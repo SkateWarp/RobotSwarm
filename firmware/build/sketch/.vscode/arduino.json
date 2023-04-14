@@ -1,0 +1,8 @@
+#line 1 "C:\\Users\\felix\\Documents\\Alterna\\esp32\\.vscode\\arduino.json"
+{
+    "sketch": "esp32.ino",
+    "output": "build",
+    "configuration": "FlashFreq=80,UploadSpeed=921600,DebugLevel=none,EraseFlash=none",
+    "board": "esp32:esp32:esp32doit-devkit-v1",
+    "port": "COM7"
+}
