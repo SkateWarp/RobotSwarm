@@ -1,9 +1,12 @@
-﻿using SwarmBackend.Models;
+﻿using LanguageExt.Common;
+using SwarmBackend.Models;
 
 namespace SwarmBackend.Interfaces;
 
 public interface IAccountService
 {
 
-    Task<AccountResponse> Authenticate(string email, string password);
+    Task<Result<AuthenticateResponse>> Authenticate(string email, string password, string? ipAddress);
+    Task<Result<AccountResponse>> Create(AccountRequest request);
+
 }
