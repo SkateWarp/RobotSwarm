@@ -3,5 +3,5 @@
 ################################################################################
 
 /SwarmBackend/.vs/SwarmBackend
-/SwarmBackend/bin/Debug/net7.0
-/SwarmBackend/obj/Debug/net7.0
+/SwarmBackend/bin
+/SwarmBackend/obj
