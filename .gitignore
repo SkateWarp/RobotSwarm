@@ -1,0 +1,7 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/SwarmBackend/.vs/SwarmBackend
+/SwarmBackend/bin/Debug/net7.0
+/SwarmBackend/obj/Debug/net7.0

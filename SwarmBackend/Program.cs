@@ -1,4 +1,21 @@
+using Microsoft.EntityFrameworkCore;
+using SwarmBackend.Helpers;
+using SwarmBackend.Interfaces;
+using SwarmBackend.Services;
+
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services
+    .AddDbContext<DataContext>(options => options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddAuthentication();
+builder.Services.AddAuthorization();
+builder.Services.GetConfigureJwt(builder.Configuration);
+
+builder.Services.AddScoped<IAccountService, AccountService>();
+
+
 
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
@@ -23,7 +40,7 @@ var summaries = new[]
 
 app.MapGet("/weatherforecast", () =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
+    var forecast = Enumerable.Range(1, 5).Select(index =>
         new WeatherForecast
         (
             DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
