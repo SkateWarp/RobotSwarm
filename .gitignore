@@ -5,3 +5,8 @@
 /SwarmBackend/.vs/SwarmBackend
 /SwarmBackend/bin
 /SwarmBackend/obj
+*.cache
+SwarmBackend/obj/project.assets.json
+SwarmBackend/obj/SwarmBackend.csproj.nuget.g.targets
+SwarmBackend/obj/SwarmBackend.csproj.nuget.g.props
+SwarmBackend/obj/SwarmBackend.csproj.nuget.dgspec.json
