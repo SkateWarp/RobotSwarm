@@ -7,7 +7,10 @@ using SwarmBackend.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
-    .AddDbContext<DataContext>(options => options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+    .AddDbContext<DataContext>(options =>
+    {
+        options.UseNpgsql(builder.Configuration.GetConnectionString("Default"));
+    });
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
