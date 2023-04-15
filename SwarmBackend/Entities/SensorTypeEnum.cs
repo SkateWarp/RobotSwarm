@@ -9,7 +9,7 @@ public enum SensorTypeEnum
     [Description("Velocidad")]
     Speed = 1,
 
-    [Description("Distncia")]
+    [Description("Distancia")]
     LaserDistance = 2,
     [Description("Encoder")]
     Encoder = 3,

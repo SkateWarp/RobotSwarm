@@ -7,4 +7,6 @@ public class Robot
     public string? Description { get; set; }
     public string? Notes { get; set; }
     public DateTime DateCreated { get; set; } = DateTime.Now;
+
+    public ICollection<Sensor>? Sensors { get; set; }
 }

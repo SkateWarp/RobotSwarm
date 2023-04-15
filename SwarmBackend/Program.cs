@@ -20,6 +20,10 @@ builder.Services.AddAuthorization();
 builder.Services.GetConfigureJwt(builder.Configuration);
 
 builder.Services.AddScoped<IAccountService, AccountService>();
+builder.Services.AddScoped<IRobotService, RobotService>();
+builder.Services.AddScoped<ISensorService, SensorService>();
+builder.Services.AddScoped<ISensorReadingService, SensortReadingService>();
+
 
 
 
@@ -65,5 +69,9 @@ app.UseHttpsRedirection();
 
 app.MapGroup("Accounts")
     .MapAccount();
+app.MapGroup("Robots")
+    .MapRobot();
+app.MapGroup("Sensors")
+    .MapSensor();
 
 app.Run();
