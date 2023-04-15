@@ -15,10 +15,10 @@ public class DataContext : DbContext
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<Robot> Robots => Set<Robot>();
-    public DbSet<Sensor> Sensors=> Set<Sensor>();
+    public DbSet<Sensor> Sensors => Set<Sensor>();
     public DbSet<SensorReading> SensorReadings => Set<SensorReading>();
-
-
+    public DbSet<TaskTemplate> TaskTemplates => Set<TaskTemplate>();
+    public DbSet<TaskLog> TaskLogs => Set<TaskLog>();
     /// <summary>
     /// 
     /// </summary>
@@ -26,6 +26,8 @@ public class DataContext : DbContext
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasPostgresEnum<SensorTypeEnum>();
+        modelBuilder.HasPostgresEnum<TaskTypeEnum>();
+
     }
 
 
