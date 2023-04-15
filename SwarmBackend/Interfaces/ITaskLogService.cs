@@ -1,0 +1,11 @@
+using LanguageExt.Common;
+using SwarmBackend.Models;
+
+namespace SwarmBackend.Interfaces;
+
+public interface ITaskLogService {
+  
+    Task<IEnumerable<TaskLogResponse>> GetAll();
+    Task<TaskLogResponse> Create(TaskLogRequest request);
+    Task<Result<TaskLogResponse>> Update(int id, TaskLogRequest request);
+}

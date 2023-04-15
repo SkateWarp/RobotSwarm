@@ -23,6 +23,9 @@ builder.Services.AddScoped<IAccountService, AccountService>();
 builder.Services.AddScoped<IRobotService, RobotService>();
 builder.Services.AddScoped<ISensorService, SensorService>();
 builder.Services.AddScoped<ISensorReadingService, SensortReadingService>();
+builder.Services.AddScoped<ITaskLogService, TaskLogService>();
+builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
+
 
 
 
@@ -73,5 +76,9 @@ app.MapGroup("Robots")
     .MapRobot();
 app.MapGroup("Sensors")
     .MapSensor();
+app.MapGroup("TaskTemplate")
+    .MapTaskTemplate();
+app.MapGroup("TaskLog")
+    .MapTaskLog();
 
 app.Run();
