@@ -4,4 +4,5 @@
 
 /SwarmBackend/obj
 /SwarmBackend/.vs
-/SwarmBackend/bin/Debug/net7.0
+/SwarmBackend/bin
+*.cache
