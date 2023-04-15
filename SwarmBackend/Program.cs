@@ -7,7 +7,10 @@ using SwarmBackend.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
-    .AddDbContext<DataContext>(options => options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+    .AddDbContext<DataContext>(options =>
+    {
+        options.UseNpgsql(builder.Configuration.GetConnectionString("Default"));
+    });
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
@@ -17,6 +20,10 @@ builder.Services.AddAuthorization();
 builder.Services.GetConfigureJwt(builder.Configuration);
 
 builder.Services.AddScoped<IAccountService, AccountService>();
+builder.Services.AddScoped<IRobotService, RobotService>();
+builder.Services.AddScoped<ISensorService, SensorService>();
+builder.Services.AddScoped<ISensorReadingService, SensortReadingService>();
+
 
 
 
@@ -62,5 +69,9 @@ app.UseHttpsRedirection();
 
 app.MapGroup("Accounts")
     .MapAccount();
+app.MapGroup("Robots")
+    .MapRobot();
+app.MapGroup("Sensors")
+    .MapSensor();
 
 app.Run();
