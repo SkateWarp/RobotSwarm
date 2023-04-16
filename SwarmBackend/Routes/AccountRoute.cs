@@ -15,6 +15,9 @@ public static class AccountRoute
             .RequireAuthorization()
            .Produces<AccountResponse>();
 
+        group.MapPost("/refreshToken", RefreshToken)
+          .Produces<AuthenticateResponse>();
+
         return group;
     }
 
@@ -29,4 +32,11 @@ public static class AccountRoute
         var response = await accountService.Create(request);
         return response.Match(Results.Ok, Results.BadRequest);
     }
+
+    public static async Task<IResult> RefreshToken(string refreshToken, IAccountService accountService)
+    {
+        var response = await accountService.RefreshTokenAsync(refreshToken, null);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
+
 }
