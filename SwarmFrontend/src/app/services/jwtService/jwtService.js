@@ -149,7 +149,7 @@ class JwtService extends FuseUtils.EventEmitter {
     signInWithToken = () => {
         return new Promise((resolve, reject) => {
             axios
-                .post(`${URL}/api/Accounts/refresh-token-flutter`, {
+                .post(`${URL}/Accounts/refreshToken`, {
                     refreshToken: this.getRefreshToken(),
                 })
                 .then((response) => {
