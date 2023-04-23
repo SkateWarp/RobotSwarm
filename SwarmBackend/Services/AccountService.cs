@@ -46,7 +46,7 @@ public class AccountService : IAccountService
 
         var token = CreateToken(account);
         var refreshToken = GenerateRefreshToken(ipAddress);
-        //await UpdateAccountRefreshToken(account, refreshToken);
+        await AddAccountRefreshToken(account, refreshToken);
 
         return AuthenticateResponse.From(account, token, refreshToken.Token);
     }
@@ -76,6 +76,36 @@ public class AccountService : IAccountService
         return AccountResponse.From(account);
     }
 
+    public async Task<Result<AuthenticateResponse>> RefreshTokenAsync(string refreshToken, string? ipAddress)
+    {
+        var account = await _dataContext.RefreshTokens
+            .Include(x => x.Account)
+            .Where(x => x.Token == refreshToken)
+            .Select(x => x.Account)
+            .FirstOrDefaultAsync();
+
+        if (account == null)
+        {
+            return new Result<AuthenticateResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        var newAccessToken = CreateToken(account);
+        var newRefreshToken = GenerateRefreshToken(ipAddress);
+
+        await AddAccountRefreshToken(account, newRefreshToken);
+        return AuthenticateResponse.From(account, newAccessToken, newRefreshToken.Token);
+
+    }
+
+    private async Task AddAccountRefreshToken(Account account, RefreshToken refreshToken)
+    {
+        account.RefreshTokens.Add(refreshToken);
+        _dataContext.Accounts.Update(account);
+        await _dataContext.SaveChangesAsync();
+
+    }
+
+
     private string CreateToken(Account account)
     {
         var signingCredentials = GetSigningCredentials();
@@ -87,7 +117,7 @@ public class AccountService : IAccountService
     private SigningCredentials GetSigningCredentials()
     {
         var jwtConfig = configuration.GetSection("AppSettings");
-        byte[] dataDecoded = Convert.FromBase64String(jwtConfig["Secret"]);
+        byte[] dataDecoded = Convert.FromBase64String(jwtConfig["Secret"]!);
         var keyString = Encoding.UTF8.GetString(dataDecoded);
 
         var key = Encoding.UTF8.GetBytes(keyString);
@@ -95,7 +125,7 @@ public class AccountService : IAccountService
         return new SigningCredentials(secret, SecurityAlgorithms.HmacSha256);
     }
 
-    private List<Claim> GetClaims(Account account)
+    private static List<Claim> GetClaims(Account account)
     {
         var claims = new List<Claim>
             {

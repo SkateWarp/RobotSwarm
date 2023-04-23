@@ -9,4 +9,6 @@ public interface IAccountService
     Task<Result<AuthenticateResponse>> Authenticate(string email, string password, string? ipAddress);
     Task<Result<AccountResponse>> Create(AccountRequest request);
 
+    public Task<Result<AuthenticateResponse>> RefreshTokenAsync(string refreshToken, string? ipAddress);
+
 }
