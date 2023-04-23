@@ -36,9 +36,9 @@ public static class AccountRoute
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> RefreshToken(string refreshToken, IAccountService accountService)
+    public static async Task<IResult> RefreshToken(RefreshTokenRequest request, IAccountService accountService)
     {
-        var response = await accountService.RefreshTokenAsync(refreshToken, null);
+        var response = await accountService.RefreshTokenAsync(request.RefreshToken, null);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
