@@ -1,0 +1,88 @@
+.MuiOutlinedInput-input {
+    padding: 18.5px 10px!important;
+}
+.w-320 {
+    width: 30rem
+}
+.w-120 {
+    width: 12rem
+}
+.MuiTableBody-root .MuiIconButton-root {
+    padding: 0px;
+}
+.h-384 {
+    height: 38.4rem
+}
+.marginTop {
+    margin-top: 8px;
+}
+.marginTopBottom{
+    margin-top: 10%;
+    margin-bottom: 10%;
+}
+.IDtable {
+    width: 31%;
+}
+.w-52 {
+    width: 52%;
+}
+.font-oswald {
+    font-family: 'Oswald', sans-serif;
+}
+.machineTitle{
+    font-size: 12em;
+}
+@media print {
+    .pagebreak {
+        page-break-before: always;
+        padding-top: '100px';
+    }
+}
+.draggable {
+    cursor: pointer;
+}
+.back:hover {
+    color: #C81111;
+}
+.forward:hover {
+    color: green;
+}
+
+/* button-text-transform ///////////// */
+.button-text-transform {
+    position: absolute;
+    left: 93%;
+    background-color: white;
+    border-radius: 5px;
+    padding: 5px;
+    color: black;
+    top: 26px;
+    transition: 0.5s;
+    box-shadow: 0px 0px 5px -1px rgba(0,0,0,0.75);
+    -webkit-box-shadow: 0px 0px 5px -1px rgba(0,0,0,0.75);
+    -moz-box-shadow: 0px 0px 5px -1px rgba(0,0,0,0.75);
+}
+
+.button-text-transform:hover {
+    background-color: #C81111;
+    color: white;
+    left: 88%;
+}
+.button-text-transform:hover::after {
+    content: 'Requisición';
+    font-size: medium;
+    background-color: #C81111;
+
+}
+table.simple tbody tr td {
+    padding: 4px 4px;
+}
+
+.MuiButton-root {
+    text-transform: uppercase;
+    font-family: 'Lato', sans-serif;
+}
+.MuiTypography-root {
+    font-family: 'Lato', sans-serif;
+    text-transform: uppercase;
+}
