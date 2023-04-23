@@ -18,6 +18,9 @@ public static class AccountRoute
         group.MapPost("/refreshToken", RefreshToken)
           .Produces<AuthenticateResponse>();
 
+        group.MapGet("", GetAll)
+      .Produces<IEnumerable<AccountResponse>>();
+
         return group;
     }
 
@@ -37,6 +40,12 @@ public static class AccountRoute
     {
         var response = await accountService.RefreshTokenAsync(refreshToken, null);
         return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    public static async Task<IResult> GetAll(IAccountService accountService)
+    {
+        var response = await accountService.GetAll();
+        return Results.Ok(response);
     }
 
 }

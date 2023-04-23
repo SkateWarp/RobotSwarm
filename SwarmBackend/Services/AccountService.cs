@@ -186,4 +186,11 @@ public class AccountService : IAccountService
         return principal;
 
     }
+
+    public async Task<IEnumerable<AccountResponse>> GetAll()
+    {
+        return await _dataContext.Accounts
+            .Select(x => AccountResponse.From(x))
+            .ToListAsync();
+    }
 }
