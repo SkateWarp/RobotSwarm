@@ -22,6 +22,7 @@ public class Account
     public DateTime Created { get; set; }
     public DateTime? Updated { get; set; }
     public bool Enabled { get; set; }
+    public Role Role { get; set; }
     public List<RefreshToken> RefreshTokens { get; set; } = new();
 
     public bool OwnsToken(string token)
