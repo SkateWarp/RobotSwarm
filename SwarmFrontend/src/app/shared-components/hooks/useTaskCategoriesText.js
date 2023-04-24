@@ -2,11 +2,11 @@ const useTaskCategoriesText = (status) => {
     const getText = (status) => {
         switch (status) {
             case 1:
-                return "Ventas";
+                return "Transporte";
             case 2:
-                return "Gestión Humana";
+                return "Sigue al líder";
             case 3:
-                return "Contabilidad";
+                return "Formación";
             case 4:
                 return "Nigga";
            
