@@ -29,7 +29,20 @@ function LeafTypesConfigDialog() {
         ({ leafTypesConfigApp }) => leafTypesConfigApp.leafTypes.leafTypesConfigDialog
     );
 
-    const [taskCategories, setTaskCategories] = useState([]);
+    const [taskCategories, setTaskCategories] = useState([
+        {
+            id: 1,
+            name: "Transporte"
+        },
+        {
+            id: 2,
+            name: "Sigue al líder"
+        },
+        {
+            id: 3,
+            name: "Formación"
+        },
+    ]);
 
     const {
         control,
