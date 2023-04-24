@@ -19,7 +19,7 @@ const Root = styled('div')(({ theme }) => ({
 function Logo() {
   return (
     <Root className="flex items-center">
-      <img className="logo-icon w-24 h-24" src="assets/images/logos/alterna.png" alt="logo" />
+      <img className="logo-icon w-24 h-24" src="assets/images/logos/logo.png" alt="logo" />
       <Typography className="logo-text text-16 leading-none mx-12 font-medium" color="inherit">
         FUSE
       </Typography>

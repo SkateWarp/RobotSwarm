@@ -5,7 +5,7 @@ export let LOGO = "assets/images/logos/logo.png";
 
 switch (settingsConfig.layout.project) {
     case "task":
-        LOGO = "assets/images/logos/alterna.png";
+        // LOGO = "assets/images/logos/alterna.png";
         URL = "https://atapi.alternard.com";
         break;
     case "GTS":
@@ -17,7 +17,7 @@ switch (settingsConfig.layout.project) {
         // URL = 'http://10.0.0.96:5017';
         break;
     case "GTS-swedish":
-        LOGO = "assets/images/logos/swedish.png";
+        // LOGO = "assets/images/logos/swedish.png";
         // FOR DEV
         // URL = "https://devswapi.alternard.com";
         // FOR LOCALHOST
@@ -26,7 +26,7 @@ switch (settingsConfig.layout.project) {
         break;
 
     case "panelTemp":
-        LOGO = "assets/images/logos/alterna.png";
+        // LOGO = "assets/images/logos/alterna.png";
 
         URL = "https://devfapi.alternard.com";
 

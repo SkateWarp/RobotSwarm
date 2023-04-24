@@ -81,7 +81,7 @@ function Login() {
                             </div>
                             <div className="w-1/3 mt-32">
                                 <a className="" href="https://www.alternard.com">
-                                    <img src="assets/images/logos/alterna.png" alt="logo" />
+                                    <img src="assets/images/logos/logo.png" alt="logo" />
                                 </a>
                             </div>
                             <Typography
