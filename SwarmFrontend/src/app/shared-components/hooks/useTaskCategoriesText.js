@@ -8,21 +8,9 @@ const useTaskCategoriesText = (status) => {
             case 3:
                 return "Contabilidad";
             case 4:
-                return "Almacén";
-            case 5:
-                return "Operaciones";
-            case 6:
-                return "Proyectos";
-            case 7:
-                return "Tecnología";
-            case 8:
-                return "Mensajería";
-            case 9:
-                return "Compras";
-            case 10:
-                return "Mantenimiento";
-            case 16:
-                return "Gerencia";
+                return "Nigga";
+           
+                
 
             default:
                 return "";
