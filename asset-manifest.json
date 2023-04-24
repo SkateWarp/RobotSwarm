@@ -1,0 +1,37 @@
+{
+  "files": {
+    "main.css": "/robotSwarm/static/css/main.1b1bab4d.css",
+    "main.js": "/robotSwarm/static/js/main.d8127945.js",
+    "static/js/399.70999344.chunk.js": "/robotSwarm/static/js/399.70999344.chunk.js",
+    "static/js/133.03616da9.chunk.js": "/robotSwarm/static/js/133.03616da9.chunk.js",
+    "static/js/53.8496fb23.chunk.js": "/robotSwarm/static/js/53.8496fb23.chunk.js",
+    "static/js/683.c81505ce.chunk.js": "/robotSwarm/static/js/683.c81505ce.chunk.js",
+    "static/js/791.5567e50e.chunk.js": "/robotSwarm/static/js/791.5567e50e.chunk.js",
+    "static/js/430.295990e4.chunk.js": "/robotSwarm/static/js/430.295990e4.chunk.js",
+    "static/js/772.2d17e4aa.chunk.js": "/robotSwarm/static/js/772.2d17e4aa.chunk.js",
+    "static/js/742.e2899ec6.chunk.js": "/robotSwarm/static/js/742.e2899ec6.chunk.js",
+    "static/js/986.e0799142.chunk.js": "/robotSwarm/static/js/986.e0799142.chunk.js",
+    "static/js/361.09fb5624.chunk.js": "/robotSwarm/static/js/361.09fb5624.chunk.js",
+    "static/js/783.92762d9f.chunk.js": "/robotSwarm/static/js/783.92762d9f.chunk.js",
+    "static/js/304.7fe5d112.chunk.js": "/robotSwarm/static/js/304.7fe5d112.chunk.js",
+    "static/js/989.b1d01b6f.chunk.js": "/robotSwarm/static/js/989.b1d01b6f.chunk.js",
+    "static/js/18.750e5e02.chunk.js": "/robotSwarm/static/js/18.750e5e02.chunk.js",
+    "static/js/286.3786542b.chunk.js": "/robotSwarm/static/js/286.3786542b.chunk.js",
+    "static/js/998.2fba47fe.chunk.js": "/robotSwarm/static/js/998.2fba47fe.chunk.js",
+    "static/js/283.ec3c2952.chunk.js": "/robotSwarm/static/js/283.ec3c2952.chunk.js",
+    "static/js/860.bb9b0221.chunk.js": "/robotSwarm/static/js/860.bb9b0221.chunk.js",
+    "static/js/27.bfcdabbd.chunk.js": "/robotSwarm/static/js/27.bfcdabbd.chunk.js",
+    "static/js/828.bd7cfc28.chunk.js": "/robotSwarm/static/js/828.bd7cfc28.chunk.js",
+    "static/js/102.4d96ea9d.chunk.js": "/robotSwarm/static/js/102.4d96ea9d.chunk.js",
+    "static/js/386.208983fa.chunk.js": "/robotSwarm/static/js/386.208983fa.chunk.js",
+    "static/js/784.d1af95e1.chunk.js": "/robotSwarm/static/js/784.d1af95e1.chunk.js",
+    "static/js/604.c4e3feae.chunk.js": "/robotSwarm/static/js/604.c4e3feae.chunk.js",
+    "static/js/872.899c8282.chunk.js": "/robotSwarm/static/js/872.899c8282.chunk.js",
+    "static/js/284.9dfdaada.chunk.js": "/robotSwarm/static/js/284.9dfdaada.chunk.js",
+    "index.html": "/robotSwarm/index.html"
+  },
+  "entrypoints": [
+    "static/css/main.1b1bab4d.css",
+    "static/js/main.d8127945.js"
+  ]
+}
