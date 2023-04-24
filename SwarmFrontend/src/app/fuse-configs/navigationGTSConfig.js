@@ -73,14 +73,14 @@ const navigationGTSConfig = [
                 auth: authRoles.admin,
                 url: "/apps/GTS/leafTypes",
             },
-            {
-                id: "sensors",
-                title: "Sensores",
-                type: "item",
-                icon: "adjust",
-                auth: authRoles.admin,
-                url: "/apps/configs/task",
-            },
+            // {
+            //     id: "sensors",
+            //     title: "Sensores",
+            //     type: "item",
+            //     icon: "adjust",
+            //     auth: authRoles.admin,
+            //     url: "/apps/configs/task",
+            // },
             {
                 id: "leafSorting",
                 title: "Robots",
