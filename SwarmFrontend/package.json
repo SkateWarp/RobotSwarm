@@ -2,7 +2,7 @@
     "name": "fuse-react-app",
     "version": "7.2.0",
     "private": true,
-    "homepage": "http://skatewarp.github.io/robotSwarm",
+    "homepage": "/",
     "dependencies": {
         "@date-io/date-fns-jalali": "2.13.1",
         "@emotion/cache": "11.7.1",

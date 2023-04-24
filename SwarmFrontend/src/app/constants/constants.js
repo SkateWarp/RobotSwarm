@@ -1,7 +1,7 @@
 import settingsConfig from "../fuse-configs/settingsConfig";
 
 export let URL = window.location.href;
-export let LOGO = "assets/images/logos/alterna.png";
+export let LOGO = "assets/images/logos/logo.png";
 
 switch (settingsConfig.layout.project) {
     case "task":
@@ -9,7 +9,7 @@ switch (settingsConfig.layout.project) {
         URL = "https://atapi.alternard.com";
         break;
     case "GTS":
-        LOGO = "assets/images/logos/alterna.png";
+        // LOGO = "assets/images/logos/alterna.png";
         // FOR DEV
         URL = "https://swarm.msk.do";
         // FOR LOCALHOST
