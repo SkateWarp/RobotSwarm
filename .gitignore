@@ -7,3 +7,5 @@
 /SwarmBackend/bin
 *.cache
 /.vs
+swarm_ws/.vscode/settings.json
+.gitignore

@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/linux/Documents/RobotSwarm/swarm_ws/devel/setup.sh
