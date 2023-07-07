@@ -1,0 +1,8 @@
+prefix=/home/anyelo/RobotSwarm/swarm_ws/devel
+
+Name: hero_firmware
+Description: Description of hero_firmware
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

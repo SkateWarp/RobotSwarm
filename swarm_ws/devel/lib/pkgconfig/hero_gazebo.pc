@@ -1,0 +1,8 @@
+prefix=/home/anyelo/RobotSwarm/swarm_ws/devel
+
+Name: hero_gazebo
+Description: Description of hero_gazebo
+Version: 0.0.0
+Cflags: -I/home/anyelo/RobotSwarm/swarm_ws/src/hero_common/hero_gazebo/include
+Libs: -L${prefix}/lib -lhero_gazebo
+Requires: roscpp gazebo_ros

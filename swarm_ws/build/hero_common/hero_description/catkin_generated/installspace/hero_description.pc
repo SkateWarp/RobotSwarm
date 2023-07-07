@@ -1,0 +1,8 @@
+prefix=/home/anyelo/RobotSwarm/swarm_ws/install
+
+Name: hero_description
+Description: Description of hero_description
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

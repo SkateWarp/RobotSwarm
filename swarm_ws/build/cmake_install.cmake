@@ -131,7 +131,14 @@ endif()
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for each subdirectory.
   include("/home/anyelo/RobotSwarm/swarm_ws/build/gtest/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_bringup/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_examples/cmake_install.cmake")
   include("/home/anyelo/RobotSwarm/swarm_ws/build/prueba/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_ar_tracker/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_firmware/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_common/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_description/cmake_install.cmake")
+  include("/home/anyelo/RobotSwarm/swarm_ws/build/hero_common/hero_gazebo/cmake_install.cmake")
 
 endif()
 

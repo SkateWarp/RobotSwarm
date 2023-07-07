@@ -1,0 +1,8 @@
+prefix=/home/anyelo/RobotSwarm/swarm_ws/install
+
+Name: hero_examples
+Description: Description of hero_examples
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

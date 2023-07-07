@@ -1,0 +1,8 @@
+prefix=/home/anyelo/RobotSwarm/swarm_ws/devel
+
+Name: hero_common
+Description: Description of hero_common
+Version: 0.0.0
+Cflags: -I/home/anyelo/RobotSwarm/swarm_ws/devel/include
+Libs: -L${prefix}/lib 
+Requires: roscpp rospy std_msgs message_runtime
