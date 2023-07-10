@@ -2,6 +2,8 @@
 
 This project presents the design of a novel platform for swarm robotics applications that is low cost, easy to assemble using off-the-shelf components, and deeply integrated with the most used robotic framework available today: ROS (Robot Operating System). The robotic platform is entirely open, composed of a 3D printed body and open-source software. We describe its architecture, present its main features, and evaluate its functionalities executing experiments using a couple of robots. Results demonstrate that the proposed mobile robot is very effective given its small size and reduced cost, being suitable for swarm robotics research and education. 
 
+test
+
 > Please, find more information [here](https://verlab.github.io/hero_common/).
 
 ![hero_view](https://user-images.githubusercontent.com/14208261/164281570-9db151b4-c538-479a-b654-469616ad4e62.png)
