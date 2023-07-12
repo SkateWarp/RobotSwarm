@@ -10,3 +10,4 @@
 swarm_ws/.vscode/settings.json
 .gitignore
 config.xlaunch
+/swarm_ws/build/
