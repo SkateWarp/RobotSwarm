@@ -1,8 +1,0 @@
-prefix=/home/anyelo/RobotSwarm/swarm_ws/install
-
-Name: hero_ar_tracker
-Description: Description of hero_ar_tracker
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 
