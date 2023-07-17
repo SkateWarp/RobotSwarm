@@ -11,3 +11,7 @@ swarm_ws/.vscode/settings.json
 .gitignore
 config.xlaunch
 /swarm_ws/build/
+/ros_wss/bin/Debug/net7.0
+/ros_wss/obj/Debug/net7.0
+/ros_wss/obj/Release/net7.0
+/ros_wss/obj
