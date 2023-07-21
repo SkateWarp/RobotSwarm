@@ -47,7 +47,7 @@ function TaskConfigList() {
                 width: 128,
                 sortable: false,
                 Cell: ({ row }) => {
-                    return <TaskCategoriesLabel status={row.original.taskCategory.id} />;
+                    return <TaskCategoriesLabel status={row.original.taskType} />;
                 },
             },
             {

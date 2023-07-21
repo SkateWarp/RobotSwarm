@@ -20,19 +20,38 @@ import {
 import * as Actions from "../../../../store/fuse/messageSlice";
 import GeneralDialogActionButtons from "../../../../shared-components/GeneralDialogActionButtons";
 
+const taskCategories = [
+    {
+        id: 0,
+        description: "Ninguno",
+    },
+    {
+        id: 1,
+        description: "Transporte",
+    },
+    {
+        id: 2,
+        description: "Sigue al líder",
+    },
+    {
+        id: 3,
+        description: "Formación",
+    },
+];
+
 const defaultValues = {
     name: "",
     description: "",
-    taskCategoryId: 1,
+    taskType: 0,
 };
 
 const schema = yup.object().shape({
     name: yup.string().required("Debe ingresar un nombre").min(3, "Debe ser mayor de 2 caracteres."),
+    taskType: yup.number().required(),
     // description:yup.string().required("Debe ingresar una descripción").min(3, "Debe ser mayor de 2 caracteres")
 });
 
 function TaskConfigDialog() {
-    const taskCategories = [];
     const dispatch = useDispatch();
     const taskConfigDialog = useSelector(({ taskConfigApp }) => taskConfigApp.taskConfig.taskConfigDialog);
 
@@ -49,7 +68,7 @@ function TaskConfigDialog() {
 
     const initDialog = useCallback(() => {
         if (taskConfigDialog.type === "edit" && taskConfigDialog.data) {
-            reset({ ...taskConfigDialog.data, taskCategoryId: taskConfigDialog.data.taskCategory.id });
+            reset({ ...taskConfigDialog.data, taskType: taskConfigDialog.data.taskType });
         }
 
         if (taskConfigDialog.type === "new") {
@@ -159,7 +178,7 @@ function TaskConfigDialog() {
                         </div>
 
                         <Controller
-                            name="taskCategoryId"
+                            name="taskType"
                             control={control}
                             render={({ field }) => (
                                 <TextField
@@ -173,7 +192,7 @@ function TaskConfigDialog() {
                                 >
                                     {taskCategories.map((taskCategory) => (
                                         <MenuItem value={taskCategory.id} key={taskCategory.id}>
-                                            {taskCategory.name}
+                                            {taskCategory.description}
                                         </MenuItem>
                                     ))}
                                 </TextField>

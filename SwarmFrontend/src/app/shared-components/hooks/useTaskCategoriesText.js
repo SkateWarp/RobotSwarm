@@ -1,17 +1,15 @@
 const useTaskCategoriesText = (status) => {
-    const getText = (status) => {
-        switch (status) {
+    const getText = (option) => {
+
+        switch (option) {
+            case 0:
+                return "Ninguno";
             case 1:
                 return "Transporte";
             case 2:
                 return "Sigue al líder";
             case 3:
                 return "Formación";
-            case 4:
-                return "Nigga";
-           
-                
-
             default:
                 return "";
         }
