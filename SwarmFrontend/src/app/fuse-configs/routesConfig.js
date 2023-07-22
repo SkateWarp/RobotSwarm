@@ -5,6 +5,7 @@ import LoginConfig from "app/main/login/LoginConfig";
 import MailConfirmPageConfig from "app/main/mail-confirm/MailConfirmPageConfig";
 import ResetPasswordPageConfig from "app/main/reset-password/ResetPasswordPageConfig";
 import AccountsAppConfig from "app/main/apps/accounts/AccountsAppConfig";
+import RealtimeConfigAppConfig from "app/main/apps/GeeTS/Realtime/RealtimeConfigAppConfig";
 import ForgotPasswordPageConfig from "../main/forgot-password/ForgotPasswordPageConfig";
 import TaskDashboardAppConfig from "../main/apps/dashboards/tasks/TaskDashboardAppConfig";
 import settingsConfig from "./settingsConfig";
@@ -28,6 +29,7 @@ const routeConfigs = [
     // Tasks
     TaskDashboardAppConfig,
     TaskConfigAppConfig,
+    RealtimeConfigAppConfig,
 
     // GeeTS
     TobaccoProductionAppConfig,
@@ -46,6 +48,8 @@ const getInitialDashboard = () => {
     if (settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish") {
         return { path: "/", exact: true, element: <Navigate to="/apps/GTS/leafSorting" /> };
     }
+
+    throw Error("Proyecto mal configurado en routesConfig");
 };
 
 const routes = [

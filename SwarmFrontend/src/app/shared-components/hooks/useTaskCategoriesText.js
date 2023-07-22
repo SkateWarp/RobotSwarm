@@ -1,6 +1,5 @@
 const useTaskCategoriesText = (status) => {
     const getText = (option) => {
-
         switch (option) {
             case 0:
                 return "Ninguno";
