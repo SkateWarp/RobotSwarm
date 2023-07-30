@@ -11,6 +11,7 @@ import {
     useTopicList,
 } from "rosreact";
 import PauseButton from "./buttons/PauseButton";
+import ResetButton from "./buttons/ResetButton";
 
 function RealtimeConfigList() {
     const dispatch = useDispatch();
@@ -27,6 +28,8 @@ function RealtimeConfigList() {
         <div className="flex flex-1 items-center justify-center h-full">
             <RosConnection url="ws://127.0.0.1:9090" autoConnect>
                 <PauseButton />
+                <ResetButton />
+
                 <TopicListProvider
                     trigger={trigger}
                     failedCallback={(e) => {
