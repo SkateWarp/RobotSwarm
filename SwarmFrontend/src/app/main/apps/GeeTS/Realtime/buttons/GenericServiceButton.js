@@ -2,7 +2,7 @@ import { ServiceCaller } from "rosreact";
 import { useState, useEffect } from "react";
 import Button from "@mui/material/Button";
 
-function GenericServiceButton({ topicName, text, serviceType }) {
+function GenericServiceButton({ topicName, text, serviceType, request }) {
     const [trigger, setTrigger] = useState(false);
 
     useEffect(() => {
@@ -22,8 +22,8 @@ function GenericServiceButton({ topicName, text, serviceType }) {
 
             <ServiceCaller
                 name={topicName}
-                serviceType={ serviceType ?? "empty"}
-                request={{}}
+                serviceType={serviceType ?? "empty"}
+                request={request ?? {}}
                 trigger={trigger}
                 callback={(resp) => {
                     console.log(resp, { topicName });
