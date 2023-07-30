@@ -2,7 +2,7 @@ import { ServiceCaller } from "rosreact";
 import { useState, useEffect } from "react";
 import Button from "@mui/material/Button";
 
-function ResetButton() {
+function GenericServiceButton({ topicName, text, serviceType }) {
     const [trigger, setTrigger] = useState(false);
 
     useEffect(() => {
@@ -17,16 +17,16 @@ function ResetButton() {
     return (
         <>
             <Button onClick={handleChange} aria-label="text alignment">
-                Reset
+                {text}
             </Button>
 
             <ServiceCaller
-                name="/gazebo/reset_simulation"
-                serviceType="empty"
+                name={topicName}
+                serviceType={ serviceType ?? "empty"}
                 request={{}}
                 trigger={trigger}
                 callback={(resp) => {
-                    console.log(resp, "/gazebo/reset_simulation");
+                    console.log(resp, { topicName });
                 }}
                 failedCallback={(error) => {
                     console.log(error);
@@ -36,4 +36,4 @@ function ResetButton() {
     );
 }
 
-export default ResetButton;
+export default GenericServiceButton;

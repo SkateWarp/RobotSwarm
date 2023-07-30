@@ -1,5 +1,4 @@
-import Typography from "@mui/material/Typography";
-import { useState, useEffect, Fragment } from "react";
+import { useState, useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import {
     RosConnection,
@@ -11,7 +10,7 @@ import {
     useTopicList,
 } from "rosreact";
 import PauseButton from "./buttons/PauseButton";
-import ResetButton from "./buttons/ResetButton";
+import GenericServiceButton from "./buttons/GenericServiceButton";
 
 function RealtimeConfigList() {
     const dispatch = useDispatch();
@@ -26,10 +25,26 @@ function RealtimeConfigList() {
 
     return (
         <div className="flex flex-1 items-center justify-center h-full">
-            <RosConnection url="ws://127.0.0.1:9090" autoConnect>
+            <RosConnection url="ws://127.0.0.1:9090" autoConnect >
                 <PauseButton />
-                <ResetButton />
+                <GenericServiceButton topicName="/gazebo/reset_simulation" text="Reset Simulation" />
+                <GenericServiceButton topicName="/gazebo/reset_world" text="Reset World" />
+                <GenericServiceButton
+                    topicName="/gazebo/delete_model"
+                    text="Delete model - no funciona - hay que enviarle las arenas"
+                    serviceType="deleteModel"
+                />
+                <GenericServiceButton
+                    topicName="/gazebo/spawn_urdf_model"
+                    text="Commi arena - no funciona - hay que enviarle un path"
+                    serviceType="spawnModel"
+                />
 
+                <GenericServiceButton
+                    topicName="/gazebo/delete_model"
+                    text="Delete model - no funciona - hay que enviarle los hero"
+                    serviceType="deleteModel"
+                />
                 <TopicListProvider
                     trigger={trigger}
                     failedCallback={(e) => {
