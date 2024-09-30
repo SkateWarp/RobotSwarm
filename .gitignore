@@ -15,3 +15,5 @@ config.xlaunch
 /ros_wss/obj/Debug/net7.0
 /ros_wss/obj/Release/net7.0
 /ros_wss/obj
+SwarmBackend/obj/*
+SwarmBackend/obj/
