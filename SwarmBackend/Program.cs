@@ -55,6 +55,29 @@ builder.Services.AddCors(
 
 var app = builder.Build();
 
+using (var scope = app.Services.CreateScope())
+    try
+    {
+        var scopedContext = scope.ServiceProvider.GetRequiredService<DataContext>();
+        var accountService = scope.ServiceProvider.GetRequiredService<IAccountService>();
+      
+
+
+        if (!accountService.GetAll().GetAwaiter().GetResult().Any())
+        {
+            await accountService.Create(Seed.GetAccount());
+        }
+
+       
+
+        scopedContext.SaveChanges();
+
+    }
+    catch
+    {
+        throw;
+    }
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseCors("AllowAll");
