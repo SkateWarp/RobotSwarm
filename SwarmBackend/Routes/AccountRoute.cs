@@ -21,6 +21,9 @@ public static class AccountRoute
         group.MapGet("", GetAll)
       .Produces<IEnumerable<AccountResponse>>();
 
+        group.MapPut("/{accountId}", Update)
+            .RequireAuthorization()
+            .Produces<AccountResponse>();
         return group;
     }
 
@@ -48,4 +51,9 @@ public static class AccountRoute
         return Results.Ok(response);
     }
 
+    public static async Task<IResult> Update(int accountId, AccountRequest request, IAccountService accountService)
+    {
+        var response = await accountService.Update(accountId, request);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
 }

@@ -193,4 +193,25 @@ public class AccountService : IAccountService
             .Select(x => AccountResponse.From(x))
             .ToListAsync();
     }
+
+    public async Task<Result<AccountResponse>> Update(int accountId, AccountRequest request)
+    {
+        var account = await _dataContext.Accounts
+            .Where(x => x.Id == accountId)
+            .FirstOrDefaultAsync();
+
+        if (account == null)
+        {
+            return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        account.FirstName = request.FirstName;
+        account.LastName = request.LastName;
+        account.Email = request.Email;
+        account.PasswordHash = BC.HashPassword(request.Password);
+        _dataContext.Accounts.Update(account);
+        await _dataContext.SaveChangesAsync();
+
+        return AccountResponse.From(account);
+    }
 }

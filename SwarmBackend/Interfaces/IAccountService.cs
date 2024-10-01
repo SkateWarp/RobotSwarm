@@ -13,4 +13,6 @@ public interface IAccountService
 
     Task<IEnumerable<AccountResponse>> GetAll();
 
+    Task<Result<AccountResponse>> Update(int accountId, AccountRequest request);
+
 }
