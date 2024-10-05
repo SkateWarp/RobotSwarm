@@ -15,4 +15,7 @@ public interface IAccountService
 
     Task<Result<AccountResponse>> Update(int accountId, AccountRequest request);
 
+    Task<Result<AccountResponse>> Update(int accountId, AccountPatchRequest request);
+
+    Task<bool> Delete(int accountId);
 }
