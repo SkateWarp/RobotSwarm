@@ -5,7 +5,7 @@ namespace SwarmBackend.Interfaces;
 
 public interface ITaskLogService {
   
-    Task<IEnumerable<TaskLogResponse>> GetAll();
+    Task<IEnumerable<TaskLogResponse>> GetAll(DateRangeRequest dateRange);
     Task<TaskLogResponse> Create(TaskLogRequest request);
     Task<Result<TaskLogResponse>> Update(int id, TaskLogRequest request);
 }

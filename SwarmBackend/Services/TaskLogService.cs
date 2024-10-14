@@ -31,9 +31,25 @@ public class TaskLogService : ITaskLogService
         return TaskLogResponse.From(task);
     }
 
-    public async Task<IEnumerable<TaskLogResponse>> GetAll()
+    public async Task<IEnumerable<TaskLogResponse>> GetAll(DateRangeRequest dateRange)
     {
-        return await context.TaskLogs
+        var query = context.TaskLogs
+            .Include(x => x.TaskTemplate)
+            .Include(x => x.Robot)
+            .AsQueryable();
+
+        if (dateRange.StartDate != null)
+        {
+            query = query.Where(x => x.DateCreated >= dateRange.StartDate);
+        }
+
+        if (dateRange.EndDate != null)
+        {
+            query = query.Where(x => x.DateCreated <= dateRange.EndDate);
+        }
+
+
+        return await query
             .Select(x => TaskLogResponse.From(x))
             .ToListAsync();
     }

@@ -1,4 +1,5 @@
-﻿using SwarmBackend.Interfaces;
+﻿using Microsoft.AspNetCore.Mvc;
+using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
 
 namespace SwarmBackend.Routes;
@@ -20,9 +21,9 @@ public static class TaskLogRoute
         return Results.Ok(await service.Create(request));
     }
 
-    public static async Task<IResult> GetAll(ITaskLogService service)
+    public static async Task<IResult> GetAll(ITaskLogService service, [AsParameters] DateRangeRequest dateRange)
     {
-        return Results.Ok(await service.GetAll());
+        return Results.Ok(await service.GetAll(dateRange));
     }
 
     public static async Task<IResult> Update(int id, TaskLogRequest request, ITaskLogService service)
