@@ -21,3 +21,20 @@ El propósito de este proyecto es construir y mejorar un sistema de enjambre rob
 5. Usar herramientas ya desarolladas de simulación para modelar y analizar el comportamiento del enjambre robótico en diferentes entornos y escenarios.
 6. Garantizar la compatibilidad con múltiples plataformas de hardware y sistemas operativos, permitiendo así la integración de una amplia variedad de robots y sensores.
 
+## Configuración del proyecto
+### Base de datos
+
+```bash
+docker compose up -d
+```
+### Comandos
+
+```bash
+dotnet tool install --global dotnet-ef
+
+dotnet ef database update
+```
+
+### Configuración de la base de datos
+
+La base de datos se configura mediante el uso de Entity Framework Core.

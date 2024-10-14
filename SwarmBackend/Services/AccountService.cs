@@ -39,6 +39,11 @@ public class AccountService : IAccountService
             return new Result<AuthenticateResponse>(new Exception("Usuario no encontrado"));
         }
 
+        if (!account.Enabled)
+        {
+            return new Result<AuthenticateResponse>(new Exception("Cuenta deshabilitada"));
+        }
+
         if (!BC.Verify(password, account.PasswordHash))
         {
             return new Result<AuthenticateResponse>(new Exception("Contraseña invalida"));
@@ -129,8 +134,8 @@ public class AccountService : IAccountService
     {
         var claims = new List<Claim>
             {
-                new Claim(ClaimTypes.Name, account.FirstName),
-                new Claim("id", account.Id.ToString()),
+                new(ClaimTypes.Name, account.FirstName),
+                new("id", account.Id.ToString()),
             };
 
         return claims;
@@ -192,5 +197,65 @@ public class AccountService : IAccountService
         return await _dataContext.Accounts
             .Select(x => AccountResponse.From(x))
             .ToListAsync();
+    }
+
+    public async Task<Result<AccountResponse>> Update(int accountId, AccountRequest request)
+    {
+        var account = await _dataContext.Accounts
+            .Where(x => x.Id == accountId)
+            .FirstOrDefaultAsync();
+
+        if (account == null)
+        {
+            return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        account.FirstName = request.FirstName;
+        account.LastName = request.LastName;
+        account.Email = request.Email;
+        account.PasswordHash = BC.HashPassword(request.Password);
+        _dataContext.Accounts.Update(account);
+        await _dataContext.SaveChangesAsync();
+
+        return AccountResponse.From(account);
+    }
+
+    public async Task<Result<AccountResponse>> Update(int accountId, AccountPatchRequest request)
+    {
+        var account = await _dataContext.Accounts
+          .Where(x => x.Id == accountId)
+          .FirstOrDefaultAsync();
+
+        if (account == null)
+        {
+            return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        account.FirstName = request.FirstName ?? account.FirstName;
+        account.LastName = request.LastName ?? account.LastName;
+        account.Email = request.Email ?? account.Email;
+        account.Role = request.Role ?? account.Role;
+        account.PasswordHash = request.Password != null ? BC.HashPassword(request.Password) : account.PasswordHash;
+        _dataContext.Accounts.Update(account);
+        await _dataContext.SaveChangesAsync();
+
+        return AccountResponse.From(account);
+    }
+
+    public async Task<bool> Delete(int accountId)
+    {
+        var account = await _dataContext.Accounts
+          .Where(x => x.Id == accountId)
+          .FirstOrDefaultAsync();
+
+        if (account == null)
+        {
+            return false;
+        }
+
+        account.Enabled = false;
+        _dataContext.Accounts.Update(account);
+        _dataContext.SaveChanges();
+        return true;
     }
 }

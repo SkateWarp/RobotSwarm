@@ -1,4 +1,6 @@
-﻿namespace SwarmBackend.Models;
+﻿using SwarmBackend.Entities;
+
+namespace SwarmBackend.Models;
 
 public record AuthenticateResponse(int Id, string FirstName, string LastName, string Email, string Role, string JwtToken, string RefreshToken)
 {
@@ -16,3 +18,5 @@ public record AccountResponse(int Id, string FirstName, string LastName, string 
 
 public record AccountRequest(string FirstName, string LastName, string Email, string Password);
 public record AuthenticateRequest(string Email, string Password);
+
+public record AccountPatchRequest(string? FirstName, string? LastName, string? Email, string? Password, Role? Role);

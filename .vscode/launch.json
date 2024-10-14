@@ -5,6 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "C#: SwarmBackend",
+            "type": "dotnet",
+            "request": "launch",
+            "projectPath": "${workspaceFolder}/SwarmBackend/SwarmBackend.csproj",
+            
+        },
+        
+        {
             "command": "npm start",
             "name": "Run npm start",
             "request": "launch",

@@ -21,6 +21,17 @@ public static class AccountRoute
         group.MapGet("", GetAll)
       .Produces<IEnumerable<AccountResponse>>();
 
+        group.MapPut("/{accountId}", Update)
+            .RequireAuthorization()
+            .Produces<AccountResponse>();
+
+        group.MapPatch("/{accountId}", Patch)
+            .RequireAuthorization()
+            .Produces<AccountResponse>();
+
+        group.MapDelete("/{accountId}", Delete)
+            .RequireAuthorization()
+            .Produces<bool>();
         return group;
     }
 
@@ -48,4 +59,21 @@ public static class AccountRoute
         return Results.Ok(response);
     }
 
+    public static async Task<IResult> Update(int accountId, AccountRequest request, IAccountService accountService)
+    {
+        var response = await accountService.Update(accountId, request);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    public static async Task<IResult> Patch(int accountId, AccountPatchRequest request, IAccountService accountService)
+    {
+        var response = await accountService.Update(accountId, request);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    public static async Task<IResult> Delete(int accountId, IAccountService accountService)
+    {
+        var response = await accountService.Delete(accountId);
+        return response ? Results.Ok() : Results.BadRequest();
+    }
 }
