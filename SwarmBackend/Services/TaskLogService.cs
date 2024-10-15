@@ -1,4 +1,5 @@
-﻿using LanguageExt.Common;
+﻿using System.Text.Json;
+using LanguageExt.Common;
 using Microsoft.EntityFrameworkCore;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -23,6 +24,7 @@ public class TaskLogService : ITaskLogService
             RobotId = request.RobotId,
             TaskTemplateId = request.TaskTemplateId,
             DateCreated = DateTime.Now,
+            Parameters = JsonDocument.Parse(request.Parameters.GetRawText())
         };
 
         context.TaskLogs.Add(task);
