@@ -11,11 +11,8 @@ import {
     defaultSettings,
 } from "@fuse/default-settings";
 import FuseSettingsConfig from "app/fuse-configs/settingsConfig";
-import FuseThemesConfig from "app/fuse-configs/themesBaldomConfig";
 import FuseLayoutConfigs from "app/fuse-layouts/FuseLayoutConfigs";
-import settingsConfig from "app/fuse-configs/settingsConfig";
 import FuseThemesTaskConfig from "app/fuse-configs/themesTaskConfig";
-import FuseThemesFragaConfig from "app/fuse-configs/themesFragaConfig";
 
 function getInitialSettings() {
     const defaultLayoutStyle =
@@ -37,29 +34,11 @@ export function generateSettings(_defaultSettings, _newSettings) {
         _newSettings
     );
 
-    /**
-     * Making theme values failsafe
-     */
-
-    if (settingsConfig.layout.project === "baldom") {
-        Object.entries(response.theme).forEach(([key, value]) => {
-            if (value !== "mainThemeDark" && value !== "mainThemeLight" && !FuseThemesConfig[value]) {
-                response.theme[key] = "default";
-            }
-        });
-    } else if (settingsConfig.layout.project === "fraga") {
-        Object.entries(response.theme).forEach(([key, value]) => {
-            if (value !== "mainThemeDark" && value !== "mainThemeLight" && !FuseThemesFragaConfig[value]) {
-                response.theme[key] = "default";
-            }
-        });
-    } else {
-        Object.entries(response.theme).forEach(([key, value]) => {
-            if (value !== "mainThemeDark" && value !== "mainThemeLight" && !FuseThemesTaskConfig[value]) {
-                response.theme[key] = "default";
-            }
-        });
-    }
+    Object.entries(response.theme).forEach(([key, value]) => {
+        if (value !== "mainThemeDark" && value !== "mainThemeLight" && !FuseThemesTaskConfig[value]) {
+            response.theme[key] = "default";
+        }
+    });
 
     return response;
 }
@@ -119,30 +98,7 @@ export const selectFooterTheme = createSelector(
     (themes, direction, id) => generateMuiTheme(themes, id, direction)
 );
 
-let themesObjRaw = Object.keys(FuseThemesConfig).length !== 0 ? FuseThemesConfig : defaultThemes;
-
-switch (settingsConfig.layout.project) {
-    case "fraga":
-        themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesFragaConfig : defaultThemes;
-        break;
-    case "task":
-        themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesTaskConfig : defaultThemes;
-        break;
-    case "GTS":
-    case "GTS-swedish":
-        // TODO FuseThemesGeeTS
-        themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesTaskConfig : defaultThemes;
-        break;
-    case "panelTemp":
-        themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesTaskConfig : defaultThemes;
-        break;
-    case "fakeBaldom":
-        themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesTaskConfig : defaultThemes;
-        break;
-    case "fakeFraga":
-        themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesTaskConfig : defaultThemes;
-        break;
-}
+let themesObjRaw = Object.keys(FuseThemesTaskConfig).length !== 0 ? FuseThemesTaskConfig : defaultThemes;
 
 const initialSettings = getInitialSettings();
 const initialThemes = {

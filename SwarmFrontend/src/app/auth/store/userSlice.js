@@ -6,8 +6,6 @@ import history from '@history';
 import _ from '@lodash';
 import { setInitialSettings, setDefaultSettings } from 'app/store/fuse/settingsSlice';
 import { showMessage } from 'app/store/fuse/messageSlice';
-import auth0Service from 'app/services/auth0Service';
-import firebaseService from 'app/services/firebaseService';
 import jwtService from 'app/services/jwtService';
 import settingsConfig from 'app/fuse-configs/settingsConfig';
 

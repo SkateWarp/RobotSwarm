@@ -1,20 +1,13 @@
 import { createSelector, createEntityAdapter, createSlice } from "@reduxjs/toolkit";
-import navigationTaskConfig from "app/fuse-configs/navigationTaskConfig";
 import FuseUtils from "@fuse/utils";
 import i18next from "i18next";
 import _ from "@lodash";
-import settingsConfig from "../../fuse-configs/settingsConfig";
 import navigationGTSConfig from "../../fuse-configs/navigationGTSConfig";
 
 const navigationAdapter = createEntityAdapter();
 const emptyInitialState = navigationAdapter.getInitialState();
 
-let initialState = navigationAdapter.upsertMany(emptyInitialState, navigationTaskConfig);
-if (settingsConfig.layout.project === "task")
-    initialState = navigationAdapter.upsertMany(emptyInitialState, navigationTaskConfig);
-
-if (settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish")
-    initialState = navigationAdapter.upsertMany(emptyInitialState, navigationGTSConfig);
+const initialState = navigationAdapter.upsertMany(emptyInitialState, navigationGTSConfig);
 
 export const appendNavigationItem = (item, parentId) => (dispatch, getState) => {
     const navigation = selectNavigationAll(getState());

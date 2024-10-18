@@ -2,7 +2,6 @@ import { createSlice } from "@reduxjs/toolkit";
 import jwtService from "../../services/jwtService";
 import { setUserData } from "./userSlice";
 import { showMessage } from "../../store/fuse/messageSlice";
-// import { connect } from 'react-redux';
 
 export const submitLogin =
     ({ email, password }) =>
