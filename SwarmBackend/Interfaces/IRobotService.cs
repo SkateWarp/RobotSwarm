@@ -10,5 +10,7 @@ public interface IRobotService
     Task<RobotResponse> Create(RobotRequest request);
     Task<Result<RobotResponse>> Update(int id, RobotRequest request);
 
+    Task<Result<RobotResponse>> Cancel(int id);
+
 
 }

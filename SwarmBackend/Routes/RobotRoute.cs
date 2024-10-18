@@ -20,6 +20,10 @@ public static class RobotRoute
           .RequireAuthorization()
          .Produces<RobotResponse>();
 
+        group.MapPut("/{id}/cancel", Cancel)
+         .RequireAuthorization()
+        .Produces<RobotResponse>();
+
         return group;
     }
 
@@ -39,6 +43,12 @@ public static class RobotRoute
     public static async Task<IResult> Update(int id, RobotRequest request, IRobotService robotService)
     {
         var response = await robotService.Update(id, request);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    public static async Task<IResult> Cancel(int id, IRobotService service)
+    {
+        var response = await service.Cancel(id);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 }

@@ -28,7 +28,8 @@ public static class TaskLogRoute
             }
 
             // If valid, proceed to create the TaskLog
-            return Results.Ok(await service.Create(request));
+            var response = await service.Create(request);
+            return response.Match(Results.Ok, Results.BadRequest);
         }
         catch (JsonException ex)
         {
@@ -49,4 +50,6 @@ public static class TaskLogRoute
         var response = await service.Update(id, request);
         return response.Match(Results.Ok, Results.BadRequest);
     }
+
+
 }

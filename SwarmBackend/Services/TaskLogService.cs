@@ -17,8 +17,14 @@ public class TaskLogService : ITaskLogService
         this.context = context;
     }
 
-    public async Task<TaskLogResponse> Create(TaskLogRequest request)
+    public async Task<Result<TaskLogResponse>> Create(TaskLogRequest request)
     {
+        var robot = await context.Robots.FindAsync(request.RobotId);
+        if (robot == null)
+        {
+            return new Result<TaskLogResponse>(new Exception("Robot no encontrado"));
+        }
+
         var task = new TaskLog
         {
             RobotId = request.RobotId,
@@ -68,5 +74,26 @@ public class TaskLogService : ITaskLogService
         await context.SaveChangesAsync();
 
         return TaskLogResponse.From(task);
+    }
+
+    public async Task<Result<TaskLogResponse>> Cancel(int id)
+    {
+        {
+            var task = await context.TaskLogs.FindAsync(id);
+            if (task == null)
+            {
+                return new Result<TaskLogResponse>(new Exception("Tarea no encontrada"));
+            }
+
+            if (task.DateFinished != null)
+            {
+                return new Result<TaskLogResponse>(new Exception("La tarea ya ha sido cancelada"));
+            }
+
+            task.DateCancelled = DateTime.Now;
+            await context.SaveChangesAsync();
+
+            return TaskLogResponse.From(task);
+        }
     }
 }

@@ -3,9 +3,11 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Interfaces;
 
-public interface ITaskLogService {
-  
+public interface ITaskLogService
+{
+
     Task<IEnumerable<TaskLogResponse>> GetAll(DateRangeRequest dateRange);
-    Task<TaskLogResponse> Create(TaskLogRequest request);
+    Task<Result<TaskLogResponse>> Create(TaskLogRequest request);
     Task<Result<TaskLogResponse>> Update(int id, TaskLogRequest request);
+    Task<Result<TaskLogResponse>> Cancel(int id);
 }

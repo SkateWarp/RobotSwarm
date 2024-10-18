@@ -10,5 +10,6 @@ public class Robot
 
     public ICollection<Sensor>? Sensors { get; set; }
 
+    public bool IsConnected { get; set; }
     public RobotStatus Status { get; set; } = RobotStatus.Idle;
 }
