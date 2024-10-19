@@ -41,4 +41,5 @@ volumes:
 
 networks:
   swarm_network:
+    name: robotswarm_swarm_network
     driver: bridge
