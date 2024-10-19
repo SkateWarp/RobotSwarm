@@ -1,0 +1,35 @@
+name: Deploy Backend and Database
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "SwarmBackend/**"
+      - "docker-compose.prod.yml"
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build Backend Docker image
+        run: |
+          docker build -t swarmbackend:latest -f SwarmBackend/Dockerfile .
+
+      - name: Deploy with Docker Compose
+        run: |
+          docker-compose -f docker-compose.prod.yml down
+          docker-compose -f docker-compose.prod.yml up -d
+        env:
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+
+      - name: Prune old Docker images
+        run: docker image prune -af
+
+      - name: Run database migrations
+        run: |
+          docker-compose -f docker-compose.prod.yml exec backend dotnet ef database update

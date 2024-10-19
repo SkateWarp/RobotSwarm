@@ -1,4 +1,5 @@
-﻿using LanguageExt.Common;
+﻿using System.Text.Json;
+using LanguageExt.Common;
 using Microsoft.EntityFrameworkCore;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -16,13 +17,20 @@ public class TaskLogService : ITaskLogService
         this.context = context;
     }
 
-    public async Task<TaskLogResponse> Create(TaskLogRequest request)
+    public async Task<Result<TaskLogResponse>> Create(TaskLogRequest request)
     {
+        var robot = await context.Robots.FindAsync(request.RobotId);
+        if (robot == null)
+        {
+            return new Result<TaskLogResponse>(new Exception("Robot no encontrado"));
+        }
+
         var task = new TaskLog
         {
             RobotId = request.RobotId,
             TaskTemplateId = request.TaskTemplateId,
             DateCreated = DateTime.Now,
+            Parameters = JsonDocument.Parse(request.Parameters.GetRawText())
         };
 
         context.TaskLogs.Add(task);
@@ -31,9 +39,25 @@ public class TaskLogService : ITaskLogService
         return TaskLogResponse.From(task);
     }
 
-    public async Task<IEnumerable<TaskLogResponse>> GetAll()
+    public async Task<IEnumerable<TaskLogResponse>> GetAll(DateRangeRequest dateRange)
     {
-        return await context.TaskLogs
+        var query = context.TaskLogs
+            .Include(x => x.TaskTemplate)
+            .Include(x => x.Robot)
+            .AsQueryable();
+
+        if (dateRange.StartDate != null)
+        {
+            query = query.Where(x => x.DateCreated >= dateRange.StartDate);
+        }
+
+        if (dateRange.EndDate != null)
+        {
+            query = query.Where(x => x.DateCreated <= dateRange.EndDate);
+        }
+
+
+        return await query
             .Select(x => TaskLogResponse.From(x))
             .ToListAsync();
     }
@@ -50,5 +74,26 @@ public class TaskLogService : ITaskLogService
         await context.SaveChangesAsync();
 
         return TaskLogResponse.From(task);
+    }
+
+    public async Task<Result<TaskLogResponse>> Cancel(int id)
+    {
+        {
+            var task = await context.TaskLogs.FindAsync(id);
+            if (task == null)
+            {
+                return new Result<TaskLogResponse>(new Exception("Tarea no encontrada"));
+            }
+
+            if (task.DateFinished != null)
+            {
+                return new Result<TaskLogResponse>(new Exception("La tarea ya ha sido cancelada"));
+            }
+
+            task.DateCancelled = DateTime.Now;
+            await context.SaveChangesAsync();
+
+            return TaskLogResponse.From(task);
+        }
     }
 }

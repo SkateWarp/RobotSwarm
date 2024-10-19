@@ -16,6 +16,26 @@ public class RobotService : IRobotService
         this.context = context;
     }
 
+    public async Task<Result<RobotResponse>> Cancel(int id)
+    {
+        var robot = await context.Robots.FirstOrDefaultAsync(x => x.Id == id);
+        if (robot == null)
+        {
+            return new Result<RobotResponse>(new Exception("Robot no encontrado"));
+        }
+
+        if (robot.Status != RobotStatus.Working)
+        {
+            return new Result<RobotResponse>(RobotResponse.From(robot));
+        }
+
+        robot.Status = RobotStatus.Idle;
+        context.Robots.Update(robot);
+        context.SaveChanges();
+
+        return RobotResponse.From(robot);
+    }
+
     public async Task<RobotResponse> Create(RobotRequest request)
     {
         var robot = new Robot

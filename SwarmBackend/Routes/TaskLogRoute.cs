@@ -1,4 +1,6 @@
-﻿using SwarmBackend.Interfaces;
+﻿using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
+using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
 
 namespace SwarmBackend.Routes;
@@ -17,12 +19,30 @@ public static class TaskLogRoute
 
     public static async Task<IResult> Create(TaskLogRequest request, ITaskLogService service)
     {
-        return Results.Ok(await service.Create(request));
+        try
+        {
+            // Check if Parameters is an object
+            if (request.Parameters.ValueKind != JsonValueKind.Object)
+            {
+                return Results.BadRequest(new { message = "Parameters must be a valid JSON object." });
+            }
+
+            // If valid, proceed to create the TaskLog
+            var response = await service.Create(request);
+            return response.Match(Results.Ok, Results.BadRequest);
+        }
+        catch (JsonException ex)
+        {
+            // Return a bad request response if JSON is invalid
+            return Results.BadRequest(
+                new { message = "Parameters must be a valid JSON object.", details = ex.Message }
+            );
+        }
     }
 
-    public static async Task<IResult> GetAll(ITaskLogService service)
+    public static async Task<IResult> GetAll(ITaskLogService service, [AsParameters] DateRangeRequest dateRange)
     {
-        return Results.Ok(await service.GetAll());
+        return Results.Ok(await service.GetAll(dateRange));
     }
 
     public static async Task<IResult> Update(int id, TaskLogRequest request, ITaskLogService service)
@@ -30,4 +50,6 @@ public static class TaskLogRoute
         var response = await service.Update(id, request);
         return response.Match(Results.Ok, Results.BadRequest);
     }
+
+
 }
