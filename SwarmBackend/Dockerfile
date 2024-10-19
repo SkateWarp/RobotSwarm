@@ -21,7 +21,21 @@ ENV PATH="$PATH:/root/.dotnet/tools"
 
 # Create startup script
 RUN echo '#!/bin/bash\n\
-    dotnet ef database update --project /src/SwarmBackend\n\
+    set -e\n\
+    echo "Current directory: $(pwd)"\n\
+    echo "Contents of /src:"\n\
+    ls -R /src\n\
+    echo "Contents of /app:"\n\
+    ls -R /app\n\
+    echo "Waiting for database..."\n\
+    until pg_isready -h db -p 5432 -U $DB_USER; do\n\
+    echo "Database is unavailable - sleeping"\n\
+    sleep 1\n\
+    done\n\
+    echo "Database is up - executing command"\n\
+    echo "Running migrations..."\n\
+    dotnet ef database update --project /src/SwarmBackend --verbose\n\
+    echo "Starting application..."\n\
     dotnet SwarmBackend.dll' > /app/startup.sh && chmod +x /app/startup.sh
 
 ENTRYPOINT ["/app/startup.sh"]
