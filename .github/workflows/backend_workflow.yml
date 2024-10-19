@@ -23,24 +23,6 @@ jobs:
           docker-compose -f docker-compose.prod.yml down
           docker-compose -f docker-compose.prod.yml up -d
 
-      - name: Wait for services to be ready
-        run: |
-          max_retries=30
-          for i in $(seq 1 $max_retries)
-          do
-            if docker-compose -f docker-compose.prod.yml exec -T db pg_isready && curl -f http://localhost:${BACKEND_PORT}/health
-            then
-              echo "Services are ready!"
-              break
-            fi
-            if [ $i -eq $max_retries ]
-            then
-              echo "Services did not become ready in time"
-              exit 1
-            fi
-            echo "Waiting for services to be ready... (Attempt $i/$max_retries)"
-          done
-
       - name: Run database migrations
         run: |
           docker-compose -f docker-compose.prod.yml exec -T backend dotnet ef database update
