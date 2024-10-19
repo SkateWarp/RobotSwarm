@@ -23,12 +23,11 @@ services:
       - .env
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-      - ConnectionStrings__Default=User Id=${DB_USER};Password=${DB_PASSWORD};Server=db;Port=5432;Database=${DB_NAME}
+      - ConnectionStrings__Default=Host=db;Port=5432;Database=${DB_NAME};Username=${DB_USER};Password=${DB_PASSWORD}
     ports:
       - "8080:80"
     depends_on:
       - db
-    command: sh -c "until nc -z db 5432; do echo waiting for db; sleep 2; done; dotnet SwarmBackend.dll"
 
 volumes:
   postgres_data:
