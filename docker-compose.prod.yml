@@ -42,4 +42,4 @@ volumes:
 
 networks:
   swarm_network:
-    external: true
+    driver: bridge
