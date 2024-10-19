@@ -1,4 +1,5 @@
-version: '3.3'
+version: '3.3'  # Adjust this version if needed
+
 services:
   db:
     image: postgres:17.0
@@ -30,7 +31,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
     ports:
-      - "8080:8080"
+      - "8080:80"
     depends_on:
       - db
     networks:
@@ -41,5 +42,5 @@ volumes:
 
 networks:
   swarm_network:
+    external: true
     name: robotswarm_swarm_network
-    driver: bridge
