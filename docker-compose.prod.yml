@@ -5,6 +5,8 @@ services:
     image: postgres:17.0
     container_name: db_prod
     restart: always
+    env_file:
+      - .env
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -18,9 +20,11 @@ services:
     image: swarmbackend:latest
     container_name: backend_prod
     restart: always
+    env_file:
+      - .env
     environment:
-      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
-      - ConnectionStrings__DefaultConnection=Host=db;Database=${DB_NAME};Username=${DB_USER};Password=${DB_PASSWORD}
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__Default=User Id=${DB_USER};Password=${DB_PASSWORD};Server=db;Port=5432;Database=${DB_NAME}
     ports:
       - "${BACKEND_PORT}:80"
     depends_on:
