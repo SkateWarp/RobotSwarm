@@ -1,5 +1,4 @@
 version: '3.3'
-
 services:
   db:
     image: postgres:17.0
@@ -26,7 +25,7 @@ services:
       - ASPNETCORE_ENVIRONMENT=Production
       - ConnectionStrings__Default=User Id=${DB_USER};Password=${DB_PASSWORD};Server=db;Port=5432;Database=${DB_NAME}
     ports:
-      - "${BACKEND_PORT}:80"
+      - "8080:80"  # Changed from ${BACKEND_PORT}:80 to a fixed port
     depends_on:
       - db
 
