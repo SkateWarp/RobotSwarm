@@ -22,14 +22,13 @@ jobs:
         run: |
           docker-compose -f docker-compose.prod.yml down
           docker-compose -f docker-compose.prod.yml up -d
-        env:
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME }}
 
-      - name: Prune old Docker images
-        run: docker image prune -af
+      - name: Wait for services to be ready
+        run: sleep 30s
 
       - name: Run database migrations
         run: |
-          docker-compose -f docker-compose.prod.yml exec backend dotnet ef database update
+          docker-compose -f docker-compose.prod.yml exec -T backend dotnet ef database update
+
+      - name: Prune old Docker images
+        run: docker image prune -af
