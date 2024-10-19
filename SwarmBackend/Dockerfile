@@ -13,7 +13,9 @@ RUN dotnet build "SwarmBackend.csproj" -c Release -o /app/build
 FROM build AS publish
 RUN dotnet publish "SwarmBackend.csproj" -c Release -o /app/publish
 
-FROM base AS final
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
+RUN dotnet tool install --global dotnet-ef
+ENV PATH="$PATH:/root/.dotnet/tools"
 ENTRYPOINT ["dotnet", "SwarmBackend.dll"]
