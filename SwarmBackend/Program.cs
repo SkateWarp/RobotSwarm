@@ -3,14 +3,12 @@ using SwarmBackend.Helpers;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Routes;
 using SwarmBackend.Services;
+
 // trigger
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
-    .AddDbContext<DataContext>(options =>
-    {
-        options.UseNpgsql(builder.Configuration.GetConnectionString("Default"));
-    });
+    .AddDbContext<DataContext>(options => { options.UseNpgsql(builder.Configuration.GetConnectionString("Default")); });
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
@@ -25,10 +23,9 @@ builder.Services.AddScoped<ISensorService, SensorService>();
 builder.Services.AddScoped<ISensorReadingService, SensortReadingService>();
 builder.Services.AddScoped<ITaskLogService, TaskLogService>();
 builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
-
-
-
-
+builder.Services.AddScoped<IRealtimeService, RobotHub>();
+builder.Services.AddSignalR()
+    .AddJsonProtocol(options => { options.PayloadSerializerOptions.PropertyNamingPolicy = null; });
 
 
 // Add services to the container.
@@ -43,11 +40,11 @@ builder.Services.AddCors(
             policyBuilder =>
             {
                 policyBuilder
-                //.AllowAnyOrigin()
-                 .SetIsOriginAllowed(origin => true)
-                .AllowAnyMethod()
-                .AllowAnyHeader()
-                .AllowCredentials();
+                    //.AllowAnyOrigin()
+                    .SetIsOriginAllowed(_ => true)
+                    .AllowAnyMethod()
+                    .AllowAnyHeader()
+                    .AllowCredentials();
             });
     }
 );
@@ -56,39 +53,30 @@ builder.Services.AddCors(
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
-    try
+{
+    var scopedContext = scope.ServiceProvider.GetRequiredService<DataContext>();
+    var accountService = scope.ServiceProvider.GetRequiredService<IAccountService>();
+
+
+    if (!accountService.GetAll().GetAwaiter().GetResult().Any())
     {
-        var scopedContext = scope.ServiceProvider.GetRequiredService<DataContext>();
-        var accountService = scope.ServiceProvider.GetRequiredService<IAccountService>();
-      
-
-
-        if (!accountService.GetAll().GetAwaiter().GetResult().Any())
-        {
-            await accountService.Create(Seed.GetAccount());
-        }
-
-       
-
-        scopedContext.SaveChanges();
-
+        await accountService.Create(Seed.GetAccount());
     }
-    catch
-    {
-        throw;
-    }
+
+
+    scopedContext.SaveChanges();
+}
 
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseCors("AllowAll");
 
 
-
 // Configure the HTTP request pipeline.
 //if (app.Environment.IsDevelopment())
 //{
-    app.UseSwagger();
-    app.UseSwaggerUI();
+app.UseSwagger();
+app.UseSwaggerUI();
 //}
 
 app.UseHttpsRedirection();
@@ -104,4 +92,5 @@ app.MapGroup("TaskTemplate")
 app.MapGroup("TaskLog")
     .MapTaskLog();
 
+app.MapHub<RobotHub>("/hubs/robot");
 app.Run();
