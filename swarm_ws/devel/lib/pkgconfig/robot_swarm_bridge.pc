@@ -1,7 +1,7 @@
 prefix=/home/felix/RobotSwarm/swarm_ws/devel
 
-Name: hero_firmware
-Description: Description of hero_firmware
+Name: robot_swarm_bridge
+Description: Description of robot_swarm_bridge
 Version: 0.0.0
 Cflags: 
 Libs: -L${prefix}/lib 

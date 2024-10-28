@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+
+import rospy
+from handlers.signalr_handler import SignalRHandler
+from handlers.ros_handler import ROSHandler
+from utils.config import load_config
+from utils.logger import setup_logger
+
+class RobotSwarmBridge:
+    def __init__(self):
+        # Initialize node
+        rospy.init_node('robot_swarm_bridge', anonymous=True)
+        
+        # Setup logger
+        self.logger = setup_logger()
+        
+        # Load configuration
+        self.config = load_config()
+        
+        # Get parameters
+        self.robot_ids = rospy.get_param('~robot_ids', [1, 2, 3, 4, 5])
+        self.backend_url = rospy.get_param('~backend_url', 'wss://localhost:5000/hubs/robot')
+        
+        # Initialize handlers
+        self.signalr_handler = SignalRHandler(
+            self.backend_url,
+            self.robot_ids,
+            self.on_command_received
+        )
+        
+        self.ros_handlers = {
+            robot_id: ROSHandler(robot_id, self.config, self.on_status_changed, self.on_sensor_data)
+            for robot_id in self.robot_ids
+        }
+
+    def on_command_received(self, robot_id, command_data):
+        """Handle commands received from SignalR"""
+        if robot_id in self.ros_handlers:
+            self.ros_handlers[robot_id].publish_command(command_data)
+        else:
+            self.logger.warning(f"Received command for unknown robot {robot_id}")
+
+    def on_status_changed(self, robot_id, status):
+        """Handle robot status changes from ROS"""
+        self.signalr_handler.send_status_update(robot_id, status)
+
+    def on_sensor_data(self, robot_id, sensor_data):
+        """Handle sensor data from ROS"""
+        self.signalr_handler.send_sensor_reading(robot_id, sensor_data)
+
+    def run(self):
+        """Main run loop"""
+        try:
+            # Start SignalR connection
+            self.signalr_handler.start()
+            
+            # Keep running until shutdown
+            rospy.spin()
+            
+        except rospy.ROSInterruptException:
+            self.logger.info("ROS node interrupted")
+        except Exception as e:
+            self.logger.error(f"Error in bridge: {e}")
+        finally:
+            # Cleanup
+            self.signalr_handler.stop()
+            for handler in self.ros_handlers.values():
+                handler.cleanup()
+
+if __name__ == '__main__':
+    bridge = RobotSwarmBridge()
+    bridge.run()
