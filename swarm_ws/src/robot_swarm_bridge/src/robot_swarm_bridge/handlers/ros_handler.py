@@ -16,20 +16,20 @@ class ROSHandler:
         """Setup ROS publishers and subscribers"""
         # Publishers
         self.command_pub = rospy.Publisher(
-            f'/robot_{self.robot_id}/commands',
+            f'/robot{self.robot_id}/commands',  # Removed underscore after 'robot'
             String,
             queue_size=10
         )
         
         # Subscribers
         rospy.Subscriber(
-            f'/robot_{self.robot_id}/status',
+            f'/robot{self.robot_id}/status',    # Removed underscore after 'robot'
             String,
             self.status_subscriber_callback
         )
         
         rospy.Subscriber(
-            f'/robot_{self.robot_id}/sensor_data',
+            f'/robot{self.robot_id}/sensor_data',  # Removed underscore after 'robot'
             String,
             self.sensor_subscriber_callback
         )
@@ -61,5 +61,4 @@ class ROSHandler:
 
     def cleanup(self):
         """Cleanup ROS connections"""
-        # Unregister publishers and subscribers if needed
         self.command_pub.unregister()

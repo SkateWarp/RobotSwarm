@@ -10,10 +10,13 @@ namespace SwarmBackend.Services;
 
 public class RobotHub(ILogger<RobotHub> logger, DataContext context) : Hub, IRealtimeService
 {
-    private static readonly Dictionary<int, string> RobotConnections = new();
+    private static readonly Dictionary<int, string> RobotConnections = [];
 
-    public async Task OnConnected()
+
+    public async override Task OnConnectedAsync()
     {
+        await base.OnConnectedAsync();
+
         try
         {
             // Get robotId from query string
@@ -32,10 +35,9 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context) : Hub, IRea
             logger.LogError(ex, "Error in OnConnectedAsync");
         }
 
-        await base.OnConnectedAsync();
     }
 
-    public async Task OnDisconnected(Exception? exception)
+    public async override Task OnDisconnectedAsync(Exception? exception)
     {
         try
         {

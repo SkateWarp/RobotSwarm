@@ -4,7 +4,7 @@
     
     <!-- Arguments -->
     <arg name="robot_ids" default="[1, 2, 3, 4, 5]" />
-    <arg name="backend_url" default="wss://localhost:5000/hubs/robot" />
+    <arg name="backend_url" default="ws://localhost:44336/hubs/robot" /> 
     
     <!-- Launch the bridge node -->
     <node pkg="robot_swarm_bridge" type="bridge.py" name="robot_swarm_bridge" output="screen">

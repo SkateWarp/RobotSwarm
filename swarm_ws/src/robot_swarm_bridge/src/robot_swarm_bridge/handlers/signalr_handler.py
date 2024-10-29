@@ -42,7 +42,6 @@ class SignalRHandler:
         self.processor_thread.start()
 
     def _setup_connection(self):
-        """Setup SignalR connection with all handlers"""
         try:
             self.connection = (HubConnectionBuilder()
                 .with_url(f"{self.url}?robotId={self.robot_id}")
@@ -54,12 +53,11 @@ class SignalRHandler:
                 })
                 .configure_logging(logging.DEBUG)
                 .build())
-
-            # Register handlers
-            self.connection.on("ExecuteCommand", self._handle_command)
-            self.connection.on_open(self._handle_connect)
-            self.connection.on_close(self._handle_disconnect)
-            self.connection.on_error(self._handle_error)
+                
+            # Add connection lifecycle handlers
+            self.connection.on_open(lambda: print("Connection opened"))
+            self.connection.on_close(lambda: print("Connection closed"))
+            self.connection.on_error(lambda error: print(f"Error: {error}"))
 
         except Exception as e:
             self.logger.error(f"Error setting up SignalR connection: {e}")
