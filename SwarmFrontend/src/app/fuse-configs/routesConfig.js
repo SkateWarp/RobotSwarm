@@ -12,11 +12,8 @@ import settingsConfig from "./settingsConfig";
 import TaskConfigAppConfig from "../main/apps/GeeTS/Tasks/TaskConfigAppConfig";
 
 // GeeTS
-import TobaccoProductionAppConfig from "../main/apps/GeeTS/TobaccoProduction/TobaccoProductionAppConfig";
 import LeafTypesAppConfig from "../main/apps/GeeTS/LeafType/LeafTypeAppConfig";
 import BoothDashboardAppConfigGeeTS from "../main/apps/GeeTS/Dashboard/BoothDashboardAppConfig";
-import OperatorProductionAppConfig from "../main/apps/GeeTS/OperatorProduction/OperatorProductionAppConfig";
-import MachineProductionAppConfig from "../main/apps/GeeTS/MachineProduction/MachineProductionAppConfig";
 import LeafSortingAppConfig from "../main/apps/GeeTS/LeafSorting/LeafSortingAppConfig";
 
 const routeConfigs = [
@@ -32,12 +29,9 @@ const routeConfigs = [
     RealtimeConfigAppConfig,
 
     // GeeTS
-    TobaccoProductionAppConfig,
     LeafTypesAppConfig,
     LeafSortingAppConfig,
     BoothDashboardAppConfigGeeTS,
-    OperatorProductionAppConfig,
-    MachineProductionAppConfig,
 ];
 
 const getInitialDashboard = () => {

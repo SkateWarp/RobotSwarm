@@ -1,2 +1,2 @@
-export let URL = "https://localhost:44337";
+export const URL = "https://robot.zerav.la/";
 export const LOGO = "assets/images/logos/logo.png";
