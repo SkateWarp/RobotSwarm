@@ -1,0 +1,18 @@
+signalr:
+  url: "wss://localhost:44337/hubs/robot"
+  reconnect_delay: 1
+  max_reconnect_delay: 60
+
+ros:
+  master_uri: "http://ros-master:11311"
+  hostname: "ros-bridge"
+
+robots:
+  ids: [1, 2, 3, 4, 5]
+  topics:
+    status: "/robot_{id}/status"
+    sensor_data: "/robot_{id}/sensor_data"
+    commands: "/robot_{id}/commands"
+
+logging:
+  level: "INFO"

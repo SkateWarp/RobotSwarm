@@ -1,0 +1,19 @@
+<launch>
+    <!-- Load configuration -->
+    <rosparam command="load" file="$(find robot_swarm_bridge)/config/params/robot_params.yaml" />
+    
+    <!-- Arguments -->
+    <arg name="robot_ids" default="[1, 2, 3, 4, 5]" />
+    <arg name="backend_url" default="ws://localhost:44336/hubs/robot" /> 
+    
+    <!-- Launch the bridge node -->
+    <node pkg="robot_swarm_bridge" type="bridge.py" name="robot_swarm_bridge" output="screen">
+        <param name="robot_ids" value="$(arg robot_ids)" />
+        <param name="backend_url" value="$(arg backend_url)" />
+        <param name="config_file" value="$(find robot_swarm_bridge)/config/config.yaml" />
+    </node>
+    
+    <!-- Optional: Launch monitoring/debugging tools -->
+    <node pkg="rqt_console" type="rqt_console" name="rqt_console" />
+    <node pkg="rqt_graph" type="rqt_graph" name="rqt_graph" />
+</launch>

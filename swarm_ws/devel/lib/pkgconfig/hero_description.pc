@@ -1,4 +1,4 @@
-prefix=/home/anyelo/RobotSwarm/swarm_ws/devel
+prefix=/home/felix/RobotSwarm/swarm_ws/devel
 
 Name: hero_description
 Description: Description of hero_description
