@@ -16,7 +16,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddAuthentication();
 builder.Services.AddAuthorization();
 builder.Services.GetConfigureJwt(builder.Configuration);
-
+builder.Services.AddControllers();
 builder.Services.AddScoped<IAccountService, AccountService>();
 builder.Services.AddScoped<IRobotService, RobotService>();
 builder.Services.AddScoped<ISensorService, SensorService>();
@@ -51,6 +51,10 @@ builder.Services.AddCors(
 
 
 var app = builder.Build();
+app.UseCors("AllowAll");
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
 
 using (var scope = app.Services.CreateScope())
 {
@@ -67,9 +71,8 @@ using (var scope = app.Services.CreateScope())
     scopedContext.SaveChanges();
 }
 
-app.UseAuthentication();
-app.UseAuthorization();
-app.UseCors("AllowAll");
+
+
 
 
 // Configure the HTTP request pipeline.
@@ -84,7 +87,8 @@ app.UseHttpsRedirection();
 app.MapGroup("Accounts")
     .MapAccount();
 app.MapGroup("Robots")
-    .MapRobot();
+    .MapRobot()
+    .MapGet("/hubs/robot/test", () => "SignalR Hub is running");
 app.MapGroup("Sensors")
     .MapSensor();
 app.MapGroup("TaskTemplate")
@@ -92,5 +96,9 @@ app.MapGroup("TaskTemplate")
 app.MapGroup("TaskLog")
     .MapTaskLog();
 
+// Add UseEndpoints
 app.MapHub<RobotHub>("/hubs/robot");
+app.MapGet("/hubs/robot/test", () => "SignalR Hub is running");
+app.MapControllers();
+
 app.Run();
