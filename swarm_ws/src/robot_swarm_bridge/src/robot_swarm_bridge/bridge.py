@@ -28,10 +28,15 @@ class RobotSwarmBridge:
             self.on_command_received
         )
         
-        self.ros_handlers = {
-            robot_id: ROSHandler(robot_id, self.config, self.on_status_changed, self.on_sensor_data)
-            for robot_id in self.robot_ids
-        }
+        if isinstance(self.robot_ids, int):
+                self.ros_handlers = {
+                        self.robot_ids: ROSHandler(self.robot_ids, self.config, self.on_status_changed, self.on_sensor_data)
+                }
+        else:
+                self.ros_handlers = {
+                        robot_id: ROSHandler(robot_id, self.config, self.on_status_changed, self.on_sensor_data)
+                        for robot_id in self.robot_ids
+                }
 
     def on_command_received(self, robot_id, command_data):
         """Handle commands received from SignalR"""
@@ -42,6 +47,7 @@ class RobotSwarmBridge:
 
     def on_status_changed(self, robot_id, status):
         """Handle robot status changes from ROS"""
+        rospy.loginfo(f"Robot {robot_id} status changed to {status}")
         self.signalr_handler.send_status_update(robot_id, status)
 
     def on_sensor_data(self, robot_id, sensor_data):
