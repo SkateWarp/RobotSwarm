@@ -185,22 +185,27 @@ class SignalRHandler:
                 self.logger.debug(f"Message queued: {method}")
         except Exception as e:
             rospy.logerr(f"Error sending message: {e}")
-            traceback.print_exc()  # Add this to see full error trace
+            rospy.logerr(f"Stack trace: {traceback.format_exc()}")            
             # Queue message for retry
             self.message_queue.put((method, data))
 
     def send_status_update(self, robot_id, status):
         """
         Send status update to backend
-        
-        Args:
-            status (str): New status
         """
         rospy.loginfo(f"Robot {robot_id} status changed to {status} from signalr")
-        self.send_message("UpdateStatus", {
-            "robotId": robot_id,
-            "status": status,
-        })
+        
+        # Try sending just the status as a single argument
+        try:
+            rospy.loginfo(f"Attempting to send status update with robot_id={robot_id}, status={status}")
+            self.connection.send("UpdateStatus", [robot_id, status])  # Try this format first
+        except Exception as e:
+            rospy.logerr(f"Error with direct parameters: {e}")
+            # Fall back to object format
+            self.send_message("UpdateStatus", {
+                "robotId": robot_id,
+                "status": status
+            })
 
     def send_sensor_reading(self, sensor_data):
         """
