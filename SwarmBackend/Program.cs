@@ -20,7 +20,7 @@ builder.Services.AddControllers();
 builder.Services.AddScoped<IAccountService, AccountService>();
 builder.Services.AddScoped<IRobotService, RobotService>();
 builder.Services.AddScoped<ISensorService, SensorService>();
-builder.Services.AddScoped<ISensorReadingService, SensortReadingService>();
+builder.Services.AddScoped<ISensorReadingService, SensorReadingService>();
 builder.Services.AddScoped<ITaskLogService, TaskLogService>();
 builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
@@ -91,6 +91,8 @@ app.MapGroup("Robots")
     .MapGet("/hubs/robot/test", () => "SignalR Hub is running");
 app.MapGroup("Sensors")
     .MapSensor();
+app.MapGroup("SensorReadings")
+    .MapSensorReading();
 app.MapGroup("TaskTemplate")
     .MapTaskTemplate();
 app.MapGroup("TaskLog")

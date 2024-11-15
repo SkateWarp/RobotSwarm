@@ -7,11 +7,11 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class SensortReadingService : ISensorReadingService
+public class SensorReadingService : ISensorReadingService
 {
     private readonly DataContext context;
 
-    public SensortReadingService(DataContext context)
+    public SensorReadingService(DataContext context)
     {
         this.context = context;
     }
@@ -32,20 +32,43 @@ public class SensortReadingService : ISensorReadingService
         return SensorReadingResponse.From(reading);
     }
 
-    public async Task<IEnumerable<SensorReadingResponse>> GetAllByRobot(int robotId, DateTime startDate, DateTime endDate)
+    public async Task<IEnumerable<SensorReadingResponse>> GetAllByRobot(int robotId, DateRangeRequest dateRange)
     {
-        return await context.SensorReadings
+        var query = context.SensorReadings
                .Include(x => x.Sensor)
-               .Where(x => x.Sensor!.RobotId == robotId && x.DateCreated >= startDate && x.DateCreated <= endDate)
+               .Where(x => x.Sensor!.RobotId == robotId);
+
+        if (dateRange.StartDate != null)
+        {
+            query = query.Where(x => x.DateCreated >= dateRange.StartDate);
+        }
+
+        if (dateRange.EndDate != null)
+        {
+            query = query.Where(x => x.DateCreated <= dateRange.EndDate);
+        }
+        return await query
                .Select(x => SensorReadingResponse.From(x))
                .ToListAsync();
     }
 
-    public async Task<IEnumerable<SensorReadingResponse>> GetAllBySensor(int sensorId, DateTime startDate, DateTime endDate)
+    public async Task<IEnumerable<SensorReadingResponse>> GetAllBySensor(int sensorId, DateRangeRequest dateRange)
     {
-        return await context.SensorReadings
-                 .Where(x => x.SensorId == sensorId && x.DateCreated >= startDate && x.DateCreated <= endDate)
-                 .Select(x => SensorReadingResponse.From(x))
+        var query = context.SensorReadings
+                 .Where(x => x.SensorId == sensorId);
+
+        if (dateRange.StartDate != null)
+        {
+            query = query.Where(x => x.DateCreated >= dateRange.StartDate);
+        }
+
+        if (dateRange.EndDate != null)
+        {
+            query = query.Where(x => x.DateCreated <= dateRange.EndDate);
+        }
+
+        return await query
+        .Select(x => SensorReadingResponse.From(x))
                  .ToListAsync();
     }
 
