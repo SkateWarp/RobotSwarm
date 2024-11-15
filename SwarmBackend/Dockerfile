@@ -19,7 +19,14 @@ RUN apt-get update && apt-get install -y postgresql-client
 RUN dotnet tool install --global dotnet-ef
 ENV PATH="$PATH:/root/.dotnet/tools"
 
-# Create startup script
+# Set environment variables for verbose logging
+ENV ASPNETCORE_ENVIRONMENT=Development
+ENV Logging__Console__LogLevel__Default=Debug
+ENV Logging__Console__LogLevel__Microsoft=Debug
+ENV Logging__Console__LogLevel__Microsoft.AspNetCore=Debug
+ENV Logging__Console__LogLevel__Microsoft.AspNetCore.SignalR=Debug
+
+# Create startup script with additional logging
 RUN echo '#!/bin/bash\n\
     set -e\n\
     echo "Current directory: $(pwd)"\n\
@@ -35,7 +42,7 @@ RUN echo '#!/bin/bash\n\
     echo "Database is up - executing command"\n\
     echo "Running migrations..."\n\
     dotnet ef database update --project /src/SwarmBackend --verbose\n\
-    echo "Starting application..."\n\
-    dotnet SwarmBackend.dll' > /app/startup.sh && chmod +x /app/startup.sh
+    echo "Starting application with debug logging..."\n\
+    dotnet SwarmBackend.dll --verbosity Debug' > /app/startup.sh && chmod +x /app/startup.sh
 
 ENTRYPOINT ["/app/startup.sh"]
