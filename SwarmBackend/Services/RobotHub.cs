@@ -127,8 +127,19 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context) : Hub, IRea
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error processing sensor reading");
-            throw;
+            logger.LogError(ex,
+                "Error processing sensor reading for robot {RobotId}, sensor {SensorId}: {Message}",
+                robotId, reading?.SensorId, ex.Message);
+
+            // Log inner exception if present
+            if (ex.InnerException != null)
+            {
+                logger.LogError(ex.InnerException,
+                    "Inner exception details: {Message}",
+                    ex.InnerException.Message);
+            }
+
+            throw; // Rethrow to ensure the client gets the error
         }
     }
 
