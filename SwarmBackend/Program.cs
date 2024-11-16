@@ -27,6 +27,16 @@ builder.Services.AddScoped<IRealtimeService, RobotHub>();
 builder.Services.AddSignalR()
     .AddJsonProtocol(options => { options.PayloadSerializerOptions.PropertyNamingPolicy = null; });
 
+builder.Services.AddLogging(logging =>
+{
+    logging.ClearProviders();
+    logging.AddConsole(options =>
+    {
+        options.FormatterName = "Simple";
+    });
+    logging.AddDebug();
+    logging.SetMinimumLevel(LogLevel.Trace);
+});
 
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
