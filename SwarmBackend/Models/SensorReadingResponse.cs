@@ -8,3 +8,5 @@ public record SensorReadingResponse(int Id, double Value, DateTime DateCreated, 
 }
 
 public record SensorReadingRequest(double Value, int SensorId, string? Notes);
+
+public record RosSensorReadingRequest(double Value, string SensorName);

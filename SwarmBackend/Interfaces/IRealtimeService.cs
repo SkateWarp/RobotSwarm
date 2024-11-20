@@ -13,7 +13,7 @@ public interface IRealtimeService
 
     Task UpdateStatus(int robotId, string status);
 
-    Task HandleSensorReading(int robotId, SensorReadingRequest reading);
+    Task HandleSensorReading(int robotId, RosSensorReadingRequest reading);
 
     Task SendCommand(int robotId, string command, JsonDocument parameters);
 

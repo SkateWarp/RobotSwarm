@@ -9,11 +9,11 @@ namespace SwarmBackend.Services;
 
 public class SensorService : ISensorService
 {
-    private readonly DataContext context;
+    private readonly DataContext _context;
 
     public SensorService(DataContext context)
     {
-        this.context = context;
+        this._context = context;
     }
 
     public async Task<SensorResponse> Create(SensorRequest request)
@@ -27,29 +27,29 @@ public class SensorService : ISensorService
             DateCreated = DateTime.Now,
         };
 
-        context.Sensors.Add(sensor);
-        await context.SaveChangesAsync();
+        _context.Sensors.Add(sensor);
+        await _context.SaveChangesAsync();
 
         return SensorResponse.From(sensor);
     }
 
     public async Task<IEnumerable<SensorResponse>> GetAllByRobot(int robotId)
     {
-        return await context.Sensors.Where(x => x.RobotId == robotId)
+        return await _context.Sensors.Where(x => x.RobotId == robotId)
             .Select(x => SensorResponse.From(x, true))
             .ToListAsync();
     }
 
     public async Task<Result<SensorResponse>> Update(int id, SensorRequest request)
     {
-        var sensor = await context.Sensors.FindAsync(id);
+        var sensor = await _context.Sensors.FindAsync(id);
         if (sensor == null)
         {
             return new Result<SensorResponse>(new Exception("Sensor no encontrado"));
         }
 
-        context.Entry(sensor).CurrentValues.SetValues(request);
-        await context.SaveChangesAsync();
+        _context.Entry(sensor).CurrentValues.SetValues(request);
+        await _context.SaveChangesAsync();
 
         return SensorResponse.From(sensor);
     }

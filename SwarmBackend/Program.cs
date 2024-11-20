@@ -6,7 +6,13 @@ using SwarmBackend.Services;
 
 // trigger
 var builder = WebApplication.CreateBuilder(args);
-
+builder.Services.AddLogging(logging =>
+{
+    logging.ClearProviders();
+    logging.AddConsole();
+    logging.AddDebug();
+    logging.SetMinimumLevel(LogLevel.Debug);
+});
 builder.Services
     .AddDbContext<DataContext>(options => { options.UseNpgsql(builder.Configuration.GetConnectionString("Default")); });
 
@@ -20,7 +26,7 @@ builder.Services.AddControllers();
 builder.Services.AddScoped<IAccountService, AccountService>();
 builder.Services.AddScoped<IRobotService, RobotService>();
 builder.Services.AddScoped<ISensorService, SensorService>();
-builder.Services.AddScoped<ISensorReadingService, SensortReadingService>();
+builder.Services.AddScoped<ISensorReadingService, SensorReadingService>();
 builder.Services.AddScoped<ITaskLogService, TaskLogService>();
 builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();

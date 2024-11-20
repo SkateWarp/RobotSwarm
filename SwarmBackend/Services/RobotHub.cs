@@ -1,5 +1,4 @@
 ﻿using System.Text.Json;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -8,12 +7,13 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class RobotHub(ILogger<RobotHub> logger, DataContext context) : Hub, IRealtimeService
+public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorReadingService sensorReadingService)
+    : Hub, IRealtimeService
 {
     private static readonly Dictionary<int, string> RobotConnections = [];
 
 
-    public async override Task OnConnectedAsync()
+    public override async Task OnConnectedAsync()
     {
         await base.OnConnectedAsync();
 
@@ -34,10 +34,9 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context) : Hub, IRea
         {
             logger.LogError(ex, "Error in OnConnectedAsync");
         }
-
     }
 
-    public async override Task OnDisconnectedAsync(Exception? exception)
+    public override async Task OnDisconnectedAsync(Exception? exception)
     {
         try
         {
@@ -107,20 +106,11 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context) : Hub, IRea
         }
     }
 
-    public async Task HandleSensorReading(int robotId, SensorReadingRequest reading)
+    public async Task HandleSensorReading(int robotId, RosSensorReadingRequest reading)
     {
         try
         {
-            var sensorReading = new SensorReading
-            {
-                SensorId = reading.SensorId,
-                Value = reading.Value,
-                Notes = reading.Notes,
-                DateCreated = DateTime.UtcNow
-            };
-
-            context.SensorReadings.Add(sensorReading);
-            await context.SaveChangesAsync();
+            await sensorReadingService.Create(robotId, reading);
 
             // Broadcast the new reading to interested clients
             await Clients.All.SendAsync("NewSensorReading", reading);
