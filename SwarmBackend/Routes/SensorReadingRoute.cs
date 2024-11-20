@@ -8,19 +8,23 @@ public static class SensorReadingRoute
     public static RouteGroupBuilder MapSensorReading(this RouteGroupBuilder group)
     {
 
-        group.MapGet("/{robotId}", GetAllByRobot)
+        group.MapGet("/{robotId:int}", GetAllByRobot)
             .RequireAuthorization()
            .Produces<IEnumerable<SensorReadingResponse>>();
 
-        group.MapGet("sensor/{sensorId}", GetAllBySensor)
+        group.MapGet("sensor/{sensorId:int}", GetAllBySensor)
          .RequireAuthorization()
         .Produces<IEnumerable<SensorReadingResponse>>();
 
         group.MapPost("", Create)
             .RequireAuthorization()
            .Produces<SensorReadingResponse>();
+        
+        group.MapPost("/{robotId:int}", CreateByRobot)
+            .RequireAuthorization()
+            .Produces<SensorReadingResponse>();
 
-        group.MapPut("/{id}", Update)
+        group.MapPut("/{id:int}", Update)
           .RequireAuthorization()
          .Produces<SensorReadingResponse>();
 
@@ -51,5 +55,11 @@ public static class SensorReadingRoute
     {
         var response = await sensorService.Update(id, request);
         return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    private static async Task<IResult> CreateByRobot(int robotId, RosSensorReadingRequest request, ISensorReadingService sensorService)
+    {
+        var response = await sensorService.Create(robotId, request);
+        return Results.Ok(response);
     }
 }
