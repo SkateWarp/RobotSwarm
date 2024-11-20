@@ -7,7 +7,7 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorReadingService sensorReadingService)
+public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorReadingService sensorReadingService, ITaskLogService taskLogService)
     : Hub, IRealtimeService
 {
     private static readonly Dictionary<int, string> RobotConnections = [];
@@ -145,5 +145,26 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
                 timestamp = DateTime.UtcNow
             });
         }
+    }
+
+    public async Task HandleTaskLog(int robotId, RosTaskTemplateRequest request)
+    {
+        try
+        {
+            await taskLogService.Create(robotId, request);
+            await Clients.All.SendAsync("NewTaskLog", request);
+            await UpdateRobotConnection(robotId, true);
+
+        }
+        catch (System.Exception ex)
+        {
+
+            logger.LogError(ex,
+                            "Error processing task log for robot {RobotId}, task {TaskType}: {Message}",
+                            robotId, request?.TaskType, ex.Message);
+            throw;
+        }
+
+
     }
 }
