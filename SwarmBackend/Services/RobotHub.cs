@@ -133,6 +133,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         }
     }
 
+
     public async Task SendCommand(int robotId, string command, JsonDocument parameters)
     {
         if (RobotConnections.TryGetValue(robotId, out var connectionId))

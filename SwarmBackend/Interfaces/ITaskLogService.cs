@@ -8,6 +8,7 @@ public interface ITaskLogService
 
     Task<IEnumerable<TaskLogResponse>> GetAll(DateRangeRequest dateRange);
     Task<Result<TaskLogResponse>> Create(TaskLogRequest request);
+    Task<Result<TaskLogResponse>> Create(int robotId, RosTaskTemplateRequest request);
     Task<Result<TaskLogResponse>> Update(int id, TaskLogRequest request);
     Task<Result<TaskLogResponse>> Cancel(int id);
 }

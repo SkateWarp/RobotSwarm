@@ -96,4 +96,37 @@ public class TaskLogService : ITaskLogService
             return TaskLogResponse.From(task);
         }
     }
+
+    public async Task<Result<TaskLogResponse>> Create(int robotId, RosTaskTemplateRequest request)
+    {
+        if (!TaskTypeEnumUtils.TryParseFromString(request.TaskType, out var taskType))
+        {
+            return new Result<TaskLogResponse>(new Exception("Task type not recognized"));
+        }
+
+        var template = await context.TaskTemplates.FirstOrDefaultAsync(x => x.TaskType == taskType);
+        if (template == null)
+        {
+            template = new TaskTemplate
+            {
+                TaskType = taskType,
+                Name = taskType.GetDescriptionAttribute()
+            };
+            context.TaskTemplates.Add(template);
+            await context.SaveChangesAsync();
+        }
+
+        var task = new TaskLog
+        {
+            RobotId = robotId,
+            TaskTemplateId = template.Id,
+            DateCreated = DateTime.Now,
+            Parameters = JsonDocument.Parse(request.Parameters.GetRawText())
+        };
+
+        context.TaskLogs.Add(task);
+        await context.SaveChangesAsync();
+
+        return TaskLogResponse.From(task);
+    }
 }
