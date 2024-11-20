@@ -16,20 +16,20 @@ class ROSHandler:
         """Setup ROS publishers and subscribers"""
         # Publishers
         self.command_pub = rospy.Publisher(
-            f'/robot{self.robot_id}/commands',  # Removed underscore after 'robot'
+            f'/robot/{self.robot_id}/commands',  # Removed underscore after 'robot'
             String,
             queue_size=10
         )
         
         # Subscribers
         rospy.Subscriber(
-            f'/robot{self.robot_id}/status',    # Removed underscore after 'robot'
+            f'/robot/{self.robot_id}/status',    # Removed underscore after 'robot'
             String,
             self.status_subscriber_callback
         )
         
         rospy.Subscriber(
-            f'/robot{self.robot_id}/sensor_data',  # Removed underscore after 'robot'
+            f'/robot/{self.robot_id}/sensor_data',  # Removed underscore after 'robot'
             String,
             self.sensor_subscriber_callback
         )
@@ -46,8 +46,18 @@ class ROSHandler:
     def status_subscriber_callback(self, msg):
         """Handle status messages from ROS"""
         try:
-            status_data = json.loads(msg.data)
-            self.status_callback(self.robot_id, status_data)
+            status = msg.data
+            # Convert status to match C# enum exactly
+            status_mapping = {
+                "working": "Working",
+                "idle": "Idle",
+                "Working": "Working",
+                "Idle": "Idle"
+            }
+            
+            normalized_status = status_mapping.get(status.strip('"').strip("'"), status)
+        
+            self.status_callback(self.robot_id, normalized_status)
         except Exception as e:
             rospy.logerr(f"Error in status callback: {e}")
 

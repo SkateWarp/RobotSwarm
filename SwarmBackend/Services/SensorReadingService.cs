@@ -96,4 +96,23 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
 
         return SensorReadingResponse.From(reading);
     }
+
+    public async Task<IEnumerable<SensorReadingResponse>> GetAllByRobot(int robotId, DateRangeRequest dateRange)
+    {
+        return await context.SensorReadings
+            .Include(x => x.Sensor)
+            .Where(x => x.Sensor!.RobotId == robotId && x.DateCreated >= dateRange.StartDate &&
+                        x.DateCreated <= dateRange.EndDate)
+            .Select(x => SensorReadingResponse.From(x))
+            .ToListAsync();
+    }
+
+    public async Task<IEnumerable<SensorReadingResponse>> GetAllBySensor(int sensorId, DateRangeRequest dateRange)
+    {
+        return await context.SensorReadings
+            .Where(x => x.SensorId == sensorId && x.DateCreated >= dateRange.StartDate &&
+                        x.DateCreated <= dateRange.EndDate)
+            .Select(x => SensorReadingResponse.From(x))
+            .ToListAsync();
+    }
 }

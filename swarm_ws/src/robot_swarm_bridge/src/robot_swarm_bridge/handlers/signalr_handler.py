@@ -31,7 +31,7 @@ class SignalRHandler:
         
         # Setup logging
         self.logger = logging.getLogger(f'signalr_handler_{robot_id}')
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
         
         # Initialize connection
         self._setup_connection()
@@ -55,9 +55,11 @@ class SignalRHandler:
                 .build())
                 
             # Add connection lifecycle handlers
-            self.connection.on_open(lambda: print("Connection opened"))
-            self.connection.on_close(lambda: print("Connection closed"))
-            self.connection.on_error(lambda error: print(f"Error: {error}"))
+            self.connection.on_open(lambda: self._handle_connect())  # Changed this line
+            self.connection.on_close(lambda: self._handle_disconnect())  # Changed this line
+            self.connection.on_error(lambda error: self._handle_error(error))  # Changed this line
+            
+            rospy.loginfo("SignalR connection setup complete")
 
         except Exception as e:
             self.logger.error(f"Error setting up SignalR connection: {e}")
@@ -136,9 +138,23 @@ class SignalRHandler:
     def start(self):
         """Start the SignalR connection"""
         try:
+            rospy.loginfo("Starting SignalR connection...")
             self.connection.start()
+            
+            # Wait for connection to be established
+            retry_count = 0
+            while not self.is_connected and retry_count < 10:
+                rospy.sleep(1)  # Wait 1 second
+                retry_count += 1
+                rospy.loginfo(f"Waiting for connection... Attempt {retry_count}")
+                
+            if self.is_connected:
+                rospy.loginfo("SignalR connection established successfully")
+            else:
+                rospy.logerr("Failed to establish SignalR connection after 10 seconds")
+                
         except Exception as e:
-            self.logger.error(f"Error starting SignalR connection: {e}")
+            rospy.logerr(f"Error starting SignalR connection: {e}")
             self._attempt_reconnect()
 
     def stop(self):
@@ -159,42 +175,60 @@ class SignalRHandler:
         """
         try:
             if self.is_connected:
+                rospy.loginfo(f"Sending message to SignalR: {method} - {data}")
                 self.connection.send(method, [data])
+                rospy.loginfo("Message sent successfully")
             else:
+                rospy.logwarn("Not connected to SignalR, queueing message")
                 # Queue message for later
                 self.message_queue.put((method, data))
                 self.logger.debug(f"Message queued: {method}")
         except Exception as e:
-            self.logger.error(f"Error sending message: {e}")
+            rospy.logerr(f"Error sending message: {e}")
+            rospy.logerr(f"Stack trace: {traceback.format_exc()}")            
             # Queue message for retry
             self.message_queue.put((method, data))
 
-    def send_status_update(self, status):
+    def send_status_update(self, robot_id, status):
         """
         Send status update to backend
-        
-        Args:
-            status (str): New status
         """
-        self.send_message("UpdateStatus", {
-            "robotId": self.robot_id,
-            "status": status,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        rospy.loginfo(f"Robot {robot_id} status changed to {status} from signalr")
+        
+        # Try sending just the status as a single argument
+        try:
+            rospy.loginfo(f"Attempting to send status update with robot_id={robot_id}, status={status}")
+            self.connection.send("UpdateStatus", [robot_id, status])  # Try this format first
+        except Exception as e:
+            rospy.logerr(f"Error with direct parameters: {e}")
+            # Fall back to object format
+            self.send_message("UpdateStatus", {
+                "robotId": robot_id,
+                "status": status
+            })
 
-    def send_sensor_reading(self, sensor_data):
+    def send_sensor_reading(self, robot_id, sensor_data):
         """
         Send sensor reading to backend
         
         Args:
             sensor_data (dict): Sensor reading data
         """
-        self.send_message("SendSensorReading", {
-            "robotId": self.robot_id,
-            "sensorId": sensor_data.get("sensorId"),
-            "value": sensor_data.get("value"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
+        rospy.loginfo(f"Sensor data: {sensor_data}")
+        # Format data to match SensorReadingRequest record
+        reading_request = {
+            "value": float(sensor_data.get("value")),  # double Value
+            "sensorId": int(sensor_data.get("sensorId")),  # int SensorId
+            "notes": sensor_data.get("notes")  # string? Notes
+        }
+        
+        # Send to SignalR hub with both robotId and reading
+        # Note: Parameters must be in same order as C# method signature
+        self.connection.send("HandleSensorReading", [
+            int(robot_id),  # First parameter as integer
+            reading_request  # Second parameter as object
+        ])
 
     def _process_message_queue(self):
         """Process queued messages when connection is restored"""

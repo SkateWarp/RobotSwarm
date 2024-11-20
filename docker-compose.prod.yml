@@ -31,8 +31,8 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
     ports:
-      - "8080:80"  # Maps host port 8080 to container port 80
-      - "8443:443" # Maps host port 8443 to container port 443 (if using HTTPS)
+      - "44336:44336"  # HTTP
+      - "44337:44337"  # HTTPS
     depends_on:
       - db
     networks:
