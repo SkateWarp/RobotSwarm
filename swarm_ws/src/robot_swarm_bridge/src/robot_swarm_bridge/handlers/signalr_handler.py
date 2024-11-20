@@ -207,19 +207,28 @@ class SignalRHandler:
                 "status": status
             })
 
-    def send_sensor_reading(self, sensor_data):
+    def send_sensor_reading(self, robot_id, sensor_data):
         """
         Send sensor reading to backend
         
         Args:
             sensor_data (dict): Sensor reading data
         """
-        self.send_message("SendSensorReading", {
-            "robotId": self.robot_id,
-            "sensorId": sensor_data.get("sensorId"),
-            "value": sensor_data.get("value"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
+        rospy.loginfo(f"Sensor data: {sensor_data}")
+        # Format data to match SensorReadingRequest record
+        reading_request = {
+            "value": float(sensor_data.get("value")),  # double Value
+            "sensorId": int(sensor_data.get("sensorId")),  # int SensorId
+            "notes": sensor_data.get("notes")  # string? Notes
+        }
+        
+        # Send to SignalR hub with both robotId and reading
+        # Note: Parameters must be in same order as C# method signature
+        self.connection.send("HandleSensorReading", [
+            int(robot_id),  # First parameter as integer
+            reading_request  # Second parameter as object
+        ])
 
     def _process_message_queue(self):
         """Process queued messages when connection is restored"""
