@@ -127,6 +127,23 @@ public class TaskLogService : ITaskLogService
         context.TaskLogs.Add(task);
         await context.SaveChangesAsync();
 
+        var robot = await context.Robots.FindAsync(robotId);
+        if (robot == null)
+        {
+            return new Result<TaskLogResponse>(new Exception("Robot no encontrado"));
+        }
+
+        context.Entry(robot).CurrentValues.SetValues(
+            new
+            {
+                IsConnected = true,
+                Status = RobotStatus.Working
+            }
+        );
+
+
+        await context.SaveChangesAsync();
+
         return TaskLogResponse.From(task);
     }
 }
