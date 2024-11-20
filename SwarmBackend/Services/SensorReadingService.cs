@@ -27,8 +27,7 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
 
     public async Task<SensorReadingResponse> Create(int robotId, RosSensorReadingRequest request)
     {
-        var parsed = Enum.TryParse<SensorTypeEnum>(request.SensorName, out var type);
-        if (!parsed)
+        if (!SensorTypeEnumUtils.TryParseFromString(request.SensorName, out var type))
         {
             logger.LogError("Sensor type {SensorName} not found for robot {RobotId}", request.SensorName, robotId);
             return new SensorReadingResponse(0, 0, DateTime.UtcNow, 0, "Sensor no encontrado");
