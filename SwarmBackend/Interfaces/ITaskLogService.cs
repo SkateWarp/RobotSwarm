@@ -11,4 +11,8 @@ public interface ITaskLogService
     Task<Result<TaskLogResponse>> Create(int robotId, RosTaskTemplateRequest request);
     Task<Result<TaskLogResponse>> Update(int id, TaskLogRequest request);
     Task<Result<TaskLogResponse>> Cancel(int id);
+
+    Task<Result<TaskLogResponse>> FinishTask(int robotId);
+
+
 }

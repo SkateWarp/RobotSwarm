@@ -13,4 +13,6 @@ public interface IRobotService
     Task<Result<RobotResponse>> Cancel(int id);
 
 
+
+
 }

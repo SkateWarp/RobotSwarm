@@ -167,4 +167,19 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
 
 
     }
+
+    public async Task HandleFinishTaskLog(int robotId)
+    {
+        try
+        {
+            await taskLogService.FinishTask(robotId);
+        }
+        catch (System.Exception ex)
+        {
+            logger.LogError(ex,
+                            "Error processing finish task log for robot {RobotId}: {Message}",
+                            robotId, ex.Message);
+            throw;
+        }
+    }
 }
