@@ -3,13 +3,14 @@ from std_msgs.msg import String
 import json
 
 class ROSHandler:
-    def __init__(self, robot_id, config, status_callback, sensor_callback, finish_task, cancel_task):
+    def __init__(self, robot_id, config, status_callback, sensor_callback, finish_task_callback, cancel_task_callback, start_task_callback):
         self.robot_id = robot_id
         self.config = config
         self.status_callback = status_callback
         self.sensor_callback = sensor_callback
-        self.finish_task_callback = finish_task
-        self.cancel_task_callback = cancel_task
+        self.finish_task_callback = finish_task_callback
+        self.cancel_task_callback = cancel_task_callback
+        self.start_task_callback = start_task_callback
         
         # Setup publishers and subscribers
         self.setup_ros_communication()
@@ -34,6 +35,12 @@ class ROSHandler:
             f'/robot/{self.robot_id}/sensor_data',  # Removed underscore after 'robot'
             String,
             self.sensor_subscriber_callback
+        )
+
+        rospy.Subscriber(
+            f'/robot/{self.robot_id}/task/start',  # Removed underscore after 'robot'
+            String,
+            self.start_task_subscriber_callback
         )
 
         rospy.Subscriber(
@@ -80,6 +87,14 @@ class ROSHandler:
         try:
             sensor_data = json.loads(msg.data)
             self.sensor_callback(self.robot_id, sensor_data)
+        except Exception as e:
+            rospy.logerr(f"Error in sensor callback: {e}")
+    
+    def start_task_subscriber_callback(self, msg):
+        """Handle sensor data from ROS"""
+        try:
+            sensor_data = json.loads(msg.data)
+            self.start_task_callback(self.robot_id, sensor_data)
         except Exception as e:
             rospy.logerr(f"Error in sensor callback: {e}")
 
