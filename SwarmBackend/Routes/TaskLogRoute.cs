@@ -12,6 +12,7 @@ public static class TaskLogRoute
 
         group.MapGet("", GetAll);
         group.MapPost("", Create);
+        group.MapPost("/{robotId:int}", CreateByRobot);
         group.MapPut("/{id}", Update);
 
         return group;
@@ -45,6 +46,11 @@ public static class TaskLogRoute
         return Results.Ok(await service.GetAll(dateRange));
     }
 
+    public static async Task<IResult> CreateByRobot(int robotId, RosTaskTemplateRequest request, ITaskLogService service)
+    {
+        var response = await service.Create(robotId, request);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
     public static async Task<IResult> Update(int id, TaskLogRequest request, ITaskLogService service)
     {
         var response = await service.Update(id, request);

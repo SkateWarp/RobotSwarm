@@ -219,8 +219,7 @@ class SignalRHandler:
         # Format data to match SensorReadingRequest record
         reading_request = {
             "value": float(sensor_data.get("value")),  # double Value
-            "sensorId": int(sensor_data.get("sensorId")),  # int SensorId
-            "notes": sensor_data.get("notes")  # string? Notes
+            "sensorName": str(sensor_data.get("sensorName")),  # int SensorId
         }
         
         # Send to SignalR hub with both robotId and reading

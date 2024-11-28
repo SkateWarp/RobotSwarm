@@ -43,3 +43,30 @@ public static class SensorTypeEnumUtils
         return false;
     }
 }
+
+public static class TaskTypeEnumUtils
+{
+    public static bool TryParseFromString(string input, out TaskTypeEnum result)
+    {
+        result = TaskTypeEnum.None;
+
+        if (string.IsNullOrWhiteSpace(input))
+            return false;
+
+        // First try direct enum parse
+        if (Enum.TryParse(input, true, out result))
+            return true;
+
+        // Then try to match by description
+        foreach (TaskTypeEnum value in Enum.GetValues(typeof(TaskTypeEnum)))
+        {
+            if (!value.GetDescriptionAttribute().Equals(input, StringComparison.OrdinalIgnoreCase)) continue;
+
+            result = value;
+            return true;
+        }
+
+
+        return false;
+    }
+}

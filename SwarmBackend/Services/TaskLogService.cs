@@ -8,15 +8,8 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class TaskLogService : ITaskLogService
+public class TaskLogService(DataContext context) : ITaskLogService
 {
-    private readonly DataContext context;
-
-    public TaskLogService(DataContext context)
-    {
-        this.context = context;
-    }
-
     public async Task<Result<TaskLogResponse>> Create(TaskLogRequest request)
     {
         var robot = await context.Robots.FindAsync(request.RobotId);
@@ -90,10 +83,100 @@ public class TaskLogService : ITaskLogService
                 return new Result<TaskLogResponse>(new Exception("La tarea ya ha sido cancelada"));
             }
 
-            task.DateCancelled = DateTime.Now;
+            context.Entry(task).CurrentValues.SetValues(
+                new
+                {
+                    DateCancelled = DateTime.Now
+                }
+            );
             await context.SaveChangesAsync();
 
             return TaskLogResponse.From(task);
         }
     }
+
+    public async Task<Result<TaskLogResponse>> Create(int robotId, RosTaskTemplateRequest request)
+    {
+        if (!TaskTypeEnumUtils.TryParseFromString(request.TaskType, out var taskType))
+        {
+            return new Result<TaskLogResponse>(new Exception("Task type not recognized"));
+        }
+
+        var template = await context.TaskTemplates.FirstOrDefaultAsync(x => x.TaskType == taskType);
+        if (template == null)
+        {
+            template = new TaskTemplate
+            {
+                TaskType = taskType,
+                Name = taskType.GetDescriptionAttribute()
+            };
+            context.TaskTemplates.Add(template);
+            await context.SaveChangesAsync();
+        }
+
+        var task = new TaskLog
+        {
+            RobotId = robotId,
+            TaskTemplateId = template.Id,
+            DateCreated = DateTime.Now,
+            Parameters = JsonDocument.Parse(request.Parameters.GetRawText())
+        };
+
+        context.TaskLogs.Add(task);
+        await context.SaveChangesAsync();
+
+        var robot = await context.Robots.FindAsync(robotId);
+        if (robot == null)
+        {
+            return new Result<TaskLogResponse>(new Exception("Robot no encontrado"));
+        }
+
+        context.Entry(robot).CurrentValues.SetValues(
+            new
+            {
+                IsConnected = true,
+                Status = RobotStatus.Working
+            }
+        );
+
+
+        await context.SaveChangesAsync();
+
+        return TaskLogResponse.From(task);
+    }
+
+    public async Task<Result<TaskLogResponse>> FinishTask(int robotId)
+    {
+        var taskLog = await context.TaskLogs.FirstOrDefaultAsync(x => x.RobotId == robotId);
+        if (taskLog == null)
+        {
+            return new Result<TaskLogResponse>(new Exception("Tarea no encontrada"));
+        }
+
+        context.Entry(taskLog).CurrentValues.SetValues(
+            new
+            {
+                DateFinished = DateTime.Now,
+            }
+        );
+
+        var robot = await context.Robots.FindAsync(robotId);
+        if (robot == null)
+        {
+            return new Result<TaskLogResponse>(new Exception("Robot no encontrado"));
+        }
+
+        context.Entry(robot).CurrentValues.SetValues(
+            new
+            {
+                IsConnected = true,
+                Status = RobotStatus.Idle
+            }
+        );
+
+        await context.SaveChangesAsync();
+
+        return TaskLogResponse.From(taskLog);
+    }
+
 }
