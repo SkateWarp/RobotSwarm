@@ -17,6 +17,7 @@ public interface IRealtimeService
 
     Task HandleTaskLog(int robotId, RosTaskTemplateRequest request);
     Task HandleFinishTaskLog(int robotId);
+    Task HandleCancelTaskLog(int robotId);
 
     Task SendCommand(int robotId, string command, JsonDocument parameters);
 

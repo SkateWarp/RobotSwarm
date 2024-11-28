@@ -229,6 +229,56 @@ class SignalRHandler:
             reading_request  # Second parameter as object
         ])
 
+    def send_task(self, robot_id, task_data):
+        """
+        Send task log to backend
+        
+        Args:
+            robot_id (int): ID of the robot
+            task_data (dict): Task log data
+        """
+        rospy.loginfo(f"Robot {robot_id} task log received from signalr")
+        rospy.loginfo(f"Task data: {task_data}")
+        # Format data to match TaskLogRequest record
+        task_request = {
+            "taskType": str(task_data.get("taskType")),  # string TaskType
+            "parameters": json.dumps(task_data.get("parameters")),  # JsonElement Parameters
+        }
+        
+        # Send to SignalR hub with both robotId and task
+        # Note: Parameters must be in same order as C# method signature
+        self.connection.send("HandleTaskLog", [
+            int(robot_id),  # First parameter as integer
+            task_request  # Second parameter as object
+        ])
+        
+        
+    def send_finish_task(self, robot_id):
+        """
+        Send finish task log to backend
+        
+        Args:
+            robot_id (int): ID of the robot
+        """
+        rospy.loginfo(f"Robot {robot_id} finish task log received from signalr")
+        self.connection.send("HandleFinishTaskLog", [
+            int(robot_id),  # First parameter as integer
+        ])
+
+    def send_cancel_task(self, robot_id):
+        """
+        Send cancel task log to backend
+        
+        Args:
+            robot_id (int): ID of the robot
+        """
+        rospy.loginfo(f"Robot {robot_id} cancel task log received from signalr")
+        self.connection.send("HandleCancelTaskLog", [
+            int(robot_id),  # First parameter as integer
+        ])
+        
+        
+
     def _process_message_queue(self):
         """Process queued messages when connection is restored"""
         while True:
