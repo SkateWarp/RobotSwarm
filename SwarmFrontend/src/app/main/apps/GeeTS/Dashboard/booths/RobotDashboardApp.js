@@ -1,10 +1,10 @@
 import {motion} from "framer-motion";
 import {Card, Typography} from "@mui/material";
 import {Link} from "react-router-dom";
-import BoothWidget from "./BoothWidget";
+import BoothWidget from "./RobotWidget";
 import useAxiosGetRequest from "../../useAxiosGetRequest";
 
-function BoothDashboardApp() {
+function RobotDashboardApp() {
 
     const robots = useAxiosGetRequest("/Robots", []);
 
@@ -25,7 +25,7 @@ function BoothDashboardApp() {
                                     to={`/apps/GTS/dashboard/booths/`}
                                     role="button"
                                 >
-                                    <BoothWidget booth={robot}/>
+                                    <BoothWidget robot={robot}/>
                                 </Link>
                             </Card>
                         ))}
@@ -40,4 +40,4 @@ function BoothDashboardApp() {
     );
 }
 
-export default BoothDashboardApp;
+export default RobotDashboardApp;

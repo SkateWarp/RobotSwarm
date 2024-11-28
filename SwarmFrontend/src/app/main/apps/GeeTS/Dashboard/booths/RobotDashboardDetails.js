@@ -31,7 +31,7 @@ const currentProductionInitialState = {
     leafCountQuantity: { totalQuantity: 0, classifiedQuantity: 0, unclassifiedQuantity: 0 },
 };
 
-function BoothDashboardDetails() {
+function RobotDashboardDetails() {
     const dispatch = useDispatch();
 
     const { date, machineId } = useParams();
@@ -214,4 +214,4 @@ function BoothDashboardDetails() {
     );
 }
 
-export default withReducer("boothDashboardDetailsApp", reducer)(BoothDashboardDetails);
+export default withReducer("boothDashboardDetailsApp", reducer)(RobotDashboardDetails);

@@ -2,10 +2,10 @@ import { lazy } from "react";
 import { Navigate } from "react-router-dom";
 import authRoles from "../../../../auth/authRoles";
 
-const BoothDashboardApp = lazy(() => import("./booths/BoothDashboardApp"));
+const BoothDashboardApp = lazy(() => import("./booths/RobotDashboardApp"));
 const ShiftsDashboardApp = lazy(() => import("./shifts/ShiftsDashboardApp"));
 const ShiftsDashboardDetails = lazy(() => import("./shifts/ShiftsDashboardDetails"));
-const BoothDashboardDetails = lazy(() => import("./booths/BoothDashboardDetails"));
+const BoothDashboardDetails = lazy(() => import("./booths/RobotDashboardDetails"));
 
 const BoothDashboardAppConfigGeeTS = {
     settings: {
