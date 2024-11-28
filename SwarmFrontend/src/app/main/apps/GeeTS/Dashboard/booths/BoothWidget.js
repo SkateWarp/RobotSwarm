@@ -8,7 +8,8 @@ const textStyle = {
     height: "260px",
 };
 
-function BoothWidget({ booth }) {
+function BoothWidget({ robot }) {
+
     const [machineStopped, setMachineStopped] = useState(false);
     const [status, setStatus] = useState(true);
     const [bg, setBackground] = useState("");
@@ -26,8 +27,7 @@ function BoothWidget({ booth }) {
         <div className="w-full p-32">
             <div className="flex w-full justify-between">
                 <div>
-                    {/* eslint-disable-next-line no-nested-ternary */}
-                    <Tooltip title={status ? (machineStopped ? "Parada" : "Encendida") : "Apagada"} arrow>
+                    <Tooltip title="Encendida" arrow>
                         <div className="w-36 h-36">
                             <div
                                 className="h2 p-8"
@@ -57,7 +57,7 @@ function BoothWidget({ booth }) {
                         className="inline-flex px-16 items-center py-auto text-32"
                         color="textSecondary"
                     >
-                        {booth.machine?.model}
+                        test
                     </Typography>
                 </div>
             </div>
@@ -65,7 +65,8 @@ function BoothWidget({ booth }) {
                 <TableBody>
                     <TableRow style={textStyle}>
                         <TableCell>
-                            <BoothProduction booth={booth} />
+                            {/*<BoothProduction booth={booth} />*/}
+                            test
                         </TableCell>
                     </TableRow>
                 </TableBody>
