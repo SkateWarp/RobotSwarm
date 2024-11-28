@@ -3,11 +3,13 @@ from std_msgs.msg import String
 import json
 
 class ROSHandler:
-    def __init__(self, robot_id, config, status_callback, sensor_callback):
+    def __init__(self, robot_id, config, status_callback, sensor_callback, finish_task, cancel_task):
         self.robot_id = robot_id
         self.config = config
         self.status_callback = status_callback
         self.sensor_callback = sensor_callback
+        self.finish_task_callback = finish_task
+        self.cancel_task_callback = cancel_task
         
         # Setup publishers and subscribers
         self.setup_ros_communication()
@@ -32,6 +34,18 @@ class ROSHandler:
             f'/robot/{self.robot_id}/sensor_data',  # Removed underscore after 'robot'
             String,
             self.sensor_subscriber_callback
+        )
+
+        rospy.Subscriber(
+            f'/robot/{self.robot_id}/task/finish',  # Removed underscore after 'robot'
+            String,
+            self.finish_task_callback
+        )
+
+        rospy.Subscriber(
+            f'/robot/{self.robot_id}/task/cancel',  # Removed underscore after 'robot'
+            String,
+            self.cancel_task_callback
         )
 
     def publish_command(self, command_data):
@@ -68,6 +82,20 @@ class ROSHandler:
             self.sensor_callback(self.robot_id, sensor_data)
         except Exception as e:
             rospy.logerr(f"Error in sensor callback: {e}")
+
+    def finish_task_callback(self, msg):
+        """Handle finish task log from ROS"""
+        try:
+            self.finish_task_callback(self.robot_id)
+        except Exception as e:
+            rospy.logerr(f"Error in finish task callback: {e}")
+
+    def cancel_task_callback(self, msg):
+        """Handle cancel task log from ROS"""
+        try:
+            self.cancel_task_callback(self.robot_id)
+        except Exception as e:
+            rospy.logerr(f"Error in cancel task callback: {e}")
 
     def cleanup(self):
         """Cleanup ROS connections"""
