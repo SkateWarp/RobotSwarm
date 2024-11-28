@@ -10,8 +10,6 @@ namespace SwarmBackend.Services;
 
 public class TaskLogService(DataContext context) : ITaskLogService
 {
-    private readonly DataContext context = context;
-
     public async Task<Result<TaskLogResponse>> Create(TaskLogRequest request)
     {
         var robot = await context.Robots.FindAsync(request.RobotId);
@@ -85,7 +83,12 @@ public class TaskLogService(DataContext context) : ITaskLogService
                 return new Result<TaskLogResponse>(new Exception("La tarea ya ha sido cancelada"));
             }
 
-            task.DateCancelled = DateTime.Now;
+            context.Entry(task).CurrentValues.SetValues(
+                new
+                {
+                    DateCancelled = DateTime.Now
+                }
+            );
             await context.SaveChangesAsync();
 
             return TaskLogResponse.From(task);
