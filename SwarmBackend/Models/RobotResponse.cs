@@ -14,7 +14,8 @@ public record RobotResponse(
     DateTime DateCreated,
     IEnumerable<SensorResponse> Sensors,
     RobotStatus Status,
-    string StatusDescription)
+    string StatusDescription,
+    bool IsConnected)
 {
     /// <summary>
     /// Creates a RobotResponse from a Robot entity
@@ -29,7 +30,8 @@ public record RobotResponse(
         robot.DateCreated,
         robot.Sensors?.Select(x => SensorResponse.From(x, false)) ?? new List<SensorResponse>(),
         robot.Status,
-        robot.Status.GetDescriptionAttribute());
+        robot.Status.GetDescriptionAttribute(),
+        robot.IsConnected);
 }
 
 /// <summary>
