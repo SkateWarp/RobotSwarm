@@ -29,14 +29,14 @@ class RobotSwarmBridge:
         )
         
         if isinstance(self.robot_ids, int):
-                self.ros_handlers = {
-                        self.robot_ids: ROSHandler(self.robot_ids, self.config, self.on_status_changed, self.on_sensor_data)
-                }
+            self.ros_handlers = {
+                    self.robot_ids: ROSHandler(self.robot_ids, self.config, self.on_status_changed, self.on_sensor_data, self.on_finish_task, self.on_cancel_task, self.on_start_task)
+            }
         else:
-                self.ros_handlers = {
-                        robot_id: ROSHandler(robot_id, self.config, self.on_status_changed, self.on_sensor_data)
-                        for robot_id in self.robot_ids
-                }
+            self.ros_handlers = {
+                    robot_id: ROSHandler(robot_id, self.config, self.on_status_changed, self.on_sensor_data, self.on_finish_task, self.on_cancel_task, self.on_start_task)
+                    for robot_id in self.robot_ids
+            }
 
     def on_command_received(self, robot_id, command_data):
         """Handle commands received from SignalR"""
@@ -53,6 +53,18 @@ class RobotSwarmBridge:
     def on_sensor_data(self, robot_id, sensor_data):
         """Handle sensor data from ROS"""
         self.signalr_handler.send_sensor_reading(robot_id, sensor_data)
+    
+    def on_finish_task(self, robot_id):
+        """Handle finish task log from ROS"""
+        self.signalr_handler.send_finish_task(robot_id)
+    
+    def on_cancel_task(self, robot_id):
+        """Handle cancel task log from ROS"""
+        self.signalr_handler.send_cancel_task(robot_id)
+
+    def on_start_task(self, robot_id, task_data):
+        """Handle start task log from ROS"""
+        self.signalr_handler.send_task(robot_id, task_data)
 
     def run(self):
         """Main run loop"""
