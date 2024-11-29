@@ -24,14 +24,14 @@ const navigationGTSConfig = [
                 auth: authRoles.admin,
                 url: "/apps/GTS/realtime",
             },
-            // {
-            //     id: "sensors",
-            //     title: "Sensores",
-            //     type: "item",
-            //     icon: "adjust",
-            //     auth: authRoles.admin,
-            //     url: "/apps/configs/task",
-            // },
+            {
+                id: "dashboard",
+                title: "Dashboard",
+                type: "item",
+                icon: "adjust",
+                auth: authRoles.admin,
+                url: "/apps/GTS/dashboard/booths/",
+            },
             {
                 id: "leafSorting",
                 title: "Robots",
