@@ -15,6 +15,7 @@ function RobotWidget({robot}) {
                             <div
                                 className="h2 p-8"
                                 style={{
+                                    backgroundColor: robot.isConnected ? "green" : "red",
                                     display: "inline-flex",
                                     borderRadius: "25px",
                                     left: "80%",
