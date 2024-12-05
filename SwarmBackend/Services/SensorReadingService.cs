@@ -114,26 +114,29 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
             .Select(x => SensorReadingResponse.From(x))
             .ToListAsync();
     }
-
-    public async Task<IEnumerable<SensorReadingResponse>> GetLastByRobotAndSensor(int sensorId, int robotId)
+    public IEnumerable<SensorReadingResponse> GetLastByRobotAndSensor(int sensorId, int robotId)
     {
-        return await context.SensorReadings
+        return context.SensorReadings
             .Include(x => x.Sensor)
             .Where(x => x.SensorId == sensorId && x.Sensor.RobotId == robotId)
-            .GroupBy(x => new { x.SensorId, x.Sensor.RobotId, x.Notes })
-            .Select(g => g.OrderByDescending(x => x.DateCreated).First())
+            .OrderByDescending(x => x.DateCreated)
+            .Take(1000)
+            .AsEnumerable()
+            .DistinctBy(x => x.SensorId)
             .Select(x => SensorReadingResponse.From(x))
-            .ToListAsync();
+            .ToList();
     }
 
-    public async Task<IEnumerable<SensorReadingResponse>> GetLastByRobot(int robotId)
+    public IEnumerable<SensorReadingResponse> GetLastByRobot(int robotId)
     {
-        return await context.SensorReadings
+        return context.SensorReadings
             .Include(x => x.Sensor)
             .Where(x => x.Sensor.RobotId == robotId)
-            .GroupBy(x => new { x.SensorId, x.Sensor.RobotId, x.Notes })
-            .Select(g => g.OrderByDescending(x => x.DateCreated).First())
+            .OrderByDescending(x => x.DateCreated)
+            .Take(1000)
+            .AsEnumerable()
+            .DistinctBy(x => x.SensorId)
             .Select(x => SensorReadingResponse.From(x))
-            .ToListAsync();
+            .ToList();
     }
 }
