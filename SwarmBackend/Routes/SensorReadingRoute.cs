@@ -71,15 +71,15 @@ public static class SensorReadingRoute
         return Results.Ok(response);
     }
 
-    public static async Task<IResult> GetLastByRobot(int robotId, ISensorReadingService sensorService)
+    public static IResult GetLastByRobot(int robotId, ISensorReadingService sensorService)
     {
-        var response = await sensorService.GetLastByRobot(robotId);
+        var response = sensorService.GetLastByRobot(robotId);
         return Results.Ok(response);
     }
 
-    public static async Task<IResult> GetLastByRobotAndSensor(int robotId, int sensorId, ISensorReadingService sensorService)
+    public static IResult GetLastByRobotAndSensor(int robotId, int sensorId, ISensorReadingService sensorService)
     {
-        var response = await sensorService.GetLastByRobotAndSensor(robotId, sensorId);
+        var response = sensorService.GetLastByRobotAndSensor(robotId, sensorId);
         return Results.Ok(response);
     }
 }
