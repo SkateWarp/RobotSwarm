@@ -54,7 +54,8 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
         {
             SensorId = sensor.Id,
             Value = request.Value,
-            DateCreated = DateTime.UtcNow
+            DateCreated = DateTime.UtcNow,
+            Notes = request.Notes,
         };
 
         context.SensorReadings.Add(sensorReading);

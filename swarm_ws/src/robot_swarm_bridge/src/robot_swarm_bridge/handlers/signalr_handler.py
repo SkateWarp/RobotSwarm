@@ -217,17 +217,24 @@ class SignalRHandler:
         rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
         rospy.loginfo(f"Sensor data: {sensor_data}")
         # Format data to match SensorReadingRequest record
-        reading_request = {
-            "value": float(sensor_data.get("value")),  # double Value
-            "sensorName": str(sensor_data.get("sensorName")),  # int SensorId
-        }
+        sensor_name = str(sensor_data.get("name"))
+        for key, value in sensor_data.items():
+            if key != "name":
+                reading_request = {
+                    "value": float(value),
+                    "sensorName":sensor_name,
+                    "notes": str(key)
+                }
+                self.connection.send("HandleSensorReading", [
+                    int(robot_id),
+                    reading_request
+                ])
+
+       
         
         # Send to SignalR hub with both robotId and reading
         # Note: Parameters must be in same order as C# method signature
-        self.connection.send("HandleSensorReading", [
-            int(robot_id),  # First parameter as integer
-            reading_request  # Second parameter as object
-        ])
+        
 
     def send_task(self, robot_id, task_data):
         """
