@@ -42,4 +42,6 @@ public static class SensorRoute
         var response = await sensorService.Update(id, request);
         return response.Match(Results.Ok, Results.BadRequest);
     }
+
+
 }
