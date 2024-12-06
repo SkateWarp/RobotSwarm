@@ -215,7 +215,6 @@ class SignalRHandler:
             sensor_data (dict): Sensor reading data
         """
         rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
-        rospy.loginfo(f"Sensor data: {sensor_data}")
         # Format data to match SensorReadingRequest record
         sensor_name = str(sensor_data.get("name"))
         for key, value in sensor_data.items():
@@ -225,6 +224,8 @@ class SignalRHandler:
                     "sensorName":sensor_name,
                     "notes": str(key)
                 }
+                rospy.loginfo(f"Sensor data to sned: {reading_request}")
+
                 self.connection.send("HandleSensorReading", [
                     int(robot_id),
                     reading_request
