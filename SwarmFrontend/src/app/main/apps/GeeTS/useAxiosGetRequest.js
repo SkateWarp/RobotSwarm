@@ -5,6 +5,7 @@ import {URL} from "../../../constants/constants";
 import jwtService from "../../../services/jwtService";
 
 const useAxiosGetRequest = (completeUrl, initialState) => {
+
     const [data, setData] = useState(initialState);
 
     useEffect(() => {

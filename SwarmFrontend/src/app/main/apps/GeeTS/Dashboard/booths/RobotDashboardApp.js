@@ -9,6 +9,7 @@ function RobotDashboardApp() {
     const robots = useAxiosGetRequest("/Robots", []);
 
     return (
+        
         <div className="w-full inline-flex m-auto justify-center">
             {robots.length > 0 ? (
                 <div className="w-full sm:p-8 container inline-flex m-auto justify-center mx-24 ml-96">
