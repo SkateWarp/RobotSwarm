@@ -32,7 +32,15 @@ jobs:
 
       - name: Deploy to local web server
         run: |
-          # Asumiendo que estás usando un servidor web como Nginx
-          # Ajusta la ruta según tu configuración
+          # Ensure the target directory exists
+          sudo mkdir -p /var/www/html
+
+          # Set proper permissions (adjust as needed)
+          sudo chown -R $USER:$USER /var/www/html
+
+          # Remove existing files (carefully!)
           rm -rf /var/www/html/*
+
+          # Copy the build output
           cp -r SwarmFrontend/build/* /var/www/html/
+
