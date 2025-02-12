@@ -35,12 +35,8 @@ jobs:
           # Ensure the target directory exists
           mkdir -p /var/www/html
 
-          # Set proper permissions (adjust as needed)
-          chown -R $USER:$USER /var/www/html
-
           # Remove existing files (carefully!)
           rm -rf /var/www/html/*
 
           # Copy the build output
           cp -r SwarmFrontend/build/* /var/www/html/
-
