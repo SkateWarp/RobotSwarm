@@ -34,5 +34,5 @@ jobs:
         run: |
           # Asumiendo que estás usando un servidor web como Nginx
           # Ajusta la ruta según tu configuración
-          sudo rm -rf /var/www/html/*
-          sudo cp -r SwarmFrontend/build/* /var/www/html/
+          rm -rf /var/www/html/*
+          cp -r SwarmFrontend/build/* /var/www/html/
