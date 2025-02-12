@@ -12,7 +12,7 @@ public static class AccountRoute
             .Produces<AuthenticateResponse>();
 
         group.MapPost("", Create)
-            .RequireAuthorization()
+           // .RequireAuthorization()
            .Produces<AccountResponse>();
 
         group.MapPost("/refreshToken", RefreshToken)
