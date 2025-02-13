@@ -215,19 +215,77 @@ class SignalRHandler:
             sensor_data (dict): Sensor reading data
         """
         rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
-        rospy.loginfo(f"Sensor data: {sensor_data}")
         # Format data to match SensorReadingRequest record
-        reading_request = {
-            "value": float(sensor_data.get("value")),  # double Value
-            "sensorName": str(sensor_data.get("sensorName")),  # int SensorId
-        }
+        sensor_name = str(sensor_data.get("name"))
+        for key, value in sensor_data.items():
+            if key != "name":
+                reading_request = {
+                    "value": float(value),
+                    "sensorName":sensor_name,
+                    "notes": str(key)
+                }
+                rospy.loginfo(f"Sensor data to sned: {reading_request}")
+
+                self.connection.send("HandleSensorReading", [
+                    int(robot_id),
+                    reading_request
+                ])
+
+       
         
         # Send to SignalR hub with both robotId and reading
         # Note: Parameters must be in same order as C# method signature
-        self.connection.send("HandleSensorReading", [
+        
+
+    def send_task(self, robot_id, task_data):
+        """
+        Send task log to backend
+        
+        Args:
+            robot_id (int): ID of the robot
+            task_data (dict): Task log data
+        """
+        rospy.loginfo(f"Robot {robot_id} task log received from signalr")
+        rospy.loginfo(f"Task data: {task_data}")
+        # Format data to match TaskLogRequest record
+        task_request = {
+            "taskType": str(task_data.get("taskType")),  # string TaskType
+            "parameters": json.dumps(task_data.get("parameters")),  # JsonElement Parameters
+        }
+        
+        # Send to SignalR hub with both robotId and task
+        # Note: Parameters must be in same order as C# method signature
+        self.connection.send("HandleTaskLog", [
             int(robot_id),  # First parameter as integer
-            reading_request  # Second parameter as object
+            task_request  # Second parameter as object
         ])
+        
+        
+    def send_finish_task(self, robot_id):
+        """
+        Send finish task log to backend
+        
+        Args:
+            robot_id (int): ID of the robot
+        """
+        rospy.loginfo(f"Robot {robot_id} finish task log received from signalr")
+        self.connection.send("HandleFinishTaskLog", [
+            int(robot_id),  # First parameter as integer
+        ])
+
+    def send_cancel_task(self, robot_id):
+        """
+        Send cancel task log to backend
+        
+        Args:
+            robot_id (int): ID of the robot
+        """
+        rospy.loginfo(f"Robot {robot_id} cancel task log received from signalr")
+        self.connection.send("HandleCancelTaskLog", [
+            int(robot_id),  # First parameter as integer
+        ])
+        
+        
 
     def _process_message_queue(self):
         """Process queued messages when connection is restored"""

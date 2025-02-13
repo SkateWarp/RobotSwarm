@@ -15,6 +15,10 @@ public interface IRealtimeService
 
     Task HandleSensorReading(int robotId, RosSensorReadingRequest reading);
 
+    Task HandleTaskLog(int robotId, RosTaskTemplateRequest request);
+    Task HandleFinishTaskLog(int robotId);
+    Task HandleCancelTaskLog(int robotId);
+
     Task SendCommand(int robotId, string command, JsonDocument parameters);
 
 

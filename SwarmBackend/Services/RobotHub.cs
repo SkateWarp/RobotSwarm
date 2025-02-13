@@ -7,7 +7,7 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorReadingService sensorReadingService)
+public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorReadingService sensorReadingService, ITaskLogService taskLogService)
     : Hub, IRealtimeService
 {
     private static readonly Dictionary<int, string> RobotConnections = [];
@@ -133,6 +133,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         }
     }
 
+
     public async Task SendCommand(int robotId, string command, JsonDocument parameters)
     {
         if (RobotConnections.TryGetValue(robotId, out var connectionId))
@@ -143,6 +144,57 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
                 parameters,
                 timestamp = DateTime.UtcNow
             });
+        }
+    }
+
+    public async Task HandleTaskLog(int robotId, RosTaskTemplateRequest request)
+    {
+        try
+        {
+            await taskLogService.Create(robotId, request);
+            await Clients.All.SendAsync("NewTaskLog", request);
+            await UpdateRobotConnection(robotId, true);
+
+        }
+        catch (System.Exception ex)
+        {
+
+            logger.LogError(ex,
+                            "Error processing task log for robot {RobotId}, task {TaskType}: {Message}",
+                            robotId, request?.TaskType, ex.Message);
+            throw;
+        }
+
+
+    }
+
+    public async Task HandleFinishTaskLog(int robotId)
+    {
+        try
+        {
+            await taskLogService.FinishTask(robotId);
+        }
+        catch (System.Exception ex)
+        {
+            logger.LogError(ex,
+                            "Error processing finish task log for robot {RobotId}: {Message}",
+                            robotId, ex.Message);
+            throw;
+        }
+    }
+    
+    public async Task HandleCancelTaskLog(int robotId)
+    {
+        try
+        {
+            await taskLogService.Cancel(robotId);
+        }
+        catch (System.Exception ex)
+        {
+            logger.LogError(ex,
+                "Error processing finish task log for robot {RobotId}: {Message}",
+                robotId, ex.Message);
+            throw;
         }
     }
 }

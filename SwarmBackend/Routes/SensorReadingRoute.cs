@@ -16,6 +16,14 @@ public static class SensorReadingRoute
          .RequireAuthorization()
         .Produces<IEnumerable<SensorReadingResponse>>();
 
+        group.MapGet("last/{robotId}", GetLastByRobot)
+            .RequireAuthorization()
+           .Produces<IEnumerable<SensorResponse>>();
+
+        group.MapGet("last/{sensorId}/{robotId}", GetLastByRobotAndSensor)
+            .RequireAuthorization()
+           .Produces<IEnumerable<SensorResponse>>();
+
         group.MapPost("", Create)
             .RequireAuthorization()
            .Produces<SensorReadingResponse>();
@@ -60,6 +68,18 @@ public static class SensorReadingRoute
     private static async Task<IResult> CreateByRobot(int robotId, RosSensorReadingRequest request, ISensorReadingService sensorService)
     {
         var response = await sensorService.Create(robotId, request);
+        return Results.Ok(response);
+    }
+
+    public static IResult GetLastByRobot(int robotId, ISensorReadingService sensorService)
+    {
+        var response = sensorService.GetLastByRobot(robotId);
+        return Results.Ok(response);
+    }
+
+    public static IResult GetLastByRobotAndSensor(int robotId, int sensorId, ISensorReadingService sensorService)
+    {
+        var response = sensorService.GetLastByRobotAndSensor(robotId, sensorId);
         return Results.Ok(response);
     }
 }

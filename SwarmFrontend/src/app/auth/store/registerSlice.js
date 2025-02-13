@@ -1,25 +1,24 @@
 import { createSlice } from '@reduxjs/toolkit';
-import { showMessage } from 'app/store/fuse/messageSlice';
 import jwtService from 'app/services/jwtService';
 import { setUserData } from './userSlice';
 
 export const submitRegister =
   ({ displayName, password, email }) =>
-  async (dispatch) => {
-    return jwtService
-      .createUser({
-        displayName,
-        password,
-        email,
-      })
-      .then((user) => {
-        dispatch(setUserData(user));
-        return dispatch(registerSuccess());
-      })
-      .catch((errors) => {
-        return dispatch(registerError(errors));
-      });
-  };
+    async (dispatch) => {
+      return jwtService
+        .createUser({
+          displayName,
+          password,
+          email,
+        })
+        .then((user) => {
+          dispatch(setUserData(user));
+          return dispatch(registerSuccess());
+        })
+        .catch((errors) => {
+          return dispatch(registerError(errors));
+        });
+    };
 
 const initialState = {
   success: false,

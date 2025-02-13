@@ -54,7 +54,8 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
         {
             SensorId = sensor.Id,
             Value = request.Value,
-            DateCreated = DateTime.UtcNow
+            DateCreated = DateTime.UtcNow,
+            Notes = request.Notes,
         };
 
         context.SensorReadings.Add(sensorReading);
@@ -113,5 +114,30 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
                         x.DateCreated <= dateRange.EndDate)
             .Select(x => SensorReadingResponse.From(x))
             .ToListAsync();
+    }
+    public IEnumerable<SensorReadingResponse> GetLastByRobotAndSensor(int sensorId, int robotId)
+    {
+        return context.SensorReadings
+            .Include(x => x.Sensor)
+            .Where(x => x.SensorId == sensorId && x.Sensor.RobotId == robotId)
+            .OrderByDescending(x => x.DateCreated)
+            .Take(1000)
+            .AsEnumerable()
+            .DistinctBy(x => new { x.Notes })
+            .Select(SensorReadingResponse.From)
+            .ToList();
+    }
+
+    public IEnumerable<SensorReadingResponse> GetLastByRobot(int robotId)
+    {
+        return context.SensorReadings
+            .Include(x => x.Sensor)
+            .Where(x => x.Sensor.RobotId == robotId)
+            .OrderByDescending(x => x.DateCreated)
+            .Take(1000)
+            .AsEnumerable()
+            .DistinctBy(x => new { x.Notes })
+            .Select(SensorReadingResponse.From)
+            .ToList();
     }
 }

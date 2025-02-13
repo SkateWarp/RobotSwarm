@@ -11,4 +11,9 @@ public interface ISensorReadingService
     Task<IEnumerable<SensorReadingResponse>> GetAllByRobot(int robotId, DateRangeRequest dateRange);
     Task<IEnumerable<SensorReadingResponse>> GetAllBySensor(int sensorId, DateRangeRequest dateRange);
 
+    IEnumerable<SensorReadingResponse> GetLastByRobot(int robotId);
+
+    IEnumerable<SensorReadingResponse> GetLastByRobotAndSensor(int robotId, int sensorId);
+
+
 }

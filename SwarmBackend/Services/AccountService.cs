@@ -12,6 +12,7 @@ using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using BC = BCrypt.Net.BCrypt;
 
 
@@ -58,6 +59,18 @@ public class AccountService : IAccountService
 
     public async Task<Result<AccountResponse>> Create(AccountRequest request)
     {
+        string emailRegex = @"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$";
+
+        if (string.IsNullOrEmpty(request.Email))
+        {
+            return new Result<AccountResponse>(new Exception("Email cannot be empty."));
+        }
+
+        if (!Regex.IsMatch(request.Email, emailRegex))
+        {
+            return new Result<AccountResponse>(new Exception("Invalid email format."));
+        }
+
         var existing = await _dataContext.Accounts.AnyAsync(x => x.Email == request.Email);
         if (existing)
         {
@@ -72,7 +85,8 @@ public class AccountService : IAccountService
             Enabled = true,
             LastName = request.LastName,
             Verified = DateTime.Now,
-            PasswordHash = BC.HashPassword(request.Password)
+            PasswordHash = BC.HashPassword(request.Password),
+            Role = Role.User,
         };
 
         _dataContext.Accounts.Add(account);

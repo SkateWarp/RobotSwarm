@@ -12,3 +12,5 @@ public record TaskLogResponse(int Id, DateTime DateCreated, DateTime? DateFinish
 }
 
 public record TaskLogRequest(int TaskTemplateId, int RobotId, JsonElement Parameters);
+
+public record RosTaskTemplateRequest(string TaskType, JsonElement Parameters);
