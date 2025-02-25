@@ -29,7 +29,7 @@ const navigationGTSConfig = [
         id: "leafSorting",
         title: "Robots",
         type: "item",
-        icon: "settings",
+        icon: "smart_toy",
         auth: authRoles.admin,
         url: "/apps/GTS/leafSorting",
     },
