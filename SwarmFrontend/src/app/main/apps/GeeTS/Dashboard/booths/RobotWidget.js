@@ -18,8 +18,6 @@ function RobotWidget({robot}) {
             },
         }).then((response) => {
             setReadings(response.data);
-
-            console.debug("test", response.data);
         });
 
     }, []);
