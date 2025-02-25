@@ -39,8 +39,13 @@ export const addNewLeafSorting = createAsyncThunk(
 
 export const updateLeafSorting = createAsyncThunk(
     "leafSortingConfigApp/leafSorting/updateLeafSorting",
-    async (leafSorting, { dispatch }) => {
-        const response = await axios.put(`${URL}/api/LeafSorting`, leafSorting);
+    async (robot, { dispatch }) => {
+        const response = await axios.put(`${URL}/Robots/${robot.id}`, robot, {
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${jwtService.getAccessToken()}`,
+            },
+        });
         const data = await response.data;
 
         dispatch(getLeafSorting());
