@@ -27,7 +27,12 @@ function LeafSortingConfigList() {
     };
 
     const deleteRowElement = () => {
-        dispatch(removeLeafSorting(idForDelete));
+        const robotToDeactivate = leafTypes.filter((x => x.id === idForDelete))[0];
+        console.log("robots", robotToDeactivate);
+        dispatch(removeLeafSorting({
+            ...robotToDeactivate,
+            status: 2
+        }));
     };
 
     const columns = useMemo(
