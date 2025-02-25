@@ -44,6 +44,7 @@ public class RobotService : IRobotService
             Description = request.Description,
             Notes = request.Notes,
             DateCreated = DateTime.Now,
+            Status = RobotStatus.Idle,
         };
 
         context.Robots.Add(robot);
@@ -56,6 +57,7 @@ public class RobotService : IRobotService
     {
         return await context.Robots
             .Include(x => x.Sensors)
+            .Where(x => x.Status != RobotStatus.Disabled)
             .Select(x => RobotResponse.From(x))
             .ToListAsync();
     }

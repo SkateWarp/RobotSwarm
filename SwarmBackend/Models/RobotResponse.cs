@@ -40,4 +40,6 @@ public record RobotResponse(
 public record RobotRequest(
     string Name,
     string? Description,
-    string? Notes);
+    string? Notes,
+    RobotStatus Status
+    );
