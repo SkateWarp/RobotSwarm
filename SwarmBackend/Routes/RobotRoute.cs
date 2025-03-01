@@ -9,7 +9,7 @@ public static class RobotRoute
     {
 
         group.MapGet("", GetAll)
-            .RequireAuthorization()
+           // .RequireAuthorization()
            .Produces<IEnumerable<RobotResponse>>();
 
         group.MapPost("", Create)
