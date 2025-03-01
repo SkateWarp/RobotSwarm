@@ -25,7 +25,7 @@ function RealtimeConfigList() {
 
     return (
         <div className="flex flex-1 items-center justify-center h-full">
-            <RosConnection url="ws://127.0.0.1:9090" autoConnect >
+            <RosConnection url="robot.zerav.la/hubs" autoConnect >
                 <PauseButton />
                 <GenericServiceButton topicName="/gazebo/reset_simulation" text="Reset Simulation" />
                 <GenericServiceButton topicName="/gazebo/reset_world" text="Reset World" />
