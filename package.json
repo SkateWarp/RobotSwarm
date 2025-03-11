@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "gzweb": "^2.0.14",
+    "ts-node": "^10.9.2"
+  }
+}

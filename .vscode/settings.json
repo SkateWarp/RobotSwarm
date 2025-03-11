@@ -1,3 +1,4 @@
 {
-  "cmake.sourceDirectory": "/home/felix/RobotSwarm/swarm_ws/src/robot_swarm_bridge"
+  "cmake.sourceDirectory": "/home/felix/RobotSwarm/swarm_ws/src/robot_swarm_bridge",
+  "cmake.ignoreCMakeListsMissing": true
 }
