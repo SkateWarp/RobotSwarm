@@ -1,6 +1,6 @@
-import {HubConnectionBuilder, LogLevel} from '@microsoft/signalr';
+import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr';
 import jwtService from 'app/services/jwtService';
-import {URL} from 'app/constants/constants';
+import { URL } from 'app/constants/constants';
 
 const singletonInstance = (function () {
 
@@ -10,7 +10,7 @@ const singletonInstance = (function () {
 
         const accessToken = jwtService.getAccessToken();
 
-        return new HubConnectionBuilder().withUrl(`${URL}/realtimehub?group=${groupNames}`, {
+        return new HubConnectionBuilder().withUrl(`${URL}/hubs/robot${groupNames ? `?group=${groupNames}` : ''}`, {
 
             accessTokenFactory() {
 
@@ -41,7 +41,7 @@ const singletonInstance = (function () {
 
             if (!instance) {
                 start();
-            }else {
+            } else {
                 instance.stop();
                 start();
             }
