@@ -25,13 +25,9 @@ function RealtimeConfigList() {
     const [selectedRobot, setSelectedRobot] = useState("");
     const [selectedTopic, setSelectedTopic] = useState("");
     const [command, setCommand] = useState("");
-    const [trigger, setTrigger] = useState(false);
     const [connection] = useState(() => singletonInstance.createConnectionBuilder());
-    useEffect(() => {
-        setTimeout(() => {
-            setTrigger(!trigger);
-        }, 3000);
-    }, [trigger]);
+
+
 
     useEffect(() => {
         axios
@@ -57,8 +53,11 @@ function RealtimeConfigList() {
     }, []);
 
     function onSend(e) {
-        console.log("onSend", e.target.value, command);
-        // connection.send();
+        console.log("SendCommand", selectedTopic, selectedRobot);
+        connection.send("SendCommand", {
+            robotId: selectedRobot,
+            command: selectedTopic
+        });
     }
 
     return (

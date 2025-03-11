@@ -145,6 +145,10 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
                 timestamp = DateTime.UtcNow
             });
         }
+        else
+        {
+            logger.LogError("Robot {RobotId} not connected, for the command {Command}", robotId, command);
+        }
     }
 
     public async Task HandleTaskLog(int robotId, RosTaskTemplateRequest request)
