@@ -318,3 +318,6 @@ class SignalRHandler:
             "robotId": self.robot_id,
             "timestamp": datetime.utcnow().isoformat()
         })
+
+        # Register command handler
+        self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
