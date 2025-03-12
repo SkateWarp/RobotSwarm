@@ -136,20 +136,17 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
 
     public async Task SendCommand(int robotId, string command, JsonDocument parameters)
     {
-        if (RobotConnections.TryGetValue(robotId, out var connectionId))
+
+        // Send command to all clients in the robot's group
+        await Clients.Group($"robot_{robotId}").SendAsync("ExecuteCommand", new
         {
-            // Send command to all clients in the robot's group
-            await Clients.Group($"robot_{robotId}").SendAsync("ExecuteCommand", new
-            {
-                command,
-                parameters,
-                timestamp = DateTime.UtcNow
-            });
-        }
-        else
-        {
-            logger.LogError("Robot {RobotId} not connected, for the command {Command}", robotId, command);
-        }
+            command,
+            parameters,
+            timestamp = DateTime.UtcNow
+        });
+
+        logger.LogError("Robot {RobotId}  connected, for the command {Command}", robotId, command);
+
     }
 
     public async Task HandleTaskLog(int robotId, RosTaskTemplateRequest request)
