@@ -3,12 +3,10 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Typography from "@mui/material/Typography";
 import clsx from "clsx";
-import { Link } from "react-router-dom";
 import { makeStyles } from "@mui/styles";
 import { darken } from "@mui/material/styles";
-import JWTLoginTab from "./tabs/JWTLoginTab";
 import { LOGO } from "../../constants/constants";
-import settingsConfig from "../../fuse-configs/settingsConfig";
+import JWTRegisterTab from "./tabs/JWTRegisterTab";
 
 const useStyles = makeStyles((theme) => ({
     root: {
@@ -28,7 +26,7 @@ const useStyles = makeStyles((theme) => ({
     },
 }));
 
-function Login() {
+function Register() {
     const classes = useStyles();
 
     return (
@@ -42,25 +40,9 @@ function Login() {
                             <img className="w-128 m-32" src={LOGO} alt="logo" />
 
                             <Typography variant="h6" className="mt-16 mb-24 font-oswald text-18 sm:text-24">
-                                BIENVENIDO
+                                Registro
                             </Typography>
-                            <JWTLoginTab />
-                            <div className="flex flex-col items-center justify-center pt-32 pb-24">
-                                <span className="font-normal">¿Olvidaste tu contraseña?</span>
-                                {settingsConfig.layout.project === "fraga" ? (
-                                    <Link
-                                        style={{ color: "#006565" }}
-                                        className="font-normal"
-                                        to="/forgot-password"
-                                    >
-                                        Reestablecer Contraseña
-                                    </Link>
-                                ) : (
-                                    <Link className="font-normal" to="/forgot-password">
-                                        Reestablecer Contraseña
-                                    </Link>
-                                )}
-                            </div>
+                            <JWTRegisterTab />
                             <div className="w-1/3 mt-32">
                                 <a className="" href="https://www.alternard.com">
                                     <img src="assets/images/logos/logo.png" alt="logo" />
@@ -71,7 +53,7 @@ function Login() {
                                 className="mt-16"
                                 style={{ fontSize: "12px", color: "#999999" }}
                             >
-                                © Alterna 4.0 2022 all rights reserved.
+                                © RobotSwarm 2022 all rights reserved.
                             </Typography>
                         </CardContent>
                     </Card>
@@ -81,4 +63,4 @@ function Login() {
     );
 }
 
-export default Login;
+export default Register;
