@@ -138,7 +138,8 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     {
         if (RobotConnections.TryGetValue(robotId, out var connectionId))
         {
-            await Clients.Client(connectionId).SendAsync("ExecuteCommand", new
+            // Send command to all clients in the robot's group
+            await Clients.Group($"robot_{robotId}").SendAsync("ExecuteCommand", new
             {
                 command,
                 parameters,
@@ -186,7 +187,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
             throw;
         }
     }
-    
+
     public async Task HandleCancelTaskLog(int robotId)
     {
         try
