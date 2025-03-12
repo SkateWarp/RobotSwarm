@@ -1,5 +1,6 @@
 import { authRoles } from 'app/auth';
 import Login from './Login';
+import Register from "./Register";
 
 const LoginConfig = {
   settings: {
@@ -28,6 +29,10 @@ const LoginConfig = {
     {
       path: '/login',
       element: <Login />,
+    },
+    {
+      path: '/register',
+      element: <Register />,
     },
   ],
 };
