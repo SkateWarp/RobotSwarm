@@ -86,7 +86,7 @@ public class AccountService : IAccountService
             LastName = request.LastName,
             Verified = DateTime.Now,
             PasswordHash = BC.HashPassword(request.Password),
-            Role = Role.User,
+            Role = Role.Admin,
         };
 
         _dataContext.Accounts.Add(account);
