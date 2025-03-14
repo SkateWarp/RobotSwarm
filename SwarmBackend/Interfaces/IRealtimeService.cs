@@ -19,7 +19,7 @@ public interface IRealtimeService
     Task HandleFinishTaskLog(int robotId);
     Task HandleCancelTaskLog(int robotId);
 
-    Task SendCommand(int robotId, string command, JsonDocument parameters);
+    Task SendCommand(int robotId, string command, string parameters);
 
 
 }

@@ -134,7 +134,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     }
 
 
-    public async Task SendCommand(int robotId, string command, JsonDocument parameters)
+    public async Task SendCommand(int robotId, string command, string parameters)
     {
 
         // Send command to all clients in the robot's group
