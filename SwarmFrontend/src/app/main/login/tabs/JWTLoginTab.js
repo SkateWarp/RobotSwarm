@@ -10,6 +10,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { submitLogin } from "app/auth/store/loginSlice";
 import * as yup from "yup";
 import _ from "@lodash";
+import history from "../../../../@history/@history";
 
 /**
  * Form Validation Schema
@@ -49,6 +50,13 @@ function JWTLoginTab() {
             });
         }
     }, [login.error]);
+
+    const goToRegisterPage = () => {
+
+        history.push({
+            pathname: '/register',
+        });
+    }
 
     function onSubmit(model) {
         dispatch(submitLogin(model));
@@ -128,6 +136,18 @@ function JWTLoginTab() {
                 >
                     Iniciar Sesión
                 </Button>
+
+                <Button
+                    variant="contained"
+                    onClick={goToRegisterPage}
+                    color="primary"
+                    className="w-full mx-auto mt-16 uppercase"
+                    aria-label="Registro"
+                    value="legacy"
+                >
+                    Registrar
+                </Button>
+
             </form>
         </div>
     );
