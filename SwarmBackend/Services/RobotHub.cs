@@ -138,7 +138,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     {
 
         // Send command to all clients in the robot's group
-        await Clients.Group($"robot_{robotId}").SendAsync("ExecuteCommand", new
+        await Clients.All.SendAsync("ExecuteCommand", new
         {
             command,
             parameters,

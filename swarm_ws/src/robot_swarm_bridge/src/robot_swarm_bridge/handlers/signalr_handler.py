@@ -9,17 +9,17 @@ from queue import Queue
 import traceback
 
 class SignalRHandler:
-    def __init__(self, backend_url, robot_id, command_callback):
+    def __init__(self, backend_url, robot_ids, command_callback):
         """
         Initialize SignalR handler
         
         Args:
             backend_url (str): URL of the SignalR hub
-            robot_id (int): ID of the robot
+            robot_ids (int or list): ID(s) of the robot(s)
             command_callback (callable): Callback for handling commands from backend
         """
         self.url = backend_url
-        self.robot_id = robot_id
+        self.robot_ids = robot_ids if isinstance(robot_ids, list) else [robot_ids]
         self.command_callback = command_callback
         self.connection = None
         self.is_connected = False
@@ -30,7 +30,7 @@ class SignalRHandler:
         self.message_queue = Queue()
         
         # Setup logging
-        self.logger = logging.getLogger(f'signalr_handler_{robot_id}')
+        self.logger = logging.getLogger('signalr_handler')
         self.logger.setLevel(logging.DEBUG)
         
         # Initialize connection
@@ -43,8 +43,9 @@ class SignalRHandler:
 
     def _setup_connection(self):
         try:
+            # We don't need to pass robot IDs in the URL as we'll handle them in the command
             self.connection = (HubConnectionBuilder()
-                .with_url(f"{self.url}?robotId={self.robot_id}")
+                .with_url(f"{self.url}")
                 .with_automatic_reconnect({
                     "type": "raw",
                     "keep_alive_interval": 10,
@@ -55,10 +56,12 @@ class SignalRHandler:
                 .build())
                 
             # Add connection lifecycle handlers
-            self.connection.on_open(lambda: self._handle_connect())  # Changed this line
-            self.connection.on_close(lambda: self._handle_disconnect())  # Changed this line
-            self.connection.on_error(lambda error: self._handle_error(error))  # Changed this line
+            self.connection.on_open(lambda: self._handle_connect())
+            self.connection.on_close(lambda: self._handle_disconnect())
+            self.connection.on_error(lambda error: self._handle_error(error))
             
+            # Register command handler
+            self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
             rospy.loginfo("SignalR connection setup complete")
 
         except Exception as e:
@@ -117,20 +120,38 @@ class SignalRHandler:
             if isinstance(command, str):
                 command = json.loads(command)
             
-            # Pass command to callback
-            self.command_callback(command)
+            # Extract command details from the format sent by C# backend
+            # The C# backend sends: { command, parameters, timestamp }
+            command_name = command.get("command")
+            parameters = command.get("parameters")
+            timestamp = command.get("timestamp")
+            
+            # The robotId is not included in the command object from the C# backend
+            # We need to handle this for all robots in our list
+            for robot_id in self.robot_ids:
+                # Create command data to pass to the callback
+                command_data = {
+                    "command": command_name,
+                    "parameters": parameters,
+                    "timestamp": timestamp
+                }
+                
+                # Pass command to callback with robot ID
+                self.logger.info(f"Forwarding command to robot {robot_id}: {command_name}")
+                self.command_callback(robot_id, command_data)
             
             # Send acknowledgment
             self.send_message("CommandAcknowledgment", {
-                "commandId": command.get("id"),
+                "commandId": command.get("id", "unknown"),
                 "status": "received",
                 "timestamp": datetime.utcnow().isoformat()
             })
             
         except Exception as e:
             self.logger.error(f"Error handling command: {e}")
+            self.logger.error(f"Stack trace: {traceback.format_exc()}")
             self.send_message("CommandError", {
-                "commandId": command.get("id"),
+                "commandId": command.get("id", "unknown"),
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat()
             })
@@ -315,9 +336,7 @@ class SignalRHandler:
     def send_heartbeat(self):
         """Send heartbeat to backend"""
         self.send_message("Heartbeat", {
-            "robotId": self.robot_id,
+            "robotId": self.robot_ids[0],
             "timestamp": datetime.utcnow().isoformat()
         })
 
-        # Register command handler
-        self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
