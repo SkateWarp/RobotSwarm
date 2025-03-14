@@ -54,10 +54,7 @@ function RealtimeConfigList() {
 
     function onSend(e) {
         console.log("SendCommand", selectedTopic, selectedRobot);
-        connection.send("SendCommand", {
-            robotId: selectedRobot,
-            command: selectedTopic
-        });
+        connection.send("SendCommand", selectedRobot, selectedTopic, command);
     }
 
     return (
