@@ -23,7 +23,7 @@ function RobotDashboardApp() {
                         {robots.map((robot, index) => (
                             <Card key={index} className="h-auto w-512 my-16 sm:m-16 items-center rounded-8">
                                 <Link
-                                    to={`/apps/GTS/dashboard/booths/`}
+                                    to={`/apps/GTS/dashboard/booths/${robot.id}/${robot.id}`}
                                     role="button"
                                 >
                                     <BoothWidget robot={robot}/>

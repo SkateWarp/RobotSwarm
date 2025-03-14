@@ -25,7 +25,7 @@ const BoothDashboardAppConfigGeeTS = {
             element: <BoothDashboardApp />,
         },
         {
-            path: `/apps/GTS/dashboard/booths/:date/:machineId`,
+            path: `/apps/GTS/dashboard/booths/:machineId/:machineId`,
             element: <BoothDashboardDetails />,
         },
         {

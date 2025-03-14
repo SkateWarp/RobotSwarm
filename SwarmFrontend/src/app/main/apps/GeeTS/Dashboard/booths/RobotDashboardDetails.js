@@ -4,20 +4,16 @@ import { Typography } from "@mui/material";
 import { motion } from "framer-motion";
 import axios from "axios";
 import { useParams } from "react-router-dom";
-import moment from "moment/moment";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AccessAlarmIcon from "@mui/icons-material/AccessAlarm";
 import AlarmOffIcon from "@mui/icons-material/AlarmOff";
 import FlagIcon from "@mui/icons-material/Flag";
-import TimerOutlinedIcon from "@mui/icons-material/TimerOutlined";
-import { useDispatch, useSelector } from "react-redux";
 import { URL } from "../../../../../constants/constants";
-import GraphicAndTableSelection from "./BoothStopCauses/GraphicAndTableSelection";
-import { getChartStops, getStopCause } from "../store/boothDashboardSlice";
 import withReducer from "../../../../../store/withReducer";
 import reducer from "../store";
 import ChargingProgressBar from "../../../../../shared-components/ChargingProgressBar";
 import BackButton from "../../../../../fuse-layouts/shared-components/BackButton";
+import jwtService from "../../../../../services/jwtService";
 
 const bandStylesTitle = {
     fontSize: "16px",
@@ -32,76 +28,45 @@ const currentProductionInitialState = {
 };
 
 function RobotDashboardDetails() {
-    const dispatch = useDispatch();
 
     const { date, machineId } = useParams();
 
-    const stopCauses = useSelector(
-        ({ boothDashboardDetailsApp }) => boothDashboardDetailsApp.boothDashboards.stops
-    );
-
-    const [firstLogin, setFirstLogin] = useState({ loginTime: "" });
-    const [lastLogin, setLastLogin] = useState({ logoutTime: null });
     const [hasDataFinishLoading, setHasDataFinishLoading] = useState(false);
     const [currentProduction, setCurrentProduction] = useState(currentProductionInitialState);
     const [currentMachineData, setCurrentMachineData] = useState({ id: 0, model: "" });
 
     useEffect(() => {
-        axios.get(`${URL}/api/Machine/${machineId}`).then((res) => {
-            setCurrentMachineData(res.data);
-        });
-
-        axios
-            .get(`${URL}/api/LoginActivityLog/first/${machineId}`, {
-                params: { date },
-            })
-            .then((res) => {
-                setFirstLogin(res.data);
-            });
-
-        axios
-            .get(`${URL}/api/LoginActivityLog/last/${machineId}`, {
-                params: { date },
-            })
-            .then((res) => {
-                setLastLogin(res.data);
-            });
-
-        axios.get(`${URL}/api/SortingProduction/machine/details/${date}/${machineId}`).then((res) => {
+        axios.get(`${URL}/SensorReadings/${machineId}`, {
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${jwtService.getAccessToken()}`,
+            }
+        }).then((res) => {
             setCurrentProduction(res.data);
             setHasDataFinishLoading(true);
+            console.log("res", res.data);
         });
 
-        dispatch(
-            getStopCause({
-                startDate: date,
-                endDate: new Date(),
-                machineId,
-                stopAlarm: true,
-                alarmType: -1,
-                pageNumber: 1,
-                pageSize: 10,
-            })
-        );
+        axios.get(`${URL}/Robots/${machineId}`, {
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${jwtService.getAccessToken()}`,
+            }
+        }).then((res) => {
+            setCurrentMachineData(res.data);
+            console.log("res", res.data);
+        });
 
-        dispatch(
-            getChartStops({
-                startDate: date,
-                endDate: new Date(),
-                machineId,
-                alarmType: -1,
-            })
-        );
     }, []);
 
     return hasDataFinishLoading ? (
         <div className="w-full">
             <BackButton className="ml-16" />
             <Typography className="text-center font-bebasNeue pt-16" color="textSecondary" variant="h3">
-                {currentMachineData.model}
+                {currentMachineData.description}
             </Typography>
             <Typography className="text-center font-bebasNeue pt-16" color="textSecondary" variant="subtitle1">
-                {currentProduction.totalSortingProductions[0].leafSorting?.description}
+                {currentProduction.sensorId}
             </Typography>
             <motion.div
                 enter={{
@@ -128,7 +93,7 @@ function RobotDashboardDetails() {
                                         color="textPrimary"
                                         style={bandStylesBody}
                                     >
-                                        {moment(date).format("YYYY-MM-DD")}
+                                        {/*{moment(date).format("YYYY-MM-DD")}*/}
                                     </Typography>
                                 </div>
                             </div>
@@ -144,7 +109,7 @@ function RobotDashboardDetails() {
                                         color="textPrimary"
                                         style={bandStylesBody}
                                     >
-                                        {currentProduction.leafCountQuantity.totalQuantity}
+                                        {/*{currentProduction.leafCountQuantity.totalQuantity}*/}
                                     </Typography>
                                 </div>
                             </div>
@@ -166,7 +131,7 @@ function RobotDashboardDetails() {
                                         color="textPrimary"
                                         style={bandStylesBody}
                                     >
-                                        {moment(firstLogin.loginTime).format("LT")}
+                                        {/*{moment(firstLogin.loginTime).format("LT")}*/}
                                     </Typography>
                                 </div>
                             </div>
@@ -183,29 +148,29 @@ function RobotDashboardDetails() {
                                         color="textPrimary"
                                         style={bandStylesBody}
                                     >
-                                        {lastLogin.logoutTime
-                                            ? moment(lastLogin.logoutTime).format("LT")
-                                            : "N/A"}
+                                        {/*{lastLogin.logoutTime*/}
+                                        {/*    ? moment(lastLogin.logoutTime).format("LT")*/}
+                                        {/*    : "N/A"}*/}
                                     </Typography>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    {stopCauses.length > 0 ? (
-                        <>
-                            <div className="flex flex-col sm:flex-row align-center ml-32 pt-12 mt-32">
-                                <TimerOutlinedIcon color="action" fontSize="large" />
-                                <Typography className="pr-16 text-18 h2 font-bold">Paradas</Typography>
-                            </div>
+                    {/*{stopCauses.length > 0 ? (*/}
+                    {/*    <>*/}
+                    {/*        <div className="flex flex-col sm:flex-row align-center ml-32 pt-12 mt-32">*/}
+                    {/*            <TimerOutlinedIcon color="action" fontSize="large" />*/}
+                    {/*            <Typography className="pr-16 text-18 h2 font-bold">Paradas</Typography>*/}
+                    {/*        </div>*/}
 
-                            <GraphicAndTableSelection stopCauses={stopCauses} />
-                        </>
-                    ) : (
-                        <Typography color="textSecondary" variant="h5" className="mt-128 text-center">
-                            No hay paradas
-                        </Typography>
-                    )}
+                    {/*        <GraphicAndTableSelection stopCauses={stopCauses} />*/}
+                    {/*    </>*/}
+                    {/*) : (*/}
+                    {/*    <Typography color="textSecondary" variant="h5" className="mt-128 text-center">*/}
+                    {/*        No hay paradas*/}
+                    {/*    </Typography>*/}
+                    {/*)}*/}
                 </div>
             </motion.div>
         </div>
