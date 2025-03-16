@@ -30,8 +30,16 @@ builder.Services.AddScoped<ISensorReadingService, SensorReadingService>();
 builder.Services.AddScoped<ITaskLogService, TaskLogService>();
 builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
-builder.Services.AddSignalR()
-    .AddJsonProtocol(options => { options.PayloadSerializerOptions.PropertyNamingPolicy = null; });
+builder.Services.AddSignalR(hubOptions =>
+{
+    hubOptions.EnableDetailedErrors = true;
+    hubOptions.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    hubOptions.HandshakeTimeout = TimeSpan.FromSeconds(15);
+})
+.AddJsonProtocol(options =>
+{
+    options.PayloadSerializerOptions.PropertyNamingPolicy = null;
+});
 
 builder.Services.AddLogging(logging =>
 {
@@ -42,6 +50,8 @@ builder.Services.AddLogging(logging =>
     });
     logging.AddDebug();
     logging.SetMinimumLevel(LogLevel.Trace);
+    logging.AddFilter("Microsoft.AspNetCore.SignalR", LogLevel.Debug);
+    logging.AddFilter("Microsoft.AspNetCore.Http.Connections", LogLevel.Debug);
 });
 
 // Add services to the container.
@@ -69,6 +79,10 @@ builder.Services.AddCors(
 var app = builder.Build();
 app.UseCors("AllowAll");
 app.UseRouting();
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(120),
+});
 app.UseAuthentication();
 app.UseAuthorization();
 
