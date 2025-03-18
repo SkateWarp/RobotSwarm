@@ -40,7 +40,7 @@ function RealtimeConfigList() {
             try {
                 const token = jwtService.getAccessToken();
                 // Use WSS protocol for direct WebSocket connection
-                const wsUrl = 'wss://robot.zerav.la/hubs/robot/ws';
+                const wsUrl = 'wss://robot.zerav.la/hubs/robot';
 
                 console.log('Initializing SceneManager with URL:', wsUrl);
 
