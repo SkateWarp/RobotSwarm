@@ -33,22 +33,36 @@ namespace SwarmBackend.Routes
 
       do
       {
+        // Receive a message from the WebSocket
         result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
 
         if (result.MessageType == WebSocketMessageType.Text)
         {
+          // Handle text messages
           var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-          // Log the message (optional)
           Console.WriteLine($"Received message: {message}");
 
           // Forward the message to SignalR clients
           await hubContext.Clients.All.SendAsync("SendCommand", message);
         }
+        else if (result.MessageType == WebSocketMessageType.Binary)
+        {
+          // Optionally handle binary messages (e.g., log or ignore)
+          Console.WriteLine("Binary message received, ignoring...");
+        }
         else if (result.MessageType == WebSocketMessageType.Close)
         {
+          // Handle close messages and terminate the connection
+          Console.WriteLine("WebSocket connection is closing...");
           await webSocket.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
         }
-      } while (!result.CloseStatus.HasValue);
+        else
+        {
+          // Handle unexpected message types (e.g., Ping, Pong)
+          Console.WriteLine($"Unexpected WebSocket message type: {result.MessageType}");
+        }
+      } while (!result.CloseStatus.HasValue); // Keep the connection open until a Close frame is received
     }
+
   }
 }
