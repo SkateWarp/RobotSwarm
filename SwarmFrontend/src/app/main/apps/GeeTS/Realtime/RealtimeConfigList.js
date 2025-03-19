@@ -47,10 +47,10 @@ function RealtimeConfigList() {
                 sceneManager = new SceneManager({
                     elementId: 'gz-scene',
                     websocketUrl: wsUrl,
-                    websocketKey: token,
-                    websocketHeaders: {
-                        'Authorization': `Bearer ${token}`
-                    }
+                    // websocketKey: token,
+                    // websocketHeaders: {
+                    //     'Authorization': `Bearer ${token}`
+                    // }
                 });
 
                 // Monitor connection status
@@ -63,7 +63,7 @@ function RealtimeConfigList() {
                         if (status === 'closed' || status === 'error') {
                             console.log('Connection lost, attempting to reconnect...');
                             try {
-                                sceneManager.connect(wsUrl, token);
+                                sceneManager.connect(wsUrl);
                             } catch (error) {
                                 console.error('Reconnection attempt failed:', error);
                                 console.error('Error details:', error.message);
@@ -76,7 +76,7 @@ function RealtimeConfigList() {
 
                 // Initial connection
                 console.log('Attempting initial connection...');
-                sceneManager.connect(wsUrl, token);
+                sceneManager.connect(wsUrl);
                 console.log('SceneManager initialized');
 
                 // Check connection status less frequently (every 10 seconds)
