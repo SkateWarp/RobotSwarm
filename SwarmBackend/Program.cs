@@ -128,9 +128,36 @@ app.MapGroup("TaskTemplate")
 app.MapGroup("TaskLog")
     .MapTaskLog();
 
+app.MapGroup("WebSocket")
+    .MapWebSocket();
+
 // Add UseEndpoints
 app.MapHub<RobotHub>("/hubs/robot");
 app.MapGet("/hubs/robot/test", () => "SignalR Hub is running");
 app.MapControllers();
+
+// app.Use(async (context, next) =>
+// {
+//     if (context.Request.Path == "/ws")
+//     {
+//         if (context.WebSockets.IsWebSocketRequest)
+//         {
+//             var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+//             var hubContext = context.RequestServices.GetRequiredService<IHubContext<RobotHub>>();
+
+//             // Handle the WebSocket connection and forward messages to SignalR
+//             await  HandleWebSocketConnection(webSocket, hubContext);
+//         }
+//         else
+//         {
+//             context.Response.StatusCode = 400; // Bad Request
+//         }
+//     }
+//     else
+//     {
+//         await next();
+//     }
+// });
+
 
 app.Run();
