@@ -5,14 +5,14 @@ import {
     useServiceList,
     useTopicList,
 } from "rosreact";
-import { InputAdornment, InputLabel, OutlinedInput, Select, MenuItem, ListSubheader, } from "@mui/material";
+import { InputAdornment, InputLabel, OutlinedInput, Select, MenuItem, ListSubheader } from "@mui/material";
 import IconButton from "@mui/material/IconButton";
 import axios from "axios";
+import { SceneManager } from "gzweb";
 import { URL } from "../../../../constants/constants";
 import jwtService from "../../../../services/jwtService";
 import singletonInstance from "../../../../services/SignalRService/signalRConnectionService";
 
-import { SceneManager } from "gzweb";
 
 const defaultTopics = [
 
@@ -29,10 +29,10 @@ function RealtimeConfigList() {
     const [selectedTopic, setSelectedTopic] = useState("");
     const [command, setCommand] = useState("");
     const [connection] = useState(() => singletonInstance.createConnectionBuilder());
-    const [connectionStatus, setConnectionStatus] = useState('disconnected');
+    const [connectionStatus, setConnectionStatus] = useState("disconnected");
 
     useEffect(() => {
-        console.log('Initializing SceneManager...');
+        console.log("Initializing SceneManager...");
         let sceneManager;
         let connectionCheckInterval;
 
@@ -40,12 +40,12 @@ function RealtimeConfigList() {
             try {
                 const token = jwtService.getAccessToken();
                 // Use WSS protocol for direct WebSocket connection
-                const wsUrl = 'wss://robot.zerav.la/WebSocket/ws';
+                const wsUrl = "wss://robot.zerav.la/WebSocket/ws";
 
-                console.log('Initializing SceneManager with URL:', wsUrl);
+                console.log("Initializing SceneManager with URL:", wsUrl);
 
                 sceneManager = new SceneManager({
-                    elementId: 'gz-scene',
+                    elementId: "gz-scene",
                     websocketUrl: wsUrl,
                     // websocketKey: token,
                     // websocketHeaders: {
@@ -57,27 +57,27 @@ function RealtimeConfigList() {
                 const checkConnection = () => {
                     try {
                         const status = sceneManager.getConnectionStatus();
-                        console.log('Current connection status:', status);
+                        console.log("Current connection status:", status);
                         setConnectionStatus(status);
 
-                        if (status === 'closed' || status === 'error') {
-                            console.log('Connection lost, attempting to reconnect...');
+                        if (status === "closed" || status === "error") {
+                            console.log("Connection lost, attempting to reconnect...");
                             try {
                                 sceneManager.connect(wsUrl);
                             } catch (error) {
-                                console.error('Reconnection attempt failed:', error);
-                                console.error('Error details:', error.message);
+                                console.error("Reconnection attempt failed:", error);
+                                console.error("Error details:", error.message);
                             }
                         }
                     } catch (error) {
-                        console.error('Error checking connection:', error);
+                        console.error("Error checking connection:", error);
                     }
                 };
 
                 // Initial connection
-                console.log('Attempting initial connection...');
+                console.log("Attempting initial connection...");
                 sceneManager.connect(wsUrl);
-                console.log('SceneManager initialized');
+                console.log("SceneManager initialized");
 
                 // Check connection status less frequently (every 10 seconds)
                 connectionCheckInterval = setInterval(checkConnection, 10000);
@@ -87,20 +87,20 @@ function RealtimeConfigList() {
                 try {
                     subscription = sceneManager.getConnectionStatusAsObservable().subscribe(
                         (isConnected) => {
-                            console.log('Connection status changed:', isConnected ? 'connected' : 'disconnected');
-                            setConnectionStatus(isConnected ? 'connected' : 'disconnected');
+                            console.log("Connection status changed:", isConnected ? "connected" : "disconnected");
+                            setConnectionStatus(isConnected ? "connected" : "disconnected");
                         },
                         (error) => {
-                            console.error('Connection observable error:', error);
-                            setConnectionStatus('error');
-                        }
+                            console.error("Connection observable error:", error);
+                            setConnectionStatus("error");
+                        },
                     );
                 } catch (error) {
-                    console.error('Error setting up connection observer:', error);
+                    console.error("Error setting up connection observer:", error);
                 }
 
                 return () => {
-                    console.log('Cleaning up SceneManager...');
+                    console.log("Cleaning up SceneManager...");
                     if (connectionCheckInterval) {
                         clearInterval(connectionCheckInterval);
                     }
@@ -108,7 +108,7 @@ function RealtimeConfigList() {
                         try {
                             subscription.unsubscribe();
                         } catch (error) {
-                            console.error('Error unsubscribing:', error);
+                            console.error("Error unsubscribing:", error);
                         }
                     }
                     if (sceneManager) {
@@ -116,14 +116,14 @@ function RealtimeConfigList() {
                             sceneManager.disconnect();
                             sceneManager.destroy();
                         } catch (error) {
-                            console.error('Error during cleanup:', error);
+                            console.error("Error during cleanup:", error);
                         }
                     }
                 };
             } catch (error) {
-                console.error('Error initializing SceneManager:', error);
-                console.error('Stack trace:', error.stack);
-                setConnectionStatus('error');
+                console.error("Error initializing SceneManager:", error);
+                console.error("Stack trace:", error.stack);
+                setConnectionStatus("error");
                 return () => {
                     if (connectionCheckInterval) {
                         clearInterval(connectionCheckInterval);
@@ -139,15 +139,15 @@ function RealtimeConfigList() {
     // Add connection status indicator to the UI
     const getConnectionStatusColor = () => {
         switch (connectionStatus) {
-            case 'connected':
-                return 'bg-green-500';
-            case 'connecting':
-                return 'bg-yellow-500';
-            case 'error':
-            case 'closed':
-            case 'disconnected':
+            case "connected":
+                return "bg-green-500";
+            case "connecting":
+                return "bg-yellow-500";
+            case "error":
+            case "closed":
+            case "disconnected":
             default:
-                return 'bg-red-500';
+                return "bg-red-500";
         }
     };
 
@@ -164,7 +164,7 @@ function RealtimeConfigList() {
                 setRobot(data);
                 // Flatten the nested arrays to get a single array of topics
                 const paths = data.flatMap(robot =>
-                    defaultTopics.map(topic => topic.replace(":id", robot.id))
+                    defaultTopics.map(topic => topic.replace(":id", robot.id)),
                 );
                 setTopics(paths);
                 console.log("Topics updated:", paths);
@@ -183,7 +183,7 @@ function RealtimeConfigList() {
         <div className="flex flex-1 flex-col items-center h-full">
             <div className="w-full p-2 flex items-center justify-between">
                 <div className="flex items-center">
-                    <div className={`w-3 h-3 rounded-full mr-2 ${getConnectionStatusColor()}`}></div>
+                    <div className={`w-3 h-3 rounded-full mr-2 ${getConnectionStatusColor()}`} />
                     <span className="text-sm">{connectionStatus}</span>
                 </div>
             </div>
@@ -216,7 +216,7 @@ function RealtimeConfigList() {
                     >
                         <ListSubheader>Sensors</ListSubheader>
                         {topics
-                            .filter(topic => topic.includes('sensor') && (selectedRobot === 'all' || topic.includes(selectedRobot)))
+                            .filter(topic => topic.includes("sensor") && (selectedRobot === "all" || topic.includes(selectedRobot)))
                             .map((topic) => (
                                 <MenuItem key={topic} value={topic}>
                                     {topic}
@@ -224,7 +224,7 @@ function RealtimeConfigList() {
                             ))}
                         <ListSubheader>Tasks</ListSubheader>
                         {topics
-                            .filter(topic => topic.includes('task') && (selectedRobot === 'all' || topic.includes(selectedRobot)))
+                            .filter(topic => topic.includes("task") && (selectedRobot === "all" || topic.includes(selectedRobot)))
                             .map((topic) => (
                                 <MenuItem key={topic} value={topic}>
                                     {topic}
@@ -232,7 +232,7 @@ function RealtimeConfigList() {
                             ))}
                         <ListSubheader>Status</ListSubheader>
                         {topics
-                            .filter(topic => topic.includes('status') && (selectedRobot === 'all' || topic.includes(selectedRobot)))
+                            .filter(topic => topic.includes("status") && (selectedRobot === "all" || topic.includes(selectedRobot)))
                             .map((topic) => (
                                 <MenuItem key={topic} value={topic}>
                                     {topic}
@@ -259,8 +259,7 @@ function RealtimeConfigList() {
                     />
                 </div>
             </div>
-            <div id="gz-scene" className="w-full h-[600px] border border-gray-300 bg-black">
-            </div>
+            <div id="gz-scene" className="w-full h-[600px] border border-gray-300 bg-black" />
             {/* <RosConnection url="https://robot.zerav.la/hubs/robot" autoConnect>
                 <PauseButton />
                 <GenericServiceButton topicName="/gazebo/reset_simulation" text="Reset Simulation" />
