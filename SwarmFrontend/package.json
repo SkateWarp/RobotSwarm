@@ -34,6 +34,7 @@
         "echarts": "^5.3.1",
         "firebase": "9.6.8",
         "framer-motion": "6.2.8",
+        "gzweb": "^2.0.14",
         "history": "5.3.0",
         "i18next": "21.6.13",
         "jwt-decode": "3.1.2",
