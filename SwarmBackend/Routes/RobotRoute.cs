@@ -12,6 +12,10 @@ public static class RobotRoute
            // .RequireAuthorization()
            .Produces<IEnumerable<RobotResponse>>();
 
+        group.MapGet("/{id}", GetById)
+        // .RequireAuthorization()
+        .Produces<RobotResponse>();
+
         group.MapPost("", Create)
             .RequireAuthorization()
            .Produces<RobotResponse>();
@@ -38,6 +42,12 @@ public static class RobotRoute
     {
         var response = await robotService.GetAll();
         return Results.Ok(response);
+    }
+
+    public static async Task<IResult> GetById(int id, IRobotService robotService)
+    {
+        var response = await robotService.GetById(id);
+        return response.Match(Results.Ok, Results.BadRequest);
     }
 
     public static async Task<IResult> Update(int id, RobotRequest request, IRobotService robotService)
