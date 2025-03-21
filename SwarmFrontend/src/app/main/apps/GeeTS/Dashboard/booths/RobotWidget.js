@@ -89,18 +89,20 @@ function RobotWidget({robot}) {
                                     </Typography>
                                 </div>
 
-                                {readings.map((reading, index) => (
+                                <div className="overflow-y-auto max-h-80 p-4">
+                                    {readings.map((reading, index) => (
+                                        <div key={index} className="flex flex-col items-center mb-4">
+                                            <Typography
+                                                className="flex h2 text-center justify-items-center items-center self-center mt-16">
+                                                {reading.notes} : {reading.value}
+                                            </Typography>
+                                            <Typography className="h3" color="textSecondary">
+                                                Sensor #{index + 1}
+                                            </Typography>
+                                        </div>
+                                    ))}
+                                </div>
 
-                                    <div key={index} className="flex flex-col items-center">
-                                        <Typography
-                                            className="flex h2 text-center justify-items-center items-center self-center mt-16">
-                                            {reading.notes} : {reading.value}
-                                        </Typography>
-                                        <Typography className="h3" color="textSecondary">
-                                            Sensor #{index + 1}
-                                        </Typography>
-                                    </div>
-                                ))}
                             </div>
 
                         </TableCell>
