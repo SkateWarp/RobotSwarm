@@ -67,6 +67,7 @@
         "react-to-print": "^2.14.4",
         "react-transition-group": "4.4.2",
         "react-virtualized": "9.22.3",
+        "react-vnc": "^3.0.7",
         "react-window": "1.8.6",
         "redux-logger": "4.0.0",
         "rosreact": "^0.4.0",

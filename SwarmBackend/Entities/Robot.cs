@@ -12,4 +12,11 @@ public class Robot
 
     public bool IsConnected { get; set; }
     public RobotStatus Status { get; set; } = RobotStatus.Idle;
+    public bool IsPublic { get; set; } = true;
+
+    public int? RobotGroupId { get; set; }
+    public RobotGroup? RobotGroup { get; set; }
+
+    public int? AccountId { get; set; }
+    public Account? Account { get; set; }
 }

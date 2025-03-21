@@ -1,5 +1,4 @@
-﻿
-using System.ComponentModel.DataAnnotations.Schema;
+﻿using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json;
 
 namespace SwarmBackend.Entities;
@@ -14,6 +13,9 @@ public class TaskLog
     public TaskTemplate? TaskTemplate { get; set; }
     public int RobotId { get; set; }
     public Robot? Robot { get; set; }
+
+    public int? RobotGroupId { get; set; }
+    public RobotGroup? RobotGroup { get; set; }
 
     [Column(TypeName = "jsonb")]
     public JsonDocument Parameters { get; set; } = JsonDocument.Parse("{}");

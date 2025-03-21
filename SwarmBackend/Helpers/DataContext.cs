@@ -19,6 +19,7 @@ public class DataContext : DbContext
     public DbSet<SensorReading> SensorReadings => Set<SensorReading>();
     public DbSet<TaskTemplate> TaskTemplates => Set<TaskTemplate>();
     public DbSet<TaskLog> TaskLogs => Set<TaskLog>();
+    public DbSet<RobotGroup> RobotGroups => Set<RobotGroup>();
     /// <summary>
     /// 
     /// </summary>

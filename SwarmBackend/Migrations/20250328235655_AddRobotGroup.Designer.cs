@@ -3,6 +3,7 @@ using System;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using SwarmBackend.Entities;
@@ -13,9 +14,11 @@ using SwarmBackend.Helpers;
 namespace SwarmBackend.Migrations
 {
     [DbContext(typeof(DataContext))]
-    partial class DataContextModelSnapshot : ModelSnapshot
+    [Migration("20250328235655_AddRobotGroup")]
+    partial class AddRobotGroup
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -133,9 +136,6 @@ namespace SwarmBackend.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<int?>("AccountId")
-                        .HasColumnType("integer");
-
                     b.Property<DateTime>("DateCreated")
                         .HasColumnType("timestamp without time zone");
 
@@ -143,9 +143,6 @@ namespace SwarmBackend.Migrations
                         .HasColumnType("text");
 
                     b.Property<bool>("IsConnected")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsPublic")
                         .HasColumnType("boolean");
 
                     b.Property<string>("Name")
@@ -162,8 +159,6 @@ namespace SwarmBackend.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("AccountId");
 
                     b.HasIndex("RobotGroupId");
 
@@ -355,15 +350,9 @@ namespace SwarmBackend.Migrations
 
             modelBuilder.Entity("SwarmBackend.Entities.Robot", b =>
                 {
-                    b.HasOne("SwarmBackend.Entities.Account", "Account")
-                        .WithMany("Robots")
-                        .HasForeignKey("AccountId");
-
                     b.HasOne("SwarmBackend.Entities.RobotGroup", "RobotGroup")
                         .WithMany("Robots")
                         .HasForeignKey("RobotGroupId");
-
-                    b.Navigation("Account");
 
                     b.Navigation("RobotGroup");
                 });
@@ -418,8 +407,6 @@ namespace SwarmBackend.Migrations
             modelBuilder.Entity("SwarmBackend.Entities.Account", b =>
                 {
                     b.Navigation("RefreshTokens");
-
-                    b.Navigation("Robots");
                 });
 
             modelBuilder.Entity("SwarmBackend.Entities.Robot", b =>

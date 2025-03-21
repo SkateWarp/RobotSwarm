@@ -30,6 +30,7 @@ builder.Services.AddScoped<ISensorReadingService, SensorReadingService>();
 builder.Services.AddScoped<ITaskLogService, TaskLogService>();
 builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
+builder.Services.AddScoped<IRobotGroupService, RobotGroupService>();
 builder.Services.AddSignalR(hubOptions =>
 {
     hubOptions.EnableDetailedErrors = true;
@@ -127,6 +128,8 @@ app.MapGroup("TaskTemplate")
     .MapTaskTemplate();
 app.MapGroup("TaskLog")
     .MapTaskLog();
+app.MapGroup("RobotGroups")
+    .MapRobotGroup();
 
 app.MapGroup("WebSocket")
     .MapWebSocket();

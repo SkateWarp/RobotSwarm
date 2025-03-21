@@ -4,7 +4,7 @@ import { useCallback, useEffect } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { useDispatch, useSelector } from "react-redux";
 import * as yup from "yup";
-import { AppBar, Dialog, Icon, TextField, Toolbar, Typography } from "@mui/material";
+import { AppBar, Dialog, Icon, TextField, Toolbar, Typography, Checkbox, FormControlLabel } from "@mui/material";
 import * as Actions from "../../../../store/fuse/messageSlice";
 import GeneralDialogActionButtons from "../../../../shared-components/GeneralDialogActionButtons";
 import {
@@ -18,6 +18,7 @@ const defaultValues = {
     name: "",
     description: "",
     notes: "",
+    isPublic: false,
 };
 
 const schema = yup.object().shape({
@@ -151,6 +152,29 @@ function LeafSortingConfigDialog() {
                                     variant="outlined"
                                     type="text"
                                     fullWidth
+                                />
+                            )}
+                        />
+                    </div>
+
+                    <div className="flex">
+                        <div className="min-w-48 pt-20">
+                            <Icon color="action">public</Icon>
+                        </div>
+                        <Controller
+                            control={control}
+                            name="isPublic"
+                            render={({ field: { onChange, value } }) => (
+                                <FormControlLabel
+                                    control={
+                                        <Checkbox
+                                            checked={value}
+                                            onChange={onChange}
+                                            color="primary"
+                                        />
+                                    }
+                                    label="Es público"
+                                    className="mb-24"
                                 />
                             )}
                         />

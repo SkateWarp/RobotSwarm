@@ -24,6 +24,7 @@ public class Account
     public bool Enabled { get; set; }
     public Role Role { get; set; }
     public List<RefreshToken> RefreshTokens { get; set; } = new();
+    public ICollection<Robot> Robots { get; set; } = new List<Robot>();
 
     public bool OwnsToken(string token)
     {
