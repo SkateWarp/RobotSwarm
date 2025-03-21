@@ -62,6 +62,17 @@ public class RobotService : IRobotService
             .ToListAsync();
     }
 
+    public async Task<Result<RobotResponse>> GetById(int id)
+    {
+        var robot = await context.Robots.FirstOrDefaultAsync(x => x.Id == id);
+        if (robot == null)
+        {
+            return new Result<RobotResponse>(new Exception("Robot no encontrado"));
+        }
+
+        return RobotResponse.From(robot);
+    }
+
     public async Task<Result<RobotResponse>> Update(int id, RobotRequest request)
     {
         var robot = await context.Robots.FirstOrDefaultAsync(x => x.Id == id);
