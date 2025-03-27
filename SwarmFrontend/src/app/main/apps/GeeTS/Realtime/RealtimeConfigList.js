@@ -259,7 +259,7 @@ function RealtimeConfigList() {
                     />
                 </div>
             </div>
-            <VncViewer url="ws://186.7.92.67:6080" username="rs" password="123456789" />
+            <VncViewer url="wss://186.7.92.67:6080" username="rs" password="123456789" />
         </div>
     );
 }
