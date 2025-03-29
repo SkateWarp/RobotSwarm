@@ -12,4 +12,7 @@ public class Robot
 
     public bool IsConnected { get; set; }
     public RobotStatus Status { get; set; } = RobotStatus.Idle;
+
+    public int? RobotGroupId { get; set; }
+    public RobotGroup? RobotGroup { get; set; }
 }
