@@ -55,7 +55,7 @@ public class RobotService : IRobotService
         return RobotResponse.From(robot);
     }
 
-    public async Task<IEnumerable<RobotResponse>> GetAll(int? accountId = null)
+    public async Task<IEnumerable<RobotResponse>> GetAll(int? accountId = null, bool? isPublic = null)
     {
         var query = context.Robots
             .Include(x => x.Sensors)
@@ -63,7 +63,12 @@ public class RobotService : IRobotService
 
         if (accountId.HasValue)
         {
-            query = query.Where(x => x.IsPublic || x.AccountId == accountId);
+            query = query.Where(x => x.AccountId == accountId);
+        }
+
+        if (isPublic.HasValue)
+        {
+            query = query.Where(x => x.IsPublic == isPublic.Value);
         }
 
         return await query

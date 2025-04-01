@@ -50,10 +50,10 @@ public static class RobotRoute
         return Results.Ok(response);
     }
 
-    public static async Task<IResult> GetAll(IRobotService robotService, HttpContext context)
+    public static async Task<IResult> GetAll(IRobotService robotService, HttpContext context, bool? isPublic = null)
     {
         var accountId = GetAccountId(context);
-        var response = await robotService.GetAll(accountId);
+        var response = await robotService.GetAll(accountId, isPublic);
         return Results.Ok(response);
     }
 

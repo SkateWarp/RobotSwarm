@@ -5,7 +5,7 @@ namespace SwarmBackend.Interfaces;
 
 public interface IRobotService
 {
-    Task<IEnumerable<RobotResponse>> GetAll(int? accountId = null);
+    Task<IEnumerable<RobotResponse>> GetAll(int? accountId = null, bool? isPublic = null);
     Task<Result<RobotResponse>> GetById(int id, int? accountId = null);
 
     Task<RobotResponse> Create(RobotRequest request);
