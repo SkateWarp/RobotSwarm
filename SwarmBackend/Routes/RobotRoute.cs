@@ -1,4 +1,5 @@
-﻿using SwarmBackend.Interfaces;
+﻿using Microsoft.AspNetCore.Authorization;
+using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
 
 namespace SwarmBackend.Routes;
@@ -7,13 +8,12 @@ public static class RobotRoute
 {
     public static RouteGroupBuilder MapRobot(this RouteGroupBuilder group)
     {
-
         group.MapGet("", GetAll)
-           // .RequireAuthorization()
+           .RequireAuthorization()
            .Produces<IEnumerable<RobotResponse>>();
 
         group.MapGet("/{id}", GetById)
-        // .RequireAuthorization()
+        .RequireAuthorization()
         .Produces<RobotResponse>();
 
         group.MapPost("", Create)
@@ -31,33 +31,59 @@ public static class RobotRoute
         return group;
     }
 
-
-    public static async Task<IResult> Create(RobotRequest request, IRobotService robotService)
+    private static int? GetAccountId(HttpContext context)
     {
+        var accountIdClaim = context.User.FindFirst("id");
+        return accountIdClaim != null ? int.Parse(accountIdClaim.Value) : null;
+    }
+
+    public static async Task<IResult> Create(RobotRequest request, IRobotService robotService, HttpContext context)
+    {
+        var accountId = GetAccountId(context);
+        if (!accountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        request = request with { AccountId = accountId };
         var response = await robotService.Create(request);
         return Results.Ok(response);
     }
 
-    public static async Task<IResult> GetAll(IRobotService robotService)
+    public static async Task<IResult> GetAll(IRobotService robotService, HttpContext context)
     {
-        var response = await robotService.GetAll();
+        var accountId = GetAccountId(context);
+        var response = await robotService.GetAll(accountId);
         return Results.Ok(response);
     }
 
-    public static async Task<IResult> GetById(int id, IRobotService robotService)
+    public static async Task<IResult> GetById(int id, IRobotService robotService, HttpContext context)
     {
-        var response = await robotService.GetById(id);
+        var accountId = GetAccountId(context);
+        var response = await robotService.GetById(id, accountId);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> Update(int id, RobotRequest request, IRobotService robotService)
+    public static async Task<IResult> Update(int id, RobotRequest request, IRobotService robotService, HttpContext context)
     {
-        var response = await robotService.Update(id, request);
+        var accountId = GetAccountId(context);
+        if (!accountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        var response = await robotService.Update(id, request, accountId);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> Cancel(int id, IRobotService service)
+    public static async Task<IResult> Cancel(int id, IRobotService service, HttpContext context)
     {
+        var accountId = GetAccountId(context);
+        if (!accountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
         var response = await service.Cancel(id);
         return response.Match(Results.Ok, Results.BadRequest);
     }

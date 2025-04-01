@@ -45,6 +45,8 @@ public class RobotService : IRobotService
             Notes = request.Notes,
             DateCreated = DateTime.Now,
             Status = RobotStatus.Idle,
+            IsPublic = request.IsPublic,
+            AccountId = request.AccountId
         };
 
         context.Robots.Add(robot);
@@ -53,27 +55,42 @@ public class RobotService : IRobotService
         return RobotResponse.From(robot);
     }
 
-    public async Task<IEnumerable<RobotResponse>> GetAll()
+    public async Task<IEnumerable<RobotResponse>> GetAll(int? accountId = null)
     {
-        return await context.Robots
+        var query = context.Robots
             .Include(x => x.Sensors)
-            .Where(x => x.Status != RobotStatus.Disabled)
+            .Where(x => x.Status != RobotStatus.Disabled);
+
+        if (accountId.HasValue)
+        {
+            query = query.Where(x => x.IsPublic || x.AccountId == accountId);
+        }
+
+        return await query
             .Select(x => RobotResponse.From(x))
             .ToListAsync();
     }
 
-    public async Task<Result<RobotResponse>> GetById(int id)
+    public async Task<Result<RobotResponse>> GetById(int id, int? accountId = null)
     {
-        var robot = await context.Robots.FirstOrDefaultAsync(x => x.Id == id);
+        var robot = await context.Robots
+            .Include(x => x.Sensors)
+            .FirstOrDefaultAsync(x => x.Id == id);
+
         if (robot == null)
         {
             return new Result<RobotResponse>(new Exception("Robot no encontrado"));
+        }
+
+        if (accountId.HasValue && !robot.IsPublic && robot.AccountId != accountId)
+        {
+            return new Result<RobotResponse>(new Exception("No tienes acceso a este robot"));
         }
 
         return RobotResponse.From(robot);
     }
 
-    public async Task<Result<RobotResponse>> Update(int id, RobotRequest request)
+    public async Task<Result<RobotResponse>> Update(int id, RobotRequest request, int? accountId = null)
     {
         var robot = await context.Robots.FirstOrDefaultAsync(x => x.Id == id);
         if (robot == null)
@@ -81,7 +98,18 @@ public class RobotService : IRobotService
             return new Result<RobotResponse>(new Exception("Robot no encontrado"));
         }
 
-        context.Entry(robot).CurrentValues.SetValues(request);
+        if (accountId.HasValue && !robot.IsPublic && robot.AccountId != accountId)
+        {
+            return new Result<RobotResponse>(new Exception("No tienes acceso a este robot"));
+        }
+
+        robot.Name = request.Name;
+        robot.Description = request.Description;
+        robot.Notes = request.Notes;
+        robot.Status = request.Status;
+        robot.IsPublic = request.IsPublic;
+        robot.AccountId = request.AccountId;
+
         await context.SaveChangesAsync();
 
         return RobotResponse.From(robot);

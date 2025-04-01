@@ -15,7 +15,9 @@ public record RobotResponse(
     IEnumerable<SensorResponse> Sensors,
     RobotStatus Status,
     string StatusDescription,
-    bool IsConnected)
+    bool IsConnected,
+    bool IsPublic,
+    int? AccountId)
 {
     /// <summary>
     /// Creates a RobotResponse from a Robot entity
@@ -31,7 +33,9 @@ public record RobotResponse(
         robot.Sensors?.Select(x => SensorResponse.From(x, false)) ?? new List<SensorResponse>(),
         robot.Status,
         robot.Status.GetDescriptionAttribute(),
-        robot.IsConnected);
+        robot.IsConnected,
+        robot.IsPublic,
+        robot.AccountId);
 }
 
 /// <summary>
@@ -41,5 +45,7 @@ public record RobotRequest(
     string Name,
     string? Description,
     string? Notes,
-    RobotStatus Status
-    );
+    RobotStatus Status,
+    bool IsPublic = false,
+    int? AccountId = null
+);
