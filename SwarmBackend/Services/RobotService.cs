@@ -61,14 +61,30 @@ public class RobotService : IRobotService
             .Include(x => x.Sensors)
             .Where(x => x.Status != RobotStatus.Disabled);
 
-        if (accountId.HasValue)
-        {
-            query = query.Where(x => x.AccountId == accountId);
-        }
-
         if (isPublic.HasValue)
         {
-            query = query.Where(x => x.IsPublic == isPublic.Value);
+            if (isPublic.Value)
+            {
+                // If requesting public robots, show all public robots
+                query = query.Where(x => x.IsPublic);
+            }
+            else
+            {
+                // If requesting private robots, only show user's own private robots
+                if (!accountId.HasValue)
+                {
+                    return Enumerable.Empty<RobotResponse>();
+                }
+                query = query.Where(x => !x.IsPublic && x.AccountId == accountId);
+            }
+        }
+        else
+        {
+            // If no isPublic filter, show user's own robots plus all public robots
+            if (accountId.HasValue)
+            {
+                query = query.Where(x => x.AccountId == accountId || x.IsPublic);
+            }
         }
 
         return await query
