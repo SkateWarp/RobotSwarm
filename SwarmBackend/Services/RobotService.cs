@@ -128,7 +128,8 @@ public class RobotService : IRobotService
         robot.Description = request.Description;
         robot.Notes = request.Notes;
         robot.Status = request.Status;
-        robot.IsPublic = request.IsPublic;
+        // If the robot is not associated with an account, it is public
+        robot.IsPublic = !accountId.HasValue && request.IsPublic;
         robot.AccountId = request.AccountId;
 
         await context.SaveChangesAsync();
