@@ -73,7 +73,7 @@ public class RobotService : IRobotService
                 // If requesting private robots, only show user's own private robots
                 if (!accountId.HasValue)
                 {
-                    return Enumerable.Empty<RobotResponse>();
+                    return [];
                 }
                 query = query.Where(x => !x.IsPublic && x.AccountId == accountId);
             }
