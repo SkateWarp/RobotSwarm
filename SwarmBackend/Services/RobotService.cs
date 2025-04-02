@@ -124,8 +124,11 @@ public class RobotService : IRobotService
         robot.Status = request.Status;
         robot.IsPublic = request.IsPublic;
 
-        // Only update AccountId if it's being claimed and doesn't already belong to someone
-        if (accountId.HasValue && (!robot.AccountId.HasValue || robot.AccountId == accountId))
+        if (request.IsPublic)
+        {
+            robot.AccountId = null;
+        }
+        else if (accountId.HasValue)
         {
             robot.AccountId = accountId;
         }
