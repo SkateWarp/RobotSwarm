@@ -48,6 +48,16 @@ function LeafSortingConfigList() {
                 sortable: true,
             },
             {
+                Header: "Es público?",
+                accessor: "isPublic",
+                sortable: true,
+                Cell: ({ row }) => (
+                    <div className="flex items-center">
+                        {row.original.isPublic ? "Si" : "No"}
+                    </div>
+                ),
+            },
+            {
                 Header: "Fecha",
                 accessor: "dateCreated",
                 sortable: true,

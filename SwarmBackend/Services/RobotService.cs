@@ -61,30 +61,24 @@ public class RobotService : IRobotService
             .Include(x => x.Sensors)
             .Where(x => x.Status != RobotStatus.Disabled);
 
-        if (isPublic.HasValue)
+        if (accountId.HasValue)
         {
-            if (isPublic.Value)
+            // If user is logged in, show their robots plus public ones (unless filtered)
+            if (isPublic.HasValue)
             {
-                // If requesting public robots, show all public robots
-                query = query.Where(x => x.IsPublic);
+                query = isPublic.Value
+                    ? query.Where(x => x.IsPublic)
+                    : query.Where(x => x.AccountId == accountId);
             }
             else
             {
-                // If requesting private robots, only show user's own private robots
-                if (!accountId.HasValue)
-                {
-                    return [];
-                }
-                query = query.Where(x => !x.IsPublic && x.AccountId == accountId);
+                query = query.Where(x => x.AccountId == accountId || x.IsPublic);
             }
         }
         else
         {
-            // If no isPublic filter, show user's own robots plus all public robots
-            if (accountId.HasValue)
-            {
-                query = query.Where(x => x.AccountId == accountId || x.IsPublic);
-            }
+            // If no user is logged in, only show public robots
+            query = query.Where(x => x.IsPublic);
         }
 
         return await query
@@ -128,9 +122,13 @@ public class RobotService : IRobotService
         robot.Description = request.Description;
         robot.Notes = request.Notes;
         robot.Status = request.Status;
-        // If the robot is not associated with an account, it is public
-        robot.IsPublic = !accountId.HasValue && request.IsPublic;
-        robot.AccountId = request.AccountId;
+        robot.IsPublic = request.IsPublic;
+
+        // Only update AccountId if it's being claimed and doesn't already belong to someone
+        if (accountId.HasValue && (!robot.AccountId.HasValue || robot.AccountId == accountId))
+        {
+            robot.AccountId = accountId;
+        }
 
         await context.SaveChangesAsync();
 
