@@ -111,9 +111,11 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         try
         {
            var response =  await sensorReadingService.Create(robotId, reading);
+           var lastReadings =  sensorReadingService.GetLastByRobot(robotId);
 
             // Broadcast the new reading to interested clients
             await Clients.All.SendAsync("NewSensorReading", response);
+            await Clients.All.SendAsync($"AllSensorReadings/{robotId}", lastReadings);
         }
         catch (Exception ex)
         {
