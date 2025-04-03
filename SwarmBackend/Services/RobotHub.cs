@@ -110,10 +110,10 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     {
         try
         {
-            await sensorReadingService.Create(robotId, reading);
+           var response =  await sensorReadingService.Create(robotId, reading);
 
             // Broadcast the new reading to interested clients
-            await Clients.All.SendAsync("NewSensorReading", reading);
+            await Clients.All.SendAsync("NewSensorReading", response);
         }
         catch (Exception ex)
         {
