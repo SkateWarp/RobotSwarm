@@ -1,4 +1,4 @@
-import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr';
+import { HubConnectionBuilder, LogLevel, JsonHubProtocol } from '@microsoft/signalr';
 import jwtService from 'app/services/jwtService';
 import { URL } from 'app/constants/constants';
 
@@ -20,12 +20,26 @@ const singletonInstance = (function () {
 
         console.log(`Creating new SignalR connection for group: ${connectionKey}`);
 
+        // Create a custom JSON protocol that uses camelCase
+        const jsonProtocol = new JsonHubProtocol();
+        // Override the parse method to convert property names to camelCase
+        const originalParse = jsonProtocol.parse;
+        jsonProtocol.parse = function (message) {
+            const parsed = originalParse.call(this, message);
+            if (parsed && parsed.arguments && parsed.arguments.length > 0) {
+                // Convert the first argument to camelCase
+                parsed.arguments[0] = convertToCamelCase(parsed.arguments[0]);
+            }
+            return parsed;
+        };
+
         const connection = new HubConnectionBuilder()
             .withUrl(`${URL}/hubs/robot${groupNames ? `?group=${groupNames}` : ''}`, {
                 accessTokenFactory() {
                     return accessToken;
                 }
             })
+            .withHubProtocol(jsonProtocol)
             .withAutomaticReconnect()
             .configureLogging(LogLevel.Warning)
             .build();
@@ -56,6 +70,26 @@ const singletonInstance = (function () {
             });
 
         return connection;
+    }
+
+    // Helper function to convert object keys to camelCase
+    function convertToCamelCase(obj) {
+        if (obj === null || typeof obj !== 'object') {
+            return obj;
+        }
+
+        if (Array.isArray(obj)) {
+            return obj.map(item => convertToCamelCase(item));
+        }
+
+        const result = {};
+        for (const key in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                const camelKey = key.charAt(0).toLowerCase() + key.slice(1);
+                result[camelKey] = convertToCamelCase(obj[key]);
+            }
+        }
+        return result;
     }
 
     const stopConnection = (groupNames) => {
