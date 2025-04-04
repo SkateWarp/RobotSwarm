@@ -1,0 +1,179 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="turtlebot_arena">
+
+  <!-- "world" link to serve as the fixed reference -->
+  <link name="world"/>
+
+  <!-- The floor (arena_link) -->
+  <link name="arena_link">
+    <visual>
+      <geometry>
+        <!-- 10x10 floor, 0.1 thick -->
+        <box size="10 10 0.1"/>
+      </geometry>
+      <material name="arena_gray">
+        <color rgba="0.7 0.7 0.7 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="10 10 0.1"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <!-- Increased mass to make it very stable -->
+      <mass value="1000.0"/>
+      <!-- Adjusted inertia for a heavy, stable platform -->
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+    <!-- Add Gazebo-specific tags -->
+    <gazebo>
+      <static>true</static>
+    </gazebo>
+  </link>
+
+  <!-- Attach the floor to the world with a fixed joint -->
+  <joint name="world_to_arena" type="fixed">
+    <parent link="world"/>
+    <child link="arena_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ========== Four walls around the floor ========== -->
+  <!-- North wall -->
+  <link name="arena_wall_north">
+    <visual>
+      <geometry>
+        <!-- 10m wide, 0.2m thick, 1m tall -->
+        <box size="10 0.2 1.0"/>
+      </geometry>
+      <material name="wall_gray">
+        <color rgba="0.8 0.8 0.8 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="10 0.2 1.0"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="100.0"/>
+      <inertia ixx="100.0" ixy="0" ixz="0" iyy="100.0" iyz="0" izz="100.0"/>
+    </inertial>
+  </link>
+
+  <joint name="joint_arena_north_wall" type="fixed">
+    <parent link="arena_link"/>
+    <child link="arena_wall_north"/>
+    <!-- Shift the north wall up on the Y axis, half the floor dimension + half wall thickness -->
+    <origin xyz="0 5.0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <!-- South wall -->
+  <link name="arena_wall_south">
+    <visual>
+      <geometry>
+        <box size="10 0.2 1.0"/>
+      </geometry>
+      <material name="wall_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="10 0.2 1.0"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="100.0"/>
+      <inertia ixx="100.0" ixy="0" ixz="0" iyy="100.0" iyz="0" izz="100.0"/>
+    </inertial>
+  </link>
+
+  <joint name="joint_arena_south_wall" type="fixed">
+    <parent link="arena_link"/>
+    <child link="arena_wall_south"/>
+    <origin xyz="0 -5.0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <!-- East wall -->
+  <link name="arena_wall_east">
+    <visual>
+      <geometry>
+        <box size="0.2 10 1.0"/>
+      </geometry>
+      <material name="wall_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.2 10 1.0"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="100.0"/>
+      <inertia ixx="100.0" ixy="0" ixz="0" iyy="100.0" iyz="0" izz="100.0"/>
+    </inertial>
+  </link>
+
+  <joint name="joint_arena_east_wall" type="fixed">
+    <parent link="arena_link"/>
+    <child link="arena_wall_east"/>
+    <origin xyz="5.0 0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <!-- West wall -->
+  <link name="arena_wall_west">
+    <visual>
+      <geometry>
+        <box size="0.2 10 1.0"/>
+      </geometry>
+      <material name="wall_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.2 10 1.0"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="100.0"/>
+      <inertia ixx="100.0" ixy="0" ixz="0" iyy="100.0" iyz="0" izz="100.0"/>
+    </inertial>
+  </link>
+
+  <joint name="joint_arena_west_wall" type="fixed">
+    <parent link="arena_link"/>
+    <child link="arena_wall_west"/>
+    <origin xyz="-5.0 0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ========== Target Marker ========== -->
+  <link name="target_marker">
+    <visual>
+      <geometry>
+        <sphere radius="0.1"/>
+      </geometry>
+      <material name="target_red">
+        <color rgba="1 0 0 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.1"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- Fixed joint to attach the target marker to the arena -->
+  <joint name="target_joint" type="fixed">
+    <parent link="arena_link"/>
+    <child link="target_marker"/>
+    <origin xyz="2 2 0.15" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Add Gazebo-specific properties to make the entire model static -->
+  <gazebo>
+    <static>true</static>
+  </gazebo>
+</robot>
