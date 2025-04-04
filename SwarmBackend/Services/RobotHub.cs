@@ -72,7 +72,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
             await context.SaveChangesAsync();
 
             // Notify all clients about the connection status change
-            await Clients.All.SendAsync("RobotConnectionChanged", new
+            await Clients.All.SendAsync($"RobotConnectionChanged/{robotId}", new
             {
                 robotId,
                 isConnected,
@@ -91,7 +91,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
                 robot.Status = Enum.Parse<RobotStatus>(status);
                 await context.SaveChangesAsync();
 
-                await Clients.All.SendAsync("RobotStatusChanged", new
+                await Clients.All.SendAsync($"RobotStatusChanged/{robotId}", new
                 {
                     robotId,
                     status = robot.Status,
@@ -110,10 +110,12 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     {
         try
         {
-            await sensorReadingService.Create(robotId, reading);
+            var response = await sensorReadingService.Create(robotId, reading);
+            var lastReadings = sensorReadingService.GetLastByRobot(robotId);
 
             // Broadcast the new reading to interested clients
-            await Clients.All.SendAsync("NewSensorReading", reading);
+            await Clients.All.SendAsync("NewSensorReading", response);
+            await Clients.All.SendAsync($"AllSensorReadings/{robotId}", lastReadings);
         }
         catch (Exception ex)
         {
