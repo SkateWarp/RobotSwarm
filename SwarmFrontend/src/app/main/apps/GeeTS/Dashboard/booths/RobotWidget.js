@@ -1,60 +1,53 @@
-import {memo, useEffect, useState} from "react";
+import { memo, useEffect, useState, useRef } from "react";
 import PropTypes from "prop-types";
-import {Table, TableBody, TableCell, TableRow, Tooltip, Typography} from "@mui/material";
-import {LOGO, URL} from "../../../../../constants/constants";
+import { Table, TableBody, TableCell, TableRow, Tooltip, Typography } from "@mui/material";
 import axios from "axios";
+import { LOGO, URL } from "../../../../../constants/constants";
 import jwtService from "../../../../../services/jwtService";
 import singletonInstance from "../../../../../services/SignalRService/signalRConnectionService";
 
-function RobotWidget({robot}) {
-
+function RobotWidget({ robot }) {
     const [readings, setReadings] = useState([]);
-    const [connection] = useState(() => singletonInstance.createConnectionBuilder());
+    const connectionRef = useRef(null);
+    const eventHandlerRef = useRef(null);
 
     useEffect(() => {
+        // Get or create a connection for this specific robot
+        connectionRef.current = singletonInstance.createConnectionBuilder(`robot_${robot.id}`);
 
-        axios.get(`${URL}/SensorReadings/last/${robot.id}`, {
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${jwtService.getAccessToken()}`,
-            },
-        }).then((response) => {
-            setReadings(response.data);
-        });
+        // Fetch initial sensor readings
+        axios
+            .get(`${URL}/SensorReadings/last/${robot.id}`, {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${jwtService.getAccessToken()}`,
+                },
+            })
+            .then((response) => {
+                setReadings(response.data);
+            })
+            .catch((error) => {
+                console.error("Error fetching sensor readings:", error);
+            });
 
-        connection.on(`AllSensorReadings/${robot.id}`, current => {
-
-            console.debug("test", current);
+        // Set up SignalR event handlers
+        eventHandlerRef.current = (current) => {
+            console.debug(`Received sensor readings for robot ${robot.id}:`, current);
             setReadings(current);
-        });
+        };
 
-        // setUpSignalRConnection().then(() => {});
+        // Register the event handler
+        connectionRef.current.on(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
 
-    }, []);
-
-
-    const setUpSignalRConnection = async () => {
-
-        const connection = singletonInstance.createConnectionBuilder();
-
-        // connection.on(`RobotConnectionChanged/${robot.id}`, current => {
-        //      setReadings(current);
-        // });
-
-        console.debug("test", robot.id);
-
-
-        connection.on(`AllSensorReadings/${robot.id}`, current => {
-
-            console.debug("test", current);
-            setReadings(current);
-        });
-
-        return connection;
-    };
+        // Cleanup function to remove event handlers when component unmounts
+        return () => {
+            if (connectionRef.current && eventHandlerRef.current) {
+                connectionRef.current.off(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
+            }
+        };
+    }, [robot.id]);
 
     return (
-
         <div className="w-full p-32">
             <div className="flex w-full justify-between">
                 <div>
@@ -75,11 +68,7 @@ function RobotWidget({robot}) {
             </div>
             <div className="flex flex-row flex-wrap items-end">
                 <div className="flex flex-col m-auto">
-                    <img
-                        alt="logo"
-                        src={LOGO}
-                        className="inline-flex w-192 leading-none mx-auto"
-                    />
+                    <img alt="logo" src={LOGO} className="inline-flex w-192 leading-none mx-auto" />
                 </div>
             </div>
             <div className="flex flex-row flex-wrap items-end">
@@ -94,15 +83,15 @@ function RobotWidget({robot}) {
             </div>
             <Table className="mt-8 text-center bg-transparent">
                 <TableBody>
-                    <TableRow style={{
-                        height: "260px",
-                    }}>
+                    <TableRow
+                        style={{
+                            height: "260px",
+                        }}
+                    >
                         <TableCell>
-
                             <div className="flex flex-col">
                                 <div className="flex flex-col items-center">
-                                    <Typography
-                                        className="flex h2 text-center justify-items-center items-center self-center mt-16">
+                                    <Typography className="flex h2 text-center justify-items-center items-center self-center mt-16">
                                         {robot?.description}
                                     </Typography>
                                     <Typography className="h3" color="textSecondary">
@@ -111,8 +100,7 @@ function RobotWidget({robot}) {
                                 </div>
 
                                 <div className="flex flex-col items-center">
-                                    <Typography
-                                        className="flex h2 text-center justify-items-center items-center self-center mt-16">
+                                    <Typography className="flex h2 text-center justify-items-center items-center self-center mt-16">
                                         {robot?.statusDescription}
                                     </Typography>
                                     <Typography className="h3" color="textSecondary">
@@ -123,8 +111,7 @@ function RobotWidget({robot}) {
                                 <div className="overflow-y-auto max-h-80 p-4">
                                     {readings.map((reading, index) => (
                                         <div key={index} className="flex flex-col items-center mb-4">
-                                            <Typography
-                                                className="flex h2 text-center justify-items-center items-center self-center mt-16">
+                                            <Typography className="flex h2 text-center justify-items-center items-center self-center mt-16">
                                                 {reading.notes} : {reading.value}
                                             </Typography>
                                             <Typography className="h3" color="textSecondary">
@@ -133,9 +120,7 @@ function RobotWidget({robot}) {
                                         </div>
                                     ))}
                                 </div>
-
                             </div>
-
                         </TableCell>
                     </TableRow>
                 </TableBody>
