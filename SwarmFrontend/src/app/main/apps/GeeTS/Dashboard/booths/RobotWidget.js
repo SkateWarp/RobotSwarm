@@ -4,10 +4,12 @@ import {Table, TableBody, TableCell, TableRow, Tooltip, Typography} from "@mui/m
 import {LOGO, URL} from "../../../../../constants/constants";
 import axios from "axios";
 import jwtService from "../../../../../services/jwtService";
+import singletonInstance from "../../../../../services/SignalRService/signalRConnectionService";
 
 function RobotWidget({robot}) {
 
     const [readings, setReadings] = useState([]);
+    const [connection] = useState(() => singletonInstance.createConnectionBuilder());
 
     useEffect(() => {
 
@@ -20,7 +22,36 @@ function RobotWidget({robot}) {
             setReadings(response.data);
         });
 
+        connection.on(`AllSensorReadings/${robot.id}`, current => {
+
+            console.debug("test", current);
+            setReadings(current);
+        });
+
+        // setUpSignalRConnection().then(() => {});
+
     }, []);
+
+
+    const setUpSignalRConnection = async () => {
+
+        const connection = singletonInstance.createConnectionBuilder();
+
+        // connection.on(`RobotConnectionChanged/${robot.id}`, current => {
+        //      setReadings(current);
+        // });
+
+        console.debug("test", robot.id);
+
+
+        connection.on(`AllSensorReadings/${robot.id}`, current => {
+
+            console.debug("test", current);
+            setReadings(current);
+        });
+
+        return connection;
+    };
 
     return (
 
@@ -89,18 +120,20 @@ function RobotWidget({robot}) {
                                     </Typography>
                                 </div>
 
-                                {readings.map((reading, index) => (
+                                <div className="overflow-y-auto max-h-80 p-4">
+                                    {readings.map((reading, index) => (
+                                        <div key={index} className="flex flex-col items-center mb-4">
+                                            <Typography
+                                                className="flex h2 text-center justify-items-center items-center self-center mt-16">
+                                                {reading.notes} : {reading.value}
+                                            </Typography>
+                                            <Typography className="h3" color="textSecondary">
+                                                Sensor #{index + 1}
+                                            </Typography>
+                                        </div>
+                                    ))}
+                                </div>
 
-                                    <div key={index} className="flex flex-col items-center">
-                                        <Typography
-                                            className="flex h2 text-center justify-items-center items-center self-center mt-16">
-                                            {reading.notes} : {reading.value}
-                                        </Typography>
-                                        <Typography className="h3" color="textSecondary">
-                                            Sensor #{index + 1}
-                                        </Typography>
-                                    </div>
-                                ))}
                             </div>
 
                         </TableCell>
