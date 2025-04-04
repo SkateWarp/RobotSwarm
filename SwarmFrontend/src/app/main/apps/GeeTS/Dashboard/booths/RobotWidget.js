@@ -5,14 +5,11 @@ import {LOGO, URL} from "../../../../../constants/constants";
 import axios from "axios";
 import jwtService from "../../../../../services/jwtService";
 import singletonInstance from "../../../../../services/SignalRService/signalRConnectionService";
-import {
-    addMechanicCalls,
-    getMachinesStop
-} from "../../../../../fuse-layouts/shared-components/quickPanel/store/stateSlice";
 
 function RobotWidget({robot}) {
 
     const [readings, setReadings] = useState([]);
+    const [connection] = useState(() => singletonInstance.createConnectionBuilder());
 
     useEffect(() => {
 
@@ -25,7 +22,13 @@ function RobotWidget({robot}) {
             setReadings(response.data);
         });
 
-        setUpSignalRConnection().then(() => {});
+        connection.on(`AllSensorReadings/${robot.id}`, current => {
+
+            console.debug("test", current);
+            setReadings(current);
+        });
+
+        // setUpSignalRConnection().then(() => {});
 
     }, []);
 
@@ -38,7 +41,12 @@ function RobotWidget({robot}) {
         //      setReadings(current);
         // });
 
-        connection.on(`AllSensorReading/${robot.id}`, current => {
+        console.debug("test", robot.id);
+
+
+        connection.on(`AllSensorReadings/${robot.id}`, current => {
+
+            console.debug("test", current);
             setReadings(current);
         });
 
