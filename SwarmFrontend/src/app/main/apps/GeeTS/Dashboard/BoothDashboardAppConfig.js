@@ -5,7 +5,6 @@ import authRoles from "../../../../auth/authRoles";
 const BoothDashboardApp = lazy(() => import("./booths/RobotDashboardApp"));
 const ShiftsDashboardApp = lazy(() => import("./shifts/ShiftsDashboardApp"));
 const ShiftsDashboardDetails = lazy(() => import("./shifts/ShiftsDashboardDetails"));
-const BoothDashboardDetails = lazy(() => import("./booths/RobotDashboardDetails"));
 
 const BoothDashboardAppConfigGeeTS = {
     settings: {
@@ -23,10 +22,6 @@ const BoothDashboardAppConfigGeeTS = {
         {
             path: "/apps/GTS/dashboard/booths/:id",
             element: <BoothDashboardApp />,
-        },
-        {
-            path: `/apps/GTS/dashboard/booths/:machineId/:machineId`,
-            element: <BoothDashboardDetails />,
         },
         {
             path: "/apps/GTS/dashboard/shifts",

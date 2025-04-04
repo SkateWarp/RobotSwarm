@@ -4,6 +4,11 @@ import {Table, TableBody, TableCell, TableRow, Tooltip, Typography} from "@mui/m
 import {LOGO, URL} from "../../../../../constants/constants";
 import axios from "axios";
 import jwtService from "../../../../../services/jwtService";
+import singletonInstance from "../../../../../services/SignalRService/signalRConnectionService";
+import {
+    addMechanicCalls,
+    getMachinesStop
+} from "../../../../../fuse-layouts/shared-components/quickPanel/store/stateSlice";
 
 function RobotWidget({robot}) {
 
@@ -20,7 +25,25 @@ function RobotWidget({robot}) {
             setReadings(response.data);
         });
 
+        setUpSignalRConnection().then(() => {});
+
     }, []);
+
+
+    const setUpSignalRConnection = async () => {
+
+        const connection = singletonInstance.createConnectionBuilder();
+
+        // connection.on(`RobotConnectionChanged/${robot.id}`, current => {
+        //      setReadings(current);
+        // });
+
+        connection.on(`AllSensorReading/${robot.id}`, current => {
+            setReadings(current);
+        });
+
+        return connection;
+    };
 
     return (
 
