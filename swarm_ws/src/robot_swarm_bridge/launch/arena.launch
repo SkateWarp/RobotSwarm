@@ -6,7 +6,7 @@
   
   <!-- Load and spawn the arena -->
   <param name="arena_description" 
-         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/urdf/turtlebot_arena.xacro" />
+         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/../urdf/turtlebot_arena.xacro"/>
   <node name="spawn_arena" pkg="gazebo_ros" type="spawn_model" 
         args="-urdf -param arena_description -model arena -x 0 -y 0 -z 0" 
         output="screen" />
