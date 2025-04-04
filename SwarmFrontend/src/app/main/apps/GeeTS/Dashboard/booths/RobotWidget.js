@@ -7,9 +7,10 @@ import jwtService from "../../../../../services/jwtService";
 import singletonInstance from "../../../../../services/SignalRService/signalRConnectionService";
 
 function RobotWidget({ robot }) {
-    const [readings, setReadings] = useState([]);
     const connectionRef = useRef(null);
     const eventHandlerRef = useRef(null);
+    const [readings, setReadings] = useState([]);
+    const [isConnected, setIsConnected] = useState(robot.isConnected);
 
     useEffect(() => {
         // Get or create a connection for this specific robot
@@ -38,6 +39,10 @@ function RobotWidget({ robot }) {
 
         // Register the event handler
         connectionRef.current.on(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
+        connectionRef.current.on(`RobotStatusChanged/${robot.id}`, (params) => {
+            console.debug(`Received robot status for robot ${robot.id}:`, params);
+            setIsConnected(params.status);
+        });
 
         // Cleanup function to remove event handlers when component unmounts
         return () => {
@@ -56,7 +61,7 @@ function RobotWidget({ robot }) {
                             <div
                                 className="h2 p-8"
                                 style={{
-                                    backgroundColor: robot.isConnected ? "green" : "red",
+                                    backgroundColor: isConnected ? "green" : "red",
                                     display: "inline-flex",
                                     borderRadius: "25px",
                                     left: "80%",
