@@ -15,6 +15,7 @@ import TaskConfigAppConfig from "../main/apps/GeeTS/Tasks/TaskConfigAppConfig";
 import LeafTypesAppConfig from "../main/apps/GeeTS/LeafType/LeafTypeAppConfig";
 import BoothDashboardAppConfigGeeTS from "../main/apps/GeeTS/Dashboard/BoothDashboardAppConfig";
 import LeafSortingAppConfig from "../main/apps/GeeTS/LeafSorting/LeafSortingAppConfig";
+import GroupAppConfig from "../main/apps/GeeTS/Groups/GroupAppConfig";
 
 const routeConfigs = [
     LoginConfig,
@@ -32,6 +33,7 @@ const routeConfigs = [
     LeafTypesAppConfig,
     LeafSortingAppConfig,
     BoothDashboardAppConfigGeeTS,
+    GroupAppConfig
 ];
 
 const getInitialDashboard = () => {

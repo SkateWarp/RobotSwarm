@@ -33,6 +33,14 @@ const navigationGTSConfig = [
         auth: authRoles.admin,
         url: "/apps/GTS/leafSorting",
     },
+    // {
+    //     id: "groups",
+    //     title: "Grupos",
+    //     type: "item",
+    //     icon: "group",
+    //     auth: authRoles.admin,
+    //     url: "/apps/GTS/groups",
+    // },
 ];
 
 export default navigationGTSConfig;

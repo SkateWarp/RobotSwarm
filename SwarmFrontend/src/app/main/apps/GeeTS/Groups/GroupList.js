@@ -1,0 +1,139 @@
+import { motion } from "framer-motion";
+import { useMemo, useState } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { Icon, IconButton, Typography } from "@mui/material";
+import moment from "moment/moment";
+import ChargingProgressBar from "../../../../shared-components/ChargingProgressBar";
+import DeleteRowElementDialog from "../../../../shared-components/DeleteRowElementDialog";
+import useFilteredData from "../../../../shared-components/hooks/useFilteredData";
+import GeneralTableFrontendPaginationComplete from "../../../../shared-components/GeneralTableFrontendPaginationComplete";
+import {
+    openEditLeafSortingConfigDialog,
+    removeLeafSorting,
+    selectLeafSorting,
+} from "./store/leafSortingConfigSlice";
+
+function GroupList() {
+    const dispatch = useDispatch();
+    const leafTypes = useSelector(selectLeafSorting);
+    const searchText = useSelector(({ leafSortingConfigApp }) => leafSortingConfigApp.leafSorting.searchText);
+
+    const { statusFilter, filteredData } = useFilteredData(leafTypes, searchText);
+    const [openDialog, setOpenDialog] = useState(false);
+    const [idForDelete, setIdForDelete] = useState(0);
+
+    const handleClickOpen = () => {
+        setOpenDialog(true);
+    };
+
+    const deleteRowElement = () => {
+        const robotToDeactivate = leafTypes.filter((x) => x.id === idForDelete)[0];
+        console.log("robots", robotToDeactivate);
+        dispatch(
+            removeLeafSorting({
+                ...robotToDeactivate,
+                status: 2,
+            })
+        );
+    };
+
+    const columns = useMemo(
+        () => [
+            {
+                Header: "Nombre",
+                accessor: "name",
+                sortable: true,
+            },
+            {
+                Header: "Descripción",
+                accessor: "description",
+                sortable: true,
+            },
+            {
+                Header: "Es público?",
+                accessor: "isPublic",
+                sortable: true,
+                Cell: ({ row }) => (
+                    <div className="flex items-center">{row.original.isPublic ? "Si" : "No"}</div>
+                ),
+            },
+            {
+                Header: "Fecha",
+                accessor: "dateCreated",
+                sortable: true,
+                Cell: ({ row }) => (
+                    <div className="flex items-center">
+                        {moment(row.original.dateCreated).format("DD-MM-YYYY")}
+                    </div>
+                ),
+            },
+            {
+                Header: "Notas",
+                accessor: "notes",
+                sortable: true,
+            },
+            {
+                id: "action",
+                Header: "Eliminar",
+                className: "justify-center",
+                width: 128,
+                sortable: false,
+                Cell: ({ row }) => (
+                    <div className="flex items-center">
+                        <IconButton
+                            onClick={(ev) => {
+                                ev.stopPropagation();
+                                handleClickOpen();
+                                setIdForDelete(row.original.id);
+                            }}
+                        >
+                            <Icon>delete</Icon>
+                        </IconButton>
+                    </div>
+                ),
+            },
+        ],
+        []
+    );
+
+    if (statusFilter && !filteredData.length) {
+        return (
+            <div className="flex flex-1 items-center justify-center h-full">
+                <Typography color="textSecondary" variant="h5">
+                    No hay datos!
+                </Typography>
+            </div>
+        );
+    }
+    if (!statusFilter) {
+        return <ChargingProgressBar />;
+    }
+
+    return (
+        <motion.div
+            initial={{ y: 20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1, transition: { delay: 0.2 } }}
+            className="flex flex-auto w-full max-h-full"
+        >
+            <GeneralTableFrontendPaginationComplete
+                columns={columns}
+                data={filteredData}
+                onRowClick={(ev, row) => {
+                    if (row) {
+                        dispatch(openEditLeafSortingConfigDialog(row.original));
+                    }
+                }}
+                rowsPerPageOptions={[5, 10, 15, 25]}
+            />
+
+            <DeleteRowElementDialog
+                isOpen={openDialog}
+                setIsOpen={setOpenDialog}
+                deleteData={deleteRowElement}
+                message="este robot"
+            />
+        </motion.div>
+    );
+}
+
+export default GroupList;

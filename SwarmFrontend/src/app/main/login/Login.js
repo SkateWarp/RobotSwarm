@@ -71,7 +71,7 @@ function Login() {
                                 className="mt-16"
                                 style={{ fontSize: "12px", color: "#999999" }}
                             >
-                                © Alterna 4.0 2022 all rights reserved.
+                                © Robot Swarm 2022 all rights reserved.
                             </Typography>
                         </CardContent>
                     </Card>
