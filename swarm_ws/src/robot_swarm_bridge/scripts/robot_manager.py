@@ -19,7 +19,7 @@ import threading
 from std_msgs.msg import String, Bool
 from geometry_msgs.msg import Pose, Twist
 from gazebo_msgs.srv import SpawnModel, DeleteModel
-from tf.transformations import quaternion_from_euler
+from tf.transformations import quaternion_from_euler, euler_from_quaternion
 from std_srvs.srv import Empty
 from nav_msgs.msg import Odometry
 
