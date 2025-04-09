@@ -49,6 +49,11 @@ public class RobotService : IRobotService
             AccountId = request.AccountId
         };
 
+        if (request.AccountId.HasValue)
+        {
+            robot.IsPublic = false;
+        }
+
         context.Robots.Add(robot);
         await context.SaveChangesAsync();
 

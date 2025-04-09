@@ -1,6 +1,8 @@
 ﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.SignalR;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
+using SwarmBackend.Services;
 
 namespace SwarmBackend.Routes;
 
@@ -17,8 +19,8 @@ public static class RobotRoute
         .Produces<RobotResponse>();
 
         group.MapPost("", Create)
-            .RequireAuthorization()
-           .Produces<RobotResponse>();
+        .RequireAuthorization()
+        .Produces<RobotResponse>();
 
         group.MapPut("/{id}", Update)
           .RequireAuthorization()
@@ -37,7 +39,7 @@ public static class RobotRoute
         return accountIdClaim != null ? int.Parse(accountIdClaim.Value) : null;
     }
 
-    public static async Task<IResult> Create(RobotRequest request, IRobotService robotService, HttpContext context)
+    public static async Task<IResult> Create(RobotRequest request, IRobotService robotService, IHubContext<RobotHub> hubContext, HttpContext context)
     {
         var accountId = GetAccountId(context);
         if (!accountId.HasValue)
@@ -47,6 +49,10 @@ public static class RobotRoute
 
         request = request with { AccountId = accountId };
         var response = await robotService.Create(request);
+
+        // Send notification using SignalR
+        await hubContext.Clients.All.SendAsync("RobotCreated", response);
+
         return Results.Ok(response);
     }
 
