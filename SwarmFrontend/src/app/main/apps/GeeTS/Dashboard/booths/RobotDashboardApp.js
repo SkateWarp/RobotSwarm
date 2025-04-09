@@ -1,6 +1,5 @@
 import {motion} from "framer-motion";
 import {Card, Typography} from "@mui/material";
-import {Link} from "react-router-dom";
 import BoothWidget from "./RobotWidget";
 import useAxiosGetRequest from "../../useAxiosGetRequest";
 
@@ -9,7 +8,7 @@ function RobotDashboardApp() {
     const robots = useAxiosGetRequest("/Robots", []);
 
     return (
-        
+
         <div className="w-full inline-flex m-auto justify-center">
             {robots.length > 0 ? (
                 <div className="w-full sm:p-8 container inline-flex m-auto justify-center mx-24 ml-96">
@@ -22,12 +21,7 @@ function RobotDashboardApp() {
                     >
                         {robots.map((robot, index) => (
                             <Card key={index} className="h-auto w-512 my-16 sm:m-16 items-center rounded-8">
-                                <Link
-                                    to={`/apps/GTS/dashboard/booths/`}
-                                    role="button"
-                                >
-                                    <BoothWidget robot={robot}/>
-                                </Link>
+                                <BoothWidget robot={robot}/>
                             </Card>
                         ))}
                     </motion.div>

@@ -3,55 +3,85 @@ import jwtService from 'app/services/jwtService';
 import { URL } from 'app/constants/constants';
 
 const singletonInstance = (function () {
-
-    let instance;
+    // Store multiple connections by group name
+    const connections = {};
 
     function createInstance(groupNames) {
-
         const accessToken = jwtService.getAccessToken();
 
-        return new HubConnectionBuilder().withUrl(`${URL}/hubs/robot${groupNames ? `?group=${groupNames}` : ''}`, {
+        // Create a unique key for this connection
+        const connectionKey = groupNames || 'default';
 
-            accessTokenFactory() {
+        // If we already have a connection for this group, return it
+        if (connections[connectionKey]) {
+            console.log(`Reusing existing SignalR connection for group: ${connectionKey}`);
+            return connections[connectionKey];
+        }
 
-                return accessToken;
-            }
-        }).withAutomaticReconnect().configureLogging(LogLevel.None).build();
+        console.log(`Creating new SignalR connection for group: ${connectionKey}`);
+
+        const connection = new HubConnectionBuilder()
+            .withUrl(`${URL}/hubs/robot${groupNames ? `?group=${groupNames}` : ''}`, {
+                accessTokenFactory() {
+                    return accessToken;
+                }
+            })
+            .withAutomaticReconnect()
+            .configureLogging(LogLevel.Warning)
+            .build();
+
+        // Store the connection
+        connections[connectionKey] = connection;
+
+        // Start the connection
+        connection.start()
+            .then(() => {
+                console.log(`SignalR connection established successfully for group: ${connectionKey}`);
+
+                // Register connection event handlers
+                connection.onreconnecting((error) => {
+                    console.log(`SignalR reconnecting for group ${connectionKey}:`, error);
+                });
+
+                connection.onclose((error) => {
+                    console.log(`SignalR connection closed for group ${connectionKey}:`, error);
+                    // Remove the connection from our store when it's closed
+                    delete connections[connectionKey];
+                });
+            })
+            .catch(err => {
+                console.error(`Error starting SignalR connection for group ${connectionKey}:`, err);
+                // Remove the connection from our store if it fails to start
+                delete connections[connectionKey];
+            });
+
+        return connection;
     }
 
-
-    const stopConnection = () => {
-
-        instance.stop();
+    const stopConnection = (groupNames) => {
+        const connectionKey = groupNames || 'default';
+        if (connections[connectionKey]) {
+            connections[connectionKey].stop();
+            delete connections[connectionKey];
+            console.log(`Stopped SignalR connection for group: ${connectionKey}`);
+        }
     };
 
+    const stopAllConnections = () => {
+        Object.keys(connections).forEach(key => {
+            connections[key].stop();
+            console.log(`Stopped SignalR connection for group: ${key}`);
+        });
+        // Clear all connections
+        Object.keys(connections).forEach(key => {
+            delete connections[key];
+        });
+    };
 
     return {
-
-        createConnectionBuilder(groupNames) {
-
-            function start() {
-                instance = createInstance(groupNames);
-
-                try {
-                    instance.start();
-                } catch (err) {
-                }
-            }
-
-            if (!instance) {
-                start();
-            } else {
-                instance.stop();
-                start();
-            }
-
-            return instance;
-        }, stopConnection, createConnectionBuilder2(groupNames) {
-            const instance2 = createInstance(groupNames);
-            instance2.start();
-            return instance2;
-        }
+        createConnectionBuilder: createInstance,
+        stopConnection,
+        stopAllConnections
     };
 })();
 

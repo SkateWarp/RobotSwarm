@@ -27,12 +27,14 @@ function LeafSortingConfigList() {
     };
 
     const deleteRowElement = () => {
-        const robotToDeactivate = leafTypes.filter((x => x.id === idForDelete))[0];
+        const robotToDeactivate = leafTypes.filter((x) => x.id === idForDelete)[0];
         console.log("robots", robotToDeactivate);
-        dispatch(removeLeafSorting({
-            ...robotToDeactivate,
-            status: 2
-        }));
+        dispatch(
+            removeLeafSorting({
+                ...robotToDeactivate,
+                status: 2,
+            })
+        );
     };
 
     const columns = useMemo(
@@ -52,9 +54,7 @@ function LeafSortingConfigList() {
                 accessor: "isPublic",
                 sortable: true,
                 Cell: ({ row }) => (
-                    <div className="flex items-center">
-                        {row.original.isPublic ? "Si" : "No"}
-                    </div>
+                    <div className="flex items-center">{row.original.isPublic ? "Si" : "No"}</div>
                 ),
             },
             {
