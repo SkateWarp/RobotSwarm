@@ -31,6 +31,9 @@ function LeafTypesConfigDialog() {
 
     const [taskCategories, setTaskCategories] = useState([
         {
+            id: 0,
+            name: "Ninguno"
+        }, {
             id: 1,
             name: "Transporte"
         },
@@ -57,13 +60,20 @@ function LeafTypesConfigDialog() {
 
     const initDialog = useCallback(() => {
         if (leafTypesConfigDialog.type === "edit" && leafTypesConfigDialog.data) {
-            reset(leafTypesConfigDialog.data);
+            console.log(leafTypesConfigDialog.data);
+            reset({
+                ...leafTypesConfigDialog.data,
+                taskCategoryId: leafTypesConfigDialog.data.taskType || taskCategories[0].id,
+            });
         }
 
         if (leafTypesConfigDialog.type === "new") {
-            reset(defaultValues);
+            reset({
+                ...defaultValues,
+                taskCategoryId: taskCategories[0].id,
+            });
         }
-    }, [leafTypesConfigDialog.data, leafTypesConfigDialog.type, reset]);
+    }, [leafTypesConfigDialog.data, leafTypesConfigDialog.type, reset, taskCategories]);
 
     useEffect(() => {
         if (leafTypesConfigDialog.props.open) {
