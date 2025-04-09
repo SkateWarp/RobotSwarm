@@ -1,6 +1,7 @@
 import { memo, useEffect, useState, useRef } from "react";
 import PropTypes from "prop-types";
 import { Table, TableBody, TableCell, TableRow, Tooltip, Typography } from "@mui/material";
+import { PlayCircleOutline, PauseCircleOutline } from '@mui/icons-material';
 import axios from "axios";
 import { LOGO, URL } from "../../../../../constants/constants";
 import jwtService from "../../../../../services/jwtService";
@@ -12,6 +13,17 @@ function RobotWidget({ robot }) {
     const [readings, setReadings] = useState([]);
     const [isConnected, setIsConnected] = useState(robot.isConnected);
     const [currentStatus, setCurrentStatus] = useState(robot.status);
+
+    const StatusIcon = () => {
+        switch (currentStatus) {
+            case 0:
+                return <PlayCircleOutline sx={{ fontSize: 48, color: 'green' }} />;
+            case 1:
+                return <PauseCircleOutline sx={{ fontSize: 48, color: 'gray' }} />;
+            default:
+                return null;
+        }
+    };
 
     const statusDescription = (status) => {
         switch (status) {
@@ -69,17 +81,23 @@ function RobotWidget({ robot }) {
         <div className="w-full p-32">
             <div className="flex w-full justify-between">
                 <div>
-                    <Tooltip title={statusDescription(currentStatus)} arrow>
-                        <div className="w-36 h-36">
+                    <Tooltip title={isConnected ? "Conectado" : "Desconectado"} arrow>
+                        <div className="w-36 h-36 flex justify-center items-center">
                             <div
                                 className="h2 p-8"
                                 style={{
                                     backgroundColor: isConnected ? "green" : "red",
                                     display: "inline-flex",
                                     borderRadius: "25px",
-                                    left: "80%",
                                 }}
                             />
+                        </div>
+                    </Tooltip>
+                </div>
+                <div>
+                    <Tooltip title={statusDescription(currentStatus)} arrow>
+                        <div className="w-36 h-36 flex justify-center items-center">
+                            <StatusIcon />
                         </div>
                     </Tooltip>
                 </div>
