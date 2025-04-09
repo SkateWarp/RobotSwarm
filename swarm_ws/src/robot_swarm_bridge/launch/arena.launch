@@ -1,29 +1,22 @@
+<?xml version="1.0"?>
 <launch>
+  <!-- Arguments -->
+  <arg name="use_gui" default="true"/>
+  <arg name="arena_width" default="10.0"/>
+  <arg name="arena_height" default="10.0"/>
+  
   <!-- Launch Gazebo with an empty world -->
   <include file="$(find gazebo_ros)/launch/empty_world.launch">
     <arg name="world_name" value="$(find gazebo_ros)/worlds/empty.world"/>
+    <arg name="gui" value="$(arg use_gui)"/>
   </include>
   
-  <!-- Load and spawn the arena -->
+  <!-- Load and spawn the arena with the correct package name -->
   <param name="arena_description" 
-         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/urdf/turtlebot_arena.xacro" />
+         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/urdf/turtlebot_arena.xacro 
+                 arena_width:=$(arg arena_width) arena_height:=$(arg arena_height)"/>
+  
   <node name="spawn_arena" pkg="gazebo_ros" type="spawn_model" 
         args="-urdf -param arena_description -model arena -x 0 -y 0 -z 0" 
         output="screen" />
-  
-  <!-- Spawn the first TurtleBot directly -->
-  <group ns="turtlebot1">
-    <param name="robot_description" 
-           command="$(find xacro)/xacro --inorder $(find turtlebot3_description)/urdf/turtlebot3_waffle.urdf.xacro" />
-    <node name="spawn_turtlebot1" pkg="gazebo_ros" type="spawn_model" 
-          args="-urdf -param robot_description -model turtlebot1 -x 1.0 -y 1.0 -z 0.05" />
-  </group>
-  
-  <!-- Spawn the second TurtleBot directly -->
-  <group ns="turtlebot2">
-    <param name="robot_description" 
-           command="$(find xacro)/xacro --inorder $(find turtlebot3_description)/urdf/turtlebot3_waffle.urdf.xacro" />
-    <node name="spawn_turtlebot2" pkg="gazebo_ros" type="spawn_model" 
-          args="-urdf -param robot_description -model turtlebot2 -x -1.0 -y -1.0 -z 0.05 -Y 1.57" />
-  </group>
 </launch>
