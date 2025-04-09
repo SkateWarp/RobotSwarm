@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - "SwarmBackend/**"
+      - "swarm_ws/**"
       - "docker-compose.prod.yml"
 jobs:
   deploy:

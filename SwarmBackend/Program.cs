@@ -3,6 +3,7 @@ using SwarmBackend.Helpers;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Routes;
 using SwarmBackend.Services;
+using System.Text.Json;
 
 // trigger
 var builder = WebApplication.CreateBuilder(args);
@@ -39,7 +40,9 @@ builder.Services.AddSignalR(hubOptions =>
 })
 .AddJsonProtocol(options =>
 {
-    options.PayloadSerializerOptions.PropertyNamingPolicy = null;
+    // Configure to use camelCase for all JSON serialization
+    options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    options.PayloadSerializerOptions.PropertyNameCaseInsensitive = true;
 });
 
 builder.Services.AddLogging(logging =>

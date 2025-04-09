@@ -150,7 +150,7 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
             return new Result<RobotGroupResponse>(new Exception("Grupo no encontrado"));
         }
 
-        if (!group.Robots.Any())
+        if (group.Robots.Count == 0)
         {
             return new Result<RobotGroupResponse>(new Exception("El grupo no tiene robots asignados"));
         }
