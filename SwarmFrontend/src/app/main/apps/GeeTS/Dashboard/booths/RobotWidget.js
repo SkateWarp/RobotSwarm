@@ -1,7 +1,7 @@
 import { memo, useEffect, useState, useRef } from "react";
 import PropTypes from "prop-types";
 import { Table, TableBody, TableCell, TableRow, Tooltip, Typography } from "@mui/material";
-import { PlayCircleOutline, PauseCircleOutline } from '@mui/icons-material';
+import { Pause, PauseCircleOutline, PlayArrow } from '@mui/icons-material';
 import axios from "axios";
 import { LOGO, URL } from "../../../../../constants/constants";
 import jwtService from "../../../../../services/jwtService";
@@ -17,9 +17,9 @@ function RobotWidget({ robot }) {
     const StatusIcon = () => {
         switch (currentStatus) {
             case 0:
-                return <PlayCircleOutline sx={{ fontSize: 48, color: 'green' }} />;
+                return <Pause sx={{ fontSize: 48, color: 'gray' }} />;
             case 1:
-                return <PauseCircleOutline sx={{ fontSize: 48, color: 'gray' }} />;
+                return <PlayArrow sx={{ fontSize: 48, color: 'green' }} />;
             default:
                 return null;
         }
