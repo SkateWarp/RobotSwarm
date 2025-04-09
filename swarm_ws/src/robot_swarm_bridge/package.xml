@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>robot_swarm_manager</name>
+  <name>robot_swarm_bridge</name>
   <version>0.1.0</version>
   <description>
     A modular ROS package for managing a swarm of TurtleBot3 robots with enhanced drawing capabilities.
