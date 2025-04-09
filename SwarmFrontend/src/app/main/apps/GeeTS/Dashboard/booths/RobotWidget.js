@@ -11,6 +11,18 @@ function RobotWidget({ robot }) {
     const eventHandlerRef = useRef(null);
     const [readings, setReadings] = useState([]);
     const [isConnected, setIsConnected] = useState(robot.isConnected);
+    const [currentStatus, setCurrentStatus] = useState(robot.status);
+
+    const statusDescription = (status) => {
+        switch (status) {
+            case 0:
+                return "Reposo";
+            case 1:
+                return "Trabajando";
+
+        };
+        return "Desconocido";
+    };
 
     useEffect(() => {
         // Get or create a connection for this specific robot
@@ -33,15 +45,16 @@ function RobotWidget({ robot }) {
 
         // Set up SignalR event handlers
         eventHandlerRef.current = (current) => {
-            console.debug(`Received sensor readings for robot ${robot.id}:`, current);
             setReadings(current);
         };
 
         // Register the event handler
         connectionRef.current.on(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
+        connectionRef.current.on(`RobotConnectionChanged/${robot.id}`, (params) => {
+            setIsConnected(params.isConnected);
+        });
         connectionRef.current.on(`RobotStatusChanged/${robot.id}`, (params) => {
-            console.debug(`Received robot status for robot ${robot.id}:`, params);
-            setIsConnected(params.status);
+            setCurrentStatus(params.status);
         });
 
         // Cleanup function to remove event handlers when component unmounts
@@ -56,7 +69,7 @@ function RobotWidget({ robot }) {
         <div className="w-full p-32">
             <div className="flex w-full justify-between">
                 <div>
-                    <Tooltip title="Encendida" arrow>
+                    <Tooltip title={statusDescription(currentStatus)} arrow>
                         <div className="w-36 h-36">
                             <div
                                 className="h2 p-8"
