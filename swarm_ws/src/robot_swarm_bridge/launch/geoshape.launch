@@ -14,18 +14,12 @@
   <!-- Load configuration -->
   <rosparam command="load" file="$(find robot_swarm_bridge)/config/params/robot_params.yaml" />
   
-  <!-- Launch Gazebo with the arena -->
-  <include file="$(find gazebo_ros)/launch/empty_world.launch">
-    <arg name="world_name" value="$(find gazebo_ros)/worlds/empty.world"/>
-    <arg name="gui" value="$(arg use_gui)"/>
+  <!-- Use the arena.launch file that has the correct path -->
+  <include file="$(find robot_swarm_bridge)/launch/arena.launch">
+    <arg name="use_gui" value="$(arg use_gui)"/>
+    <arg name="arena_width" value="$(arg arena_width)"/>
+    <arg name="arena_height" value="$(arg arena_height)"/>
   </include>
-  
-  <!-- Load and spawn the arena -->
-  <param name="arena_description" 
-         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/urdf/turtlebot_arena.xacro"/>
-  <node name="spawn_arena" pkg="gazebo_ros" type="spawn_model" 
-        args="-urdf -param arena_description -model arena -x 0 -y 0 -z 0" 
-        output="screen" />
   
   <!-- Robot Manager node -->
   <node name="robot_manager" pkg="robot_swarm_bridge" type="robot_manager.py" output="screen">

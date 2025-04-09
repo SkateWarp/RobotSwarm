@@ -11,9 +11,9 @@
     <arg name="gui" value="$(arg use_gui)"/>
   </include>
   
-  <!-- Load and spawn the arena with the correct package name -->
+  <!-- Load and spawn the arena with the CORRECT path that uses ../ -->
   <param name="arena_description" 
-         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/urdf/turtlebot_arena.xacro 
+         command="$(find xacro)/xacro --inorder $(find robot_swarm_bridge)/../urdf/turtlebot_arena.xacro 
                  arena_width:=$(arg arena_width) arena_height:=$(arg arena_height)"/>
   
   <node name="spawn_arena" pkg="gazebo_ros" type="spawn_model" 
