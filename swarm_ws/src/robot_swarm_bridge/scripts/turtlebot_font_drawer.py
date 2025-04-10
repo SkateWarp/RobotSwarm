@@ -1016,6 +1016,33 @@ class TurtleBotFontDrawer:
         with self.lock:
             for robot_name in self.publishers:
                 self.stop_robot(robot_name)
+
+    def check_for_obstacles(self, robot_name, target_x, target_y):
+        """
+        Check if there are obstacles in the path to the target point
+        
+        Args:
+            robot_name (str): Name of the robot
+            target_x (float): Target X coordinate
+            target_y (float): Target Y coordinate
+            
+        Returns:
+            bool: True if obstacle detected, False otherwise
+        """
+        with self.lock:  # If you have a lock in your class
+            for other_robot, (other_x, other_y) in self.robot_positions.items():
+                if other_robot == robot_name:
+                    continue
+                
+                # Calculate distance between target and other robot
+                dist = math.sqrt((target_x - other_x)**2 + (target_y - other_y)**2)
+                
+                # If another robot is too close to the target point, consider it an obstacle
+                if dist < 0.5:  # 0.5 meters minimum distance
+                    rospy.loginfo(f"Obstacle detected: {other_robot} near target point for {robot_name}")
+                    return True  # Obstacle detected
+        
+        return False  # No obstacles
     
     def stop_robot(self, robot_name):
         """Stop the robot by publishing zero velocity"""
@@ -1423,6 +1450,7 @@ class TurtleBotFontDrawer:
     def move_to_point(self, robot_name, target_x, target_y, speed=None):
         """
         Move the robot to a specific point using closed-loop control with odometry feedback.
+        Enhanced with obstacle avoidance.
         
         Args:
             robot_name (str): Name of the robot to move
@@ -1441,16 +1469,46 @@ class TurtleBotFontDrawer:
                 rospy.logwarn(f"No publisher for robot {robot_name}")
                 return False
                 
-        # Ensure target is within arena boundaries
-        target_point = (target_x, target_y)
-        target_point = self.arena_manager.adjust_point_to_bounds(target_point)
-        target_x, target_y = target_point
+            # Get current position
+            if robot_name not in self.robot_positions:
+                rospy.logwarn(f"No position data for robot {robot_name}")
+                return False
+                
+            current_x, current_y = self.robot_positions[robot_name]
         
-        # Check for collisions
-        if self.arena_manager.check_robot_collision(robot_name, target_point):
-            rospy.logwarn(f"Target point would cause collision for robot {robot_name}")
-            return False
+        # Check if target point would cause collision
+        if self.check_for_obstacles(robot_name, target_x, target_y):
+            # Obstacle detected, adjust the target position
+            rospy.loginfo(f"Adjusting path for {robot_name} to avoid obstacle")
             
+            # Calculate direction to original target
+            direction = math.atan2(target_y - current_y, target_x - current_x)
+            
+            # Try different angles to find a clear path
+            clear_path_found = False
+            for angle_offset in [math.pi/4, -math.pi/4, math.pi/2, -math.pi/2, 3*math.pi/4, -3*math.pi/4]:
+                # Calculate new angle with offset
+                new_angle = direction + angle_offset
+                
+                # Calculate new target 0.5m away in the new direction
+                new_target_x = current_x + 0.5 * math.cos(new_angle)
+                new_target_y = current_y + 0.5 * math.sin(new_angle)
+                
+                # Check if new target is clear
+                if not self.check_for_obstacles(robot_name, new_target_x, new_target_y):
+                    rospy.loginfo(f"Found clear path at angle offset {angle_offset}")
+                    # Use this as intermediate target
+                    target_x = new_target_x
+                    target_y = new_target_y
+                    clear_path_found = True
+                    break
+            
+            if not clear_path_found:
+                rospy.logwarn(f"Could not find clear path for {robot_name}")
+        
+        # Continue with the existing move_to_point implementation
+        # ... (the rest of your existing method that handles actual movement)
+        
         control_rate = rospy.Rate(self.control_rate)
         max_duration = 60.0  # Maximum time to try reaching the target (seconds)
         start_time = rospy.Time.now()
@@ -1485,7 +1543,9 @@ class TurtleBotFontDrawer:
             target_theta = math.atan2(dy, dx)
             
             # Normalize angle difference to [-pi, pi]
-            angle_diff = GeometryUtils.normalize_angle(target_theta - current_theta)
+            angle_diff = target_theta - current_theta
+            while angle_diff > math.pi: angle_diff -= 2*math.pi
+            while angle_diff < -math.pi: angle_diff += 2*math.pi
             
             # Create twist message
             twist = Twist()
