@@ -1315,6 +1315,7 @@ class TurtleBotFontDrawer:
             msg (std_msgs.String): Command message in format "robot_name:action[:params]"
         """
         try:
+            rospy.loginfo(f"DRAWER RECEIVED: {msg.data}")
             # Parse command
             robot_name, action, params = self.parse_command(msg.data)
             
@@ -1485,6 +1486,7 @@ class TurtleBotFontDrawer:
             current_x, current_y = self.robot_positions[robot_name]
         
         # Check if target would cause collision and find safe path
+        rospy.loginfo(f"MOVE: {robot_name} to ({target_x:.2f}, {target_y:.2f})")
         original_target = (target_x, target_y)
         if self.arena_manager.check_robot_collision(robot_name, original_target):
             rospy.loginfo(f"Finding safe path for {robot_name} to avoid collision")
@@ -1642,6 +1644,7 @@ class TurtleBotFontDrawer:
         """
         # Create circle at origin, then translate to robot
         circle = ShapeLibrary.create_circle(0, 0, radius)
+        rospy.loginfo(f"CIRCLE: robot={robot_name}, radius={radius}, scale={scale}")
         self.draw_shape(robot_name, circle, scale)
     
     def draw_square(self, robot_name, side_length=0.5, scale=1.0):
