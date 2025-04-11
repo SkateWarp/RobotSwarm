@@ -144,27 +144,6 @@
     <origin xyz="-5.0 0 0.5" rpy="0 0 0"/>
   </joint>
 
-  <!-- ========== Pushable Block (replacing sphere) ========== -->
-  <link name="pushable_block">
-    <visual>
-      <geometry>
-        <box size="0.3 0.4 0.15"/>  <!-- Small box that can be pushed by turtlebots -->
-      </geometry>
-      <material name="object_blue">
-        <color rgba="0.3 0.3 1.0 1"/>
-      </material>
-    </visual>
-    <collision>
-      <geometry>
-        <box size="0.3 0.4 0.15"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <!-- Light enough for turtlebots to push -->
-      <mass value="0.5"/>
-      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
-    </inertial>
-  </link>
 
   <!-- Create a floating joint that allows the block to move freely -->
   <joint name="pushable_block_joint" type="floating">
@@ -172,46 +151,6 @@
     <child link="pushable_block"/>
     <origin xyz="0 0 0.125" rpy="0 0 0"/>  <!-- Positioned on the floor -->
   </joint>
-
-  <!-- Add Gazebo-specific properties for the pushable block -->
-  <gazebo reference="pushable_block">
-    <material>Gazebo/Blue</material>
-    <mu1>0.1</mu1>  <!-- Low friction coefficient -->
-    <mu2>0.1</mu2>
-    <kp>1000.0</kp>  <!-- Contact stiffness -->
-    <kd>100.0</kd>   <!-- Contact damping -->
-  </gazebo>
-  
-  <!-- ========== Designated Area (Target Zone) ========== -->
-  <link name="target_zone">
-    <visual>
-      <geometry>
-        <cylinder radius="0.75" length="0.01"/>  <!-- Circular target zone -->
-      </geometry>
-      <material name="target_zone_material">
-        <color rgba="0.0 1.0 0.0 0.3"/>  <!-- Semi-transparent green -->
-      </material>
-    </visual>
-    <!-- No collision geometry - intangible -->
-    <inertial>
-      <mass value="0.001"/>  <!-- Nearly massless -->
-      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
-    </inertial>
-  </link>
-
-  <!-- Fixed joint to attach the target zone to the arena -->
-  <joint name="target_zone_joint" type="fixed">
-    <parent link="arena_link"/>
-    <child link="target_zone"/>
-    <origin xyz="2 2 0.05" rpy="0 0 0"/>  <!-- Positioned at (2,2) -->
-  </joint>
-
-  <!-- Gazebo-specific properties for the target zone -->
-  <gazebo reference="target_zone">
-    <material>Gazebo/Green</material>
-    <transparency>0.7</transparency>  <!-- Make it transparent -->
-    <collideBitmask>0x00</collideBitmask>  <!-- Disable collisions -->
-  </gazebo>
 
   <!-- Add Gazebo-specific properties to make the entire model static -->
   <gazebo>
