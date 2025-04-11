@@ -146,7 +146,8 @@ class Line(DrawingPrimitive):
     def __init__(self, start_x, start_y, end_x, end_y):
         self.start = (start_x, start_y)
         self.end = (end_x, end_y)
-    
+        rospy.Subscriber("/robot_manager/robot_list", String, self.robot_list_callback)
+
     def get_points(self, num_points=20):
         """Get evenly spaced points along the line"""
         points = []
@@ -1017,32 +1018,56 @@ class TurtleBotFontDrawer:
             for robot_name in self.publishers:
                 self.stop_robot(robot_name)
 
-    def check_for_obstacles(self, robot_name, target_x, target_y):
+    # Add this new method to the TurtleBotFontDrawer class
+    def robot_list_callback(self, msg):
         """
-        Check if there are obstacles in the path to the target point
+        Process robot list updates and auto-register robots.
         
         Args:
-            robot_name (str): Name of the robot
-            target_x (float): Target X coordinate
-            target_y (float): Target Y coordinate
-            
-        Returns:
-            bool: True if obstacle detected, False otherwise
+            msg (std_msgs.String): JSON string with robot info
         """
-        with self.lock:  # If you have a lock in your class
+        try:
+            # Parse the JSON string
+            robot_list = json.loads(msg.data)
+            
+            # Register each robot in the list
+            for robot_info in robot_list:
+                robot_id = robot_info['robot_id']
+                robot_name = f"robot_{robot_id}"
+                
+                # Register if not already registered
+                if robot_name not in self.publishers:
+                    rospy.loginfo(f"Auto-registering robot {robot_name}")
+                    self.register_robot(robot_id)
+                    
+        except Exception as e:
+            rospy.logerr(f"Error processing robot list: {str(e)}")
+            
+    # Improve the check_for_obstacles method
+    def check_for_obstacles(self, robot_name, target_x, target_y):
+        """Check if moving to target would cause collision"""
+        with self.lock:
+            # Get current position of the robot
+            if robot_name not in self.robot_positions:
+                return False
+                
+            current_x, current_y = self.robot_positions[robot_name]
+            
+            # Check each other robot
             for other_robot, (other_x, other_y) in self.robot_positions.items():
                 if other_robot == robot_name:
                     continue
+                    
+                # Check if other robot is in path
+                # Calculate distance to other robot
+                dist = math.sqrt((other_x - target_x)**2 + (other_y - target_y)**2)
                 
-                # Calculate distance between target and other robot
-                dist = math.sqrt((target_x - other_x)**2 + (target_y - other_y)**2)
-                
-                # If another robot is too close to the target point, consider it an obstacle
-                if dist < 0.5:  # 0.5 meters minimum distance
-                    rospy.loginfo(f"Obstacle detected: {other_robot} near target point for {robot_name}")
-                    return True  # Obstacle detected
-        
-        return False  # No obstacles
+                # Consider minimum safe distance (robot diameter + margin)
+                if dist < 0.7:  # Increased from 0.5
+                    rospy.loginfo(f"Obstacle detected: {other_robot} near target for {robot_name}")
+                    return True
+                    
+            return False
     
     def stop_robot(self, robot_name):
         """Stop the robot by publishing zero velocity"""
