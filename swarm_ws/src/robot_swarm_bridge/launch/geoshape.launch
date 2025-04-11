@@ -61,7 +61,8 @@
     <param name="backend_url" value="$(arg backend_url)" />
     <param name="config_file" value="$(find robot_swarm_bridge)/config/config.yaml" />
   </node>
-  
+  <!-- Add robot description parameter -->
+  <param name="robot_description" command="$(find xacro)/xacro $(find turtlebot3_description)/urdf/turtlebot3_waffle.urdf.xacro" />
   <!-- RViz for visualization -->
   <node name="rviz" pkg="rviz" type="rviz" 
         args="-d $(find robot_swarm_bridge)/rviz/robot_swarm.rviz"
