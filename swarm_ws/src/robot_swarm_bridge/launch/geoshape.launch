@@ -61,6 +61,16 @@
     <param name="backend_url" value="$(arg backend_url)" />
     <param name="config_file" value="$(find robot_swarm_bridge)/config/config.yaml" />
   </node>
+
+  <!-- Add these before the RViz node -->
+  <node pkg="tf" type="static_transform_publisher" name="world_to_map" 
+        args="0 0 0 0 0 0 world map 100" />
+
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+    <param name="publish_frequency" type="double" value="50.0" />
+    <param name="tf_prefix" value="robot_tf" />
+  </node>
+
   <!-- Add robot description parameter -->
   <param name="robot_description" command="$(find xacro)/xacro $(find turtlebot3_description)/urdf/turtlebot3_waffle.urdf.xacro" />
   <!-- RViz for visualization -->

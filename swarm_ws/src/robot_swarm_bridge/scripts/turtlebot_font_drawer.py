@@ -1042,7 +1042,7 @@ class TurtleBotFontDrawer:
                     
         except Exception as e:
             rospy.logerr(f"Error processing robot list: {str(e)}")
-            
+
     # Improve the check_for_obstacles method
     def check_for_obstacles(self, robot_name, target_x, target_y):
         """Check if moving to target would cause collision"""
@@ -1473,121 +1473,95 @@ class TurtleBotFontDrawer:
             rospy.logerr(traceback.format_exc())
     
     def move_to_point(self, robot_name, target_x, target_y, speed=None):
-        """
-        Move the robot to a specific point using closed-loop control with odometry feedback.
-        Enhanced with obstacle avoidance.
-        
-        Args:
-            robot_name (str): Name of the robot to move
-            target_x (float): Target X coordinate
-            target_y (float): Target Y coordinate
-            speed (float, optional): Linear speed in m/s. Uses default if None.
-            
-        Returns:
-            bool: True if the target was reached, False otherwise
-        """
+        """Move robot to target point with improved collision avoidance"""
         if speed is None:
             speed = self.speed_linear
-            
-        with self.lock:
-            if robot_name not in self.publishers:
-                rospy.logwarn(f"No publisher for robot {robot_name}")
-                return False
                 
-            # Get current position
-            if robot_name not in self.robot_positions:
-                rospy.logwarn(f"No position data for robot {robot_name}")
+        with self.lock:
+            if robot_name not in self.publishers or robot_name not in self.robot_positions:
+                rospy.logwarn(f"No publisher or position data for robot {robot_name}")
                 return False
                 
             current_x, current_y = self.robot_positions[robot_name]
         
-        # Check if target point would cause collision
-        if self.check_for_obstacles(robot_name, target_x, target_y):
-            # Obstacle detected, adjust the target position
-            rospy.loginfo(f"Adjusting path for {robot_name} to avoid obstacle")
+        # Check if target would cause collision and find safe path
+        original_target = (target_x, target_y)
+        if self.arena_manager.check_robot_collision(robot_name, original_target):
+            rospy.loginfo(f"Finding safe path for {robot_name} to avoid collision")
             
-            # Calculate direction to original target
-            direction = math.atan2(target_y - current_y, target_x - current_x)
+            # Calculate direction vector to target
+            dx = target_x - current_x
+            dy = target_y - current_y
+            dist = math.sqrt(dx*dx + dy*dy)
             
-            # Try different angles to find a clear path
-            clear_path_found = False
-            for angle_offset in [math.pi/4, -math.pi/4, math.pi/2, -math.pi/2, 3*math.pi/4, -3*math.pi/4]:
-                # Calculate new angle with offset
-                new_angle = direction + angle_offset
+            # Try different paths at increasing angles from original
+            for angle_offset in [0.5, -0.5, 1.0, -1.0, 1.5, -1.5]:
+                # Rotate direction vector
+                angle = math.atan2(dy, dx) + angle_offset
                 
-                # Calculate new target 0.5m away in the new direction
-                new_target_x = current_x + 0.5 * math.cos(new_angle)
-                new_target_y = current_y + 0.5 * math.sin(new_angle)
+                # Find intermediate point at half distance
+                safe_dist = min(dist/2, 0.5)  # Don't go too far
+                new_x = current_x + safe_dist * math.cos(angle)
+                new_y = current_y + safe_dist * math.sin(angle)
                 
-                # Check if new target is clear
-                if not self.check_for_obstacles(robot_name, new_target_x, new_target_y):
-                    rospy.loginfo(f"Found clear path at angle offset {angle_offset}")
-                    # Use this as intermediate target
-                    target_x = new_target_x
-                    target_y = new_target_y
-                    clear_path_found = True
-                    break
-            
-            if not clear_path_found:
-                rospy.logwarn(f"Could not find clear path for {robot_name}")
+                # Check if new point is safe
+                if not self.arena_manager.check_robot_collision(robot_name, (new_x, new_y)):
+                    rospy.loginfo(f"Safe intermediate path found at angle {angle_offset}")
+                    
+                    # First move to intermediate point
+                    if self._execute_move(robot_name, new_x, new_y, speed):
+                        # Then try direct path to original target
+                        return self._execute_move(robot_name, original_target[0], original_target[1], speed)
+                    return False
         
-        # Continue with the existing move_to_point implementation
-        # ... (the rest of your existing method that handles actual movement)
+            rospy.logwarn(f"No safe path found for {robot_name}")
+            return False
         
+        # Direct path is safe
+        return self._execute_move(robot_name, target_x, target_y, speed)
+
+    def _execute_move(self, robot_name, target_x, target_y, speed):
+        """Execute the actual movement with PD control"""
+        # Your existing movement control logic goes here
+        # (Without the collision checking parts)
         control_rate = rospy.Rate(self.control_rate)
-        max_duration = 60.0  # Maximum time to try reaching the target (seconds)
+        max_duration = 60.0
         start_time = rospy.Time.now()
         
         while not rospy.is_shutdown():
-            # Check if we've been trying too long
             if (rospy.Time.now() - start_time).to_sec() > max_duration:
-                rospy.logwarn(f"Timeout reached while moving robot {robot_name} to ({target_x:.2f}, {target_y:.2f})")
+                rospy.logwarn(f"Timeout reaching ({target_x:.2f}, {target_y:.2f})")
                 self.stop_robot(robot_name)
                 return False
                 
-            # Get current position and orientation
             with self.lock:
                 if robot_name not in self.robot_positions:
-                    rospy.logwarn(f"No position data available for robot {robot_name}")
                     return False
                     
                 current_x, current_y = self.robot_positions[robot_name]
                 current_theta = self.robot_orientations[robot_name]
             
-            # Calculate remaining distance
             dx = target_x - current_x
             dy = target_y - current_y
             distance = math.sqrt(dx*dx + dy*dy)
             
-            # If we've reached the target, stop and return
             if distance < self.position_tolerance:
                 self.stop_robot(robot_name)
                 return True
                 
-            # Calculate target heading
             target_theta = math.atan2(dy, dx)
+            angle_diff = GeometryUtils.normalize_angle(target_theta - current_theta)
             
-            # Normalize angle difference to [-pi, pi]
-            angle_diff = target_theta - current_theta
-            while angle_diff > math.pi: angle_diff -= 2*math.pi
-            while angle_diff < -math.pi: angle_diff += 2*math.pi
-            
-            # Create twist message
             twist = Twist()
-            
-            # If we're facing the right direction, move forward
             if abs(angle_diff) < self.angle_tolerance:
-                # Forward motion with proportional speed control
-                forward_speed = min(speed, 0.5 * distance + 0.05)  # Slow down as we approach target
+                forward_speed = min(speed, 0.5 * distance + 0.05)
                 twist.linear.x = forward_speed
-                twist.angular.z = 0.3 * angle_diff  # Small correction while moving
+                twist.angular.z = 0.3 * angle_diff
             else:
-                # First turn to face target
                 twist.linear.x = 0
                 twist.angular.z = min(self.speed_angular, max(-self.speed_angular, 
-                                                        self.speed_angular * angle_diff))  # Proportional control
+                                                    self.speed_angular * angle_diff))
             
-            # Publish velocity command
             with self.lock:
                 if robot_name in self.publishers:
                     self.publishers[robot_name].publish(twist)
