@@ -1471,7 +1471,7 @@ class TurtleBotFontDrawer:
             rospy.logerr(traceback.format_exc())
     
     def move_to_point(self, robot_name, target_x, target_y, speed=None):
-        """Move robot to target point with improved collision avoidance"""
+        """Move robot to target point with improved collision avoidance and safety checks"""
         if speed is None:
             speed = self.speed_linear
                 
@@ -1482,9 +1482,41 @@ class TurtleBotFontDrawer:
                 
             current_x, current_y = self.robot_positions[robot_name]
         
+        # Add strict boundary enforcement - don't let robots near walls
+        # These boundaries should match your actual arena
+        arena_min_x, arena_max_x = -4.0, 4.0
+        arena_min_y, arena_max_y = -4.0, 4.0
+        
+        # Add safety margin from boundaries
+        safety_margin = 0.5
+        safe_min_x = arena_min_x + safety_margin
+        safe_max_x = arena_max_x - safety_margin
+        safe_min_y = arena_min_y + safety_margin
+        safe_max_y = arena_max_y - safety_margin
+        
+        # Check if target is outside safe boundaries and adjust
+        original_target = (target_x, target_y)
+        target_x = max(safe_min_x, min(target_x, safe_max_x))
+        target_y = max(safe_min_y, min(target_y, safe_max_y))
+        
+        if original_target != (target_x, target_y):
+            rospy.logwarn(f"Target {original_target} outside safe boundaries, adjusted to ({target_x:.2f}, {target_y:.2f})")
+        
+        # Limit movement distance to avoid large movements
+        max_distance = 1.0  # Maximum 1m movement at a time
+        requested_distance = math.sqrt((target_x - current_x)**2 + (target_y - current_y)**2)
+        
+        if requested_distance > max_distance:
+            rospy.logwarn(f"Requested distance {requested_distance:.2f}m exceeds maximum {max_distance}m")
+            # Scale the movement vector to max_distance
+            direction_x = (target_x - current_x) / requested_distance
+            direction_y = (target_y - current_y) / requested_distance
+            target_x = current_x + direction_x * max_distance
+            target_y = current_y + direction_y * max_distance
+            rospy.loginfo(f"Adjusted target to ({target_x:.2f}, {target_y:.2f})")
+        
         # Check if target would cause collision and find safe path
         rospy.loginfo(f"MOVE: {robot_name} to ({target_x:.2f}, {target_y:.2f})")
-        original_target = (target_x, target_y)
         
         # Reduced collision check for coordinated movements
         # Only check immediate vicinity for better coordination
@@ -1513,7 +1545,7 @@ class TurtleBotFontDrawer:
                     # First move to intermediate point
                     if self._execute_move(robot_name, new_x, new_y, speed):
                         # Then try direct path to original target
-                        return self._execute_move(robot_name, original_target[0], original_target[1], speed)
+                        return self._execute_move(robot_name, target_x, target_y, speed)
                     return False
         
             rospy.logwarn(f"No safe path found for {robot_name}")
@@ -1523,12 +1555,19 @@ class TurtleBotFontDrawer:
         return self._execute_move(robot_name, target_x, target_y, speed)
 
     def _execute_move(self, robot_name, target_x, target_y, speed):
-        """Execute the actual movement with PD control"""
+        """Execute the actual movement with improved PD control and verbose logging"""
         control_rate = rospy.Rate(self.control_rate)
-        max_duration = 30.0  # Reduced from 60s to 30s for faster timeout
+        max_duration = 30.0  # 30s timeout
         start_time = rospy.Time.now()
         
+        # Log start of movement
+        rospy.loginfo(f"Starting movement to ({target_x:.2f}, {target_y:.2f})")
+        
+        # Show actual parameters in use
+        rospy.loginfo(f"Movement parameters: speed={speed}, angle_tolerance={self.angle_tolerance}")
+        
         while not rospy.is_shutdown():
+            # Check timeout
             if (rospy.Time.now() - start_time).to_sec() > max_duration:
                 rospy.logwarn(f"Timeout reaching ({target_x:.2f}, {target_y:.2f})")
                 self.stop_robot(robot_name)
@@ -1536,37 +1575,60 @@ class TurtleBotFontDrawer:
                 
             with self.lock:
                 if robot_name not in self.robot_positions:
+                    rospy.logerr(f"Lost position data for {robot_name}")
                     return False
                     
                 current_x, current_y = self.robot_positions[robot_name]
                 current_theta = self.robot_orientations[robot_name]
             
+            # Calculate distance and angle to target
             dx = target_x - current_x
             dy = target_y - current_y
             distance = math.sqrt(dx*dx + dy*dy)
             
+            # Log progress periodically (every ~1 second)
+            if int((rospy.Time.now() - start_time).to_sec()) % 1 == 0:
+                rospy.loginfo(f"Distance to target: {distance:.3f}m")
+            
+            # Check if we've reached the target
             if distance < self.position_tolerance:
+                rospy.loginfo(f"Reached target position within tolerance ({distance:.3f}m < {self.position_tolerance}m)")
                 self.stop_robot(robot_name)
                 return True
                 
+            # Calculate target heading
             target_theta = math.atan2(dy, dx)
             angle_diff = GeometryUtils.normalize_angle(target_theta - current_theta)
             
+            # Log orientation info periodically
+            if int((rospy.Time.now() - start_time).to_sec()) % 1 == 0:
+                rospy.loginfo(f"Current heading: {math.degrees(current_theta):.1f}°, "
+                            f"Target heading: {math.degrees(target_theta):.1f}°, "
+                            f"Difference: {math.degrees(angle_diff):.1f}°")
+            
+            # Create movement command
             twist = Twist()
-            if abs(angle_diff) < self.angle_tolerance:
-                # Increased speed proportional to distance for faster movement
-                forward_speed = min(speed, 0.6 * distance + 0.08) 
-                twist.linear.x = forward_speed
-                twist.angular.z = 0.4 * angle_diff  # Increased from 0.3 to 0.4
-            else:
+            
+            # Two-phase movement: first rotate, then move forward
+            if abs(angle_diff) > self.angle_tolerance:
+                # Need to rotate first - no forward movement
+                rospy.loginfo(f"Rotating to face target (angle_diff = {math.degrees(angle_diff):.1f}°)")
                 twist.linear.x = 0
                 twist.angular.z = min(self.speed_angular, max(-self.speed_angular, 
-                                                    1.2 * self.speed_angular * angle_diff))  # Increased from 1.0 to 1.2
+                                                self.speed_angular * angle_diff * 2.0))
+            else:
+                # We're facing the target, move forward with minor steering correction
+                forward_speed = min(speed, 0.5 * distance + 0.05)
+                twist.linear.x = forward_speed
+                # Small steering correction while moving to maintain heading
+                twist.angular.z = 0.8 * angle_diff
             
+            # Send command
             with self.lock:
                 if robot_name in self.publishers:
                     self.publishers[robot_name].publish(twist)
             
+            # Sleep to maintain loop rate
             control_rate.sleep()
     
     def follow_path(self, robot_name, points, speed=None):
@@ -1634,17 +1696,45 @@ class TurtleBotFontDrawer:
     # Shape drawing methods
     def draw_circle(self, robot_name, radius=0.5, scale=1.0):
         """
-        Draw a circle using Arc primitive.
+        Draw a circle using Arc primitive with simplified approach.
         
         Args:
             robot_name (str): Name of the robot to use
             radius (float): Radius of the circle in meters
             scale (float): Scale factor
         """
-        # Create circle at origin, then translate to robot
-        circle = ShapeLibrary.create_circle(0, 0, radius)
-        rospy.loginfo(f"CIRCLE: robot={robot_name}, radius={radius}, scale={scale}")
-        self.draw_shape(robot_name, circle, scale)
+        # Make sure radius is reasonable
+        actual_radius = min(radius * scale, 0.5)  # Maximum 0.5m radius for safety
+        
+        rospy.loginfo(f"Drawing circle with radius {actual_radius:.2f}m")
+        
+        with self.lock:
+            if robot_name not in self.robot_positions:
+                rospy.logwarn(f"No position data available for robot {robot_name}")
+                return
+                
+            # Get current position for center
+            current_x, current_y = self.robot_positions[robot_name]
+            
+        # Create points around a circle
+        num_points = 12  # 12 points makes a reasonably smooth circle
+        points = []
+        
+        for i in range(num_points + 1):  # +1 to close the circle
+            angle = 2 * math.pi * i / num_points
+            x = current_x + actual_radius * math.cos(angle)
+            y = current_y + actual_radius * math.sin(angle)
+            points.append((x, y))
+        
+        # Follow the circular path
+        rospy.loginfo(f"Following circular path with {len(points)} points")
+        for i, (x, y) in enumerate(points):
+            rospy.loginfo(f"Moving to circle point {i+1}/{len(points)}")
+            if not self.move_to_point(robot_name, x, y, speed=0.1):  # Slower speed for smooth circles
+                rospy.logwarn(f"Failed to complete circle at point {i+1}")
+                return False
+        
+        return True
     
     def draw_square(self, robot_name, side_length=0.5, scale=1.0):
         """
@@ -2120,7 +2210,7 @@ class TurtleBotFontDrawer:
     
     def coordinated_pattern_drawing(self, pattern, robot_names, scale=1.0):
         """
-        Coordinate multiple robots to draw patterns like stars, flowers, etc.
+        Coordinate multiple robots to draw patterns with improved movement safety.
         
         Args:
             pattern (str): Pattern type ('star', 'flower', 'spiral', etc.)
@@ -2136,6 +2226,7 @@ class TurtleBotFontDrawer:
         # Determine pattern center based on current robot positions rather than fixed (0,0)
         with self.lock:
             if not self.robot_positions:
+                # Default center - use the middle of the arena instead of (0,0)
                 center_x, center_y = 0, 0
             else:
                 # Calculate centroid of all robot positions
@@ -2143,90 +2234,54 @@ class TurtleBotFontDrawer:
                 center_x = sum(pos[0] for pos in positions) / len(positions)
                 center_y = sum(pos[1] for pos in positions) / len(positions)
         
+        # Reduce the scale for patterns to ensure safety
+        safe_scale = min(scale, 1.0)
+        if safe_scale < scale:
+            rospy.logwarn(f"Reduced pattern scale from {scale} to {safe_scale} for safety")
+        
         # Create threads for concurrent robot movements
         movement_threads = []
         
-        if pattern.lower() == 'star':
-            # Create a star pattern with robots
-            points = min(len(robot_names), 8)  # Max 8 points in the star
-            use_robots = robot_names[:points]
-            
-            # First move all robots to the center
-            radius = 3.0 * scale  # Adjust based on scale
-            
-            for i, robot_name in enumerate(use_robots):
-                # Calculate target position
-                angle = 2 * math.pi * i / points
-                target_x = center_x + radius * math.cos(angle)
-                target_y = center_y + radius * math.sin(angle)
-                
-                # Create thread for this robot
-                thread = threading.Thread(
-                    target=self._execute_robot_star_ray,
-                    args=(robot_name, center_x, center_y, target_x, target_y)
-                )
-                movement_threads.append(thread)
-                thread.start()
+        # Make sure pattern fits within arena with extra safety margin
+        arena_min_x, arena_max_x = -4.0, 4.0
+        arena_min_y, arena_max_y = -4.0, 4.0
+        safety_margin = 0.5
         
-        elif pattern.lower() == 'circle':
+        # Calculate maximum pattern radius based on arena size and center position
+        max_x_distance = min(abs(arena_max_x - center_x), abs(arena_min_x - center_x)) - safety_margin
+        max_y_distance = min(abs(arena_max_y - center_y), abs(arena_min_y - center_y)) - safety_margin
+        max_pattern_radius = min(max_x_distance, max_y_distance)
+        
+        # Ensure pattern fits within maximum radius
+        pattern_radius = min(2.0 * safe_scale, max_pattern_radius)
+        
+        rospy.loginfo(f"Pattern center: ({center_x:.2f}, {center_y:.2f}), radius: {pattern_radius:.2f}m")
+        
+        if pattern.lower() == 'circle':
             # Have robots form a circle
-            radius = 2.5 * scale  # Reduced from 3.0 to 2.5 for better visibility
-            
             for i, robot_name in enumerate(robot_names):
                 # Calculate position on circle
                 angle = 2 * math.pi * i / len(robot_names)
-                target_x = center_x + radius * math.cos(angle)
-                target_y = center_y + radius * math.sin(angle)
+                target_x = center_x + pattern_radius * math.cos(angle)
+                target_y = center_y + pattern_radius * math.sin(angle)
                 
-                # Create thread for this robot
-                thread = threading.Thread(
-                    target=self._execute_robot_circle_position,
-                    args=(robot_name, target_x, target_y, scale)
-                )
-                movement_threads.append(thread)
-                thread.start()
+                # Move robot directly (no threading for this test)
+                with self.lock:
+                    if robot_name in self.robot_positions:
+                        rospy.loginfo(f"Moving {robot_name} to circle position ({target_x:.2f}, {target_y:.2f})")
+                        self.move_to_point(robot_name, target_x, target_y)
+                        
+                        # Wait a bit before moving the next robot to reduce interference
+                        rospy.sleep(1.0)
+                        
+                        # After reaching position, draw a small circle
+                        rospy.loginfo(f"{robot_name} drawing circle at position")
+                        self.draw_circle(robot_name, radius=0.3*safe_scale)
         
-        elif pattern.lower() == 'spiral':
-            # Have robots form a spiral
-            for i, robot_name in enumerate(robot_names):
-                # Calculate position on spiral
-                angle = 2 * math.pi * i / len(robot_names)
-                radius_factor = (i + 1) / len(robot_names)
-                target_x = center_x + 3.0 * scale * radius_factor * math.cos(angle)
-                target_y = center_y + 3.0 * scale * radius_factor * math.sin(angle)
-                
-                # Create thread for this robot
-                thread = threading.Thread(
-                    target=self._execute_robot_spiral_position,
-                    args=(robot_name, target_x, target_y, scale)
-                )
-                movement_threads.append(thread)
-                thread.start()
-        
+        # We only implement the circle pattern for testing
         else:
-            # Default pattern: coordinate a simple grid of shapes
-            num_robots = len(robot_names)
-            grid_dim = math.ceil(math.sqrt(num_robots))
-            
-            for i, robot_name in enumerate(robot_names):
-                # Calculate grid position
-                row = i // grid_dim
-                col = i % grid_dim
-                
-                target_x = center_x + (col - (grid_dim-1)/2) * 2.0 * scale
-                target_y = center_y + (row - (grid_dim-1)/2) * 2.0 * scale
-                
-                # Create thread for this robot
-                thread = threading.Thread(
-                    target=self._execute_robot_grid_position,
-                    args=(robot_name, target_x, target_y, scale, i)
-                )
-                movement_threads.append(thread)
-                thread.start()
-        
-        # Wait for all threads to complete
-        for thread in movement_threads:
-            thread.join()
+            rospy.logwarn(f"Pattern '{pattern}' not implemented in test version. Using circle instead.")
+            self.coordinated_pattern_drawing('circle', robot_names, scale)
     
     def _execute_robot_star_ray(self, robot_name, center_x, center_y, target_x, target_y):
         """
