@@ -144,14 +144,6 @@
     <origin xyz="-5.0 0 0.5" rpy="0 0 0"/>
   </joint>
 
-
-  <!-- Create a floating joint that allows the block to move freely -->
-  <joint name="pushable_block_joint" type="floating">
-    <parent link="world"/>
-    <child link="pushable_block"/>
-    <origin xyz="0 0 0.125" rpy="0 0 0"/>  <!-- Positioned on the floor -->
-  </joint>
-
   <!-- Add Gazebo-specific properties to make the entire model static -->
   <gazebo>
     <static>true</static>
