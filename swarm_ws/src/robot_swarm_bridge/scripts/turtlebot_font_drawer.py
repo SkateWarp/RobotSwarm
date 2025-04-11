@@ -31,11 +31,6 @@ from nav_msgs.msg import Odometry
 from tf.transformations import euler_from_quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 
-# Import the provided TBI code
-# Since the provided tbi.py is quite large, I'll import it and adapt as needed
-# Here, we would normally import the classes and functions from tbi.py
-# For this implementation, I'll extract and adapt the necessary parts
-
 # Optional imports - will be handled gracefully if not available
 try:
     import jsonschema
@@ -146,7 +141,6 @@ class Line(DrawingPrimitive):
     def __init__(self, start_x, start_y, end_x, end_y):
         self.start = (start_x, start_y)
         self.end = (end_x, end_y)
-        rospy.Subscriber("/robot_manager/robot_list", String, self.robot_list_callback)
 
     def get_points(self, num_points=20):
         """Get evenly spaced points along the line"""
@@ -972,6 +966,9 @@ class TurtleBotFontDrawer:
         # Subscribe to multi-robot task topic
         rospy.Subscriber("/drawer/task", String, self.task_callback)
         
+        # Subscribe to robot list topic for automatic robot registration
+        rospy.Subscriber("/robot_manager/robot_list", String, self.robot_list_callback)
+        
         # Publisher for status
         self.status_pub = rospy.Publisher("/drawer/status", String, queue_size=10)
         
@@ -1008,6 +1005,9 @@ class TurtleBotFontDrawer:
         # Start status publisher
         self.status_timer = rospy.Timer(rospy.Duration(1.0), self.publish_status)
         
+        # List of robot movement threads
+        self.movement_threads = {}
+        
         rospy.loginfo("TurtleBot Font Drawer initialized")
         rospy.loginfo("Using robot namespace template: " + robot_namespace_template)
     
@@ -1017,8 +1017,7 @@ class TurtleBotFontDrawer:
         with self.lock:
             for robot_name in self.publishers:
                 self.stop_robot(robot_name)
-
-    # Add this new method to the TurtleBotFontDrawer class
+    
     def robot_list_callback(self, msg):
         """
         Process robot list updates and auto-register robots.
@@ -1043,7 +1042,6 @@ class TurtleBotFontDrawer:
         except Exception as e:
             rospy.logerr(f"Error processing robot list: {str(e)}")
 
-    # Improve the check_for_obstacles method
     def check_for_obstacles(self, robot_name, target_x, target_y):
         """Check if moving to target would cause collision"""
         with self.lock:
@@ -1058,12 +1056,11 @@ class TurtleBotFontDrawer:
                 if other_robot == robot_name:
                     continue
                     
-                # Check if other robot is in path
                 # Calculate distance to other robot
                 dist = math.sqrt((other_x - target_x)**2 + (other_y - target_y)**2)
                 
                 # Consider minimum safe distance (robot diameter + margin)
-                if dist < 0.7:  # Increased from 0.5
+                if dist < 0.6:  # Slightly reduced from 0.7 for better coordination
                     rospy.loginfo(f"Obstacle detected: {other_robot} near target for {robot_name}")
                     return True
                     
@@ -1075,9 +1072,9 @@ class TurtleBotFontDrawer:
             if robot_name in self.publishers:
                 twist = Twist()  # All fields initialize to zero
                 # Publish several times to ensure it's received
-                for _ in range(5):
+                for _ in range(3):  # Reduced from 5 to 3 for faster response
                     self.publishers[robot_name].publish(twist)
-                    rospy.sleep(0.1)
+                    rospy.sleep(0.05)  # Reduced from 0.1 to 0.05
     
     def register_robot(self, robot_id):
         """
@@ -1488,7 +1485,10 @@ class TurtleBotFontDrawer:
         # Check if target would cause collision and find safe path
         rospy.loginfo(f"MOVE: {robot_name} to ({target_x:.2f}, {target_y:.2f})")
         original_target = (target_x, target_y)
-        if self.arena_manager.check_robot_collision(robot_name, original_target):
+        
+        # Reduced collision check for coordinated movements
+        # Only check immediate vicinity for better coordination
+        if self.check_for_obstacles(robot_name, target_x, target_y):
             rospy.loginfo(f"Finding safe path for {robot_name} to avoid collision")
             
             # Calculate direction vector to target
@@ -1497,17 +1497,17 @@ class TurtleBotFontDrawer:
             dist = math.sqrt(dx*dx + dy*dy)
             
             # Try different paths at increasing angles from original
-            for angle_offset in [0.5, -0.5, 1.0, -1.0, 1.5, -1.5]:
+            for angle_offset in [0.3, -0.3, 0.6, -0.6, 1.0, -1.0]:
                 # Rotate direction vector
                 angle = math.atan2(dy, dx) + angle_offset
                 
                 # Find intermediate point at half distance
-                safe_dist = min(dist/2, 0.5)  # Don't go too far
+                safe_dist = min(dist/2, 0.4)  # Reduced distance for faster progress
                 new_x = current_x + safe_dist * math.cos(angle)
                 new_y = current_y + safe_dist * math.sin(angle)
                 
                 # Check if new point is safe
-                if not self.arena_manager.check_robot_collision(robot_name, (new_x, new_y)):
+                if not self.check_for_obstacles(robot_name, new_x, new_y):
                     rospy.loginfo(f"Safe intermediate path found at angle {angle_offset}")
                     
                     # First move to intermediate point
@@ -1524,10 +1524,8 @@ class TurtleBotFontDrawer:
 
     def _execute_move(self, robot_name, target_x, target_y, speed):
         """Execute the actual movement with PD control"""
-        # Your existing movement control logic goes here
-        # (Without the collision checking parts)
         control_rate = rospy.Rate(self.control_rate)
-        max_duration = 60.0
+        max_duration = 30.0  # Reduced from 60s to 30s for faster timeout
         start_time = rospy.Time.now()
         
         while not rospy.is_shutdown():
@@ -1556,13 +1554,14 @@ class TurtleBotFontDrawer:
             
             twist = Twist()
             if abs(angle_diff) < self.angle_tolerance:
-                forward_speed = min(speed, 0.5 * distance + 0.05)
+                # Increased speed proportional to distance for faster movement
+                forward_speed = min(speed, 0.6 * distance + 0.08) 
                 twist.linear.x = forward_speed
-                twist.angular.z = 0.3 * angle_diff
+                twist.angular.z = 0.4 * angle_diff  # Increased from 0.3 to 0.4
             else:
                 twist.linear.x = 0
                 twist.angular.z = min(self.speed_angular, max(-self.speed_angular, 
-                                                    self.speed_angular * angle_diff))
+                                                    1.2 * self.speed_angular * angle_diff))  # Increased from 1.0 to 1.2
             
             with self.lock:
                 if robot_name in self.publishers:
@@ -1984,6 +1983,10 @@ class TurtleBotFontDrawer:
         
         # Position each robot and assign text
         x_pos = center_x - total_width / 2
+        
+        # Create threads for each robot's movement
+        movement_threads = []
+        
         for robot_name, part in text_parts:
             # Calculate width of this part
             part_width = 0
@@ -1993,22 +1996,45 @@ class TurtleBotFontDrawer:
                 else:
                     part_width += self.font_parser.get_advance_width(char, scale)
             
-            # Move robot to starting position
+            # Calculate target position for this robot
             target_x = x_pos + part_width / 2
             target_y = center_y
             
-            with self.lock:
-                if robot_name in self.robot_positions:
-                    # Move to starting position
-                    rospy.loginfo(f"Moving {robot_name} to position ({target_x:.2f}, {target_y:.2f})")
-                    self.move_to_point(robot_name, target_x, target_y)
-                    
-                    # Draw the text part
-                    rospy.loginfo(f"{robot_name} drawing '{part}'")
-                    self.draw_text(robot_name, part, scale)
+            # Create a thread for this robot's movement
+            thread = threading.Thread(
+                target=self._execute_robot_text_part, 
+                args=(robot_name, target_x, target_y, part, scale)
+            )
+            movement_threads.append(thread)
+            thread.start()
             
             # Update position for next robot
             x_pos += part_width
+        
+        # Wait for all threads to complete
+        for thread in movement_threads:
+            thread.join()
+    
+    def _execute_robot_text_part(self, robot_name, target_x, target_y, text, scale):
+        """
+        Helper method to move a robot to position and draw text part (for threading).
+        
+        Args:
+            robot_name (str): Name of the robot
+            target_x (float): Target x position
+            target_y (float): Target y position
+            text (str): Text part to draw
+            scale (float): Scale factor
+        """
+        with self.lock:
+            if robot_name in self.robot_positions:
+                # Move to starting position
+                rospy.loginfo(f"Moving {robot_name} to position ({target_x:.2f}, {target_y:.2f})")
+                self.move_to_point(robot_name, target_x, target_y)
+                
+                # Draw the text part
+                rospy.loginfo(f"{robot_name} drawing '{text}'")
+                self.draw_text(robot_name, text, scale)
     
     def coordinated_shape_drawing(self, shape, robot_names, scale=1.0):
         """
@@ -2025,9 +2051,17 @@ class TurtleBotFontDrawer:
             
         rospy.loginfo(f"Coordinating {len(robot_names)} robots to draw shape: {shape}")
         
+        # Initialize from current positions of robots rather than fixed center
+        with self.lock:
+            if not self.robot_positions:
+                center_x, center_y = 0, 0
+            else:
+                # Calculate centroid of all robot positions
+                positions = list(self.robot_positions.values())
+                center_x = sum(pos[0] for pos in positions) / len(positions)
+                center_y = sum(pos[1] for pos in positions) / len(positions)
+        
         # Calculate positions for robots in a circular pattern
-        center_x = 0
-        center_y = 0
         radius = 2.0 * scale  # Adjust based on scale
         
         positions = []
@@ -2037,27 +2071,52 @@ class TurtleBotFontDrawer:
             y = center_y + radius * math.sin(angle)
             positions.append((x, y))
         
-        # Move robots to positions and draw shapes
+        # Create threads for each robot's movement and drawing
+        movement_threads = []
+        
         for i, robot_name in enumerate(robot_names):
             pos_x, pos_y = positions[i]
             
-            with self.lock:
-                if robot_name in self.robot_positions:
-                    # Move to position
-                    rospy.loginfo(f"Moving {robot_name} to position ({pos_x:.2f}, {pos_y:.2f})")
-                    self.move_to_point(robot_name, pos_x, pos_y)
+            # Create thread for this robot
+            thread = threading.Thread(
+                target=self._execute_robot_shape_drawing,
+                args=(robot_name, pos_x, pos_y, shape, scale)
+            )
+            movement_threads.append(thread)
+            thread.start()
+        
+        # Wait for all threads to complete
+        for thread in movement_threads:
+            thread.join()
+    
+    def _execute_robot_shape_drawing(self, robot_name, pos_x, pos_y, shape, scale):
+        """
+        Helper method to move a robot to position and draw shape (for threading).
+        
+        Args:
+            robot_name (str): Name of the robot
+            pos_x (float): Target x position
+            pos_y (float): Target y position
+            shape (str): Shape to draw
+            scale (float): Scale factor
+        """
+        with self.lock:
+            if robot_name in self.robot_positions:
+                # Move to position
+                rospy.loginfo(f"Moving {robot_name} to position ({pos_x:.2f}, {pos_y:.2f})")
+                self.move_to_point(robot_name, pos_x, pos_y)
+                
+                # Draw the shape
+                if shape.lower() in self.shapes:
+                    shape_func = self.shapes[shape.lower()]
                     
-                    # Draw the shape
-                    if shape.lower() in self.shapes:
-                        shape_func = self.shapes[shape.lower()]
+                    # Prepare kwargs
+                    kwargs = {'scale': scale}
+                    if shape.lower() in self.polygon_sides:
+                        kwargs['n_sides'] = self.polygon_sides[shape.lower()]
                         
-                        # Prepare kwargs
-                        kwargs = {'scale': scale}
-                        if shape.lower() in self.polygon_sides:
-                            kwargs['n_sides'] = self.polygon_sides[shape.lower()]
-                            
-                        rospy.loginfo(f"{robot_name} drawing {shape}")
-                        shape_func(robot_name, **kwargs)
+                    rospy.loginfo(f"{robot_name} drawing {shape}")
+                    shape_func(robot_name, **kwargs)
     
     def coordinated_pattern_drawing(self, pattern, robot_names, scale=1.0):
         """
@@ -2074,9 +2133,18 @@ class TurtleBotFontDrawer:
             
         rospy.loginfo(f"Coordinating {len(robot_names)} robots to draw pattern: {pattern}")
         
-        # Center of the pattern
-        center_x = 0
-        center_y = 0
+        # Determine pattern center based on current robot positions rather than fixed (0,0)
+        with self.lock:
+            if not self.robot_positions:
+                center_x, center_y = 0, 0
+            else:
+                # Calculate centroid of all robot positions
+                positions = list(self.robot_positions.values())
+                center_x = sum(pos[0] for pos in positions) / len(positions)
+                center_y = sum(pos[1] for pos in positions) / len(positions)
+        
+        # Create threads for concurrent robot movements
+        movement_threads = []
         
         if pattern.lower() == 'star':
             # Create a star pattern with robots
@@ -2084,71 +2152,56 @@ class TurtleBotFontDrawer:
             use_robots = robot_names[:points]
             
             # First move all robots to the center
-            for robot_name in use_robots:
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        rospy.loginfo(f"Moving {robot_name} to center position")
-                        self.move_to_point(robot_name, center_x, center_y)
-            
-            # Then have them move outward in a star pattern
             radius = 3.0 * scale  # Adjust based on scale
             
             for i, robot_name in enumerate(use_robots):
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        # Calculate target position
-                        angle = 2 * math.pi * i / points
-                        target_x = center_x + radius * math.cos(angle)
-                        target_y = center_y + radius * math.sin(angle)
-                        
-                        # Move to target position, drawing a line
-                        rospy.loginfo(f"{robot_name} drawing star ray")
-                        self.move_to_point(robot_name, target_x, target_y)
+                # Calculate target position
+                angle = 2 * math.pi * i / points
+                target_x = center_x + radius * math.cos(angle)
+                target_y = center_y + radius * math.sin(angle)
+                
+                # Create thread for this robot
+                thread = threading.Thread(
+                    target=self._execute_robot_star_ray,
+                    args=(robot_name, center_x, center_y, target_x, target_y)
+                )
+                movement_threads.append(thread)
+                thread.start()
         
         elif pattern.lower() == 'circle':
             # Have robots form a circle
-            radius = 3.0 * scale  # Adjust based on scale
+            radius = 2.5 * scale  # Reduced from 3.0 to 2.5 for better visibility
             
             for i, robot_name in enumerate(robot_names):
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        # Calculate position on circle
-                        angle = 2 * math.pi * i / len(robot_names)
-                        target_x = center_x + radius * math.cos(angle)
-                        target_y = center_y + radius * math.sin(angle)
-                        
-                        # Move to position
-                        rospy.loginfo(f"Moving {robot_name} to circle position")
-                        self.move_to_point(robot_name, target_x, target_y)
-            
-            # Have each robot draw a local shape
-            for robot_name in robot_names:
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        rospy.loginfo(f"{robot_name} drawing circle at position")
-                        self.draw_circle(robot_name, radius=0.3*scale)
+                # Calculate position on circle
+                angle = 2 * math.pi * i / len(robot_names)
+                target_x = center_x + radius * math.cos(angle)
+                target_y = center_y + radius * math.sin(angle)
+                
+                # Create thread for this robot
+                thread = threading.Thread(
+                    target=self._execute_robot_circle_position,
+                    args=(robot_name, target_x, target_y, scale)
+                )
+                movement_threads.append(thread)
+                thread.start()
         
         elif pattern.lower() == 'spiral':
             # Have robots form a spiral
             for i, robot_name in enumerate(robot_names):
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        # Calculate position on spiral
-                        angle = 2 * math.pi * i / len(robot_names)
-                        radius_factor = (i + 1) / len(robot_names)
-                        target_x = center_x + 3.0 * scale * radius_factor * math.cos(angle)
-                        target_y = center_y + 3.0 * scale * radius_factor * math.sin(angle)
-                        
-                        # Move to position
-                        rospy.loginfo(f"Moving {robot_name} to spiral position")
-                        self.move_to_point(robot_name, target_x, target_y)
-            
-            # Have each robot draw a spiral
-            for robot_name in robot_names:
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        rospy.loginfo(f"{robot_name} drawing spiral at position")
-                        self.draw_spiral(robot_name, radius=0.5*scale, turns=2)
+                # Calculate position on spiral
+                angle = 2 * math.pi * i / len(robot_names)
+                radius_factor = (i + 1) / len(robot_names)
+                target_x = center_x + 3.0 * scale * radius_factor * math.cos(angle)
+                target_y = center_y + 3.0 * scale * radius_factor * math.sin(angle)
+                
+                # Create thread for this robot
+                thread = threading.Thread(
+                    target=self._execute_robot_spiral_position,
+                    args=(robot_name, target_x, target_y, scale)
+                )
+                movement_threads.append(thread)
+                thread.start()
         
         else:
             # Default pattern: coordinate a simple grid of shapes
@@ -2156,25 +2209,109 @@ class TurtleBotFontDrawer:
             grid_dim = math.ceil(math.sqrt(num_robots))
             
             for i, robot_name in enumerate(robot_names):
-                with self.lock:
-                    if robot_name in self.robot_positions:
-                        # Calculate grid position
-                        row = i // grid_dim
-                        col = i % grid_dim
-                        
-                        target_x = center_x + (col - (grid_dim-1)/2) * 2.0 * scale
-                        target_y = center_y + (row - (grid_dim-1)/2) * 2.0 * scale
-                        
-                        # Move to position
-                        rospy.loginfo(f"Moving {robot_name} to grid position")
-                        self.move_to_point(robot_name, target_x, target_y)
-                        
-                        # Draw a shape
-                        shape_type = ['circle', 'square', 'star', 'heart'][i % 4]
-                        if shape_type in self.shapes:
-                            rospy.loginfo(f"{robot_name} drawing {shape_type}")
-                            shape_func = self.shapes[shape_type]
-                            shape_func(robot_name, scale=scale)
+                # Calculate grid position
+                row = i // grid_dim
+                col = i % grid_dim
+                
+                target_x = center_x + (col - (grid_dim-1)/2) * 2.0 * scale
+                target_y = center_y + (row - (grid_dim-1)/2) * 2.0 * scale
+                
+                # Create thread for this robot
+                thread = threading.Thread(
+                    target=self._execute_robot_grid_position,
+                    args=(robot_name, target_x, target_y, scale, i)
+                )
+                movement_threads.append(thread)
+                thread.start()
+        
+        # Wait for all threads to complete
+        for thread in movement_threads:
+            thread.join()
+    
+    def _execute_robot_star_ray(self, robot_name, center_x, center_y, target_x, target_y):
+        """
+        Helper method for a robot to draw a star ray (for threading).
+        
+        Args:
+            robot_name (str): Name of the robot
+            center_x (float): Center x position
+            center_y (float): Center y position
+            target_x (float): Target x position
+            target_y (float): Target y position
+        """
+        with self.lock:
+            if robot_name in self.robot_positions:
+                # First move to center
+                rospy.loginfo(f"Moving {robot_name} to center position")
+                self.move_to_point(robot_name, center_x, center_y)
+                
+                # Then move to target position, drawing a line
+                rospy.loginfo(f"{robot_name} drawing star ray")
+                self.move_to_point(robot_name, target_x, target_y)
+    
+    def _execute_robot_circle_position(self, robot_name, target_x, target_y, scale):
+        """
+        Helper method for a robot to draw a circle at a position (for threading).
+        
+        Args:
+            robot_name (str): Name of the robot
+            target_x (float): Target x position
+            target_y (float): Target y position
+            scale (float): Scale factor
+        """
+        with self.lock:
+            if robot_name in self.robot_positions:
+                # Move to position
+                rospy.loginfo(f"Moving {robot_name} to circle position")
+                self.move_to_point(robot_name, target_x, target_y)
+                
+                # Draw a circle
+                rospy.loginfo(f"{robot_name} drawing circle at position")
+                self.draw_circle(robot_name, radius=0.3*scale)
+    
+    def _execute_robot_spiral_position(self, robot_name, target_x, target_y, scale):
+        """
+        Helper method for a robot to draw a spiral at a position (for threading).
+        
+        Args:
+            robot_name (str): Name of the robot
+            target_x (float): Target x position
+            target_y (float): Target y position
+            scale (float): Scale factor
+        """
+        with self.lock:
+            if robot_name in self.robot_positions:
+                # Move to position
+                rospy.loginfo(f"Moving {robot_name} to spiral position")
+                self.move_to_point(robot_name, target_x, target_y)
+                
+                # Draw a spiral
+                rospy.loginfo(f"{robot_name} drawing spiral at position")
+                self.draw_spiral(robot_name, radius=0.5*scale, turns=2)
+    
+    def _execute_robot_grid_position(self, robot_name, target_x, target_y, scale, index):
+        """
+        Helper method for a robot to draw a shape at a grid position (for threading).
+        
+        Args:
+            robot_name (str): Name of the robot
+            target_x (float): Target x position
+            target_y (float): Target y position
+            scale (float): Scale factor
+            index (int): Index of the robot for selecting a shape
+        """
+        with self.lock:
+            if robot_name in self.robot_positions:
+                # Move to position
+                rospy.loginfo(f"Moving {robot_name} to grid position")
+                self.move_to_point(robot_name, target_x, target_y)
+                
+                # Draw a shape
+                shape_type = ['circle', 'square', 'star', 'heart'][index % 4]
+                if shape_type in self.shapes:
+                    rospy.loginfo(f"{robot_name} drawing {shape_type}")
+                    shape_func = self.shapes[shape_type]
+                    shape_func(robot_name, scale=scale)
     
     def publish_status(self, event=None):
         """Publish the current status of all robots"""
@@ -2185,7 +2322,8 @@ class TurtleBotFontDrawer:
                 for robot_name in self.publishers.keys():
                     # Check if robot is actively moving or drawing
                     if robot_name in self.robot_positions:
-                        status[robot_name] = 'idle'  # Default to idle
+                        # For now just report idle - in a real implementation we would track active drawing state
+                        status[robot_name] = 'idle'
                 
                 # Convert to JSON and publish
                 status_json = json.dumps(status)
@@ -2197,7 +2335,16 @@ class TurtleBotFontDrawer:
         """Run the node until shutdown"""
         rospy.loginfo("TurtleBot Font Drawer is running")
         rospy.loginfo("Send commands to /drawer/command and coordinated tasks to /drawer/task")
+        
+        # Try to auto-detect robots at startup
+        try:
+            rospy.wait_for_message("/robot_manager/robot_list", String, timeout=5.0)
+            rospy.loginfo("Waiting for robot list message to auto-register robots...")
+        except rospy.ROSException:
+            rospy.logwarn("No robot list received. You'll need to send commands to register robots.")
+        
         rospy.spin()
+
 
 def main():
     """Main function to start the node"""
