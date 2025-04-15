@@ -218,7 +218,7 @@ class SignalRHandler:
         
         # Try sending just the status as a single argument
         try:
-            rospy.loginfo(f"Attempting to send status update with robot_id={robot_id}, status={status}")
+            # rospy.loginfo(f"Attempting to send status update with robot_id={robot_id}, status={status}")
             self.connection.send("UpdateStatus", [robot_id, status])  # Try this format first
         except Exception as e:
             rospy.logerr(f"Error with direct parameters: {e}")
@@ -235,7 +235,7 @@ class SignalRHandler:
         Args:
             sensor_data (dict): Sensor reading data
         """
-        rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
+        # rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
         # Format data to match SensorReadingRequest record
         sensor_name = str(sensor_data.get("name"))
         for key, value in sensor_data.items():
@@ -245,7 +245,7 @@ class SignalRHandler:
                     "sensorName":sensor_name,
                     "notes": str(key)
                 }
-                rospy.loginfo(f"Sensor data to sned: {reading_request}")
+                # rospy.loginfo(f"Sensor data to sned: {reading_request}")
 
                 self.connection.send("HandleSensorReading", [
                     int(robot_id),
