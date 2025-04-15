@@ -619,7 +619,7 @@ def swarm_controller():
         for ns_format in possible_leader_ns:
             try:
                 rospy.logdebug(f"Checking for leader odom on: /{ns_format}/odom")
-                rospy.wait_for_message(f'/{ns_format}/odom', Odometry, timeout=5.0) # Shorter check timeout
+                rospy.wait_for_message(f'/{ns_format}/odom', Odometry, timeout=30.0) # Shorter check timeout
                 confirmed_leader_ns = ns_format
                 rospy.loginfo(f"Successfully connected to Leader Odometry on namespace: {confirmed_leader_ns}")
                 break
@@ -640,7 +640,7 @@ def swarm_controller():
         num_followers = rospy.get_param('~num_followers', 3)
         base_radius = rospy.get_param('~formation_radius', 1.5)
         robot_spacing = rospy.get_param('~robot_spacing', 0.3)
-        follower_connect_timeout = rospy.get_param('~follower_connect_timeout', 10.0)
+        follower_connect_timeout = rospy.get_param('~follower_connect_timeout', 30.0)
         leader_index_str = confirmed_leader_ns.split('_')[-1].split('/')[-1]
         try: leader_index = int(leader_index_str)
         except ValueError:
