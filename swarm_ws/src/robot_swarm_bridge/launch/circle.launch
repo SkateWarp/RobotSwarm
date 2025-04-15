@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <launch>
   <!-- Arguments -->
-  <arg name="initial_robots" default="2"/>
+  <arg name="initial_robots" default="5"/>
   <arg name="robot_model" default="waffle"/>
   <arg name="font_path" default="$(find robot_swarm_bridge)/config/simple_font.json"/>
   <arg name="arena_width" default="10.0"/>
@@ -22,12 +22,12 @@
   </include>
   
   <!-- Robot Manager node -->
-  <node name="robot_manager" pkg="robot_swarm_bridge" type="robot_manager.py" output="screen">
+  <!-- <node name="robot_manager" pkg="robot_swarm_bridge" type="robot_manager.py" output="screen">
     <param name="robot_model" value="$(arg robot_model)"/>
     <param name="status_update_rate" value="1.0"/>
     <param name="arena_width" value="$(arg arena_width)"/>
     <param name="arena_height" value="$(arg arena_height)"/>
-  </node>
+  </node> -->
   
   <!-- Task Manager node -->
   <node name="task_manager" pkg="robot_swarm_bridge" type="task_manager.py" output="screen">
@@ -37,7 +37,7 @@
   </node>
   
   <!-- Enhanced Font Drawer node -->
-  <node name="font_drawer" pkg="robot_swarm_bridge" type="turtlebot_font_drawer.py" output="screen">
+  <!-- <node name="font_drawer" pkg="robot_swarm_bridge" type="turtlebot_font_drawer.py" output="screen">
     <param name="robot_namespace_template" value="/robot/{}/"/>
     <param name="font_path" value="$(arg font_path)"/>
     <param name="speed_linear" value="0.2"/>
@@ -48,7 +48,7 @@
     <param name="arena_width" value="$(arg arena_width)"/>
     <param name="arena_height" value="$(arg arena_height)"/>
     <param name="detailed_logging" value="$(arg detailed_logging)"/>
-  </node>
+  </node> -->
   
   <!-- Spawn initial robots -->
   <node name="initial_robot_spawner" pkg="robot_swarm_bridge" type="initial_robot_spawner.py" output="screen">
@@ -61,7 +61,7 @@
     <param name="linear_vel" value="0.15" />
     <param name="angular_vel" value="0.3" />
     <param name="leader_ns" value="tb3_0" />
-    <param name="num_followers" value="2" />
+    <param name="num_followers" value="4" />
     <param name="formation_radius" value="1.5" />
     <param name="robot_spacing" value="0.5" />
     <param name="k_linear" value="0.6" />
