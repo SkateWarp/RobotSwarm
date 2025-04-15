@@ -77,6 +77,11 @@ class SwarmLeader:
             
         self.cmd_pub.publish(cmd)
         
+    def stop(self):
+        """Stop the leader"""
+        cmd = Twist()
+        self.cmd_pub.publish(cmd)
+        
     @staticmethod
     def normalize_angle(angle):
         """Keep angles within [-π, π]"""
@@ -105,6 +110,10 @@ class SwarmMember:
         self.recovery_mode = False
         self.last_dist_error = float('inf')
         self.recovery_timeout = rospy.get_param('~recovery_timeout', 5.0)
+        
+        # Initialization status
+        self.initialized = False
+        self.init_position_reached = False
 
         # ROS interfaces
         self.cmd_pub = rospy.Publisher(f'/{self.ns}/cmd_vel', Twist, queue_size=1)
@@ -153,6 +162,54 @@ class SwarmMember:
         self.yaw = tf.transformations.euler_from_quaternion(
             [quat.x, quat.y, quat.z, quat.w])[2]
         self.sensors_ready = True
+
+    def calculate_init_command(self, phase_progress):
+        """Generate command for initialization phase"""
+        # Calculate a temporary gathering point at a safe distance from leader
+        # Use phase_progress (0-1) to gradually move from current pos to target formation
+        
+        # Phase 1: Move closer to leader first (at reduced radius)
+        init_radius = self.formation_radius * (0.5 + 0.5 * phase_progress)  # Start at 50% of final radius
+        
+        # Compute target position relative to leader
+        init_angle = self.formation_angle
+        target_x = self.leader.position[0] + init_radius * math.cos(init_angle)
+        target_y = self.leader.position[1] + init_radius * math.sin(init_angle)
+        
+        # Compute error
+        dx = target_x - self.position[0]
+        dy = target_y - self.position[1]
+        dist_error = math.hypot(dx, dy)
+        target_angle = math.atan2(dy, dx)
+        angle_error = self.normalize_angle(target_angle - self.yaw)
+        
+        # Check if close enough to initial position
+        if dist_error < 0.2:
+            self.init_position_reached = True
+            
+        # Create command
+        cmd = Twist()
+        
+        # Consider obstacles during initialization too
+        if self.get_min_obstacle_distance() < self.safe_dist * 0.8:
+            # Emergency obstacle avoidance
+            obstacle_dist = self.get_min_obstacle_distance()
+            obstacle_angle = self.get_closest_obstacle_angle()
+            
+            avoidance_gain = 1.5 / (obstacle_dist + 0.1)
+            cmd.linear.x = 0.1  # Slow movement during avoidance
+            cmd.angular.z = -avoidance_gain * math.copysign(1.0, obstacle_angle)
+        else:
+            # Normal initialization movement
+            # Use higher gain during initialization for faster convergence
+            cmd.linear.x = 0.3 * math.tanh(2.0 * dist_error)  # Limit speed for stability
+            cmd.angular.z = 1.5 * angle_error  # Higher angular gain for quicker alignment
+        
+        # Safety limits during initialization
+        cmd.linear.x = max(-0.2, min(0.2, cmd.linear.x))
+        cmd.angular.z = max(-0.8, min(0.8, cmd.angular.z))
+        
+        return cmd
 
     def calculate_command(self, all_followers=None):
         """Generate movement command with enhanced collision avoidance"""
@@ -308,7 +365,7 @@ class SwarmMember:
 
 
 def swarm_controller():
-    rospy.init_node('fixed_swarm_controller')
+    rospy.init_node('staged_swarm_controller')
 
     try:
         # Initialize leader
@@ -316,34 +373,50 @@ def swarm_controller():
         
         # Wait for leader odometry
         rospy.loginfo("Waiting for leader odometry...")
-        if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=60):
-            alt_ns = f"tb3_{leader.ns.split('/')[-1]}"
-            rospy.logwarn(f"Leader odometry not available with namespace {leader.ns}! Trying {alt_ns}...")
+        odom_msg_received = False
+        
+        # Try both namespace formats
+        namespace_formats = [
+            leader.ns,  # Try original format first (robot/1)
+            f"tb3_{leader.ns.split('/')[-1]}", # Try tb3_X format
+            f"robot_{leader.ns.split('/')[-1]}" # Try robot_X format (matching your GUI)
+        ]
+        
+        for ns_format in namespace_formats:
+            try:
+                if rospy.wait_for_message(f'/{ns_format}/odom', Odometry, timeout=60):
+                    leader.ns = ns_format
+                    leader.cmd_pub = rospy.Publisher(f'/{leader.ns}/cmd_vel', Twist, queue_size=1)
+                    leader.odom_sub = rospy.Subscriber(f'/{leader.ns}/odom', Odometry, leader.odom_cb)
+                    leader.scan_sub = rospy.Subscriber(f'/{leader.ns}/scan', LaserScan, leader.scan_cb)
+                    odom_msg_received = True
+                    rospy.loginfo(f"Connected to leader with namespace: {leader.ns}")
+                    break
+            except rospy.ROSException:
+                continue
+                
+        if not odom_msg_received:
+            rospy.logerr("Could not connect to leader with any namespace format!")
+            return
             
-            # Try alternate namespace format
-            leader.ns = alt_ns
-            leader.cmd_pub = rospy.Publisher(f'/{leader.ns}/cmd_vel', Twist, queue_size=1)
-            leader.odom_sub = rospy.Subscriber(f'/{leader.ns}/odom', Odometry, leader.odom_cb)
-            leader.scan_sub = rospy.Subscriber(f'/{leader.ns}/scan', LaserScan, leader.scan_cb)
-            
-            if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=60):
-                rospy.logerr("Leader odometry not available with either namespace!")
-                return
+        # Wait for leader odometry data to be processed
+        rospy.sleep(0.5)
         
         # Formation configuration
         num_followers = rospy.get_param('~num_followers', 5)  # Default to 5
         base_radius = rospy.get_param('~formation_radius', 1.8)  # Larger radius for 5 robots
         robot_spacing = rospy.get_param('~robot_spacing', 0.4)
+        
+        # Create possible namespace formats for followers
+        base_formats = [
+            lambda i: f'robot/{i+2}',    # robot/X format
+            lambda i: f'tb3_{i+1}',      # tb3_X format
+            lambda i: f'robot_{i+2}'     # robot_X format (matching your GUI)
+        ]
 
         # Create followers
         followers = []
         angle_step = 2 * math.pi / num_followers
-        
-        # Try both namespace formats
-        ns_formats = [
-            lambda i: f'robot/{i+2}',  # robot/X format
-            lambda i: f'tb3_{i+1}'     # tb3_X format
-        ]
         
         for i in range(num_followers):
             config = {
@@ -353,7 +426,9 @@ def swarm_controller():
             }
             
             follower_created = False
-            for ns_format in ns_formats:
+            
+            # Try each namespace format for this follower
+            for ns_format in base_formats:
                 follower_ns = ns_format(i)
                 try:
                     # Check if this namespace exists
@@ -375,6 +450,50 @@ def swarm_controller():
             
         rospy.loginfo(f"Swarm initialized with {len(followers)} followers")
 
+        # ==============================================
+        # INITIALIZATION PHASE
+        # ==============================================
+        rospy.loginfo("Starting initialization phase...")
+        
+        # Stop the leader during initialization
+        leader.stop()
+        
+        # Configuration for initialization
+        init_duration = rospy.get_param('~init_duration', 15.0)  # 15 seconds for initialization
+        rate = rospy.Rate(10)  # 10Hz for initialization
+        
+        start_time = rospy.Time.now()
+        
+        while (rospy.Time.now() - start_time).to_sec() < init_duration and not rospy.is_shutdown():
+            # Calculate phase progress (0 to 1)
+            phase_progress = min(1.0, (rospy.Time.now() - start_time).to_sec() / init_duration)
+            
+            # Keep leader stationary
+            leader.stop()
+            
+            # Move followers to initial positions
+            for follower in followers:
+                cmd = follower.calculate_init_command(phase_progress)
+                follower.cmd_pub.publish(cmd)
+                
+            # Check if all followers are in position
+            all_positioned = all(follower.init_position_reached for follower in followers)
+            if all_positioned and phase_progress > 0.5:  # At least 50% of init time passed
+                rospy.loginfo("All followers in position, ending initialization phase")
+                break
+                
+            rate.sleep()
+            
+        # Mark all followers as initialized
+        for follower in followers:
+            follower.initialized = True
+            
+        rospy.loginfo("Initialization complete, starting formation control")
+        
+        # ==============================================
+        # FORMATION PHASE
+        # ==============================================
+        
         # Control loop
         control_rate = rospy.Rate(rospy.get_param('~control_rate', 15))
         
