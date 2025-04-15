@@ -25,7 +25,7 @@ jobs:
       #     echo "Database Logs:"
       #     docker-compose -f docker-compose.prod.yml logs db
       - name: Prune old Docker images
-        run: docker image prune -af
+        run: docker system prune -af
 
       - name: Give permission to script
         run: find . -type f -name "*.py" -exec chmod +x {} \;
