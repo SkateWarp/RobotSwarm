@@ -87,13 +87,13 @@ class SwarmMember:
 
     def calculate_command(self):
         """Generate movement command with collision avoidance"""
-        # Compute time offset based on current time and leader data
-        time_offset = rospy.Time.now().to_sec()  # Adjusted here if needed
-        angle_offset = self.formation_angle + self.leader.angular_vel * time_offset
+        # Compute the desired position based on the leader's current position and heading.
+        # The follower's desired position is at a fixed offset (formation_angle) relative to the leader's heading.
+        desired_angle = self.leader.yaw + self.formation_angle
+        target_x = self.leader.position[0] + (self.formation_radius + self.robot_spacing) * math.cos(desired_angle)
+        target_y = self.leader.position[1] + (self.formation_radius + self.robot_spacing) * math.sin(desired_angle)
 
-        target_x = self.leader.position[0] + (self.formation_radius + self.robot_spacing) * math.cos(angle_offset)
-        target_y = self.leader.position[1] + (self.formation_radius + self.robot_spacing) * math.sin(angle_offset)
-
+        # Compute position error.
         dx = target_x - self.position[0]
         dy = target_y - self.position[1]
         dist_error = math.hypot(dx, dy)
@@ -102,6 +102,8 @@ class SwarmMember:
 
         cmd = Twist()
 
+        # Collision avoidance: if an obstacle is close, reduce forward speed
+        # and add an additional angular rotation to help steer clear.
         if self.obstacle_dist < self.safe_dist:
             avoidance = 1.2 / (self.obstacle_dist + 0.1)
             cmd.linear.x = max(0, self.k_lin * dist_error * 0.5)
@@ -110,10 +112,11 @@ class SwarmMember:
             cmd.linear.x = self.k_lin * dist_error
             cmd.angular.z = self.k_ang * angle_error
 
+        # Enforce safety limits.
         cmd.linear.x = max(-0.4, min(0.4, cmd.linear.x))
         cmd.angular.z = max(-1.5, min(1.5, cmd.angular.z))
-
         return cmd
+
 
     @staticmethod
     def normalize_angle(angle):
