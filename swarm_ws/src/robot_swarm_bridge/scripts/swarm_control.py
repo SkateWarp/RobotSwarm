@@ -6,528 +6,771 @@ import time
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
+from enum import Enum
 
+# --- Constants ---
+NODE_NAME = 'enhanced_swarm_controller'
+DEFAULT_CONTROL_RATE = 15 # Hz
+DEFAULT_INIT_DURATION = 15.0 # seconds
+DEFAULT_RECOVERY_TIMEOUT = 5.0 # seconds
+ANGLE_NORMALIZATION_THRESHOLD = 0.01 # Radians, threshold for small angle changes
+
+# --- Helper Functions ---
+def normalize_angle(angle):
+    """Keep angles within [-π, π]"""
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    # Using atan2 is robust but potentially slower for repeated calls if not needed
+    # return math.atan2(math.sin(angle), math.cos(angle))
+    return angle
+
+# --- State Machine for Followers ---
+class FollowerState(Enum):
+    INITIALIZING = 1
+    FORMING = 2
+    AVOIDING_OBSTACLE = 3
+    AVOIDING_ROBOT = 4
+    RECOVERING = 5
+
+# --- Leader Class ---
 class SwarmLeader:
+    """ Controls the leader robot's movement and provides state information. """
     def __init__(self):
+        """ Initializes the leader robot. """
+        rospy.loginfo("Initializing Swarm Leader...")
         # Load parameters with defaults
         self.linear_vel = rospy.get_param('~linear_vel', 0.15)
-        self.angular_vel = rospy.get_param('~angular_vel', 0.25)  # Slowed down for stability
-        self.ns = rospy.get_param('~leader_ns', 'robot/1')
-        
-        # Track actual angular velocity
+        self.angular_vel = rospy.get_param('~angular_vel', 0.25)
+        self.ns = rospy.get_param('~leader_ns', 'robot/1') # Initial guess for namespace
+        self.obstacle_check_dist = rospy.get_param('~leader_obstacle_dist', 0.5) # m
+        self.obstacle_avoid_factor = rospy.get_param('~leader_avoid_factor', 1.5) # Multiplier for angular vel during avoidance
+
+        # Track actual angular velocity for smoother follower prediction
         self.last_yaw = 0.0
-        self.last_yaw_time = time.time()
-        self.actual_angular_vel = self.angular_vel
-        
-        # ROS setup
-        self.cmd_pub = rospy.Publisher(f'/{self.ns}/cmd_vel', Twist, queue_size=1)
-        self.odom_sub = rospy.Subscriber(f'/{self.ns}/odom', Odometry, self.odom_cb)
-        self.scan_sub = rospy.Subscriber(f'/{self.ns}/scan', LaserScan, self.scan_cb)
-        
+        self.last_yaw_time = rospy.Time.now().to_sec()
+        self.actual_angular_vel = 0.0 # Start at zero
+        self.yaw_filter_alpha = 0.3 # Smoothing factor for actual angular velocity
+
+        # ROS setup - Publishers and Subscribers will be finalized after namespace confirmation
+        self.cmd_pub = None
+        self.odom_sub = None
+        self.scan_sub = None
+
         # State variables
         self.position = (0.0, 0.0)
         self.yaw = 0.0
-        self.odom_ready = False
+        self.odom_ready = False # Flag to indicate if odometry has been received
+        self.scan_ready = False # Flag to indicate if scan has been received
         self.obstacle_detected = False
 
+    def finalize_ros_setup(self, actual_ns):
+        """ Sets up ROS interfaces once the correct namespace is confirmed. """
+        self.ns = actual_ns
+        rospy.loginfo(f"Finalizing Leader ROS setup for namespace: {self.ns}")
+        self.cmd_pub = rospy.Publisher(f'/{self.ns}/cmd_vel', Twist, queue_size=1)
+        self.odom_sub = rospy.Subscriber(f'/{self.ns}/odom', Odometry, self.odom_cb, queue_size=1)
+        self.scan_sub = rospy.Subscriber(f'/{self.ns}/scan', LaserScan, self.scan_cb, queue_size=1)
+        # Short delay to allow connections
+        rospy.sleep(0.2)
+
     def odom_cb(self, msg):
-        """Update leader position and orientation"""
-        self.position = (msg.pose.pose.position.x, 
-                         msg.pose.pose.position.y)
+        """ Callback for Odometry messages. Updates position, yaw, and actual angular velocity. """
+        self.position = (msg.pose.pose.position.x, msg.pose.pose.position.y)
         quat = msg.pose.pose.orientation
         current_yaw = tf.transformations.euler_from_quaternion(
             [quat.x, quat.y, quat.z, quat.w])[2]
-        
-        # Calculate actual angular velocity for more accurate formation
-        current_time = time.time()
+
+        current_time = rospy.Time.now().to_sec()
         dt = current_time - self.last_yaw_time
-        if dt > 0.01:  # Only update if enough time has passed
-            yaw_change = self.normalize_angle(current_yaw - self.last_yaw)
-            self.actual_angular_vel = 0.7 * self.actual_angular_vel + 0.3 * (yaw_change / dt)  # Smooth
+
+        if dt > ANGLE_NORMALIZATION_THRESHOLD: # Avoid division by zero or instability
+            # Calculate yaw change, handling wrap-around
+            yaw_change = normalize_angle(current_yaw - self.last_yaw)
+
+            # Calculate instantaneous angular velocity
+            inst_angular_vel = yaw_change / dt
+
+            # Apply a simple low-pass filter to smooth the actual angular velocity
+            self.actual_angular_vel = (1.0 - self.yaw_filter_alpha) * self.actual_angular_vel + \
+                                      self.yaw_filter_alpha * inst_angular_vel
+
             self.last_yaw = current_yaw
             self.last_yaw_time = current_time
-            
+
         self.yaw = current_yaw
-        self.odom_ready = True
+        if not self.odom_ready:
+            rospy.loginfo(f"Leader Odometry Ready (NS: {self.ns})")
+            self.odom_ready = True
 
     def scan_cb(self, msg):
-        """Simple obstacle detection for leader"""
+        """ Callback for LaserScan messages. Performs simple forward obstacle detection. """
         if not msg.ranges:
+            self.obstacle_detected = False
             return
-            
-        # Check front 90° for obstacles
+
         num_ranges = len(msg.ranges)
-        front_indices = list(range(-num_ranges//8, num_ranges//8))
-        front_ranges = [msg.ranges[i % num_ranges] for i in front_indices]
-        valid_ranges = [r for r in front_ranges if 0.1 < r < 0.5]
-        
+        # Check front 90 degrees (adjust indices as needed based on LIDAR setup)
+        # Example: If range[0] is front, check +/- 45 degrees
+        center_index = num_ranges // 2 # Assuming center index corresponds to 0 radians relative angle
+        angle_increment = msg.angle_increment
+        front_angle_range = math.pi / 4 # +/- 45 degrees
+
+        if angle_increment <= 0: # Safety check for invalid angle_increment
+             rospy.logwarn_throttle(5, f"[{self.ns}] Invalid angle_increment in LaserScan: {angle_increment}")
+             self.obstacle_detected = False
+             return
+
+        indices_per_side = int(math.ceil(front_angle_range / angle_increment))
+
+        # Calculate start and end indices, handling wrap-around if needed
+        # This depends heavily on the specific LIDAR's angle convention (e.g., where index 0 points)
+        # Assuming index 0 is front for simplicity here (adjust if necessary)
+        start_idx = -indices_per_side
+        end_idx = indices_per_side
+
+        # Extract ranges, handling potential index wrapping
+        front_ranges = []
+        for i in range(start_idx, end_idx + 1):
+             actual_index = i % num_ranges
+             front_ranges.append(msg.ranges[actual_index])
+
+        # Filter valid ranges within the detection distance
+        valid_ranges = [r for r in front_ranges if msg.range_min < r < self.obstacle_check_dist]
+
         self.obstacle_detected = len(valid_ranges) > 0
+        self.scan_ready = True
+
 
     def move(self):
-        """Publish continuous circular motion with basic obstacle avoidance"""
+        """ Publishes movement commands for the leader (circular motion with basic avoidance). """
+        if not self.odom_ready or not self.cmd_pub:
+             rospy.logwarn_throttle(5, f"[{self.ns}] Leader move called before ready or publisher setup.")
+             return
+
         cmd = Twist()
-        
         if self.obstacle_detected:
-            # Simple obstacle avoidance - turn more sharply
+            # Simple avoidance: slow down and turn more sharply away from the default turn direction
             cmd.linear.x = self.linear_vel * 0.5
-            cmd.angular.z = self.angular_vel * 1.5
+            # Turn slightly sharper than usual, assuming default turn is positive angular.z
+            # A more robust method would determine which side the obstacle is on.
+            cmd.angular.z = self.angular_vel * self.obstacle_avoid_factor
+            rospy.logwarn_throttle(2, f"[{self.ns}] Leader avoiding obstacle.")
         else:
+            # Normal circular motion
             cmd.linear.x = self.linear_vel
             cmd.angular.z = self.angular_vel
-            
+
+        # Apply safety limits (optional, but good practice)
+        cmd.linear.x = max(-self.linear_vel, min(self.linear_vel, cmd.linear.x))
+        cmd.angular.z = max(-self.angular_vel * 2, min(self.angular_vel * 2, cmd.angular.z)) # Allow sharper turns for avoidance
+
         self.cmd_pub.publish(cmd)
-        
+
     def stop(self):
-        """Stop the leader"""
-        cmd = Twist()
-        self.cmd_pub.publish(cmd)
-        
-    @staticmethod
-    def normalize_angle(angle):
-        """Keep angles within [-π, π]"""
-        return math.atan2(math.sin(angle), math.cos(angle))
+        """ Stops the leader robot. """
+        if self.cmd_pub:
+            rospy.loginfo(f"[{self.ns}] Leader stopping.")
+            self.cmd_pub.publish(Twist()) # Zero velocity command
+        else:
+             rospy.logwarn(f"[{self.ns}] Leader stop called before publisher setup.")
 
 
+# --- Follower Class ---
 class SwarmMember:
+    """ Controls a follower robot, maintaining formation and avoiding collisions. """
     def __init__(self, namespace, leader, formation_config):
-        # Configuration
+        """ Initializes the follower robot. """
         self.ns = namespace
-        self.leader = leader
-        self.formation_angle = formation_config['angle']
-        self.formation_radius = formation_config['radius']
-        self.robot_spacing = formation_config['spacing']
+        self.leader = leader # Reference to the leader object
+        self.formation_angle = formation_config['angle'] # Desired angle relative to leader's heading
+        self.formation_radius = formation_config['radius'] # Desired distance from leader
+        self.robot_spacing = formation_config['spacing'] # Additional spacing factor
 
-        # Control parameters
-        self.k_lin = rospy.get_param('~k_linear', 0.6)
-        self.k_ang = rospy.get_param('~k_angular', 1.2)
-        self.safe_dist = rospy.get_param('~safety_distance', 0.7)
-        
-        # Time tracking for formation
-        self.last_update_time = rospy.Time.now().to_sec()
-        
-        # Recovery behavior
-        self.stuck_time = None
-        self.recovery_mode = False
-        self.last_dist_error = float('inf')
-        self.recovery_timeout = rospy.get_param('~recovery_timeout', 5.0)
-        
-        # Initialization status
-        self.initialized = False
-        self.init_position_reached = False
+        rospy.loginfo(f"Initializing Swarm Member: {self.ns} (Angle: {self.formation_angle:.2f} rad, Radius: {self.formation_radius:.2f} m)")
 
-        # ROS interfaces
-        self.cmd_pub = rospy.Publisher(f'/{self.ns}/cmd_vel', Twist, queue_size=1)
-        self.scan_sub = rospy.Subscriber(f'/{self.ns}/scan', LaserScan, self.scan_cb)
-        self.odom_sub = rospy.Subscriber(f'/{self.ns}/odom', Odometry, self.odom_cb)
+        # --- Control Parameters ---
+        # PID Gains for Formation Control
+        self.k_p_lin = rospy.get_param('~k_p_linear', 0.7)
+        self.k_i_lin = rospy.get_param('~k_i_linear', 0.05)
+        self.k_d_lin = rospy.get_param('~k_d_linear', 0.1)
+        self.k_p_ang = rospy.get_param('~k_p_angular', 1.5)
+        self.k_i_ang = rospy.get_param('~k_i_angular', 0.1)
+        self.k_d_ang = rospy.get_param('~k_d_angular', 0.2)
 
-        # State management
-        self.obstacle_dists = {}  # Store obstacles by angle sector
+        # Safety and Avoidance Parameters
+        self.safe_dist_obstacle = rospy.get_param('~safety_distance_obstacle', 0.6) # Min distance to static obstacles
+        self.safe_dist_robot = rospy.get_param('~safety_distance_robot', 0.7)     # Min distance to other robots (leader/followers)
+        self.obstacle_repulsion_gain = rospy.get_param('~obstacle_repulsion_gain', 0.8) # How strongly to push away from obstacles
+        self.robot_repulsion_gain = rospy.get_param('~robot_repulsion_gain', 1.0)       # How strongly to push away from other robots
+        self.max_linear_vel = rospy.get_param('~max_linear_vel', 0.3)
+        self.max_angular_vel = rospy.get_param('~max_angular_vel', 1.0)
+
+        # Recovery Parameters
+        self.recovery_timeout = rospy.get_param('~recovery_timeout', DEFAULT_RECOVERY_TIMEOUT)
+        self.stuck_dist_threshold = rospy.get_param('~stuck_dist_threshold', 0.02) # Min distance change to be considered "moving"
+        self.stuck_error_threshold = rospy.get_param('~stuck_error_threshold', 0.2) # Min distance error to target to trigger stuck check
+
+        # --- State Variables ---
+        self.state = FollowerState.INITIALIZING # Initial state
         self.position = (0.0, 0.0)
         self.yaw = 0.0
-        self.sensors_ready = False
+        self.obstacle_data = {} # Dictionary {angle: distance} for detected obstacles
+        self.sensors_ready = False # Flag for odom and scan readiness
+        self.init_position_reached = False # Flag for initialization phase completion
 
-    def scan_cb(self, msg):
-        """Process LIDAR data for 360° obstacle detection"""
-        if not msg.ranges:
-            return
-            
-        num_ranges = len(msg.ranges)
-        # Divide the 360° scan into 8 sectors
-        sector_size = num_ranges // 8
-        
-        # Reset obstacle map
-        self.obstacle_dists = {}
-        
-        # Process each sector
-        for i in range(8):
-            start_idx = i * sector_size
-            end_idx = (i+1) * sector_size
-            
-            # Get valid ranges in this sector
-            sector_ranges = msg.ranges[start_idx:end_idx]
-            valid_ranges = [r for r in sector_ranges if 0.1 < r < 3.5]
-            
-            if valid_ranges:
-                # Store minimum distance for this sector
-                angle = i * math.pi/4  # Convert sector to angle (0 is front)
-                self.obstacle_dists[angle] = min(valid_ranges)
-        
-        self.sensors_ready = True
+        # PID Control State Variables
+        self.integral_lin_err = 0.0
+        self.prev_lin_err = 0.0
+        self.integral_ang_err = 0.0
+        self.prev_ang_err = 0.0
+
+        # Time and Stuck Detection
+        self.last_update_time = rospy.Time.now().to_sec()
+        self.stuck_timer_start = None
+        self.last_dist_error = float('inf')
+
+        # ROS Interfaces
+        self.cmd_pub = rospy.Publisher(f'/{self.ns}/cmd_vel', Twist, queue_size=1)
+        self.scan_sub = rospy.Subscriber(f'/{self.ns}/scan', LaserScan, self.scan_cb, queue_size=1)
+        self.odom_sub = rospy.Subscriber(f'/{self.ns}/odom', Odometry, self.odom_cb, queue_size=1)
+        rospy.loginfo(f"[{self.ns}] ROS Interfaces setup.")
+
 
     def odom_cb(self, msg):
-        """Update member position and orientation"""
-        self.position = (msg.pose.pose.position.x,
-                         msg.pose.pose.position.y)
+        """ Callback for Odometry messages. Updates position and yaw. """
+        self.position = (msg.pose.pose.position.x, msg.pose.pose.position.y)
         quat = msg.pose.pose.orientation
         self.yaw = tf.transformations.euler_from_quaternion(
             [quat.x, quat.y, quat.z, quat.w])[2]
-        self.sensors_ready = True
+        if not self.sensors_ready:
+             # Consider sensors ready only after first odom AND scan
+             if hasattr(self, 'scan_received') and self.scan_received:
+                  rospy.loginfo(f"[{self.ns}] Sensors Ready (Odom)")
+                  self.sensors_ready = True
+             self.odom_received = True
 
-    def calculate_init_command(self, phase_progress):
-        """Generate command for initialization phase"""
-        # Calculate a temporary gathering point at a safe distance from leader
-        # Use phase_progress (0-1) to gradually move from current pos to target formation
-        
-        # Phase 1: Move closer to leader first (at reduced radius)
-        init_radius = self.formation_radius * (0.5 + 0.5 * phase_progress)  # Start at 50% of final radius
-        
-        # Compute target position relative to leader
-        init_angle = self.formation_angle
-        target_x = self.leader.position[0] + init_radius * math.cos(init_angle)
-        target_y = self.leader.position[1] + init_radius * math.sin(init_angle)
-        
-        # Compute error
-        dx = target_x - self.position[0]
-        dy = target_y - self.position[1]
-        dist_error = math.hypot(dx, dy)
-        target_angle = math.atan2(dy, dx)
-        angle_error = self.normalize_angle(target_angle - self.yaw)
-        
-        # Check if close enough to initial position
-        if dist_error < 0.2:
-            self.init_position_reached = True
-            
-        # Create command
-        cmd = Twist()
-        
-        # Consider obstacles during initialization too
-        if self.get_min_obstacle_distance() < self.safe_dist * 0.8:
-            # Emergency obstacle avoidance
-            obstacle_dist = self.get_min_obstacle_distance()
-            obstacle_angle = self.get_closest_obstacle_angle()
-            
-            avoidance_gain = 1.5 / (obstacle_dist + 0.1)
-            cmd.linear.x = 0.1  # Slow movement during avoidance
-            cmd.angular.z = -avoidance_gain * math.copysign(1.0, obstacle_angle)
-        else:
-            # Normal initialization movement
-            # Use higher gain during initialization for faster convergence
-            cmd.linear.x = 0.3 * math.tanh(2.0 * dist_error)  # Limit speed for stability
-            cmd.angular.z = 1.5 * angle_error  # Higher angular gain for quicker alignment
-        
-        # Safety limits during initialization
-        cmd.linear.x = max(-0.2, min(0.2, cmd.linear.x))
-        cmd.angular.z = max(-0.8, min(0.8, cmd.angular.z))
-        
-        return cmd
 
-    def calculate_command(self, all_followers=None):
-        """Generate movement command with enhanced collision avoidance"""
-        # Get current time for time-based formation
-        current_time = rospy.Time.now().to_sec()
-        dt = current_time - self.last_update_time
-        
-        # Calculate desired position using time-based rotation
-        # Use leader's actual angular velocity for smoother formation
-        phase_offset = self.leader.yaw + self.leader.actual_angular_vel * dt
-        desired_angle = phase_offset + self.formation_angle
-        
-        target_x = self.leader.position[0] + (self.formation_radius + self.robot_spacing) * math.cos(desired_angle)
-        target_y = self.leader.position[1] + (self.formation_radius + self.robot_spacing) * math.sin(desired_angle)
-        
-        # Update time
-        self.last_update_time = current_time
+    def scan_cb(self, msg):
+        """ Callback for LaserScan. Processes data into obstacle sectors. """
+        if not msg.ranges:
+            self.obstacle_data = {}
+            return
 
-        # Compute error
-        dx = target_x - self.position[0]
-        dy = target_y - self.position[1]
-        dist_error = math.hypot(dx, dy)
-        target_angle = math.atan2(dy, dx)
-        angle_error = self.normalize_angle(target_angle - self.yaw)
-        
-        # Check for leader collision
-        leader_dist = math.hypot(
-            self.position[0] - self.leader.position[0],
-            self.position[1] - self.leader.position[1]
-        )
-        leader_angle = math.atan2(
-            self.leader.position[1] - self.position[1], 
-            self.leader.position[0] - self.position[0]
-        )
-        relative_leader_angle = self.normalize_angle(leader_angle - self.yaw)
-        
-        # Check for other robot collisions
-        robot_collision = False
-        closest_robot_dist = float('inf')
-        closest_robot_angle = 0
-        
+        num_ranges = len(msg.ranges)
+        sector_size = num_ranges // 8 # Divide 360 degrees into 8 sectors
+        new_obstacle_data = {}
+
+        for i in range(8):
+            start_idx = i * sector_size
+            end_idx = (i + 1) * sector_size
+            sector_ranges = msg.ranges[start_idx:end_idx]
+
+            # Filter valid ranges (within sensor limits and reasonable detection range)
+            valid_ranges = [r for r in sector_ranges if msg.range_min < r < msg.range_max and r < 3.5] # Limit detection range
+
+            if valid_ranges:
+                min_dist_in_sector = min(valid_ranges)
+                # Angle represents the center of the sector (0 is front, pi/4 is front-right, etc.)
+                # Adjust if LIDAR zero angle is not forward
+                angle = normalize_angle(i * math.pi / 4)
+                new_obstacle_data[angle] = min_dist_in_sector
+
+        self.obstacle_data = new_obstacle_data
+        if not self.sensors_ready:
+             if hasattr(self, 'odom_received') and self.odom_received:
+                  rospy.loginfo(f"[{self.ns}] Sensors Ready (Scan)")
+                  self.sensors_ready = True
+             self.scan_received = True
+
+    def _calculate_target_position(self, current_time):
+        """ Calculates the desired target position based on leader state and formation config. """
+        # Predict leader's future yaw based on current yaw and smoothed actual angular velocity
+        # This dt should ideally match the control loop rate for better prediction
+        dt_pred = current_time - self.leader.last_yaw_time # Time since leader's last yaw update
+        predicted_leader_yaw = normalize_angle(self.leader.yaw + self.leader.actual_angular_vel * dt_pred)
+
+        # Calculate the absolute desired angle in the world frame
+        desired_world_angle = normalize_angle(predicted_leader_yaw + self.formation_angle)
+
+        # Calculate target coordinates relative to the leader's current position
+        # Add spacing to the radius for the final target distance
+        target_radius = self.formation_radius + self.robot_spacing
+        target_x = self.leader.position[0] + target_radius * math.cos(desired_world_angle)
+        target_y = self.leader.position[1] + target_radius * math.sin(desired_world_angle)
+
+        return target_x, target_y
+
+    def _calculate_pid_control(self, dist_error, angle_error, dt):
+        """ Calculates linear and angular velocities using PID controllers. """
+        # --- Linear Velocity PID ---
+        self.integral_lin_err += dist_error * dt
+        # Anti-windup (clamp integral term)
+        self.integral_lin_err = max(-1.0, min(1.0, self.integral_lin_err)) # Adjust limits as needed
+        derivative_lin_err = (dist_error - self.prev_lin_err) / dt if dt > 0 else 0.0
+        self.prev_lin_err = dist_error
+
+        linear_vel = (self.k_p_lin * dist_error +
+                      self.k_i_lin * self.integral_lin_err +
+                      self.k_d_lin * derivative_lin_err)
+
+        # --- Angular Velocity PID ---
+        self.integral_ang_err += angle_error * dt
+        # Anti-windup
+        self.integral_ang_err = max(-math.pi, min(math.pi, self.integral_ang_err)) # Adjust limits
+        derivative_ang_err = (angle_error - self.prev_ang_err) / dt if dt > 0 else 0.0
+        self.prev_ang_err = angle_error
+
+        angular_vel = (self.k_p_ang * angle_error +
+                       self.k_i_ang * self.integral_ang_err +
+                       self.k_d_ang * derivative_ang_err)
+
+        return linear_vel, angular_vel
+
+    def _calculate_repulsive_velocity(self, all_followers):
+        """ Calculates repulsive velocity components from obstacles and other robots. """
+        repulsive_lin = 0.0
+        repulsive_ang = 0.0
+        obstacle_force_active = False
+        robot_force_active = False
+
+        # --- Obstacle Repulsion ---
+        min_obs_dist = float('inf')
+        closest_obs_angle_rel = 0.0 # Angle relative to robot's front
+
+        for angle_abs, dist in self.obstacle_data.items():
+             if dist < self.safe_dist_obstacle:
+                  # Calculate angle relative to robot heading
+                  relative_angle = normalize_angle(angle_abs - self.yaw) # Assuming angle_abs is world frame sector center
+
+                  # Simple repulsive force: stronger for closer obstacles, pushes away
+                  # We want angular velocity to turn away from relative_angle
+                  # We might want linear velocity to slow down if obstacle is ahead
+                  repulsion_strength = self.obstacle_repulsion_gain * (1.0 / (dist + 0.1) - 1.0 / self.safe_dist_obstacle)
+
+                  # Add angular component (turn away from the obstacle)
+                  # Negative sign because positive angle is CCW, we want to turn away
+                  repulsive_ang -= repulsion_strength * math.copysign(1.0, relative_angle) * (math.pi - abs(relative_angle))/math.pi # Weight by how much it's NOT behind
+
+                  # Add linear component (slow down if obstacle is in front)
+                  # Cosine is positive in front +/- 90deg
+                  if abs(relative_angle) < math.pi / 2:
+                       repulsive_lin -= repulsion_strength * math.cos(relative_angle) * 0.5 # Reduce linear speed more if directly ahead
+
+                  obstacle_force_active = True
+                  if dist < min_obs_dist:
+                       min_obs_dist = dist
+                       closest_obs_angle_rel = relative_angle
+
+
+        # --- Robot Repulsion (Leader and Followers) ---
+        min_robot_dist = float('inf')
+        closest_robot_angle_rel = 0.0
+
+        # Check Leader
+        dx_leader = self.leader.position[0] - self.position[0]
+        dy_leader = self.leader.position[1] - self.position[1]
+        dist_leader = math.hypot(dx_leader, dy_leader)
+
+        if dist_leader < self.safe_dist_robot:
+             relative_angle_leader = normalize_angle(math.atan2(dy_leader, dx_leader) - self.yaw)
+             repulsion_strength = self.robot_repulsion_gain * (1.0 / (dist_leader + 0.1) - 1.0 / self.safe_dist_robot)
+             repulsive_ang -= repulsion_strength * math.copysign(1.0, relative_angle_leader) * (math.pi - abs(relative_angle_leader))/math.pi
+             if abs(relative_angle_leader) < math.pi / 2:
+                   repulsive_lin -= repulsion_strength * math.cos(relative_angle_leader) * 0.8 # Stronger linear repulsion from robots
+             robot_force_active = True
+             if dist_leader < min_robot_dist:
+                  min_robot_dist = dist_leader
+                  closest_robot_angle_rel = relative_angle_leader
+
+
+        # Check Other Followers
         if all_followers:
             for other in all_followers:
-                if other.ns == self.ns:
-                    continue  # Skip self
-                    
-                # Calculate distance to other robot
-                robot_dist = math.hypot(
-                    self.position[0] - other.position[0],
-                    self.position[1] - other.position[1]
-                )
-                
-                if robot_dist < 0.5:  # Detection threshold
-                    robot_collision = True
-                    if robot_dist < closest_robot_dist:
-                        closest_robot_dist = robot_dist
-                        closest_robot_angle = math.atan2(
-                            other.position[1] - self.position[1], 
-                            other.position[0] - self.position[0]
-                        )
-                        closest_robot_angle = self.normalize_angle(closest_robot_angle - self.yaw)
-        
-        # Update stuck detection
-        if abs(dist_error - self.last_dist_error) < 0.02 and dist_error > 0.2:
-            if self.stuck_time is None:
-                self.stuck_time = current_time
-            elif current_time - self.stuck_time > self.recovery_timeout:
-                self.recovery_mode = True
-        else:
-            self.stuck_time = None
-            self.recovery_mode = False
-            
-        self.last_dist_error = dist_error
+                if other.ns == self.ns: continue # Skip self
 
-        # Create command
+                dx_other = other.position[0] - self.position[0]
+                dy_other = other.position[1] - self.position[1]
+                dist_other = math.hypot(dx_other, dy_other)
+
+                if dist_other < self.safe_dist_robot:
+                    relative_angle_other = normalize_angle(math.atan2(dy_other, dx_other) - self.yaw)
+                    repulsion_strength = self.robot_repulsion_gain * (1.0 / (dist_other + 0.1) - 1.0 / self.safe_dist_robot)
+                    repulsive_ang -= repulsion_strength * math.copysign(1.0, relative_angle_other) * (math.pi - abs(relative_angle_other))/math.pi
+                    if abs(relative_angle_other) < math.pi / 2:
+                         repulsive_lin -= repulsion_strength * math.cos(relative_angle_other) * 0.8
+                    robot_force_active = True
+                    if dist_other < min_robot_dist:
+                         min_robot_dist = dist_other
+                         closest_robot_angle_rel = relative_angle_other
+
+        return repulsive_lin, repulsive_ang, obstacle_force_active, robot_force_active, min_obs_dist, min_robot_dist
+
+
+    def update_state(self, dist_error, obstacle_force_active, robot_force_active, min_obs_dist, min_robot_dist, current_time):
+         """ Updates the follower's state based on current conditions. """
+         # --- Stuck Detection ---
+         is_stuck = False
+         if abs(dist_error - self.last_dist_error) < self.stuck_dist_threshold and dist_error > self.stuck_error_threshold:
+             if self.stuck_timer_start is None:
+                 self.stuck_timer_start = current_time
+             elif current_time - self.stuck_timer_start > self.recovery_timeout:
+                 is_stuck = True
+                 # Reset timer if we enter recovery
+                 self.stuck_timer_start = current_time
+         else:
+             self.stuck_timer_start = None # Reset timer if moving or close enough
+
+         self.last_dist_error = dist_error
+
+         # --- State Transitions ---
+         previous_state = self.state
+
+         # Highest priority: Recovery if stuck
+         if is_stuck and self.state != FollowerState.INITIALIZING:
+             self.state = FollowerState.RECOVERING
+         # Next priority: Avoid other robots
+         elif robot_force_active and self.state != FollowerState.INITIALIZING:
+             self.state = FollowerState.AVOIDING_ROBOT
+         # Next priority: Avoid obstacles
+         elif obstacle_force_active and self.state != FollowerState.INITIALIZING:
+             self.state = FollowerState.AVOIDING_OBSTACLE
+         # If not avoiding or recovering, go back to forming (or stay initializing)
+         elif self.state != FollowerState.INITIALIZING:
+             self.state = FollowerState.FORMING
+             # Reset stuck timer when returning to forming
+             self.stuck_timer_start = None
+
+         # Handle Initialization Completion
+         if self.state == FollowerState.INITIALIZING:
+             # Check if close enough to initial target (e.g., within 0.2m)
+             if dist_error < 0.2:
+                 self.init_position_reached = True
+                 # Transition to FORMING once init position is reached (handled in main loop)
+
+         if self.state != previous_state:
+             rospy.loginfo(f"[{self.ns}] State transition: {previous_state.name} -> {self.state.name}")
+             # Reset PID integrals on state change to avoid sudden jumps
+             self.integral_lin_err = 0.0
+             self.integral_ang_err = 0.0
+             self.prev_lin_err = dist_error # Use current error as prev for next step
+             self.prev_ang_err = 0.0 # Reset angular prev error
+
+
+    def calculate_command(self, all_followers=None):
+        """ Calculates the appropriate Twist command based on the current state. """
+        if not self.sensors_ready or not self.leader.odom_ready:
+            rospy.logwarn_throttle(5, f"[{self.ns}] Calculate command called before sensors ready.")
+            return Twist() # Send zero command if not ready
+
+        current_time = rospy.Time.now().to_sec()
+        dt = current_time - self.last_update_time
+        if dt <= 0: # Avoid issues with time going backwards or zero dt
+             dt = 1.0 / DEFAULT_CONTROL_RATE # Estimate dt
+
+        # --- Calculate Target and Errors ---
+        target_x, target_y = self._calculate_target_position(current_time)
+        dx = target_x - self.position[0]
+        dy = target_y - self.position[1]
+        dist_error = math.hypot(dx, dy)
+        # Angle needed to point towards the target
+        target_world_angle = math.atan2(dy, dx)
+        angle_error = normalize_angle(target_world_angle - self.yaw)
+
+        # --- Calculate Repulsive Forces ---
+        repulsive_lin, repulsive_ang, obs_active, rob_active, min_obs, min_rob = self._calculate_repulsive_velocity(all_followers)
+
+        # --- Update State Machine ---
+        self.update_state(dist_error, obs_active, rob_active, min_obs, min_rob, current_time)
+
+        # --- Calculate Control Command based on State ---
         cmd = Twist()
-        
-        # Prioritized collision avoidance
-        if leader_dist < self.safe_dist * 0.7:
-            # 1. Avoid leader collision (highest priority)
-            avoidance_gain = 1.5 / (leader_dist + 0.1)
-            cmd.linear.x = 0.05  # Slow down
-            # Turn away from leader
-            cmd.angular.z = -1.2 * avoidance_gain * math.copysign(1.0, relative_leader_angle)
-            rospy.logwarn(f"{self.ns} avoiding leader! Distance: {leader_dist:.2f}")
-            
-        elif robot_collision:
-            # 2. Avoid other robots (second priority)
-            avoidance_gain = 1.0 / (closest_robot_dist + 0.1)
-            cmd.linear.x = 0.1
-            # Turn away from other robot
-            cmd.angular.z = -1.0 * avoidance_gain * math.copysign(1.0, closest_robot_angle)
-            rospy.logwarn(f"{self.ns} avoiding robot collision! Distance: {closest_robot_dist:.2f}")
-            
-        elif self.get_min_obstacle_distance() < self.safe_dist:
-            # 3. Avoid environmental obstacles (third priority)
-            obstacle_dist = self.get_min_obstacle_distance()
-            obstacle_angle = self.get_closest_obstacle_angle()
-            
-            avoidance_gain = 1.2 / (obstacle_dist + 0.1)
-            cmd.linear.x = max(0, self.k_lin * dist_error * 0.5)
-            
-            # Turn away from obstacle, biased by formation goal
-            obstacle_avoidance = -avoidance_gain * math.copysign(1.0, obstacle_angle)
-            formation_influence = 0.3 * self.k_ang * angle_error  # Reduced weight
-            cmd.angular.z = obstacle_avoidance + formation_influence
-            
-        elif self.recovery_mode:
-            # 4. Recovery behavior for stuck robots
-            rospy.logwarn(f"{self.ns} in recovery mode!")
-            cmd.linear.x = 0.15
-            # Use time to create varying recovery pattern
-            recovery_pattern = math.sin(current_time * 0.5)
-            cmd.angular.z = recovery_pattern
-            
-        else:
-            # 5. Normal formation control (lowest priority)
-            cmd.linear.x = self.k_lin * dist_error
-            cmd.angular.z = self.k_ang * angle_error
+        attractive_lin, attractive_ang = self._calculate_pid_control(dist_error, angle_error, dt)
 
-        # Safety limits
-        cmd.linear.x = max(-0.3, min(0.3, cmd.linear.x))
-        cmd.angular.z = max(-1.0, min(1.0, cmd.angular.z))
-        
+        if self.state == FollowerState.INITIALIZING:
+            # Simplified P-control during initialization for faster convergence
+            # Use higher gains initially maybe? Or just P control.
+            init_k_p_lin = 1.0
+            init_k_p_ang = 2.0
+            cmd.linear.x = init_k_p_lin * dist_error
+            cmd.angular.z = init_k_p_ang * angle_error
+            # Add some basic repulsion even during init
+            cmd.linear.x += repulsive_lin * 0.5 # Lower weight during init
+            cmd.angular.z += repulsive_ang * 0.5
+            rospy.loginfo_throttle(1, f"[{self.ns}] Initializing: DistErr={dist_error:.2f}, AngErr={angle_error:.2f}")
+
+
+        elif self.state == FollowerState.FORMING:
+            # Combine attractive PID forces with repulsive forces (if any linger slightly)
+            cmd.linear.x = attractive_lin + repulsive_lin # Repulsive lin usually negative
+            cmd.angular.z = attractive_ang + repulsive_ang
+            rospy.loginfo_throttle(1, f"[{self.ns}] Forming: DistErr={dist_error:.2f}, AngErr={angle_error:.2f}")
+
+
+        elif self.state == FollowerState.AVOIDING_OBSTACLE:
+            # Prioritize repulsion, potentially reduce attraction
+            cmd.linear.x = attractive_lin * 0.2 + repulsive_lin # Heavily weight repulsion
+            cmd.angular.z = attractive_ang * 0.1 + repulsive_ang
+            rospy.logwarn_throttle(1, f"[{self.ns}] Avoiding Obstacle: MinDist={min_obs:.2f}")
+
+
+        elif self.state == FollowerState.AVOIDING_ROBOT:
+            # Prioritize repulsion, potentially reduce attraction
+            cmd.linear.x = attractive_lin * 0.1 + repulsive_lin # Very heavily weight repulsion
+            cmd.angular.z = attractive_ang * 0.05 + repulsive_ang
+            rospy.logwarn_throttle(1, f"[{self.ns}] Avoiding Robot: MinDist={min_rob:.2f}")
+
+
+        elif self.state == FollowerState.RECOVERING:
+            # Simple recovery: move forward slowly and oscillate turning
+            rospy.logwarn_throttle(1, f"[{self.ns}] Recovering!")
+            cmd.linear.x = 0.1 # Move forward slowly
+            # Oscillate based on time since recovery started
+            time_in_recovery = current_time - (self.stuck_timer_start or current_time)
+            cmd.angular.z = 0.6 * math.sin(time_in_recovery * 1.5) # Oscillating turn
+
+
+        # --- Apply Velocity Limits ---
+        cmd.linear.x = max(-self.max_linear_vel, min(self.max_linear_vel, cmd.linear.x))
+        # Limit angular velocity more strictly if moving fast linearly to prevent instability
+        current_max_angular = self.max_angular_vel / (1.0 + 1.0 * abs(cmd.linear.x / self.max_linear_vel))
+        cmd.angular.z = max(-current_max_angular, min(current_max_angular, cmd.angular.z))
+
+
+        # --- Update Time ---
+        self.last_update_time = current_time
+
+        # --- Publish Command ---
+        self.cmd_pub.publish(cmd)
+        # Return command mainly for potential debugging/logging if needed outside
         return cmd
-        
-    def get_min_obstacle_distance(self):
-        """Get minimum obstacle distance from any direction"""
-        if not self.obstacle_dists:
-            return float('inf')
-        return min(self.obstacle_dists.values())
-        
-    def get_closest_obstacle_angle(self):
-        """Get angle of the closest obstacle"""
-        if not self.obstacle_dists:
-            return 0.0
-        
-        min_dist = float('inf')
-        min_angle = 0.0
-        
-        for angle, dist in self.obstacle_dists.items():
-            if dist < min_dist:
-                min_dist = dist
-                min_angle = angle
-                
-        # Convert to robot-relative angle
-        return self.normalize_angle(min_angle)
-
-    @staticmethod
-    def normalize_angle(angle):
-        """Keep angles within [-π, π]"""
-        return math.atan2(math.sin(angle), math.cos(angle))
 
 
+    def stop(self):
+        """ Stops the follower robot. """
+        rospy.loginfo(f"[{self.ns}] Stopping.")
+        self.cmd_pub.publish(Twist())
+
+
+# --- Main Controller Function ---
 def swarm_controller():
-    rospy.init_node('staged_swarm_controller')
+    """ Initializes and runs the swarm controller node. """
+    rospy.init_node(NODE_NAME, log_level=rospy.INFO)
+    rospy.loginfo("Starting Enhanced Swarm Controller Node...")
+
+    leader = None
+    followers = []
 
     try:
-        # Initialize leader
+        # --- Initialize Leader ---
         leader = SwarmLeader()
-        
-        # Wait for leader odometry
-        rospy.loginfo("Waiting for leader odometry...")
-        odom_msg_received = False
-        
-        # Try both namespace formats
-        namespace_formats = [
-            leader.ns,  # Try original format first (robot/1)
+
+        # Dynamically find leader namespace
+        possible_leader_ns = [
+            leader.ns, # Try configured default first
             f"tb3_{leader.ns.split('/')[-1]}", # Try tb3_X format
-            f"robot_{leader.ns.split('/')[-1]}" # Try robot_X format (matching your GUI)
+            f"robot_{leader.ns.split('/')[-1]}", # Try robot_X format
+            # Add more potential formats if needed
         ]
-        
-        for ns_format in namespace_formats:
+        confirmed_leader_ns = None
+        rospy.loginfo(f"Attempting to connect to Leader Odometry using formats: {possible_leader_ns}...")
+        for ns_format in possible_leader_ns:
             try:
-                if rospy.wait_for_message(f'/{ns_format}/odom', Odometry, timeout=60):
-                    leader.ns = ns_format
-                    leader.cmd_pub = rospy.Publisher(f'/{leader.ns}/cmd_vel', Twist, queue_size=1)
-                    leader.odom_sub = rospy.Subscriber(f'/{leader.ns}/odom', Odometry, leader.odom_cb)
-                    leader.scan_sub = rospy.Subscriber(f'/{leader.ns}/scan', LaserScan, leader.scan_cb)
-                    odom_msg_received = True
-                    rospy.loginfo(f"Connected to leader with namespace: {leader.ns}")
-                    break
+                # Wait briefly for the topic to potentially become available
+                rospy.wait_for_message(f'/{ns_format}/odom', Odometry, timeout=60)
+                confirmed_leader_ns = ns_format
+                rospy.loginfo(f"Successfully connected to Leader Odometry on namespace: {confirmed_leader_ns}")
+                break
             except rospy.ROSException:
+                rospy.logdebug(f"No odometry message received for namespace '{ns_format}' within timeout.")
                 continue
-                
-        if not odom_msg_received:
-            rospy.logerr("Could not connect to leader with any namespace format!")
+            except Exception as e:
+                 rospy.logwarn(f"Error checking namespace {ns_format}: {e}")
+
+
+        if not confirmed_leader_ns:
+            rospy.logerr("Could not connect to Leader Odometry using any known namespace format. Exiting.")
             return
-            
-        # Wait for leader odometry data to be processed
-        rospy.sleep(0.5)
-        
-        # Formation configuration
-        num_followers = rospy.get_param('~num_followers', 5)  # Default to 5
-        base_radius = rospy.get_param('~formation_radius', 1.8)  # Larger radius for 5 robots
-        robot_spacing = rospy.get_param('~robot_spacing', 0.4)
-        
-        # Create possible namespace formats for followers
-        base_formats = [
-            lambda i: f'robot/{i+2}',    # robot/X format
-            lambda i: f'tb3_{i+1}',      # tb3_X format
-            lambda i: f'robot_{i+2}'     # robot_X format (matching your GUI)
+
+        leader.finalize_ros_setup(confirmed_leader_ns)
+
+        # Wait until leader's odometry is ready
+        while not leader.odom_ready and not rospy.is_shutdown():
+            rospy.loginfo_throttle(5, f"Waiting for Leader ({leader.ns}) odometry data...")
+            rospy.sleep(0.5)
+        if rospy.is_shutdown(): return
+
+
+        # --- Initialize Followers ---
+        num_followers = rospy.get_param('~num_followers', 3) # Default to 3 followers
+        base_radius = rospy.get_param('~formation_radius', 1.5)
+        robot_spacing = rospy.get_param('~robot_spacing', 0.3)
+
+        # Define potential namespace formats for followers (adjust indices/patterns as needed)
+        # Assumes followers are numbered sequentially starting from an index (e.g., robot/2, robot/3 or tb3_1, tb3_2)
+        leader_index_str = confirmed_leader_ns.split('_')[-1].split('/')[-1]
+        try:
+             leader_index = int(leader_index_str)
+        except ValueError:
+             rospy.logwarn(f"Could not parse index from leader namespace '{confirmed_leader_ns}'. Assuming follower indices start from 1 or 2.")
+             leader_index = 0 # Default assumption
+
+        # Generate potential follower namespace generation functions
+        follower_ns_generators = [
+            lambda i: f'robot/{i+leader_index+1}', # robot/X (if leader is robot/1, followers are robot/2, ...)
+            lambda i: f'tb3_{i+1}',              # tb3_X (if leader is tb3_0, followers are tb3_1, ...) - adjust base index if needed
+            lambda i: f'robot_{i+leader_index+1}', # robot_X (if leader is robot_1, followers are robot_2, ...)
         ]
 
-        # Create followers
         followers = []
-        angle_step = 2 * math.pi / num_followers
-        
+        angle_step = 2 * math.pi / num_followers if num_followers > 0 else 0
+
+        rospy.loginfo(f"Attempting to initialize {num_followers} followers...")
         for i in range(num_followers):
-            config = {
+            formation_config = {
                 'angle': angle_step * i,
                 'radius': base_radius,
                 'spacing': robot_spacing
             }
-            
-            follower_created = False
-            
-            # Try each namespace format for this follower
-            for ns_format in base_formats:
-                follower_ns = ns_format(i)
+            follower_found = False
+            for ns_gen in follower_ns_generators:
+                follower_ns = ns_gen(i)
                 try:
-                    # Check if this namespace exists
-                    if rospy.wait_for_message(f'/{follower_ns}/odom', Odometry, timeout=60):
-                        follower = SwarmMember(follower_ns, leader, config)
-                        followers.append(follower)
-                        rospy.loginfo(f"Added follower {follower_ns}")
-                        follower_created = True
-                        break
+                    rospy.logdebug(f"Checking for follower namespace: {follower_ns}")
+                    # Check if odometry topic exists for this namespace
+                    rospy.wait_for_message(f'/{follower_ns}/odom', Odometry, timeout=60) # Shorter timeout for followers
+                    # If message received, create the follower
+                    follower = SwarmMember(follower_ns, leader, formation_config)
+                    followers.append(follower)
+                    rospy.loginfo(f"Successfully initialized follower: {follower_ns}")
+                    follower_found = True
+                    break # Stop checking formats for this follower index once found
                 except rospy.ROSException:
-                    continue
-                    
-            if not follower_created:
-                rospy.logwarn(f"Could not add follower {i+1} - no matching namespace found")
-        
+                    rospy.logdebug(f"No odometry message for follower namespace '{follower_ns}'.")
+                    continue # Try next format
+                except Exception as e:
+                     rospy.logwarn(f"Error checking follower namespace {follower_ns}: {e}")
+
+
+            if not follower_found:
+                rospy.logwarn(f"Could not initialize follower {i+1}. No suitable namespace found.")
+
         if not followers:
-            rospy.logerr("No followers could be initialized!")
+            rospy.logerr("No followers could be initialized. Exiting.")
             return
-            
-        rospy.loginfo(f"Swarm initialized with {len(followers)} followers")
+
+        rospy.loginfo(f"Successfully initialized {len(followers)} out of {num_followers} requested followers.")
+
+        # Wait for all followers' sensors to be ready
+        all_ready = False
+        start_wait_time = rospy.Time.now()
+        wait_timeout = 30.0 # Max seconds to wait for followers
+        while not all_ready and not rospy.is_shutdown() and (rospy.Time.now() - start_wait_time).to_sec() < wait_timeout:
+             all_ready = all(f.sensors_ready for f in followers)
+             rospy.loginfo_throttle(5, f"Waiting for {len([f for f in followers if not f.sensors_ready])} followers to become ready...")
+             rospy.sleep(0.5)
+
+        if not all_ready:
+             rospy.logwarn("Timeout waiting for all followers to become ready. Continuing with available followers...")
+
 
         # ==============================================
         # INITIALIZATION PHASE
         # ==============================================
-        rospy.loginfo("Starting initialization phase...")
-        
-        # Stop the leader during initialization
-        leader.stop()
-        
-        # Configuration for initialization
-        init_duration = rospy.get_param('~init_duration', 15.0)  # 15 seconds for initialization
-        rate = rospy.Rate(10)  # 10Hz for initialization
-        
-        start_time = rospy.Time.now()
-        
-        while (rospy.Time.now() - start_time).to_sec() < init_duration and not rospy.is_shutdown():
-            # Calculate phase progress (0 to 1)
-            phase_progress = min(1.0, (rospy.Time.now() - start_time).to_sec() / init_duration)
-            
-            # Keep leader stationary
-            leader.stop()
-            
-            # Move followers to initial positions
-            for follower in followers:
-                cmd = follower.calculate_init_command(phase_progress)
-                follower.cmd_pub.publish(cmd)
-                
-            # Check if all followers are in position
-            all_positioned = all(follower.init_position_reached for follower in followers)
-            if all_positioned and phase_progress > 0.5:  # At least 50% of init time passed
-                rospy.loginfo("All followers in position, ending initialization phase")
+        rospy.loginfo("Starting Initialization Phase...")
+        leader.stop() # Keep leader stationary during initialization
+
+        init_duration = rospy.get_param('~init_duration', DEFAULT_INIT_DURATION)
+        init_rate = rospy.Rate(10) # Control rate during initialization
+        init_start_time = rospy.Time.now()
+
+        while not rospy.is_shutdown():
+            current_time = rospy.Time.now()
+            elapsed_time = (current_time - init_start_time).to_sec()
+
+            # Check if duration exceeded
+            if elapsed_time >= init_duration:
+                rospy.loginfo("Initialization duration reached.")
                 break
-                
-            rate.sleep()
-            
-        # Mark all followers as initialized
+
+            # Keep leader stopped
+            leader.stop()
+
+            # Update followers in initialization state
+            all_positioned = True
+            for follower in followers:
+                if follower.state == FollowerState.INITIALIZING:
+                    # Calculate command (will use init logic internally)
+                    follower.calculate_command(followers)
+                    if not follower.init_position_reached:
+                        all_positioned = False
+                else:
+                     # Should not happen, but stop follower if not initializing
+                     follower.stop()
+
+            # Check if all followers reached their positions
+            if all_positioned:
+                rospy.loginfo("All followers reached initial positions. Ending initialization phase early.")
+                break
+
+            init_rate.sleep()
+
+        # Transition all followers to FORMING state after initialization
+        rospy.loginfo("Initialization complete. Transitioning followers to FORMING state.")
         for follower in followers:
-            follower.initialized = True
-            
-        rospy.loginfo("Initialization complete, starting formation control")
-        
+            follower.state = FollowerState.FORMING
+            follower.init_position_reached = True # Mark as done
+            # Reset PID errors after initialization phase
+            follower.integral_lin_err = 0.0
+            follower.prev_lin_err = 0.0
+            follower.integral_ang_err = 0.0
+            follower.prev_ang_err = 0.0
+            follower.stuck_timer_start = None # Reset stuck timer
+
+
+        rospy.loginfo("Starting Formation Control Phase...")
         # ==============================================
         # FORMATION PHASE
         # ==============================================
-        
-        # Control loop
-        control_rate = rospy.Rate(rospy.get_param('~control_rate', 15))
-        
-        rospy.loginfo("Swarm controller operational")
+        control_rate = rospy.Rate(rospy.get_param('~control_rate', DEFAULT_CONTROL_RATE))
+
         while not rospy.is_shutdown():
-            # Leader moves
+            # 1. Leader moves based on its logic (circular path + basic avoidance)
             leader.move()
-            
-            # Followers maintain formation
+
+            # 2. Followers update based on their state machine and calculations
             for follower in followers:
-                cmd = follower.calculate_command(followers)
-                follower.cmd_pub.publish(cmd)
-                
+                # The calculate_command method now handles state transitions and control internally
+                follower.calculate_command(followers)
+
+            # 3. Sleep for the control loop duration
             control_rate.sleep()
-            
+
     except KeyboardInterrupt:
-        rospy.loginfo("Shutting down swarm")
+        rospy.loginfo("Ctrl+C detected. Shutting down swarm...")
+    except rospy.ROSInterruptException:
+        rospy.loginfo("ROSInterruptException. Shutting down swarm...")
     except Exception as e:
-        rospy.logerr(f"Error in swarm controller: {e}")
+        rospy.logerr(f"Unhandled exception in swarm controller: {e}", exc_info=True) # Log traceback
     finally:
-        # Emergency stop all robots
+        # --- Emergency Stop ---
+        rospy.loginfo("Executing emergency stop for all robots.")
         try:
-            stop_cmd = Twist()
-            if 'leader' in locals():
-                leader.cmd_pub.publish(stop_cmd)
-            if 'followers' in locals():
+            if leader and leader.cmd_pub:
+                leader.stop()
+            if followers:
                 for follower in followers:
-                    follower.cmd_pub.publish(stop_cmd)
-        except:
-            pass
+                    if follower.cmd_pub:
+                        follower.stop()
+            rospy.loginfo("Emergency stop commands sent.")
+        except Exception as stop_e:
+            rospy.logerr(f"Error during emergency stop: {stop_e}")
 
 
 if __name__ == '__main__':
     try:
         swarm_controller()
-    except rospy.ROSInterruptException:
-        pass
+    except Exception as main_e:
+         # Catch exceptions during init that might happen before ROS is fully running
+         print(f"Critical error during swarm controller startup: {main_e}")
