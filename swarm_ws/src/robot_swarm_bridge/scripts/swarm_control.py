@@ -316,7 +316,7 @@ def swarm_controller():
         
         # Wait for leader odometry
         rospy.loginfo("Waiting for leader odometry...")
-        if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=10):
+        if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=60):
             alt_ns = f"tb3_{leader.ns.split('/')[-1]}"
             rospy.logwarn(f"Leader odometry not available with namespace {leader.ns}! Trying {alt_ns}...")
             
@@ -326,7 +326,7 @@ def swarm_controller():
             leader.odom_sub = rospy.Subscriber(f'/{leader.ns}/odom', Odometry, leader.odom_cb)
             leader.scan_sub = rospy.Subscriber(f'/{leader.ns}/scan', LaserScan, leader.scan_cb)
             
-            if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=10):
+            if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=60):
                 rospy.logerr("Leader odometry not available with either namespace!")
                 return
         
@@ -357,7 +357,7 @@ def swarm_controller():
                 follower_ns = ns_format(i)
                 try:
                     # Check if this namespace exists
-                    if rospy.wait_for_message(f'/{follower_ns}/odom', Odometry, timeout=2):
+                    if rospy.wait_for_message(f'/{follower_ns}/odom', Odometry, timeout=60):
                         follower = SwarmMember(follower_ns, leader, config)
                         followers.append(follower)
                         rospy.loginfo(f"Added follower {follower_ns}")
