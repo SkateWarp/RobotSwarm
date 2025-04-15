@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import rospy
 import math
 import tf
@@ -12,7 +11,8 @@ class SwarmLeader:
         # Load parameters with defaults
         self.linear_vel = rospy.get_param('~linear_vel', 0.15)
         self.angular_vel = rospy.get_param('~angular_vel', 0.3)
-        self.ns = rospy.get_param('~leader_ns', 'tb3_0')
+        # Change the default leader namespace from 'tb3_0' to 'robot/1'
+        self.ns = rospy.get_param('~leader_ns', 'robot/1')
 
         # ROS setup
         self.cmd_pub = rospy.Publisher(f'/{self.ns}/cmd_vel', Twist, queue_size=1)
@@ -26,7 +26,7 @@ class SwarmLeader:
     def odom_cb(self, msg):
         """Update leader position and orientation"""
         self.position = (msg.pose.pose.position.x, 
-                        msg.pose.pose.position.y)
+                         msg.pose.pose.position.y)
         quat = msg.pose.pose.orientation
         self.yaw = tf.transformations.euler_from_quaternion(
             [quat.x, quat.y, quat.z, quat.w])[2]
@@ -38,6 +38,7 @@ class SwarmLeader:
         cmd.linear.x = self.linear_vel
         cmd.angular.z = self.angular_vel
         self.cmd_pub.publish(cmd)
+
 
 class SwarmMember:
     def __init__(self, namespace, leader, formation_config):
@@ -78,7 +79,7 @@ class SwarmMember:
     def odom_cb(self, msg):
         """Update member position and orientation"""
         self.position = (msg.pose.pose.position.x,
-                        msg.pose.pose.position.y)
+                         msg.pose.pose.position.y)
         quat = msg.pose.pose.orientation
         self.yaw = tf.transformations.euler_from_quaternion(
             [quat.x, quat.y, quat.z, quat.w])[2]
@@ -86,15 +87,13 @@ class SwarmMember:
 
     def calculate_command(self):
         """Generate movement command with collision avoidance"""
-        # Target position calculation
-        angle_offset = self.formation_angle + self.leader.angular_vel * \
-                      (rospy.Time.now().to_sec() - self.leader.odom_ready)
-        target_x = self.leader.position[0] + \
-                  (self.formation_radius + self.robot_spacing) * math.cos(angle_offset)
-        target_y = self.leader.position[1] + \
-                  (self.formation_radius + self.robot_spacing) * math.sin(angle_offset)
+        # Compute time offset based on current time and leader data
+        time_offset = rospy.Time.now().to_sec()  # Adjusted here if needed
+        angle_offset = self.formation_angle + self.leader.angular_vel * time_offset
 
-        # Error calculations
+        target_x = self.leader.position[0] + (self.formation_radius + self.robot_spacing) * math.cos(angle_offset)
+        target_y = self.leader.position[1] + (self.formation_radius + self.robot_spacing) * math.sin(angle_offset)
+
         dx = target_x - self.position[0]
         dy = target_y - self.position[1]
         dist_error = math.hypot(dx, dy)
@@ -103,7 +102,6 @@ class SwarmMember:
 
         cmd = Twist()
 
-        # Collision avoidance logic
         if self.obstacle_dist < self.safe_dist:
             avoidance = 1.2 / (self.obstacle_dist + 0.1)
             cmd.linear.x = max(0, self.k_lin * dist_error * 0.5)
@@ -112,7 +110,6 @@ class SwarmMember:
             cmd.linear.x = self.k_lin * dist_error
             cmd.angular.z = self.k_ang * angle_error
 
-        # Apply safety limits
         cmd.linear.x = max(-0.4, min(0.4, cmd.linear.x))
         cmd.angular.z = max(-1.5, min(1.5, cmd.angular.z))
 
@@ -122,6 +119,7 @@ class SwarmMember:
     def normalize_angle(angle):
         """Keep angles within [-π, π]"""
         return math.atan2(math.sin(angle), math.cos(angle))
+
 
 def swarm_controller():
     rospy.init_node('intelligent_swarm_controller')
@@ -140,20 +138,21 @@ def swarm_controller():
     # Create followers
     followers = []
     angle_step = 2 * math.pi / num_followers
+    # Since the leader is '/robot/1', we assign followers with namespaces '/robot/2', '/robot/3', etc.
     for i in range(num_followers):
         config = {
             'angle': angle_step * i,
             'radius': base_radius,
             'spacing': robot_spacing
         }
-        follower = SwarmMember(f'tb3_{i+1}', leader, config)
+        follower_ns = f'robot/{i+2}'  # Start numbering followers from 2
+        follower = SwarmMember(follower_ns, leader, config)
         if rospy.wait_for_message(f'/{follower.ns}/odom', Odometry, timeout=5):
             followers.append(follower)
         else:
-            rospy.logwarn(f"Follower {i+1} not available!")
+            rospy.logwarn(f"Follower with namespace {follower_ns} not available!")
 
     control_rate = rospy.Rate(rospy.get_param('~control_rate', 15))
-
     try:
         rospy.loginfo("Swarm controller operational")
         while not rospy.is_shutdown():
@@ -162,15 +161,14 @@ def swarm_controller():
                 cmd = follower.calculate_command()
                 follower.cmd_pub.publish(cmd)
             control_rate.sleep()
-
     except KeyboardInterrupt:
         rospy.loginfo("Shutting down swarm")
     finally:
-        # Emergency stop
         stop_cmd = Twist()
         leader.cmd_pub.publish(stop_cmd)
         for follower in followers:
             follower.cmd_pub.publish(stop_cmd)
+
 
 if __name__ == '__main__':
     try:
