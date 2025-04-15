@@ -126,7 +126,7 @@ def swarm_controller():
 
     # Initialize leader
     leader = SwarmLeader()
-    if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=5):
+    if not rospy.wait_for_message(f'/{leader.ns}/odom', Odometry, timeout=60):
         rospy.logerr("Leader odometry not available!")
         return
 
@@ -147,7 +147,7 @@ def swarm_controller():
         }
         follower_ns = f'robot/{i+2}'  # Start numbering followers from 2
         follower = SwarmMember(follower_ns, leader, config)
-        if rospy.wait_for_message(f'/{follower.ns}/odom', Odometry, timeout=5):
+        if rospy.wait_for_message(f'/{follower.ns}/odom', Odometry, timeout=60):
             followers.append(follower)
         else:
             rospy.logwarn(f"Follower with namespace {follower_ns} not available!")
