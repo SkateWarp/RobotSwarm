@@ -69,12 +69,12 @@ class SwarmMember:
         """Process LIDAR data for obstacle detection"""
         if not msg.ranges:
             return
-
-        # Analyze 120-degree front sector
         num_ranges = len(msg.ranges)
-        front_sector = msg.ranges[num_ranges//3:2*num_ranges//3]
+        # Use a wider sector (for example, the central 50% instead of 33%)
+        front_sector = msg.ranges[num_ranges//4:3*num_ranges//4]
         valid = [r for r in front_sector if 0.1 < r < 3.5]
         self.obstacle_dist = min(valid) if valid else float('inf')
+
 
     def odom_cb(self, msg):
         """Update member position and orientation"""
@@ -86,14 +86,16 @@ class SwarmMember:
         self.sensors_ready = True
 
     def calculate_command(self):
-        """Generate movement command with collision avoidance"""
-        # Compute the desired position based on the leader's current position and heading.
-        # The follower's desired position is at a fixed offset (formation_angle) relative to the leader's heading.
-        desired_angle = self.leader.yaw + self.formation_angle
+        """Generate movement command with collision avoidance and smooth circular formation."""
+        # Instead of static formation_angle, add a time-dependent phase offset.
+        # You could use the leader’s yaw plus a common rotational rate.
+        # For example, let phase_offset be the leader’s yaw (or time-based progression).
+        phase_offset = self.leader.yaw  # or use rospy.Time.now().to_sec() * omega, with a chosen omega
+        desired_angle = phase_offset + self.formation_angle  # formation_angle remains a constant offset unique to each follower
         target_x = self.leader.position[0] + (self.formation_radius + self.robot_spacing) * math.cos(desired_angle)
         target_y = self.leader.position[1] + (self.formation_radius + self.robot_spacing) * math.sin(desired_angle)
 
-        # Compute position error.
+        # Compute error.
         dx = target_x - self.position[0]
         dy = target_y - self.position[1]
         dist_error = math.hypot(dx, dy)
@@ -102,9 +104,9 @@ class SwarmMember:
 
         cmd = Twist()
 
-        # Collision avoidance: if an obstacle is close, reduce forward speed
-        # and add an additional angular rotation to help steer clear.
+        # Collision avoidance logic.
         if self.obstacle_dist < self.safe_dist:
+            # Add an avoidance term based on how close the obstacle is.
             avoidance = 1.2 / (self.obstacle_dist + 0.1)
             cmd.linear.x = max(0, self.k_lin * dist_error * 0.5)
             cmd.angular.z = self.k_ang * angle_error + avoidance
@@ -112,10 +114,11 @@ class SwarmMember:
             cmd.linear.x = self.k_lin * dist_error
             cmd.angular.z = self.k_ang * angle_error
 
-        # Enforce safety limits.
+        # Safety limits.
         cmd.linear.x = max(-0.4, min(0.4, cmd.linear.x))
         cmd.angular.z = max(-1.5, min(1.5, cmd.angular.z))
         return cmd
+
 
 
     @staticmethod
