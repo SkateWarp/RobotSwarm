@@ -1,7 +1,10 @@
+
+
 import rospy
 from std_msgs.msg import String
 import json
 import threading
+import time
 
 class ROSHandler:
     def __init__(self, robot_id, config, status_callback, sensor_callback, finish_task_callback, cancel_task_callback, start_task_callback):
@@ -13,21 +16,33 @@ class ROSHandler:
         self.cancel_task_callback = cancel_task_callback
         self.start_task_callback = start_task_callback
         
-        # Message buffers for deduplication
-        self.latest_status = None
-        self.latest_sensor_data = None
-        self.latest_task_data = None
+        # Buffer for latest messages only - no duplicates
+        self.latest_messages = {
+            'status': None,
+            'sensor': None,
+            'task': None
+        }
         
-        # Buffer locks
-        self.status_lock = threading.Lock()
-        self.sensor_lock = threading.Lock()
-        self.task_lock = threading.Lock()
+        # Locks for thread safety
+        self.message_lock = threading.Lock()
+        
+        # Rate limiting - strict enforcement
+        self.next_allowed_time = {
+            'status': 0,
+            'sensor': 0,
+            'task': 0,
+            'finish_task': 0,
+            'cancel_task': 0
+        }
         
         # Setup publishers and subscribers
         self.setup_ros_communication()
         
-        # Start timer for processing buffered messages (every 1 second)
-        self.timer = rospy.Timer(rospy.Duration(1.0), self.process_buffers)
+        # Start the rate-limited sender thread
+        self.running = True
+        self.sender_thread = threading.Thread(target=self._process_messages)
+        self.sender_thread.daemon = True
+        self.sender_thread.start()
 
     def setup_ros_communication(self):
         """Setup ROS publishers and subscribers"""
@@ -79,7 +94,7 @@ class ROSHandler:
             rospy.logerr(f"Error publishing command: {e}")
 
     def status_subscriber_callback(self, msg):
-        """Buffer status messages from ROS"""
+        """Handle status messages from ROS"""
         try:
             status = msg.data
             # Convert status to match C# enum exactly
@@ -92,33 +107,33 @@ class ROSHandler:
             
             normalized_status = status_mapping.get(status.strip('"').strip("'"), status)
             
-            # Store only the latest status
-            with self.status_lock:
-                self.latest_status = normalized_status
+            # Store in buffer
+            with self.message_lock:
+                self.latest_messages['status'] = normalized_status
                 
         except Exception as e:
             rospy.logerr(f"Error in status callback: {e}")
 
     def sensor_subscriber_callback(self, msg):
-        """Buffer sensor data from ROS"""
+        """Handle sensor data from ROS"""
         try:
             sensor_data = json.loads(msg.data)
             
-            # Store only the latest sensor data
-            with self.sensor_lock:
-                self.latest_sensor_data = sensor_data
+            # Store in buffer
+            with self.message_lock:
+                self.latest_messages['sensor'] = sensor_data
                 
         except Exception as e:
             rospy.logerr(f"Error in sensor callback: {e}")
     
     def start_task_subscriber_callback(self, msg):
-        """Buffer task data from ROS"""
+        """Handle task data from ROS"""
         try:
             task_data = json.loads(msg.data)
             
-            # Store task data
-            with self.task_lock:
-                self.latest_task_data = task_data
+            # Store in buffer
+            with self.message_lock:
+                self.latest_messages['task'] = task_data
                 
         except Exception as e:
             rospy.logerr(f"Error in start task callback: {e}")
@@ -126,40 +141,70 @@ class ROSHandler:
     def finish_task_subscriber_callback(self, msg):
         """Handle finish task log from ROS"""
         try:
-            # Just trigger this event - these should be infrequent
-            self.finish_task_callback(self.robot_id)
+            # For event-based messages, we need to check rate limiting directly
+            current_time = time.time()
+            if current_time >= self.next_allowed_time.get('finish_task', 0):
+                self.next_allowed_time['finish_task'] = current_time + 1.0
+                self.finish_task_callback(self.robot_id)
         except Exception as e:
             rospy.logerr(f"Error in finish task callback: {e}")
 
     def cancel_task_subscriber_callback(self, msg):
         """Handle cancel task log from ROS"""
         try:
-            # Just trigger this event - these should be infrequent
-            self.cancel_task_callback(self.robot_id)
+            # For event-based messages, we need to check rate limiting directly
+            current_time = time.time()
+            if current_time >= self.next_allowed_time.get('cancel_task', 0):
+                self.next_allowed_time['cancel_task'] = current_time + 1.0
+                self.cancel_task_callback(self.robot_id)
         except Exception as e:
             rospy.logerr(f"Error in cancel task callback: {e}")
 
-    def process_buffers(self, event):
-        """Process buffered messages at a fixed rate"""
-        # Process status buffer
-        with self.status_lock:
-            if self.latest_status is not None:
-                self.status_callback(self.robot_id, self.latest_status)
-                self.latest_status = None
-        
-        # Process sensor data buffer
-        with self.sensor_lock:
-            if self.latest_sensor_data is not None:
-                self.sensor_callback(self.robot_id, self.latest_sensor_data)
-                self.latest_sensor_data = None
-        
-        # Process task data buffer
-        with self.task_lock:
-            if self.latest_task_data is not None:
-                self.start_task_callback(self.robot_id, self.latest_task_data)
-                self.latest_task_data = None
+    def _process_messages(self):
+        """Thread that processes messages at a controlled rate"""
+        while self.running:
+            try:
+                current_time = time.time()
+                
+                # Process status messages
+                if current_time >= self.next_allowed_time.get('status', 0):
+                    with self.message_lock:
+                        status_data = self.latest_messages.get('status')
+                        if status_data is not None:
+                            self.next_allowed_time['status'] = current_time + 1.0
+                            self.latest_messages['status'] = None
+                            rospy.loginfo(f"[RATE_LIMITED] Sending status update for robot {self.robot_id}")
+                            self.status_callback(self.robot_id, status_data)
+                
+                # Process sensor messages
+                if current_time >= self.next_allowed_time.get('sensor', 0):
+                    with self.message_lock:
+                        sensor_data = self.latest_messages.get('sensor')
+                        if sensor_data is not None:
+                            self.next_allowed_time['sensor'] = current_time + 1.0
+                            self.latest_messages['sensor'] = None
+                            rospy.loginfo(f"[RATE_LIMITED] Sending sensor data for robot {self.robot_id}")
+                            self.sensor_callback(self.robot_id, sensor_data)
+                
+                # Process task messages
+                if current_time >= self.next_allowed_time.get('task', 0):
+                    with self.message_lock:
+                        task_data = self.latest_messages.get('task')
+                        if task_data is not None:
+                            self.next_allowed_time['task'] = current_time + 1.0
+                            self.latest_messages['task'] = None
+                            rospy.loginfo(f"[RATE_LIMITED] Sending task data for robot {self.robot_id}")
+                            self.start_task_callback(self.robot_id, task_data)
+                
+                # Sleep for a short time to avoid high CPU usage
+                time.sleep(0.1)
+                
+            except Exception as e:
+                rospy.logerr(f"Error in message processing thread: {e}")
 
     def cleanup(self):
         """Cleanup ROS connections"""
+        self.running = False
+        if self.sender_thread.is_alive():
+            self.sender_thread.join(timeout=1.0)
         self.command_pub.unregister()
-        self.timer.shutdown()
