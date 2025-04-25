@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Arguments -->
+  <arg name="initial_robots" default="2"/>
+  <arg name="robot_model" default="waffle"/>
+  <arg name="font_path" default="$(find robot_swarm_bridge)/config/simple_font.json"/>
+  <arg name="arena_width" default="10.0"/>
+  <arg name="arena_height" default="10.0"/>
+  <arg name="use_gui" default="true"/>
+  <arg name="detailed_logging" default="false"/>
+  <arg name="robot_ids" default="1" />
+  <arg name="backend_url" default="wss://robot.zerav.la/hubs/robot" />
+  
+  <!-- Load configuration -->
+  <rosparam command="load" file="$(find robot_swarm_bridge)/config/params/robot_params.yaml" />
+  
+  <!-- Use the arena.launch file that has the correct path -->
+  <include file="$(find robot_swarm_bridge)/launch/arena.launch">
+    <arg name="use_gui" value="$(arg use_gui)"/>
+    <arg name="arena_width" value="$(arg arena_width)"/>
+    <arg name="arena_height" value="$(arg arena_height)"/>
+  </include>
+  
+  <!-- Robot Manager node -->
+  <node name="robot_manager" pkg="robot_swarm_bridge" type="robot_manager.py" output="screen">
+    <param name="robot_model" value="$(arg robot_model)"/>
+    <param name="status_update_rate" value="1.0"/>
+    <param name="arena_width" value="$(arg arena_width)"/>
+    <param name="arena_height" value="$(arg arena_height)"/>
+  </node>
+  
+  <!-- Task Manager node -->
+  <node name="task_manager" pkg="robot_swarm_bridge" type="task_manager.py" output="screen">
+    <param name="task_check_rate" value="1.0"/>
+    <param name="arena_width" value="$(arg arena_width)"/>
+    <param name="arena_height" value="$(arg arena_height)"/>
+  </node>
+  
+  <!-- Enhanced Font Drawer node -->
+  <node name="font_drawer" pkg="robot_swarm_bridge" type="turtlebot_font_drawer.py" output="screen">
+    <param name="robot_namespace_template" value="/robot/{}/"/>
+    <param name="font_path" value="$(arg font_path)"/>
+    <param name="speed_linear" value="0.2"/>
+    <param name="speed_angular" value="0.5"/>
+    <param name="position_tolerance" value="0.05"/>
+    <param name="angle_tolerance" value="0.1"/>
+    <param name="control_rate" value="10"/>
+    <param name="arena_width" value="$(arg arena_width)"/>
+    <param name="arena_height" value="$(arg arena_height)"/>
+    <param name="detailed_logging" value="$(arg detailed_logging)"/>
+  </node>
+  
+  <!-- Spawn initial robots -->
+  <node name="initial_robot_spawner" pkg="robot_swarm_bridge" type="initial_robot_spawner.py" output="screen">
+    <param name="num_robots" value="$(arg initial_robots)"/>
+  </node>
+  
+  <!-- Launch the bridge node -->
+  <node pkg="robot_swarm_bridge" type="bridge.py" name="robot_swarm_bridge" output="screen">
+    <param name="robot_ids" value="$(arg robot_ids)" />
+    <param name="backend_url" value="$(arg backend_url)" />
+    <param name="config_file" value="$(find robot_swarm_bridge)/config/config.yaml" />
+  </node>
+
+  <!-- Add these before the RViz node -->
+  <node pkg="tf" type="static_transform_publisher" name="world_to_map" 
+        args="0 0 0 0 0 0 world map 100" />
+
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+    <param name="publish_frequency" type="double" value="50.0" />
+    <param name="tf_prefix" value="robot_tf" />
+  </node>
+
+  <!-- Add robot description parameter -->
+  <param name="robot_description" command="$(find xacro)/xacro $(find turtlebot3_description)/urdf/turtlebot3_waffle.urdf.xacro" />
+  <!-- RViz for visualization -->
+  <node name="rviz" pkg="rviz" type="rviz" 
+        args="-d $(find robot_swarm_bridge)/rviz/robot_swarm.rviz"
+        if="$(arg use_gui)"/>
+</launch>

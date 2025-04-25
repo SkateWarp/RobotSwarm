@@ -1,0 +1,84 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Number of dummy robots to spawn -->
+  <arg name="num_robots" default="4"/>
+  
+  <!-- Robot parameters -->
+  <arg name="publish_rate" default="10.0"/>
+  <arg name="noise_amplitude" default="0.05"/>
+  
+  <!-- Leader robot (tb3_0) -->
+  <group ns="tb3_0">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+      <param name="robot_id" value="0"/>
+      <param name="publish_rate" value="$(arg publish_rate)"/>
+      <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
+      <!-- Simulated position of robot in virtual space -->
+      <param name="x_pos" value="0.0"/>
+      <param name="y_pos" value="0.0"/>
+      <param name="yaw" value="0.0"/>
+    </node>
+    
+    <!-- Optional: Command velocity publisher for the leader -->
+    <node pkg="rostopic" type="rostopic" name="velocity_publisher" 
+          args="pub -r 2 /tb3_0/cmd_vel geometry_msgs/Twist '{linear: {x: 0.2, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.05}}'" 
+          output="screen" />
+  </group>
+  
+  <!-- Follower robot (tb3_1) -->
+  <group ns="tb3_1" if="$(eval int(arg('num_robots')) >= 2)">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+      <param name="robot_id" value="1"/>
+      <param name="publish_rate" value="$(arg publish_rate)"/>
+      <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
+      <!-- Simulated position of robot in virtual space -->
+      <param name="x_pos" value="-1.5"/>
+      <param name="y_pos" value="0.0"/>
+      <param name="yaw" value="0.0"/>
+    </node>
+  </group>
+  
+  <!-- Follower robot (tb3_2) -->
+  <group ns="tb3_2" if="$(eval int(arg('num_robots')) >= 3)">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+      <param name="robot_id" value="2"/>
+      <param name="publish_rate" value="$(arg publish_rate)"/>
+      <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
+      <!-- Simulated position of robot in virtual space -->
+      <param name="x_pos" value="-3.0"/>
+      <param name="y_pos" value="0.0"/>
+      <param name="yaw" value="0.0"/>
+    </node>
+  </group>
+  
+  <!-- Follower robot (tb3_3) -->
+  <group ns="tb3_3" if="$(eval int(arg('num_robots')) >= 4)">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+      <param name="robot_id" value="3"/>
+      <param name="publish_rate" value="$(arg publish_rate)"/>
+      <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
+      <!-- Simulated position of robot in virtual space -->
+      <param name="x_pos" value="-4.5"/>
+      <param name="y_pos" value="0.0"/>
+      <param name="yaw" value="0.0"/>
+    </node>
+  </group>
+  
+  <!-- Test data verification nodes (optional) -->
+  <group ns="data_verification" if="false">
+    <!-- Set to if="true" to enable -->
+    <node pkg="robot_swarm_bridge" type="test_sensor_script.py" name="test_robot0" output="screen">
+      <param name="robot_id" value="0"/>
+    </node>
+    
+    <node pkg="robot_swarm_bridge" type="test_sensor_script.py" name="test_robot1" output="screen" if="$(eval int(arg('num_robots')) >= 2)">
+      <param name="robot_id" value="1"/>
+    </node>
+  </group>
+  
+  <!-- RViz (Optional, might not be needed for pure data simulation) -->
+  <arg name="use_rviz" default="false"/>
+  <node pkg="rviz" type="rviz" name="rviz" if="$(arg use_rviz)"
+        args="-d $(find robot_swarm_bridge)/rviz/dummy_turtlebot3.rviz"
+        output="screen"/>
+</launch>

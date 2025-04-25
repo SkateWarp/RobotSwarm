@@ -18,11 +18,14 @@ jobs:
         run: |
           docker-compose -f docker-compose.prod.yml down
           docker-compose -f docker-compose.prod.yml up -d
-      - name: Check logs
-        run: |
-          echo "Backend Logs:"
-          docker-compose -f docker-compose.prod.yml logs backend
-          echo "Database Logs:"
-          docker-compose -f docker-compose.prod.yml logs db
+      # - name: Check logs
+      #   run: |
+      #     echo "Backend Logs:"
+      #     docker-compose -f docker-compose.prod.yml logs backend
+      #     echo "Database Logs:"
+      #     docker-compose -f docker-compose.prod.yml logs db
       - name: Prune old Docker images
-        run: docker image prune -af
+        run: docker system prune -af
+
+      - name: Give permission to script
+        run: find . -type f -name "*.py" -exec chmod +x {} \;

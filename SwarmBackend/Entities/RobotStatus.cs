@@ -4,6 +4,5 @@ public enum RobotStatus
 {
   Idle,
   Working,
-
   Disabled
 }

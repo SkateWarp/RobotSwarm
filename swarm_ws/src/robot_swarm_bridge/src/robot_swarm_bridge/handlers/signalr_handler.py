@@ -31,7 +31,7 @@ class SignalRHandler:
         
         # Setup logging
         self.logger = logging.getLogger('signalr_handler')
-        self.logger.setLevel(logging.DEBUG)
+        # self.logger.setLevel(logging.DEBUG)
         
         # Initialize connection
         self._setup_connection()
@@ -52,7 +52,7 @@ class SignalRHandler:
                     "reconnect_interval": 5,
                     "max_attempts": 5
                 })
-                .configure_logging(logging.DEBUG)
+                # .configure_logging(logging.DEBUG)
                 .build())
                 
             # Add connection lifecycle handlers
@@ -116,7 +116,7 @@ class SignalRHandler:
     def _handle_command(self, command):
         """Handle incoming commands from SignalR"""
         try:
-            self.logger.debug(f"Received command: {command}")
+            # self.logger.debug(f"Received command: {command}")
             if isinstance(command, str):
                 command = json.loads(command)
             
@@ -175,7 +175,7 @@ class SignalRHandler:
                 rospy.logerr("Failed to establish SignalR connection after 10 seconds")
                 
         except Exception as e:
-            rospy.logerr(f"Error starting SignalR connection: {e}")
+            # rospy.logerr(f"Error starting SignalR connection: {e}")
             self._attempt_reconnect()
 
     def stop(self):
@@ -203,7 +203,7 @@ class SignalRHandler:
                 rospy.logwarn("Not connected to SignalR, queueing message")
                 # Queue message for later
                 self.message_queue.put((method, data))
-                self.logger.debug(f"Message queued: {method}")
+                # self.logger.debug(f"Message queued: {method}")
         except Exception as e:
             rospy.logerr(f"Error sending message: {e}")
             rospy.logerr(f"Stack trace: {traceback.format_exc()}")            
@@ -218,7 +218,7 @@ class SignalRHandler:
         
         # Try sending just the status as a single argument
         try:
-            rospy.loginfo(f"Attempting to send status update with robot_id={robot_id}, status={status}")
+            # rospy.loginfo(f"Attempting to send status update with robot_id={robot_id}, status={status}")
             self.connection.send("UpdateStatus", [robot_id, status])  # Try this format first
         except Exception as e:
             rospy.logerr(f"Error with direct parameters: {e}")
@@ -235,7 +235,7 @@ class SignalRHandler:
         Args:
             sensor_data (dict): Sensor reading data
         """
-        rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
+        # rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
         # Format data to match SensorReadingRequest record
         sensor_name = str(sensor_data.get("name"))
         for key, value in sensor_data.items():
@@ -245,7 +245,7 @@ class SignalRHandler:
                     "sensorName":sensor_name,
                     "notes": str(key)
                 }
-                rospy.loginfo(f"Sensor data to sned: {reading_request}")
+                # rospy.loginfo(f"Sensor data to sned: {reading_request}")
 
                 self.connection.send("HandleSensorReading", [
                     int(robot_id),
@@ -315,9 +315,9 @@ class SignalRHandler:
                 try:
                     method, data = self.message_queue.get()
                     self.connection.send(method, [data])
-                    self.logger.debug(f"Processed queued message: {method}")
+                    # self.logger.debug(f"Processed queued message: {method}")
                 except Exception as e:
-                    self.logger.error(f"Error processing queued message: {e}")
+                    # self.logger.error(f"Error processing queued message: {e}")
                     # Re-queue the message
                     self.message_queue.put((method, data))
             time.sleep(0.1)
@@ -328,9 +328,9 @@ class SignalRHandler:
             try:
                 method, data = self.message_queue.get_nowait()
                 self.connection.send(method, [data])
-                self.logger.debug(f"Processed queued message: {method}")
+                # self.logger.debug(f"Processed queued message: {method}")
             except Exception as e:
-                self.logger.error(f"Error processing queued message: {e}")
+                # self.logger.error(f"Error processing queued message: {e}")
                 break
 
     def send_heartbeat(self):

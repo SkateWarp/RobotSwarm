@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import SendIcon from "@mui/icons-material/Send";
-import { useParamList, useServiceList, useTopicList } from "rosreact";
 import { InputAdornment, InputLabel, OutlinedInput, Select, MenuItem, ListSubheader } from "@mui/material";
 import IconButton from "@mui/material/IconButton";
 import axios from "axios";
@@ -42,7 +41,7 @@ function RealtimeConfigList() {
     }, []);
 
     function onSend(e) {
-        console.log("SendCommand", selectedTopic, selectedRobot);
+        console.log("SendCommand", selectedTopic, selectedRobot, command);
         // connection.send("SendCommand", selectedRobot, selectedTopic, command);
     }
 
@@ -51,112 +50,113 @@ function RealtimeConfigList() {
             <div className="pb-32">
                 <VncViewer url="wss://websocket.zerav.la" username="rs" password="123456789" />
             </div>
-            <div className="p-2 flex ">
-                <div className="w-full mr-2">
-                    <InputLabel id="robot-select-label">Robot</InputLabel>
-                    <Select
-                        labelId="robot-select-label"
-                        id="robot-select"
-                        value={selectedRobot}
-                        onChange={(e) => setSelectedRobot(e.target.value)}
-                        className="w-full"
-                    >
-                        <MenuItem value="all">All Robots</MenuItem>
-                        {robots.map((robot) => (
-                            <MenuItem key={robot.id} value={robot.id}>
-                                Robot {robot.id}
-                            </MenuItem>
-                        ))}
-                    </Select>
+            <div className="p-2 pb-8 flex flex-col">
+                <div className="flex flex-col mb-4">
+                    <div className="flex mb-4">
+                        <div className="w-full mr-2">
+                            <InputLabel id="robot-select-label">Robot</InputLabel>
+                            <Select
+                                labelId="robot-select-label"
+                                id="robot-select"
+                                value={selectedRobot}
+                                onChange={(e) => setSelectedRobot(e.target.value)}
+                                className="w-full"
+                            >
+                                <MenuItem value="all">All Robots</MenuItem>
+                                {robots.map((robot) => (
+                                    <MenuItem key={robot.id} value={robot.id}>
+                                        Robot {robot.id}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </div>
+                        <div className="w-full mr-2">
+                            <InputLabel id="topic-select-label">Topic</InputLabel>
+                            <Select
+                                labelId="topic-select-label"
+                                id="topic-select"
+                                value={selectedTopic}
+                                onChange={(e) => {
+                                    const topic = e.target.value;
+                                    setSelectedTopic(topic);
+                                    if (topic.includes("sensor_data")) {
+                                        setCommand(`data: '{"left_ticks": 21.0, "right_ticks": 20.0, "left_diff": 19.0, "right_diff": 18.0, "left_dist": 17.0, "right_dist": 16.0, "timestep": 15.0, "left_speed": 14.0, "right_speed": 13.0, "left_speed_filtered": 12.0, "right_speed_filtered": 11.0, "name": "Speed"}'`);
+                                    } else if (topic.includes("task")) {
+                                        setCommand(`data: '{"taskType": "transporte", "parameters": {"sensorName": "speed", "value": 23.5}}'`);
+                                    } else if (topic.includes("status")) {
+                                        setCommand("data: 'Working'");
+                                    } else {
+                                        setCommand("");
+                                    }
+                                }}
+                                className="w-full"
+                            >
+                                <ListSubheader>Sensors</ListSubheader>
+                                {topics
+                                    .filter(
+                                        (topic) =>
+                                            topic.includes("sensor") &&
+                                            (selectedRobot === "all" || topic.includes(selectedRobot)),
+                                    )
+                                    .map((topic) => (
+                                        <MenuItem key={topic} value={topic}>
+                                            {topic}
+                                        </MenuItem>
+                                    ))}
+                                <ListSubheader>Tasks</ListSubheader>
+                                {topics
+                                    .filter(
+                                        (topic) =>
+                                            topic.includes("task") &&
+                                            (selectedRobot === "all" || topic.includes(selectedRobot)),
+                                    )
+                                    .map((topic) => (
+                                        <MenuItem key={topic} value={topic}>
+                                            {topic}
+                                        </MenuItem>
+                                    ))}
+                                <ListSubheader>Status</ListSubheader>
+                                {topics
+                                    .filter(
+                                        (topic) =>
+                                            topic.includes("status") &&
+                                            (selectedRobot === "all" || topic.includes(selectedRobot)),
+                                    )
+                                    .map((topic) => (
+                                        <MenuItem key={topic} value={topic}>
+                                            {topic}
+                                        </MenuItem>
+                                    ))}
+                            </Select>
+                        </div>
+                        <IconButton
+                            onClick={onSend}
+                            disabled={!selectedRobot || !selectedTopic || !command.trim()}
+                            className="p-4  h-full"
+                        >
+                            <SendIcon color="green" />
+                        </IconButton>
+
+                    </div>
+                    <div className="w-full">
+                        <InputLabel htmlFor="command-input">Comando</InputLabel>
+                        <OutlinedInput
+                            id="command-input"
+                            type="text"
+                            multiline
+                            rows={4}
+                            className="w-full"
+                            value={command}
+                            onChange={(e) => setCommand(e.target.value)}
+                            label="Comando"
+                        />
+                    </div>
                 </div>
-                <div className="w-full mr-2">
-                    <InputLabel id="topic-select-label">Topic</InputLabel>
-                    <Select
-                        labelId="topic-select-label"
-                        id="topic-select"
-                        value={selectedTopic}
-                        onChange={(e) => setSelectedTopic(e.target.value)}
-                        className="w-full"
-                    >
-                        <ListSubheader>Sensors</ListSubheader>
-                        {topics
-                            .filter(
-                                (topic) =>
-                                    topic.includes("sensor") &&
-                                    (selectedRobot === "all" || topic.includes(selectedRobot)),
-                            )
-                            .map((topic) => (
-                                <MenuItem key={topic} value={topic}>
-                                    {topic}
-                                </MenuItem>
-                            ))}
-                        <ListSubheader>Tasks</ListSubheader>
-                        {topics
-                            .filter(
-                                (topic) =>
-                                    topic.includes("task") &&
-                                    (selectedRobot === "all" || topic.includes(selectedRobot)),
-                            )
-                            .map((topic) => (
-                                <MenuItem key={topic} value={topic}>
-                                    {topic}
-                                </MenuItem>
-                            ))}
-                        <ListSubheader>Status</ListSubheader>
-                        {topics
-                            .filter(
-                                (topic) =>
-                                    topic.includes("status") &&
-                                    (selectedRobot === "all" || topic.includes(selectedRobot)),
-                            )
-                            .map((topic) => (
-                                <MenuItem key={topic} value={topic}>
-                                    {topic}
-                                </MenuItem>
-                            ))}
-                    </Select>
-                </div>
-                <div className="w-full">
-                    <InputLabel htmlFor="outlined-adornment-password">Comando</InputLabel>
-                    <OutlinedInput
-                        id="outlined-adornment-password"
-                        type="text"
-                        className="w-full"
-                        value={command}
-                        onChange={(e) => setCommand(e.target.value)}
-                        endAdornment={
-                            <InputAdornment position="end">
-                                <IconButton onClick={onSend} edge="end">
-                                    <SendIcon />
-                                </IconButton>
-                            </InputAdornment>
-                        }
-                        label="Comando"
-                    />
-                </div>
+
             </div>
         </div>
     );
 }
 
-const TopicListView = () => {
-    const topicList = useTopicList();
-    return (
-        <>
-            <p>{`${topicList.topics}`}</p>
-            <p>{`${topicList.types}`}</p>
-        </>
-    );
-};
-
-const ServiceListView = () => {
-    const list = useServiceList();
-    return <p>{`${list}`}</p>;
-};
-
-const ParamListView = () => {
-    const list = useParamList();
-    return <p>{`${list}`}</p>;
-};
 
 export default RealtimeConfigList;

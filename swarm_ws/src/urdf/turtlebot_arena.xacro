@@ -144,34 +144,6 @@
     <origin xyz="-5.0 0 0.5" rpy="0 0 0"/>
   </joint>
 
-  <!-- ========== Target Marker ========== -->
-  <link name="target_marker">
-    <visual>
-      <geometry>
-        <sphere radius="0.1"/>
-      </geometry>
-      <material name="target_red">
-        <color rgba="1 0 0 1"/>
-      </material>
-    </visual>
-    <collision>
-      <geometry>
-        <sphere radius="0.1"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <mass value="0.1"/>
-      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
-    </inertial>
-  </link>
-
-  <!-- Fixed joint to attach the target marker to the arena -->
-  <joint name="target_joint" type="fixed">
-    <parent link="arena_link"/>
-    <child link="target_marker"/>
-    <origin xyz="2 2 0.15" rpy="0 0 0"/>
-  </joint>
-
   <!-- Add Gazebo-specific properties to make the entire model static -->
   <gazebo>
     <static>true</static>
