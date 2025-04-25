@@ -20,11 +20,6 @@ class RobotSwarmBridge:
         self.robot_ids = rospy.get_param('~robot_ids', [1, 2, 3, 4, 5])
         self.backend_url = rospy.get_param('~backend_url', 'ws://localhost:44337/hubs/robot')
        
-        # Initialize rate limiting dictionaries (separate timestamps for each robot and message type)
-        self.last_status_updates = {robot_id: rospy.Time(0) for robot_id in self.robot_ids} if isinstance(self.robot_ids, list) else {self.robot_ids: rospy.Time(0)}
-        self.last_sensor_updates = {robot_id: rospy.Time(0) for robot_id in self.robot_ids} if isinstance(self.robot_ids, list) else {self.robot_ids: rospy.Time(0)}
-        self.last_task_updates = {robot_id: rospy.Time(0) for robot_id in self.robot_ids} if isinstance(self.robot_ids, list) else {self.robot_ids: rospy.Time(0)}
-        
         # Initialize handlers
         self.signalr_handler = SignalRHandler(
             self.backend_url,
@@ -50,58 +45,25 @@ class RobotSwarmBridge:
             self.logger.warning(f"Received command for unknown robot {robot_id}")
     
     def on_status_changed(self, robot_id, status):
-        """Handle robot status changes from ROS with rate limiting"""
-        current_time = rospy.Time.now()
-        
-        # Check if enough time has passed since the last update for this specific robot
-        if (current_time - self.last_status_updates.get(robot_id, rospy.Time(0))).to_sec() >= 1.0:
-            # Update the timestamp for this robot
-            self.last_status_updates[robot_id] = current_time
-            
-            rospy.loginfo(f"Robot {robot_id} status changed to {status}")
-            self.signalr_handler.send_status_update(robot_id, status)
+        """Handle robot status changes from ROS"""
+        rospy.loginfo(f"Robot {robot_id} status changed to {status}")
+        self.signalr_handler.send_status_update(robot_id, status)
     
     def on_sensor_data(self, robot_id, sensor_data):
-        """Handle sensor data from ROS with rate limiting"""
-        current_time = rospy.Time.now()
-        
-        # Check if enough time has passed since the last update for this specific robot
-        if (current_time - self.last_sensor_updates.get(robot_id, rospy.Time(0))).to_sec() >= 1.0:
-            # Update the timestamp for this robot
-            self.last_sensor_updates[robot_id] = current_time
-            
-            self.signalr_handler.send_sensor_reading(robot_id, sensor_data)
+        """Handle sensor data from ROS"""
+        self.signalr_handler.send_sensor_reading(robot_id, sensor_data)
    
     def on_finish_task(self, robot_id):
-        """Handle finish task log from ROS with rate limiting"""
-        current_time = rospy.Time.now()
-        
-        # Task-related events might be less frequent, but still rate limit them
-        if (current_time - self.last_task_updates.get(robot_id, rospy.Time(0))).to_sec() >= 1.0:
-            # Update the timestamp for this robot
-            self.last_task_updates[robot_id] = current_time
-            
-            self.signalr_handler.send_finish_task(robot_id)
+        """Handle finish task log from ROS"""
+        self.signalr_handler.send_finish_task(robot_id)
    
     def on_cancel_task(self, robot_id):
-        """Handle cancel task log from ROS with rate limiting"""
-        current_time = rospy.Time.now()
-        
-        if (current_time - self.last_task_updates.get(robot_id, rospy.Time(0))).to_sec() >= 1.0:
-            # Update the timestamp for this robot
-            self.last_task_updates[robot_id] = current_time
-            
-            self.signalr_handler.send_cancel_task(robot_id)
+        """Handle cancel task log from ROS"""
+        self.signalr_handler.send_cancel_task(robot_id)
     
     def on_start_task(self, robot_id, task_data):
-        """Handle start task log from ROS with rate limiting"""
-        current_time = rospy.Time.now()
-        
-        if (current_time - self.last_task_updates.get(robot_id, rospy.Time(0))).to_sec() >= 1.0:
-            # Update the timestamp for this robot
-            self.last_task_updates[robot_id] = current_time
-            
-            self.signalr_handler.send_task(robot_id, task_data)
+        """Handle start task log from ROS"""
+        self.signalr_handler.send_task(robot_id, task_data)
     
     def run(self):
         """Main run loop"""
