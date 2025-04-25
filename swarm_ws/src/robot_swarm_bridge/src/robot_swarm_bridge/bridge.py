@@ -13,7 +13,11 @@ class RobotSwarmBridge:
         
         # Setup logger
         self.logger = setup_logger()
+        self.rate = rospy.Rate(1)  # 1 Hz
         
+        # Add timestamps for rate limiting
+        self.last_sensor_update = rospy.Time.now()
+        self.last_status_update = rospy.Time.now()
         # Load configuration
         self.config = load_config()
         
@@ -46,13 +50,17 @@ class RobotSwarmBridge:
             self.logger.warning(f"Received command for unknown robot {robot_id}")
 
     def on_status_changed(self, robot_id, status):
-        """Handle robot status changes from ROS"""
-        rospy.loginfo(f"Robot {robot_id} status changed to {status}")
-        self.signalr_handler.send_status_update(robot_id, status)
+        current_time = rospy.Time.now()
+        if (current_time - self.last_status_update).to_sec() >= 1.0:  # 1 second
+            """Handle robot status changes from ROS"""
+            rospy.loginfo(f"Robot {robot_id} status changed to {status}")
+            self.signalr_handler.send_status_update(robot_id, status)
 
     def on_sensor_data(self, robot_id, sensor_data):
         """Handle sensor data from ROS"""
-        self.signalr_handler.send_sensor_reading(robot_id, sensor_data)
+        current_time = rospy.Time.now()
+        if (current_time - self.last_sensor_update).to_sec() >= 1.0:  # 1 second
+            self.signalr_handler.send_sensor_reading(robot_id, sensor_data)
     
     def on_finish_task(self, robot_id):
         """Handle finish task log from ROS"""
