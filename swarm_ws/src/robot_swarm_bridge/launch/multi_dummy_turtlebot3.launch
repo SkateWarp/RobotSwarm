@@ -27,7 +27,7 @@
   
   <!-- Follower robot (tb3_1) -->
   <group ns="tb3_1" if="$(eval int(arg('num_robots')) >= 2)">
-    <node pkg="your_package" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="1"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
       <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
@@ -40,7 +40,7 @@
   
   <!-- Follower robot (tb3_2) -->
   <group ns="tb3_2" if="$(eval int(arg('num_robots')) >= 3)">
-    <node pkg="your_package" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="2"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
       <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
@@ -53,7 +53,7 @@
   
   <!-- Follower robot (tb3_3) -->
   <group ns="tb3_3" if="$(eval int(arg('num_robots')) >= 4)">
-    <node pkg="your_package" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
+    <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="3"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
       <param name="noise_amplitude" value="$(arg noise_amplitude)"/>
