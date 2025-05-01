@@ -165,8 +165,8 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
         {
             var task = new TaskLog
             {
-                RobotId = robot.Id,
-                RobotGroupId = groupId,
+
+                Robots = [],
                 TaskTemplateId = request.TaskTemplateId,
                 DateCreated = DateTime.Now,
                 Parameters = System.Text.Json.JsonDocument.Parse(request.Parameters.GetRawText())
