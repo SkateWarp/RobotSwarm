@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import rospy
 import json
@@ -35,6 +35,7 @@ class DummyTurtleBot3:
         # Initialize simulated values
         self.left_ticks = 0.0
         self.right_ticks = 0.0
+        
         self.left_diff = 0.0
         self.right_diff = 0.0
         self.left_dist = 0.0

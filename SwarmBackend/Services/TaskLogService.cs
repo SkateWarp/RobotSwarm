@@ -12,15 +12,13 @@ public class TaskLogService(DataContext context) : ITaskLogService
 {
     public async Task<Result<TaskLogResponse>> Create(TaskLogRequest request)
     {
-        var robot = await context.Robots.FindAsync(request.RobotId);
-        if (robot == null)
-        {
-            return new Result<TaskLogResponse>(new Exception("Robot no encontrado"));
-        }
+        var robots = await context.Robots.Filter(
+            x => request.RobotIds.Contains(x.Id)
+        ).ToListAsync() ?? throw new Exception("robots no encontrado");
 
         var task = new TaskLog
         {
-            RobotId = request.RobotId,
+            Robots = robots,
             TaskTemplateId = request.TaskTemplateId,
             DateCreated = DateTime.Now,
             Parameters = JsonDocument.Parse(request.Parameters.GetRawText())
@@ -36,7 +34,7 @@ public class TaskLogService(DataContext context) : ITaskLogService
     {
         var query = context.TaskLogs
             .Include(x => x.TaskTemplate)
-            .Include(x => x.Robot)
+            .Include(x => x.Robots)
             .AsQueryable();
 
         if (dateRange.StartDate != null)
@@ -114,9 +112,13 @@ public class TaskLogService(DataContext context) : ITaskLogService
             await context.SaveChangesAsync();
         }
 
+        var robots = await context.Robots.Filter(
+          x => request.RobotIds.Contains(x.Id)
+      ).ToListAsync() ?? throw new Exception("robots no encontrado");
+
         var task = new TaskLog
         {
-            RobotId = robotId,
+            Robots = robots,
             TaskTemplateId = template.Id,
             DateCreated = DateTime.Now,
             Parameters = JsonDocument.Parse(request.Parameters.GetRawText())
@@ -147,7 +149,7 @@ public class TaskLogService(DataContext context) : ITaskLogService
 
     public async Task<Result<TaskLogResponse>> FinishTask(int robotId)
     {
-        var taskLog = await context.TaskLogs.FirstOrDefaultAsync(x => x.RobotId == robotId);
+        var taskLog = await context.TaskLogs.FirstOrDefaultAsync(x => x.Robots.Any(r => r.Id == robotId));
         if (taskLog == null)
         {
             return new Result<TaskLogResponse>(new Exception("Tarea no encontrada"));

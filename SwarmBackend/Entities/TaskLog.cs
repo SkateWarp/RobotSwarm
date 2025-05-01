@@ -11,11 +11,8 @@ public class TaskLog
     public DateTime? DateCancelled { get; set; }
     public int TaskTemplateId { get; set; }
     public TaskTemplate? TaskTemplate { get; set; }
-    public int RobotId { get; set; }
-    public Robot? Robot { get; set; }
+  public ICollection<Robot> Robots { get; set; } = [];
 
-    public int? RobotGroupId { get; set; }
-    public RobotGroup? RobotGroup { get; set; }
 
     [Column(TypeName = "jsonb")]
     public JsonDocument Parameters { get; set; } = JsonDocument.Parse("{}");
