@@ -245,7 +245,7 @@ class SignalRHandler:
                     "sensorName":sensor_name,
                     "notes": str(key)
                 }
-                # rospy.loginfo(f"Sensor data to sned: {reading_request}")
+                rospy.loginfo(f"Sensor data to sned: {reading_request} to robot {robot_id} convertido {int(robot_id)}")
 
                 self.connection.send("HandleSensorReading", [
                     int(robot_id),
