@@ -19,6 +19,9 @@ class RobotSwarmBridge:
         # Get parameters
         self.robot_ids = rospy.get_param('~robot_ids', [1, 2, 3, 4, 5])
         self.backend_url = rospy.get_param('~backend_url', 'ws://localhost:44337/hubs/robot')
+
+        self.logger.info(f"Robot IDs: {self.robot_ids}")
+        self.logger.info(f"Backend URL: {self.backend_url}")
        
         # Initialize handlers
         self.signalr_handler = SignalRHandler(

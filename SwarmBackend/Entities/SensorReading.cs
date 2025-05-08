@@ -3,7 +3,7 @@
 public class SensorReading
 {
     public int Id { get; set; }
-    public double Value { get; set; }
+    public string Value { get; set; } = string.Empty;
     public DateTime DateCreated { get; set; } = DateTime.Now;
 
     public int SensorId { get; set; }
