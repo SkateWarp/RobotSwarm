@@ -11,7 +11,6 @@ public static class RobotRoute
     public static RouteGroupBuilder MapRobot(this RouteGroupBuilder group)
     {
         group.MapGet("", GetAll)
-           .RequireAuthorization()
            .Produces<IEnumerable<RobotResponse>>();
 
         group.MapGet("/{id}", GetById)
