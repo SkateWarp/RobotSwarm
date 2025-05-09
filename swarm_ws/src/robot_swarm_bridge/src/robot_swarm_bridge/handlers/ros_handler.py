@@ -1,5 +1,3 @@
-
-
 import rospy
 from std_msgs.msg import String
 import json
@@ -34,6 +32,9 @@ class ROSHandler:
             'finish_task': 0,
             'cancel_task': 0
         }
+        
+        # Rate limiting interval in seconds (changed from 1 to 5)
+        self.rate_limit_interval = 5.0
         
         # Setup publishers and subscribers
         self.setup_ros_communication()
@@ -82,7 +83,7 @@ class ROSHandler:
             f'/robot/{self.robot_id}/task/cancel',
             String,
             self.cancel_task_subscriber_callback
-        )
+        )   
 
     def publish_command(self, command_data):
         """Publish command to ROS"""
@@ -144,7 +145,7 @@ class ROSHandler:
             # For event-based messages, we need to check rate limiting directly
             current_time = time.time()
             if current_time >= self.next_allowed_time.get('finish_task', 0):
-                self.next_allowed_time['finish_task'] = current_time + 1.0
+                self.next_allowed_time['finish_task'] = current_time + self.rate_limit_interval
                 self.finish_task_callback(self.robot_id)
         except Exception as e:
             rospy.logerr(f"Error in finish task callback: {e}")
@@ -155,7 +156,7 @@ class ROSHandler:
             # For event-based messages, we need to check rate limiting directly
             current_time = time.time()
             if current_time >= self.next_allowed_time.get('cancel_task', 0):
-                self.next_allowed_time['cancel_task'] = current_time + 1.0
+                self.next_allowed_time['cancel_task'] = current_time + self.rate_limit_interval
                 self.cancel_task_callback(self.robot_id)
         except Exception as e:
             rospy.logerr(f"Error in cancel task callback: {e}")
@@ -171,9 +172,9 @@ class ROSHandler:
                     with self.message_lock:
                         status_data = self.latest_messages.get('status')
                         if status_data is not None:
-                            self.next_allowed_time['status'] = current_time + 1.0
+                            self.next_allowed_time['status'] = current_time + self.rate_limit_interval
                             self.latest_messages['status'] = None
-                            rospy.loginfo(f"[RATE_LIMITED] Sending status update for robot {self.robot_id}")
+                            rospy.loginfo(f"[RATE_LIMITED] Sending status update for robot {self.robot_id} (every {self.rate_limit_interval}s)")
                             self.status_callback(self.robot_id, status_data)
                 
                 # Process sensor messages
@@ -181,9 +182,9 @@ class ROSHandler:
                     with self.message_lock:
                         sensor_data = self.latest_messages.get('sensor')
                         if sensor_data is not None:
-                            self.next_allowed_time['sensor'] = current_time + 1.0
+                            self.next_allowed_time['sensor'] = current_time + self.rate_limit_interval
                             self.latest_messages['sensor'] = None
-                            rospy.loginfo(f"[RATE_LIMITED] Sending sensor data for robot {self.robot_id}")
+                            rospy.loginfo(f"[RATE_LIMITED] Sending sensor data for robot {self.robot_id} (every {self.rate_limit_interval}s)")
                             self.sensor_callback(self.robot_id, sensor_data)
                 
                 # Process task messages
@@ -191,9 +192,9 @@ class ROSHandler:
                     with self.message_lock:
                         task_data = self.latest_messages.get('task')
                         if task_data is not None:
-                            self.next_allowed_time['task'] = current_time + 1.0
+                            self.next_allowed_time['task'] = current_time + self.rate_limit_interval
                             self.latest_messages['task'] = None
-                            rospy.loginfo(f"[RATE_LIMITED] Sending task data for robot {self.robot_id}")
+                            rospy.loginfo(f"[RATE_LIMITED] Sending task data for robot {self.robot_id} (every {self.rate_limit_interval}s)")
                             self.start_task_callback(self.robot_id, task_data)
                 
                 # Sleep for a short time to avoid high CPU usage

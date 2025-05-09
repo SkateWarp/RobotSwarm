@@ -21,5 +21,7 @@ public interface IRealtimeService
 
     Task SendCommand(int robotId, string command, string parameters);
 
+    Task<List<int>> NotifyRobotsAvailable();
+
 
 }

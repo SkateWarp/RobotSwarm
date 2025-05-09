@@ -9,7 +9,7 @@ from queue import Queue
 import traceback
 
 class SignalRHandler:
-    def __init__(self, backend_url, robot_ids, command_callback):
+    def __init__(self, backend_url, robot_ids, command_callback, robots_available_callback=None):
         """
         Initialize SignalR handler
         
@@ -21,6 +21,7 @@ class SignalRHandler:
         self.url = backend_url
         self.robot_ids = robot_ids if isinstance(robot_ids, list) else [robot_ids]
         self.command_callback = command_callback
+        self.robots_available_callback = robots_available_callback
         self.connection = None
         self.is_connected = False
         self.reconnect_attempt = 0
@@ -62,6 +63,7 @@ class SignalRHandler:
             
             # Register command handler
             self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
+            self.connection.on("RobotsAvailable", lambda robots: self.robots_available_callback(robots))
             rospy.loginfo("SignalR connection setup complete")
 
         except Exception as e:
@@ -156,6 +158,22 @@ class SignalRHandler:
                 "timestamp": datetime.utcnow().isoformat()
             })
 
+    def _handle_available_robots(self, robots):
+        """Handle available robots from SignalR"""
+        try:
+            # self.logger.debug(f"Available robots: {robots}")
+            if isinstance(robots, str):
+                robots = json.loads(robots)
+            
+            # Update robot IDs
+            # self.robot_ids = robots.get("robotIds", [])
+            self.logger.info(f"Updated available robots: {self.robot_ids}")
+            
+            
+            
+        except Exception as e:
+            self.logger.error(f"Error handling available robots: {e}")
+
     def start(self):
         """Start the SignalR connection"""
         try:
@@ -241,11 +259,11 @@ class SignalRHandler:
         for key, value in sensor_data.items():
             if key != "name":
                 reading_request = {
-                    "value": float(value),
+                    "value": value,
                     "sensorName":sensor_name,
                     "notes": str(key)
                 }
-                # rospy.loginfo(f"Sensor data to sned: {reading_request}")
+                rospy.loginfo(f"Sensor data to sned: {reading_request} to robot {robot_id} convertido {int(robot_id)}")
 
                 self.connection.send("HandleSensorReading", [
                     int(robot_id),
