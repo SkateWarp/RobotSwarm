@@ -20,6 +20,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
 
         try
         {
+            await RobotsAvailable();
             // Get robotId from query string
             if (Context.GetHttpContext()?.Request.Query.TryGetValue("robotId", out var robotIdStr) == true
                 && int.TryParse(robotIdStr, out var robotId))
