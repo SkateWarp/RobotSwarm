@@ -26,17 +26,22 @@ function LeafTypesConfigList() {
         dispatch(removeLeafType(idForDelete));
     };
 
-    const columns = useMemo(
-        () => [
+    const columns = useMemo(() => [
             {
                 Header: "Nombre",
                 accessor: "name",
                 sortable: true,
+                Cell: ({ row }) => (
+                    row.original.taskTemplate.name
+                ),
             },
             {
                 Header: "Descripción",
                 accessor: "taskTypeDescription",
                 sortable: true,
+                Cell: ({ row }) => (
+                    row.original.taskTemplate.taskTypeDescription
+                ),
             },
             {
                 Header: "Fecha",
@@ -54,7 +59,7 @@ function LeafTypesConfigList() {
                 width: 128,
                 sortable: false,
                 Cell: ({ row }) => {
-                    return <TaskCategoriesLabel status={row.original.taskType} />;
+                    return <TaskCategoriesLabel status={row.original.taskTemplate.taskType} />;
                 },
             },
             {

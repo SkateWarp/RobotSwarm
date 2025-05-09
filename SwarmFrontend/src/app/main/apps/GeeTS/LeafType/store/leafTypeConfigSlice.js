@@ -7,7 +7,7 @@ export const getLeafTypes = createAsyncThunk(
     async (routeParams, { getState }) => {
         routeParams = routeParams || getState().leafTypesConfigApp.leafTypes.routeParams;
 
-        const response = await axios.get(`${URL}/TaskTemplate`);
+        const response = await axios.get(`${URL}/TaskLog`);
         const data = await response.data;
 
         return { data, routeParams };

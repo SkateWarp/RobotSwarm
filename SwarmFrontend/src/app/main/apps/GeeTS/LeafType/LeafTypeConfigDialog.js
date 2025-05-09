@@ -29,6 +29,8 @@ function LeafTypesConfigDialog() {
         ({ leafTypesConfigApp }) => leafTypesConfigApp.leafTypes.leafTypesConfigDialog
     );
 
+    const [taskTemplates, setTaskTemplates] = useState([]);
+
     const [taskCategories, setTaskCategories] = useState([
         {
             id: 0,
@@ -98,6 +100,8 @@ function LeafTypesConfigDialog() {
         closeComposeDialog();
     }
 
+
+//crear tasklogs ,agregar una seleccion de tasktemplate y un campo string para agregar un json
     return (
         <Dialog
             classes={{
@@ -128,7 +132,7 @@ function LeafTypesConfigDialog() {
                                 <TextField
                                     {...field}
                                     className="mb-24"
-                                    label="Nombre"
+                                    label="Parametro"
                                     type="text"
                                     error={!!errors.name}
                                     helperText={errors?.name?.message}
