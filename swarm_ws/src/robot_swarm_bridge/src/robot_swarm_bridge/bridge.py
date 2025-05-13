@@ -4,6 +4,7 @@ from handlers.signalr_handler import SignalRHandler
 from handlers.ros_handler import ROSHandler
 from utils.config import load_config
 from utils.logger import setup_logger
+from std_msgs.msg import String
 
 class RobotSwarmBridge:
     def __init__(self):
@@ -39,6 +40,36 @@ class RobotSwarmBridge:
                 robot_id: ROSHandler(robot_id, self.config, self.on_status_changed, self.on_sensor_data, self.on_finish_task, self.on_cancel_task, self.on_start_task)
                 for robot_id in self.robot_ids
             }
+
+    def on_robots_available(self, robot_ids):
+        """Handle available robots from SignalR"""
+        self.logger.info(f"Available robots: {robot_ids}")
+        \
+        # /listOfAvailableRobots
+        command_pub = rospy.Publisher(
+            f'/listOfAvailableRobots',
+            String,
+            queue_size=10
+        )
+
+        command_pub.publish(f"{robot_ids}")
+
+       
+        # Initialize ROS handlers for each robot
+        for robot_id in robot_ids:
+            if robot_id not in self.ros_handlers:
+                self.ros_handlers[robot_id] = ROSHandler(
+                    robot_id,
+                    self.config,
+                    self.on_status_changed,
+                    self.on_sensor_data,
+                    self.on_finish_task,
+                    self.on_cancel_task,
+                    self.on_start_task
+                )
+                rospy.loginfo(f"Initialized ROS handler for robot {robot_id}")
+            else:
+                rospy.loginfo(f"ROS handler already exists for robot {robot_id}")
     
     def on_command_received(self, robot_id, command_data):
         """Handle commands received from SignalR"""

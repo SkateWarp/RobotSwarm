@@ -9,7 +9,7 @@ from queue import Queue
 import traceback
 
 class SignalRHandler:
-    def __init__(self, backend_url, robot_ids, command_callback):
+    def __init__(self, backend_url, robot_ids, command_callback, robots_available_callback=None):
         """
         Initialize SignalR handler
         
@@ -21,6 +21,7 @@ class SignalRHandler:
         self.url = backend_url
         self.robot_ids = robot_ids if isinstance(robot_ids, list) else [robot_ids]
         self.command_callback = command_callback
+        self.robots_available_callback = robots_available_callback
         self.connection = None
         self.is_connected = False
         self.reconnect_attempt = 0
@@ -62,7 +63,7 @@ class SignalRHandler:
             
             # Register command handler
             self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
-            self.connection.on("RobotsAvailable", lambda robots: self._handle_available_robots(robots))
+            self.connection.on("RobotsAvailable", lambda robots: self.robots_available_callback(robots))
             rospy.loginfo("SignalR connection setup complete")
 
         except Exception as e:
