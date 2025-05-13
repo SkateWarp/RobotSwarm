@@ -28,7 +28,8 @@ class RobotSwarmBridge:
         self.signalr_handler = SignalRHandler(
             self.backend_url,
             self.robot_ids,
-            self.on_command_received
+            self.on_command_received,
+            self.on_robots_available,
         )
        
         if isinstance(self.robot_ids, int):
