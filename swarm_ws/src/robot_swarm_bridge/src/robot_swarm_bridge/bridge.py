@@ -44,7 +44,8 @@ class RobotSwarmBridge:
 
     def on_robots_available(self, robot_ids):
         """Handle available robots from SignalR"""
-        self.logger.info(f"Available robots: {robot_ids}")
+        # force porque python recibe una lista de parametros
+        self.logger.info(f"Available robots: {robot_ids[0]}")
         
         # /listOfAvailableRobots
         command_pub = rospy.Publisher(
@@ -53,7 +54,7 @@ class RobotSwarmBridge:
             queue_size=10
         )
 
-        command_pub.publish(f"{robot_ids}")
+        command_pub.publish(f"{robot_ids[0]}")
 
        
         # Initialize ROS handlers for each robot
