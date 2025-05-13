@@ -62,6 +62,7 @@ class SignalRHandler:
             
             # Register command handler
             self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
+            self.connection.on("RobotsAvailable", lambda robots: self._handle_available_robots(robots))
             rospy.loginfo("SignalR connection setup complete")
 
         except Exception as e:
@@ -155,6 +156,22 @@ class SignalRHandler:
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat()
             })
+
+    def _handle_available_robots(self, robots):
+        """Handle available robots from SignalR"""
+        try:
+            # self.logger.debug(f"Available robots: {robots}")
+            if isinstance(robots, str):
+                robots = json.loads(robots)
+            
+            # Update robot IDs
+            # self.robot_ids = robots.get("robotIds", [])
+            self.logger.info(f"Updated available robots: {self.robot_ids}")
+            
+            
+            
+        except Exception as e:
+            self.logger.error(f"Error handling available robots: {e}")
 
     def start(self):
         """Start the SignalR connection"""

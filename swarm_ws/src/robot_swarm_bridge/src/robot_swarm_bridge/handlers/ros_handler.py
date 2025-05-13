@@ -83,7 +83,7 @@ class ROSHandler:
             f'/robot/{self.robot_id}/task/cancel',
             String,
             self.cancel_task_subscriber_callback
-        )
+        )   
 
     def publish_command(self, command_data):
         """Publish command to ROS"""
