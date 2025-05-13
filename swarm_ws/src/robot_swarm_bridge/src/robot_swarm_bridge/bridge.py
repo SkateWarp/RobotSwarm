@@ -44,7 +44,7 @@ class RobotSwarmBridge:
     def on_robots_available(self, robot_ids):
         """Handle available robots from SignalR"""
         self.logger.info(f"Available robots: {robot_ids}")
-        \
+        
         # /listOfAvailableRobots
         command_pub = rospy.Publisher(
             f'/listOfAvailableRobots',
