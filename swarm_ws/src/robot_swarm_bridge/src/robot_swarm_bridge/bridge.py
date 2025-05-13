@@ -58,7 +58,7 @@ class RobotSwarmBridge:
 
        
         # Initialize ROS handlers for each robot
-        for robot_id in robot_ids:
+        for robot_id in robot_ids[0]:
             if robot_id not in self.ros_handlers:
                 self.ros_handlers[robot_id] = ROSHandler(
                     robot_id,
