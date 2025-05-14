@@ -143,17 +143,17 @@ class DummyTurtleBot3:
         
         # Prepare sensor data
         sensor_data = {
-            "left_ticks": round(noisy_left_ticks, 1),
-            "right_ticks": round(noisy_right_ticks, 1),
-            "left_diff": round(noisy_left_diff, 1),
-            "right_diff": round(noisy_right_diff, 1),
-            "left_dist": round(noisy_left_dist, 1),
-            "right_dist": round(noisy_right_dist, 1),
-            "timestep": round(dt, 1),
-            "left_speed": round(noisy_left_speed, 1),
-            "right_speed": round(noisy_right_speed, 1),
-            "left_speed_filtered": round(noisy_left_speed_filtered, 1),
-            "right_speed_filtered": round(noisy_right_speed_filtered, 1),
+            "left_ticks": str(round(noisy_left_ticks, 1)),
+            "right_ticks": str(round(noisy_right_ticks, 1)),
+            "left_diff": str(round(noisy_left_diff, 1)),
+            "right_diff": str(round(noisy_right_diff, 1)),
+            "left_dist": str(round(noisy_left_dist, 1)),
+            "right_dist": str(round(noisy_right_dist, 1)),
+            "timestep": str(round(dt, 1)),
+            "left_speed": str(round(noisy_left_speed, 1)),
+            "right_speed": str(round(noisy_right_speed, 1)),
+            "left_speed_filtered": str(round(noisy_left_speed_filtered, 1)),
+            "right_speed_filtered": str(round(noisy_right_speed_filtered, 1)),
             "name": "Speed"
         }
         
