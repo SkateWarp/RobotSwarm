@@ -20,7 +20,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
 
         try
         {
-            await RobotsAvailable();
+            await NotifyRobotsAvailable();
             // Get robotId from query string
             if (Context.GetHttpContext()?.Request.Query.TryGetValue("robotId", out var robotIdStr) == true
                 && int.TryParse(robotIdStr, out var robotId))
@@ -205,7 +205,7 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         }
     }
 
-    public async Task<List<int>> RobotsAvailable()
+    public async Task<List<int>> NotifyRobotsAvailable()
     {
         var robotIds = await context.Robots
             .Where(r => r.Status != RobotStatus.Disabled)
