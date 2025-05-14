@@ -157,6 +157,7 @@ class DummyTurtleBot3:
             "name": "Speed"
         }
         
+        print (sensor_data)
         # Convert to JSON and publish
         json_str = json.dumps(sensor_data)
         msg = String()
