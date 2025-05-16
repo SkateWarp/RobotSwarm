@@ -121,6 +121,8 @@ class SignalRHandler:
             # self.logger.debug(f"Received command: {command}")
             if isinstance(command, str):
                 command = json.loads(command)
+
+            rospy.loginfo(f"Received command")
             
             # Extract command details from the format sent by C# backend
             # The C# backend sends: { command, parameters, timestamp }
@@ -140,7 +142,7 @@ class SignalRHandler:
                 }
                 
                 # Pass command to callback with robot ID
-                self.logger.info(f"Forwarding command to robot {robot_id}: {command_name} {parameters}")
+                rospy.loginfo(f"Forwarding command to robot {robot_id}: {command_name} {parameters}")
                 self.command_callback(robot_id, command_data)
             
             # Send acknowledgment
