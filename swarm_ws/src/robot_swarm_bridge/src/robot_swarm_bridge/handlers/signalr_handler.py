@@ -62,7 +62,7 @@ class SignalRHandler:
             self.connection.on_error(lambda error: self._handle_error(error))
             
             # Register command handler
-            self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
+            self.connection.on("ExecuteCommand", lambda *command: self._handle_command(*command))
             self.connection.on("RobotsAvailable", lambda robots: self.robots_available_callback(robots))
             rospy.loginfo("SignalR connection setup complete")
 
@@ -115,9 +115,10 @@ class SignalRHandler:
             self.logger.error(f"Reconnection failed: {e}")
             self._attempt_reconnect()
 
-    def _handle_command(self, command):
+    def _handle_command(self, *args):
         """Handle incoming commands from SignalR"""
         try:
+            command = args[0]
             # self.logger.debug(f"Received command: {command}")
             if isinstance(command, str):
                 command = json.loads(command)
