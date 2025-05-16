@@ -122,7 +122,7 @@ class SignalRHandler:
             if isinstance(command, str):
                 command = json.loads(command)
 
-            rospy.loginfo(f"Received command")
+            rospy.loginfo(f"Received command, {command}")
             
             # Extract command details from the format sent by C# backend
             # The C# backend sends: { command, parameters, timestamp }
@@ -133,7 +133,9 @@ class SignalRHandler:
             
             # The robotId is not included in the command object from the C# backend
             # We need to handle this for all robots in our list
-            for robot_id in robot_ids if robot_ids else self.robot_ids:
+            robotsToNotify = robot_ids if robot_ids else self.robot_ids
+            rospy.loginfo(f"Command to be sent to robots: {robotsToNotify}")
+            for robot_id in robotsToNotify:
                 # Create command data to pass to the callback
                 command_data = {
                     "command": command_name,
