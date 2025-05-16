@@ -118,7 +118,7 @@ class SignalRHandler:
     def _handle_command(self, *args):
         """Handle incoming commands from SignalR"""
         try:
-            command = args[0]
+            command = args[0][0]
             # self.logger.debug(f"Received command: {command}")
             if isinstance(command, str):
                 command = json.loads(command)
