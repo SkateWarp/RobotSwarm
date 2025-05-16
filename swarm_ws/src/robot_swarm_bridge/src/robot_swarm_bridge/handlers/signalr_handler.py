@@ -127,10 +127,11 @@ class SignalRHandler:
             command_name = command.get("command")
             parameters = command.get("parameters")
             timestamp = command.get("timestamp")
+            robot_ids = command.get("robot_ids", None)  # Get robot IDs from command
             
             # The robotId is not included in the command object from the C# backend
             # We need to handle this for all robots in our list
-            for robot_id in self.robot_ids:
+            for robot_id in robot_ids if robot_ids else self.robot_ids:
                 # Create command data to pass to the callback
                 command_data = {
                     "command": command_name,
@@ -139,7 +140,7 @@ class SignalRHandler:
                 }
                 
                 # Pass command to callback with robot ID
-                self.logger.info(f"Forwarding command to robot {robot_id}: {command_name}")
+                self.logger.info(f"Forwarding command to robot {robot_id}: {command_name} {parameters}")
                 self.command_callback(robot_id, command_data)
             
             # Send acknowledgment

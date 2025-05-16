@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using LanguageExt.Common;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -8,7 +9,7 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class TaskLogService(DataContext context) : ITaskLogService
+public class TaskLogService(DataContext context, IHubContext<RobotHub> hubContext) : ITaskLogService
 {
     public async Task<Result<TaskLogResponse>> Create(TaskLogRequest request)
     {
@@ -26,6 +27,19 @@ public class TaskLogService(DataContext context) : ITaskLogService
 
         context.TaskLogs.Add(task);
         await context.SaveChangesAsync();
+
+        var taskType = await context.TaskTemplates
+            .Where(x => x.Id == request.TaskTemplateId)
+            .Select(x => x.TaskType)
+            .FirstOrDefaultAsync(); 
+
+        await hubContext.Clients.All.SendAsync("ExecuteCommand", new
+        {
+            Command = taskType.GetDescriptionAttribute(),
+            RobotIds = request.RobotIds,
+            Parameters = request.Parameters,
+            Timestamp = DateTime.Now,
+        });
 
         return TaskLogResponse.From(task);
     }
