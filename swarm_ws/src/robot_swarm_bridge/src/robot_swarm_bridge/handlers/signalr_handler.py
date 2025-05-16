@@ -259,7 +259,7 @@ class SignalRHandler:
         for key, value in sensor_data.items():
             if key != "name":
                 reading_request = {
-                    "value": float(value),
+                    "value": value,
                     "sensorName":sensor_name,
                     "notes": str(key)
                 }
