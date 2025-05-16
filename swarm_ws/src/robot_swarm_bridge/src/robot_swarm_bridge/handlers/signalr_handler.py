@@ -130,7 +130,7 @@ class SignalRHandler:
             command_name = command.get("command")
             parameters = command.get("parameters")
             timestamp = command.get("timestamp")
-            robot_ids = command.get("robot_ids", None)  # Get robot IDs from command
+            robot_ids = command.get("robotIds", None)  # Get robot IDs from command
             
             # The robotId is not included in the command object from the C# backend
             # We need to handle this for all robots in our list
