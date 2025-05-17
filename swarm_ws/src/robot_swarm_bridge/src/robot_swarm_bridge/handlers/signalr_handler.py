@@ -62,7 +62,7 @@ class SignalRHandler:
             self.connection.on_error(lambda error: self._handle_error(error))
             
             # Register command handler
-            self.connection.on("ExecuteCommand", lambda command: self._handle_command(command))
+            self.connection.on("ExecuteCommand", lambda *command: self._handle_command(*command))
             self.connection.on("RobotsAvailable", lambda robots: self.robots_available_callback(robots))
             rospy.loginfo("SignalR connection setup complete")
 
@@ -115,22 +115,28 @@ class SignalRHandler:
             self.logger.error(f"Reconnection failed: {e}")
             self._attempt_reconnect()
 
-    def _handle_command(self, command):
+    def _handle_command(self, *args):
         """Handle incoming commands from SignalR"""
         try:
+            command = args[0][0]
             # self.logger.debug(f"Received command: {command}")
             if isinstance(command, str):
                 command = json.loads(command)
+
+            rospy.loginfo(f"Received command, {command}")
             
             # Extract command details from the format sent by C# backend
             # The C# backend sends: { command, parameters, timestamp }
             command_name = command.get("command")
             parameters = command.get("parameters")
             timestamp = command.get("timestamp")
+            robot_ids = command.get("robotIds", None)  # Get robot IDs from command
             
             # The robotId is not included in the command object from the C# backend
             # We need to handle this for all robots in our list
-            for robot_id in self.robot_ids:
+            robotsToNotify = robot_ids if robot_ids else self.robot_ids
+            rospy.loginfo(f"Command to be sent to robots: {robotsToNotify}")
+            for robot_id in robotsToNotify:
                 # Create command data to pass to the callback
                 command_data = {
                     "command": command_name,
@@ -139,7 +145,7 @@ class SignalRHandler:
                 }
                 
                 # Pass command to callback with robot ID
-                self.logger.info(f"Forwarding command to robot {robot_id}: {command_name}")
+                rospy.loginfo(f"Forwarding command to robot {robot_id}: {command_name} {parameters}")
                 self.command_callback(robot_id, command_data)
             
             # Send acknowledgment
