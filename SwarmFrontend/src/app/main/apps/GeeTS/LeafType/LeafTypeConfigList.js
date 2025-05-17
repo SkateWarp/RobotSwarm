@@ -7,7 +7,7 @@ import ChargingProgressBar from "../../../../shared-components/ChargingProgressB
 import DeleteRowElementDialog from "../../../../shared-components/DeleteRowElementDialog";
 import useFilteredData from "../../../../shared-components/hooks/useFilteredData";
 import GeneralTableFrontendPaginationComplete from "../../../../shared-components/GeneralTableFrontendPaginationComplete";
-import { openEditLeafTypesConfigDialog, removeLeafType, selectLeafTypes } from "./store/leafTypeConfigSlice";
+import { openEditLeafTypesConfigDialog, removeTask, selectLeafTypes } from "./store/leafTypeConfigSlice";
 import TaskCategoriesLabel from "../../../../shared-components/TaskCategoriesLabel";
 
 function LeafTypesConfigList() {
@@ -23,7 +23,7 @@ function LeafTypesConfigList() {
     };
 
     const deleteRowElement = () => {
-        dispatch(removeLeafType(idForDelete));
+        dispatch(removeTask(idForDelete));
     };
 
     const columns = useMemo(() => [

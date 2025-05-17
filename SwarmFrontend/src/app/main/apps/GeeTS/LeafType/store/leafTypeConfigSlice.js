@@ -2,7 +2,7 @@ import { createSlice, createAsyncThunk, createEntityAdapter } from "@reduxjs/too
 import axios from "axios";
 import { URL } from "app/constants/constants";
 
-export const getLeafTypes = createAsyncThunk(
+export const getTasks = createAsyncThunk(
     "leafTypesConfigApp/leafType-components/getLeafTypes",
     async (routeParams, { getState }) => {
         routeParams = routeParams || getState().leafTypesConfigApp.leafTypes.routeParams;
@@ -14,36 +14,36 @@ export const getLeafTypes = createAsyncThunk(
     }
 );
 
-export const addNewLeafType = createAsyncThunk(
+export const addNewTaskLog = createAsyncThunk(
     "leafTypesConfigApp/leafType-components/addNewLeafType",
-    async (newLeafType, { dispatch }) => {
-        const response = await axios.post(`${URL}/api/LeafType`, newLeafType);
+    async (newTaskLog, { dispatch }) => {
+        const response = await axios.post(`${URL}/TaskLog`, newTaskLog);
         const data = await response.data;
 
-        dispatch(getLeafTypes());
+        dispatch(getTasks());
 
         return data;
     }
 );
 
-export const updateLeafType = createAsyncThunk(
+export const updateTask = createAsyncThunk(
     "leafTypesConfigApp/leafType-components/updateLeafType",
-    async (leafType, { dispatch }) => {
-        const response = await axios.put(`${URL}/api/LeafType`, leafType);
+    async (task, { dispatch }) => {
+        const response = await axios.put(`${URL}/TaskLog/${task.id}`, task);
         const data = await response.data;
 
-        dispatch(getLeafTypes());
+        dispatch(getTasks());
 
         return data;
     }
 );
 
-export const removeLeafType = createAsyncThunk(
+export const removeTask = createAsyncThunk(
     "leafTypesConfigApp/leafType-components/removeLeafType",
     async (idForDelete, { dispatch }) => {
         const response = await axios.put(`${URL}/api/LeafType/disable/${idForDelete}`);
         const data = await response.data;
-        dispatch(getLeafTypes());
+        dispatch(getTasks());
 
         return data;
     }
@@ -111,7 +111,7 @@ const leafTypesConfigSlice = createSlice({
     },
 
     extraReducers: {
-        [getLeafTypes.fulfilled]: (state, action) => {
+        [getTasks.fulfilled]: (state, action) => {
             const { data, routeParams } = action.payload;
 
             leafTypeConfigAdapter.setAll(state, data);

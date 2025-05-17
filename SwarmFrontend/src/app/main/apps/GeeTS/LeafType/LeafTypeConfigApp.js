@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { useDispatch } from "react-redux";
 import reducer from "./store";
 import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAppStyle";
-import { getLeafTypes, openNewLeafTypesConfigDialog } from "./store/leafTypeConfigSlice";
+import { getTasks, openNewLeafTypesConfigDialog } from "./store/leafTypeConfigSlice";
 import LeafTypesConfigList from "./LeafTypeConfigList";
 import LeafTypesConfigDialog from "./LeafTypeConfigDialog";
 import SimpleSidebarContent from "../../../../shared-components/SimpleSidebarContent";
@@ -18,7 +18,7 @@ function LeafTypesConfigApp() {
     const pageLayout = useRef(null);
 
     useEffect(() => {
-        dispatch(getLeafTypes());
+        dispatch(getTasks());
     }, []);
 
     return (

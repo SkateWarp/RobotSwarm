@@ -1,27 +1,24 @@
-import { yupResolver } from "@hookform/resolvers/yup";
 import DialogContent from "@mui/material/DialogContent";
 import { useCallback, useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { useDispatch, useSelector } from "react-redux";
-import * as yup from "yup";
 import { AppBar, Dialog, Icon, MenuItem, TextField, Toolbar, Typography } from "@mui/material";
 import * as Actions from "../../../../store/fuse/messageSlice";
 import GeneralDialogActionButtons from "../../../../shared-components/GeneralDialogActionButtons";
 import {
-    addNewLeafType,
+    addNewTaskLog,
     closeEditLeafTypesConfigDialog,
     closeNewLeafTypesConfigDialog,
-    updateLeafType,
+    updateTask,
 } from "./store/leafTypeConfigSlice";
+import axios from "axios";
+import {URL} from "../../../../constants/constants";
 
 const defaultValues = {
-    name: "",
-    description: "",
+    robots: "",
+    parameters: "",
+    taskTemplateId: 1
 };
-
-const schema = yup.object().shape({
-    name: yup.string().required("Debe ingresar un nombre").min(1, "Debe de tener mínimo 1 caracter."),
-});
 
 function LeafTypesConfigDialog() {
     const dispatch = useDispatch();
@@ -31,24 +28,6 @@ function LeafTypesConfigDialog() {
 
     const [taskTemplates, setTaskTemplates] = useState([]);
 
-    const [taskCategories, setTaskCategories] = useState([
-        {
-            id: 0,
-            name: "Ninguno"
-        }, {
-            id: 1,
-            name: "Transporte"
-        },
-        {
-            id: 2,
-            name: "Sigue al líder"
-        },
-        {
-            id: 3,
-            name: "Formación"
-        },
-    ]);
-
     const {
         control,
         reset,
@@ -56,28 +35,33 @@ function LeafTypesConfigDialog() {
         formState: { errors, isValid },
     } = useForm({
         mode: "onChange",
-        defaultValues,
-        resolver: yupResolver(schema),
+        defaultValues
     });
 
     const initDialog = useCallback(() => {
+
         if (leafTypesConfigDialog.type === "edit" && leafTypesConfigDialog.data) {
-            console.log(leafTypesConfigDialog.data);
+
             reset({
-                ...leafTypesConfigDialog.data,
-                taskCategoryId: leafTypesConfigDialog.data.taskType || taskCategories[0].id,
+                ...leafTypesConfigDialog.data
             });
         }
 
         if (leafTypesConfigDialog.type === "new") {
             reset({
                 ...defaultValues,
-                taskCategoryId: taskCategories[0].id,
+                taskTemplateId: 1,
+                parameters: ""
             });
         }
-    }, [leafTypesConfigDialog.data, leafTypesConfigDialog.type, reset, taskCategories]);
+    }, [leafTypesConfigDialog.data]);
 
     useEffect(() => {
+
+        axios.get(`${URL}/TaskTemplate`).then((response) => {
+            setTaskTemplates(response.data);
+        });
+
         if (leafTypesConfigDialog.props.open) {
             initDialog();
         }
@@ -92,16 +76,14 @@ function LeafTypesConfigDialog() {
     function onSubmit(data) {
         if (leafTypesConfigDialog.type === "new") {
             dispatch(Actions.showMessage({ message: "Creando..." }));
-            dispatch(addNewLeafType(data));
+            dispatch(addNewTaskLog(data));
         } else {
             dispatch(Actions.showMessage({ message: "Actualizando..." }));
-            dispatch(updateLeafType({ ...leafTypesConfigDialog.data, ...data }));
+            dispatch(updateTask(data));
         }
         closeComposeDialog();
     }
 
-
-//crear tasklogs ,agregar una seleccion de tasktemplate y un campo string para agregar un json
     return (
         <Dialog
             classes={{
@@ -127,12 +109,12 @@ function LeafTypesConfigDialog() {
                         </div>
                         <Controller
                             control={control}
-                            name="name"
+                            name="parameters"
                             render={({ field }) => (
                                 <TextField
                                     {...field}
                                     className="mb-24"
-                                    label="Parametro"
+                                    label="Parametros"
                                     type="text"
                                     error={!!errors.name}
                                     helperText={errors?.name?.message}
@@ -150,12 +132,12 @@ function LeafTypesConfigDialog() {
                         </div>
                         <Controller
                             control={control}
-                            name="description"
+                            name="robots"
                             render={({ field }) => (
                                 <TextField
                                     {...field}
                                     className="mb-24"
-                                    label="Descripción"
+                                    label="Robots"
                                     variant="outlined"
                                     type="text"
                                     fullWidth
@@ -170,7 +152,7 @@ function LeafTypesConfigDialog() {
                         </div>
 
                         <Controller
-                            name="taskCategoryId"
+                            name="taskTemplateId"
                             control={control}
                             render={({ field }) => (
                                 <TextField
@@ -178,13 +160,13 @@ function LeafTypesConfigDialog() {
                                     autoFocus
                                     select
                                     margin="dense"
-                                    label="Categoría"
+                                    label="Plantilla"
                                     className="w-full"
                                     required
                                 >
-                                    {taskCategories.map((taskCategory) => (
-                                        <MenuItem value={taskCategory.id} key={taskCategory.id}>
-                                            {taskCategory.name}
+                                    {taskTemplates.map((taskTemplate) => (
+                                        <MenuItem value={taskTemplate.id} key={taskTemplate.id}>
+                                            {taskTemplate.name}
                                         </MenuItem>
                                     ))}
                                 </TextField>
