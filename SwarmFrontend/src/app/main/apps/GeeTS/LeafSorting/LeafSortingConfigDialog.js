@@ -4,187 +4,244 @@ import { useCallback, useEffect } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { useDispatch, useSelector } from "react-redux";
 import * as yup from "yup";
-import { AppBar, Dialog, Icon, TextField, Toolbar, Typography, Checkbox, FormControlLabel } from "@mui/material";
+import {
+  AppBar,
+  Dialog,
+  Icon,
+  TextField,
+  Toolbar,
+  Typography,
+  Checkbox,
+  Select,
+  MenuItem,
+  ListItemText,
+  ListItem,
+  FormControlLabel,
+} from "@mui/material";
 import * as Actions from "../../../../store/fuse/messageSlice";
 import GeneralDialogActionButtons from "../../../../shared-components/GeneralDialogActionButtons";
 import {
-    addNewLeafSorting,
-    closeEditLeafSortingConfigDialog,
-    closeNewLeafSortingConfigDialog,
-    updateLeafSorting,
+  addNewLeafSorting,
+  closeEditLeafSortingConfigDialog,
+  closeNewLeafSortingConfigDialog,
+  updateLeafSorting,
 } from "./store/leafSortingConfigSlice";
 
 const defaultValues = {
-    name: "",
-    description: "",
-    notes: "",
-    isPublic: false,
+  name: "",
+  description: "",
+  notes: "",
+  isPublic: false,
+  status: 0,
 };
 
+const statusOptions = [
+  { label: "Reposo", value: 0 },
+  { label: "Trabajando", value: 1 },
+  { label: "Cancelado", value: 2 },
+];
+
 const schema = yup.object().shape({
-    name: yup.string().required("Debe ingresar un nombre").min(1, "Debe de tener mínimo 1 caracter."),
+  name: yup
+    .string()
+    .required("Debe ingresar un nombre")
+    .min(1, "Debe de tener mínimo 1 caracter."),
 });
 
 function LeafSortingConfigDialog() {
-    const dispatch = useDispatch();
-    const leafTypesConfigDialog = useSelector(
-        ({ leafSortingConfigApp }) => leafSortingConfigApp.leafSorting.leafSortingConfigDialog
-    );
+  const dispatch = useDispatch();
+  const leafTypesConfigDialog = useSelector(
+    ({ leafSortingConfigApp }) =>
+      leafSortingConfigApp.leafSorting.leafSortingConfigDialog
+  );
 
-    const {
-        control,
-        reset,
-        handleSubmit,
-        formState: { errors, isValid },
-    } = useForm({
-        mode: "onChange",
-        defaultValues,
-        resolver: yupResolver(schema),
-    });
+  const {
+    control,
+    reset,
+    handleSubmit,
+    formState: { errors, isValid },
+  } = useForm({
+    mode: "onChange",
+    defaultValues,
+    resolver: yupResolver(schema),
+  });
 
-    const initDialog = useCallback(() => {
-        if (leafTypesConfigDialog.type === "edit" && leafTypesConfigDialog.data) {
-            reset(leafTypesConfigDialog.data);
-        }
-
-        if (leafTypesConfigDialog.type === "new") {
-            reset(defaultValues);
-        }
-    }, [leafTypesConfigDialog.data, leafTypesConfigDialog.type, reset]);
-
-    useEffect(() => {
-        if (leafTypesConfigDialog.props.open) {
-            initDialog();
-        }
-    }, [leafTypesConfigDialog.props.open, initDialog]);
-
-    function closeComposeDialog() {
-        return leafTypesConfigDialog.type === "edit"
-            ? dispatch(closeEditLeafSortingConfigDialog())
-            : dispatch(closeNewLeafSortingConfigDialog());
+  const initDialog = useCallback(() => {
+    if (leafTypesConfigDialog.type === "edit" && leafTypesConfigDialog.data) {
+      reset(leafTypesConfigDialog.data);
     }
 
-    function onSubmit(data) {
-        if (leafTypesConfigDialog.type === "new") {
-            dispatch(Actions.showMessage({ message: "Creando..." }));
-            dispatch(addNewLeafSorting(data));
-        } else {
-            dispatch(Actions.showMessage({ message: "Actualizando..." }));
-            dispatch(updateLeafSorting({ ...leafTypesConfigDialog.data, ...data }));
-        }
-        closeComposeDialog();
+    if (leafTypesConfigDialog.type === "new") {
+      reset(defaultValues);
     }
+  }, [leafTypesConfigDialog.data, leafTypesConfigDialog.type, reset]);
 
-    return (
-        <Dialog
-            classes={{
-                paper: "m-24",
-            }}
-            {...leafTypesConfigDialog.props}
-            onClose={closeComposeDialog}
-            fullWidth
-            maxWidth="xs"
-        >
-            <AppBar position="static" elevation={0}>
-                <Toolbar className="flex w-full">
-                    <Typography variant="subtitle1" color="inherit">
-                        {leafTypesConfigDialog.type === "new" ? "Nuevo" : "Editar"}
-                    </Typography>
-                </Toolbar>
-            </AppBar>
-            <form noValidate onSubmit={handleSubmit(onSubmit)} className="flex flex-col md:overflow-hidden">
-                <DialogContent classes={{ root: "p-24" }}>
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">account_circle</Icon>
-                        </div>
-                        <Controller
-                            control={control}
-                            name="name"
-                            render={({ field }) => (
-                                <TextField
-                                    {...field}
-                                    className="mb-24"
-                                    label="Nombre"
-                                    type="text"
-                                    error={!!errors.name}
-                                    helperText={errors?.name?.message}
-                                    variant="outlined"
-                                    required
-                                    fullWidth
-                                />
-                            )}
-                        />
-                    </div>
+  useEffect(() => {
+    if (leafTypesConfigDialog.props.open) {
+      initDialog();
+    }
+  }, [leafTypesConfigDialog.props.open, initDialog]);
 
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">category</Icon>
-                        </div>
-                        <Controller
-                            control={control}
-                            name="description"
-                            render={({ field }) => (
-                                <TextField
-                                    {...field}
-                                    className="mb-24"
-                                    label="Descripción"
-                                    variant="outlined"
-                                    type="text"
-                                    fullWidth
-                                />
-                            )}
-                        />
-                    </div>
+  function closeComposeDialog() {
+    return leafTypesConfigDialog.type === "edit"
+      ? dispatch(closeEditLeafSortingConfigDialog())
+      : dispatch(closeNewLeafSortingConfigDialog());
+  }
 
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">category</Icon>
-                        </div>
-                        <Controller
-                            control={control}
-                            name="notes"
-                            render={({ field }) => (
-                                <TextField
-                                    {...field}
-                                    className="mb-24"
-                                    label="Notas"
-                                    variant="outlined"
-                                    type="text"
-                                    fullWidth
-                                />
-                            )}
-                        />
-                    </div>
+  function onSubmit(data) {
+    if (leafTypesConfigDialog.type === "new") {
+      dispatch(Actions.showMessage({ message: "Creando..." }));
+      dispatch(addNewLeafSorting(data));
+    } else {
+      dispatch(Actions.showMessage({ message: "Actualizando..." }));
+      dispatch(updateLeafSorting({ ...leafTypesConfigDialog.data, ...data }));
+    }
+    closeComposeDialog();
+  }
 
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">public</Icon>
-                        </div>
-                        <Controller
-                            control={control}
-                            name="isPublic"
-                            render={({ field: { onChange, value } }) => (
-                                <FormControlLabel
-                                    control={
-                                        <Checkbox
-                                            checked={value}
-                                            onChange={onChange}
-                                            color="primary"
-                                        />
-                                    }
-                                    label="Es público"
-                                    className="mb-24"
-                                />
-                            )}
-                        />
-                    </div>
-                </DialogContent>
+  return (
+    <Dialog
+      classes={{
+        paper: "m-24",
+      }}
+      {...leafTypesConfigDialog.props}
+      onClose={closeComposeDialog}
+      fullWidth
+      maxWidth="xs"
+    >
+      <AppBar position="static" elevation={0}>
+        <Toolbar className="flex w-full">
+          <Typography variant="subtitle1" color="inherit">
+            {leafTypesConfigDialog.type === "new" ? "Nuevo" : "Editar"}
+          </Typography>
+        </Toolbar>
+      </AppBar>
+      <form
+        noValidate
+        onSubmit={handleSubmit(onSubmit)}
+        className="flex flex-col md:overflow-hidden"
+      >
+        <DialogContent classes={{ root: "p-24" }}>
+          <div className="flex">
+            <div className="min-w-48 pt-20">
+              <Icon color="action">account_circle</Icon>
+            </div>
+            <Controller
+              control={control}
+              name="name"
+              render={({ field }) => (
+                <TextField
+                  {...field}
+                  className="mb-24"
+                  label="Nombre"
+                  type="text"
+                  error={!!errors.name}
+                  helperText={errors?.name?.message}
+                  variant="outlined"
+                  required
+                  fullWidth
+                />
+              )}
+            />
+          </div>
 
-                <GeneralDialogActionButtons dialogType={leafTypesConfigDialog.type} isValid={isValid} />
-            </form>
-        </Dialog>
-    );
+          <div className="flex">
+            <div className="min-w-48 pt-20">
+              <Icon color="action">category</Icon>
+            </div>
+            <Controller
+              control={control}
+              name="description"
+              render={({ field }) => (
+                <TextField
+                  {...field}
+                  className="mb-24"
+                  label="Descripción"
+                  variant="outlined"
+                  type="text"
+                  fullWidth
+                />
+              )}
+            />
+          </div>
+
+          <div className="flex">
+            <div className="min-w-48 pt-20">
+              <Icon color="action">category</Icon>
+            </div>
+            <Controller
+              control={control}
+              name="notes"
+              render={({ field }) => (
+                <TextField
+                  {...field}
+                  className="mb-24"
+                  label="Notas"
+                  variant="outlined"
+                  type="text"
+                  fullWidth
+                />
+              )}
+            />
+          </div>
+
+          <div className="flex">
+            <div className="min-w-48 pt-20">
+              <Icon color="action">public</Icon>
+            </div>
+            <Controller
+              control={control}
+              name="isPublic"
+              render={({ field: { onChange, value } }) => (
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={value}
+                      onChange={onChange}
+                      color="primary"
+                    />
+                  }
+                  label="Es público"
+                  className="mb-24"
+                />
+              )}
+            />
+          </div>
+
+          <div className="flex">
+            <div className="min-w-48 pt-20">
+              <Icon color="action">assessment</Icon>
+            </div>
+            <Controller
+              control={control}
+              name="status"
+              render={({ field }) => (
+                <TextField
+                  {...field}
+                  select
+                  className="mb-24"
+                  label="Estado"
+                  variant="outlined"
+                  fullWidth
+                >
+                  {statusOptions.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              )}
+            />
+          </div>
+        </DialogContent>
+
+        <GeneralDialogActionButtons
+          dialogType={leafTypesConfigDialog.type}
+          isValid={isValid}
+        />
+      </form>
+    </Dialog>
+  );
 }
 
 export default LeafSortingConfigDialog;
