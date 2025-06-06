@@ -1,4 +1,4 @@
-﻿using LanguageExt.Common;
+using LanguageExt.Common;
 using Microsoft.EntityFrameworkCore;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -10,10 +10,12 @@ namespace SwarmBackend.Services;
 public class RobotService : IRobotService
 {
     private readonly DataContext context;
+    private readonly IRealtimeService realtimeService;
 
-    public RobotService(DataContext context)
+    public RobotService(DataContext context, IRealtimeService realtimeService)
     {
         this.context = context;
+        this.realtimeService = realtimeService;
     }
 
     public async Task<Result<RobotResponse>> Cancel(int id)
@@ -138,6 +140,8 @@ public class RobotService : IRobotService
             robot.AccountId = accountId;
         }
 
+
+        await realtimeService.NotifyRobotsAvailable();
         await context.SaveChangesAsync();
 
         return RobotResponse.From(robot);
