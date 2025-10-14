@@ -17,6 +17,11 @@ services:
       - "5432:5432"
     networks:
       - swarm_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "10"
 
   backend:
     image: swarmbackend:latest
@@ -37,6 +42,11 @@ services:
       - db
     networks:
       - swarm_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "10"
 
 volumes:
   postgres_data:

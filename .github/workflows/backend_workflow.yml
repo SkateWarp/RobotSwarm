@@ -27,5 +27,12 @@ jobs:
       - name: Prune old Docker images
         run: docker system prune -af
 
+      - name: Clean up old log files
+        run: |
+          echo "Cleaning up Docker logs older than 7 days..."
+          docker system df
+          journalctl --vacuum-time=7d 2>/dev/null || true
+          echo "Log cleanup completed"
+
       - name: Give permission to script
         run: find . -type f -name "*.py" -exec chmod +x {} \;
