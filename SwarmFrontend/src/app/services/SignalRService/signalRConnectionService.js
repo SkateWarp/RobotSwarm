@@ -5,6 +5,8 @@ import { URL } from 'app/constants/constants';
 const singletonInstance = (function () {
     // Store multiple connections by group name
     const connections = {};
+    // Store connection promises for each connection
+    const connectionPromises = {};
 
     function createInstance(groupNames) {
         const accessToken = jwtService.getAccessToken();
@@ -33,8 +35,8 @@ const singletonInstance = (function () {
         // Store the connection
         connections[connectionKey] = connection;
 
-        // Start the connection
-        connection.start()
+        // Start the connection and store the promise
+        connectionPromises[connectionKey] = connection.start()
             .then(() => {
                 console.log(`SignalR connection established successfully for group: ${connectionKey}`);
 
@@ -47,16 +49,26 @@ const singletonInstance = (function () {
                     console.log(`SignalR connection closed for group ${connectionKey}:`, error);
                     // Remove the connection from our store when it's closed
                     delete connections[connectionKey];
+                    delete connectionPromises[connectionKey];
                 });
+
+                return connection;
             })
             .catch(err => {
                 console.error(`Error starting SignalR connection for group ${connectionKey}:`, err);
                 // Remove the connection from our store if it fails to start
                 delete connections[connectionKey];
+                delete connectionPromises[connectionKey];
+                throw err;
             });
 
         return connection;
     }
+
+    const getConnectionPromise = (groupNames) => {
+        const connectionKey = groupNames || 'default';
+        return connectionPromises[connectionKey] || Promise.reject(new Error(`No connection found for ${connectionKey}`));
+    };
 
     const stopConnection = (groupNames) => {
         const connectionKey = groupNames || 'default';
@@ -80,6 +92,7 @@ const singletonInstance = (function () {
 
     return {
         createConnectionBuilder: createInstance,
+        getConnectionPromise,
         stopConnection,
         stopAllConnections
     };

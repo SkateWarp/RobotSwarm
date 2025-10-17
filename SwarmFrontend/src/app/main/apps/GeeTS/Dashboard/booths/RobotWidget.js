@@ -57,22 +57,36 @@ function RobotWidget({ robot }) {
 
         // Set up SignalR event handlers
         eventHandlerRef.current = (current) => {
+            console.log(`Received AllSensorReadings for robot ${robot.id}:`, current);
             setReadings(current);
         };
 
-        // Register the event handler
-        connectionRef.current.on(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
-        connectionRef.current.on(`RobotConnectionChanged/${robot.id}`, (params) => {
-            setIsConnected(params.isConnected);
-        });
-        connectionRef.current.on(`RobotStatusChanged/${robot.id}`, (params) => {
-            setCurrentStatus(params.status);
-        });
+        // Wait for connection to be established before registering handlers
+        singletonInstance.getConnectionPromise(`robot_${robot.id}`)
+            .then((connection) => {
+                console.log(`Registering event handlers for robot ${robot.id}`);
+
+                // Register the event handlers
+                connection.on(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
+                connection.on(`RobotConnectionChanged/${robot.id}`, (params) => {
+                    console.log(`Robot ${robot.id} connection changed:`, params);
+                    setIsConnected(params.isConnected);
+                });
+                connection.on(`RobotStatusChanged/${robot.id}`, (params) => {
+                    console.log(`Robot ${robot.id} status changed:`, params);
+                    setCurrentStatus(params.status);
+                });
+            })
+            .catch((error) => {
+                console.error(`Error establishing SignalR connection for robot ${robot.id}:`, error);
+            });
 
         // Cleanup function to remove event handlers when component unmounts
         return () => {
             if (connectionRef.current && eventHandlerRef.current) {
                 connectionRef.current.off(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
+                connectionRef.current.off(`RobotConnectionChanged/${robot.id}`);
+                connectionRef.current.off(`RobotStatusChanged/${robot.id}`);
             }
         };
     }, [robot.id]);
