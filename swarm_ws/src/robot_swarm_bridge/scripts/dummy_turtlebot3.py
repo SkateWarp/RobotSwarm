@@ -52,6 +52,11 @@ class DummyTurtleBot3:
         self.ticks_per_meter = 4096.0 / (2.0 * math.pi * self.wheel_radius)  # Approximation
         self.alpha = 0.7  # Filter coefficient
         
+        # Random movement parameters
+        self.use_random_movement = rospy.get_param('~use_random_movement', True)
+        self.velocity_change_interval = rospy.get_param('~velocity_change_interval', 2.0)  # seconds
+        self.last_velocity_change = rospy.Time.now()
+        
         # TF broadcaster for simulated position
         self.tf_broadcaster = TransformBroadcaster()
         
@@ -72,11 +77,27 @@ class DummyTurtleBot3:
         self.last_update_time = rospy.Time.now()
         
         rospy.loginfo(f"Dummy TurtleBot3 (ID: {self.robot_id}, Namespace: {self.namespace}) initialized, publishing at {self.publish_rate} Hz")
+        rospy.loginfo(f"Random movement: {self.use_random_movement}")
     
     def cmd_vel_callback(self, msg):
         """Update simulated robot velocities based on command"""
         self.linear_velocity = msg.linear.x
         self.angular_velocity = msg.angular.z
+        # If receiving cmd_vel commands, disable random movement
+        if abs(msg.linear.x) > 0.001 or abs(msg.angular.z) > 0.001:
+            self.use_random_movement = False
+    
+    def generate_random_velocity(self):
+        """Generate random velocity commands for testing"""
+        current_time = rospy.Time.now()
+        
+        # Change velocity periodically
+        if (current_time - self.last_velocity_change).to_sec() >= self.velocity_change_interval:
+            self.linear_velocity = np.random.uniform(-0.15, 0.22)  # -0.15 a 0.22 m/s (TurtleBot3 range)
+            self.angular_velocity = np.random.uniform(-1.5, 1.5)  # -1.5 a 1.5 rad/s
+            self.last_velocity_change = current_time
+            
+            rospy.loginfo_throttle(5, f"[{self.namespace}] New random velocity - Linear: {self.linear_velocity:.2f} m/s, Angular: {self.angular_velocity:.2f} rad/s")
     
     def add_noise(self, value):
         """Add random noise to simulate sensor readings"""
@@ -89,6 +110,10 @@ class DummyTurtleBot3:
         """Update simulation state based on current velocities"""
         if dt <= 0:
             return
+        
+        # Generate random movement if enabled
+        if self.use_random_movement:
+            self.generate_random_velocity()
             
         # Calculate wheel velocities from robot velocity
         v_right = self.linear_velocity + (self.angular_velocity * self.wheel_separation / 2.0)
@@ -157,7 +182,6 @@ class DummyTurtleBot3:
             "name": "Speed"
         }
         
-        print (sensor_data)
         # Convert to JSON and publish
         json_str = json.dumps(sensor_data)
         msg = String()
@@ -169,7 +193,7 @@ class DummyTurtleBot3:
         self.publish_odom(current_time)
         self.publish_tf(current_time)
         
-        rospy.loginfo_throttle(3, f"[{self.namespace}] Published sensor data")
+        rospy.loginfo_throttle(3, f"[{self.namespace}] Published sensor data - Linear: {self.linear_velocity:.2f}, Angular: {self.angular_velocity:.2f}")
     
     def publish_joint_states(self, timestamp):
         """Publish simulated joint states"""

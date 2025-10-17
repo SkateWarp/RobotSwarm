@@ -7,8 +7,8 @@
   <arg name="publish_rate" default="10.0"/>
   <arg name="noise_amplitude" default="0.05"/>
   
-  <!-- Leader robot (tb3_0) -->
-  <group ns="tb3_0">
+  <!-- Leader robot (robot/0) -->
+  <group ns="robot/0">
     <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="0"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
@@ -21,12 +21,12 @@
     
     <!-- Optional: Command velocity publisher for the leader -->
     <node pkg="rostopic" type="rostopic" name="velocity_publisher" 
-          args="pub -r 2 /tb3_0/cmd_vel geometry_msgs/Twist '{linear: {x: 0.2, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.05}}'" 
+          args="pub -r 2 /robot/0/cmd_vel geometry_msgs/Twist '{linear: {x: 0.2, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.05}}'" 
           output="screen" />
   </group>
   
-  <!-- Follower robot (tb3_1) -->
-  <group ns="tb3_1" if="$(eval int(arg('num_robots')) >= 2)">
+  <!-- Follower robot (robot/1) -->
+  <group ns="robot/1" if="$(eval int(arg('num_robots')) >= 2)">
     <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="1"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
@@ -38,8 +38,8 @@
     </node>
   </group>
   
-  <!-- Follower robot (tb3_2) -->
-  <group ns="tb3_2" if="$(eval int(arg('num_robots')) >= 3)">
+  <!-- Follower robot (robot/2) -->
+  <group ns="robot/2" if="$(eval int(arg('num_robots')) >= 3)">
     <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="2"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
@@ -51,8 +51,8 @@
     </node>
   </group>
   
-  <!-- Follower robot (tb3_3) -->
-  <group ns="tb3_3" if="$(eval int(arg('num_robots')) >= 4)">
+  <!-- Follower robot (robot/3) -->
+  <group ns="robot/3" if="$(eval int(arg('num_robots')) >= 4)">
     <node pkg="robot_swarm_bridge" type="dummy_turtlebot3.py" name="dummy_turtlebot3" output="screen">
       <param name="robot_id" value="3"/>
       <param name="publish_rate" value="$(arg publish_rate)"/>
