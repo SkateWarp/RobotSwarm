@@ -187,7 +187,7 @@ class DummyTurtleBot3:
         json_str = json.dumps(sensor_data)
         # Match the format from the working manual command: data: '{JSON}'
         msg = String()
-        msg.data = f"data: '{json_str}'"
+        msg.data = json_str
         self.sensor_pub.publish(msg)
         
         # Also publish standard TurtleBot3 topics
