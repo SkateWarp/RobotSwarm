@@ -182,10 +182,16 @@ class DummyTurtleBot3:
             "name": "Speed"
         }
         
+<<<<<<< HEAD
         # Convert to JSON and publish
+=======
+        print (sensor_data)
+        # Convert to JSON and publish in the format expected by ROS handler
+>>>>>>> ee5bf245d69a565cabaa686e6385e3a10b160640
         json_str = json.dumps(sensor_data)
+        # Match the format from the working manual command: data: '{JSON}'
         msg = String()
-        msg.data = json_str
+        msg.data = f"data: '{json_str}'"
         self.sensor_pub.publish(msg)
         
         # Also publish standard TurtleBot3 topics
