@@ -49,7 +49,8 @@ function RobotWidget({ robot }) {
                 },
             })
             .then((response) => {
-                setReadings(response.data);
+                const sortedReadings = response.data.sort((a, b) => a.notes.localeCompare(b.notes));
+                setReadings(sortedReadings);
             })
             .catch((error) => {
                 console.error("Error fetching sensor readings:", error);
@@ -58,7 +59,8 @@ function RobotWidget({ robot }) {
         // Set up SignalR event handlers
         eventHandlerRef.current = (current) => {
             console.log(`Received AllSensorReadings for robot ${robot.id}:`, current);
-            setReadings(current);
+            const sortedReadings = current.sort((a, b) => a.notes.localeCompare(b.notes));
+            setReadings(sortedReadings);
         };
 
         // Wait for connection to be established before registering handlers
@@ -160,7 +162,7 @@ function RobotWidget({ robot }) {
 
                                 <div className="overflow-y-auto max-h-80 p-4">
                                     {readings.map((reading, index) => (
-                                        <div key={index} className="flex flex-col items-center mb-4">
+                                        <div key={reading.id} className="flex flex-col items-center mb-4">
                                             <Typography className="flex h2 text-center justify-items-center items-center self-center mt-16">
                                                 {reading.notes} : {reading.value}
                                             </Typography>

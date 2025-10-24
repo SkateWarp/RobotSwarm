@@ -124,6 +124,7 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
             .Take(1000)
             .AsEnumerable()
             .DistinctBy(x => new { x.Notes })
+            .OrderBy(x => x.Notes)
             .Select(SensorReadingResponse.From)
             .ToList();
     }
@@ -137,6 +138,7 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
             .Take(1000)
             .AsEnumerable()
             .DistinctBy(x => new { x.Notes })
+            .OrderBy(x => x.Notes)
             .Select(SensorReadingResponse.From)
             .ToList();
     }
