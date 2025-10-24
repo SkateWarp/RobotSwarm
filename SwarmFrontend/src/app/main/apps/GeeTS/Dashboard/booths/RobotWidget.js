@@ -58,7 +58,6 @@ function RobotWidget({ robot }) {
 
         // Set up SignalR event handlers
         eventHandlerRef.current = (current) => {
-            console.log(`Received AllSensorReadings for robot ${robot.id}:`, current);
             const sortedReadings = current.sort((a, b) => a.notes.localeCompare(b.notes));
             setReadings(sortedReadings);
         };
@@ -66,16 +65,13 @@ function RobotWidget({ robot }) {
         // Wait for connection to be established before registering handlers
         singletonInstance.getConnectionPromise(`robot_${robot.id}`)
             .then((connection) => {
-                console.log(`Registering event handlers for robot ${robot.id}`);
 
                 // Register the event handlers
                 connection.on(`AllSensorReadings/${robot.id}`, eventHandlerRef.current);
                 connection.on(`RobotConnectionChanged/${robot.id}`, (params) => {
-                    console.log(`Robot ${robot.id} connection changed:`, params);
                     setIsConnected(params.isConnected);
                 });
                 connection.on(`RobotStatusChanged/${robot.id}`, (params) => {
-                    console.log(`Robot ${robot.id} status changed:`, params);
                     setCurrentStatus(params.status);
                 });
             })

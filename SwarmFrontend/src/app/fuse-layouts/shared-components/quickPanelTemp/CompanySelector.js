@@ -14,7 +14,6 @@ function CompanySelector() {
     const [companyId, setCompanyId] = useActualCompanyIdWithState();
     const canLoadCompanySelector =
         user && (user.id === "1" || user.id === 1) && settingsConfig.layout.project === "panelTemp";
-    console.log(history.location.pathname, "route", canLoadCompanySelector, "can load", user);
     useEffect(() => {
         if (companies.length === 0 && canLoadCompanySelector)
             axios

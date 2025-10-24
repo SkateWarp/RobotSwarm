@@ -11,7 +11,6 @@ function GenericServiceButton({ topicName, text, serviceType, request }) {
 
     const handleChange = (e) => {
         setTrigger(true);
-        console.log("cambiando trigger", trigger);
     };
 
     return (
@@ -26,10 +25,8 @@ function GenericServiceButton({ topicName, text, serviceType, request }) {
                 request={request ?? {}}
                 trigger={trigger}
                 callback={(resp) => {
-                    console.log(resp, { topicName });
                 }}
                 failedCallback={(error) => {
-                    console.log(error);
                 }}
             />
         </>

@@ -28,7 +28,6 @@ function LeafSortingConfigList() {
 
     const deleteRowElement = () => {
         const robotToDeactivate = leafTypes.filter((x) => x.id === idForDelete)[0];
-        console.log("robots", robotToDeactivate);
         dispatch(
             removeLeafSorting({
                 ...robotToDeactivate,

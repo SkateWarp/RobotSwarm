@@ -149,7 +149,6 @@ function PanelTempAccountDialog() {
     const password = watch("password");
     const confirmPassword = watch("confirmPassword");
 
-    console.log(errors);
     /**
      * Initialize Dialog with Data
      */

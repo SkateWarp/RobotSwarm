@@ -33,7 +33,6 @@ function RealtimeConfigList() {
                     defaultTopics.map((topic) => topic.replace(":id", robot.id)),
                 );
                 setTopics(paths);
-                console.log("Topics updated:", paths);
             })
             .catch((error) => {
                 console.error("Error fetching robots:", error);
@@ -41,7 +40,6 @@ function RealtimeConfigList() {
     }, []);
 
     function onSend(e) {
-        console.log("SendCommand", selectedTopic, selectedRobot, command);
         // connection.send("SendCommand", selectedRobot, selectedTopic, command);
     }
 

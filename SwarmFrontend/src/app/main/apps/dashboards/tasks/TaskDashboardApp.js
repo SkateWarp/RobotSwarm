@@ -52,10 +52,7 @@ function TaskDashboardApp() {
   const [tabValue, setTabValue] = useState(0);
 
   const onHandleTag = (tag) =>{
-    console.log(tag);
     OneSignal.sendTag('user', tag).then(()=>{
-      console.log("Tagged");
-      console.log(tag);
     });
   }
 

@@ -45,10 +45,8 @@ function PauseButton() {
                 request={{}}
                 trigger={trigger}
                 callback={(resp) => {
-                    console.log(resp, serviceName);
                 }}
                 failedCallback={(error) => {
-                    console.log(error);
                 }}
             />
         </>

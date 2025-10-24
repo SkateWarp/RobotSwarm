@@ -60,7 +60,6 @@ function LeafTypesConfigDialog() {
 
     const initDialog = useCallback(() => {
         if (leafTypesConfigDialog.type === "edit" && leafTypesConfigDialog.data) {
-            console.log(leafTypesConfigDialog.data);
             reset({
                 ...leafTypesConfigDialog.data,
                 taskCategoryId: leafTypesConfigDialog.data.taskType || taskCategories[0].id,
