@@ -195,4 +195,45 @@ public class TaskLogService(DataContext context, IHubContext<RobotHub> hubContex
         return TaskLogResponse.From(taskLog);
     }
 
+    public async Task<Result<IEnumerable<TaskLogResponse>>> CancelTasksByRobot(int robotId, int accountId)
+    {
+        try
+        {
+            // Find all running tasks for this robot that belong to the user
+            var runningTasks = await context.TaskLogs
+                .Include(t => t.Robots)
+                .Include(t => t.TaskTemplate)
+                .Where(t => t.DateFinished == null && t.DateCancelled == null)
+                .Where(t => t.Robots.Any(r => r.Id == robotId && r.AccountId == accountId))
+                .ToListAsync();
+
+            if (!runningTasks.Any())
+            {
+                return new Result<IEnumerable<TaskLogResponse>>(new Exception("No running tasks found for this robot"));
+            }
+
+            // Cancel all found tasks
+            foreach (var task in runningTasks)
+            {
+                task.DateCancelled = DateTime.Now;
+            }
+
+            await context.SaveChangesAsync();
+
+            // Update robot status to idle
+            var robot = await context.Robots.FindAsync(robotId);
+            if (robot != null)
+            {
+                robot.Status = RobotStatus.Idle;
+                await context.SaveChangesAsync();
+            }
+
+            return new Result<IEnumerable<TaskLogResponse>>(runningTasks.Select(TaskLogResponse.From));
+        }
+        catch (Exception ex)
+        {
+            return new Result<IEnumerable<TaskLogResponse>>(ex);
+        }
+    }
+
 }

@@ -14,5 +14,7 @@ public interface ITaskLogService
 
     Task<Result<TaskLogResponse>> FinishTask(int robotId);
 
+    Task<Result<IEnumerable<TaskLogResponse>>> CancelTasksByRobot(int robotId, int accountId);
+
 
 }

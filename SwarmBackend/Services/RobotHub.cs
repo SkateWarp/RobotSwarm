@@ -189,16 +189,16 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         }
     }
 
-    public async Task HandleCancelTaskLog(int robotId)
+    public async Task HandleCancelTaskLog(int robotId, int accountId)
     {
         try
         {
-            await taskLogService.Cancel(robotId);
+            await taskLogService.CancelTasksByRobot(robotId, accountId);
         }
         catch (System.Exception ex)
         {
             logger.LogError(ex,
-                "Error processing finish task log for robot {RobotId}: {Message}",
+                "Error processing cancel task log for robot {RobotId}: {Message}",
                 robotId, ex.Message);
             throw;
         }

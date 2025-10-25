@@ -19,6 +19,8 @@ function RealtimeConfigList() {
     const [command, setCommand] = useState("");
     const [connectionStatus, setConnectionStatus] = useState("disconnected");
     const [commandFeedback, setCommandFeedback] = useState("");
+    const [runningCommands, setRunningCommands] = useState({});
+    const [commandHistory, setCommandHistory] = useState([]);
 
     const userId = useLoggedUserId();
     const connectionRef = useRef(null);
@@ -31,6 +33,9 @@ function RealtimeConfigList() {
 
         // Fetch robots accessible to current user
         fetchUserRobots();
+
+        // Load existing running TaskLogs
+        loadRunningTaskLogs();
 
         // Cleanup on unmount
         return () => {
@@ -114,6 +119,48 @@ function RealtimeConfigList() {
         }
     };
 
+    const loadRunningTaskLogs = async () => {
+        try {
+            const response = await axios.get(`${URL}/api/TaskLog`, {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${jwtService.getAccessToken()}`,
+                },
+            });
+
+            const taskLogs = response.data;
+
+            // Find running TaskLogs for user's robots
+            const runningTaskLogs = taskLogs.filter(task =>
+                task.dateFinished === null &&
+                task.dateCancelled === null &&
+                task.robots?.some(robot => robot.accountId === userId)
+            );
+
+            // Convert running TaskLogs to running commands state
+            const runningState = {};
+            runningTaskLogs.forEach(task => {
+                task.robots.forEach(robot => {
+                    if (robot.accountId === userId) {
+                        runningState[robot.id] = {
+                            id: `task_${task.id}`,
+                            taskLogId: task.id,
+                            command: task.taskTemplate?.taskTypeDescription || "Unknown",
+                            parameters: task.parameters,
+                            startTime: new Date(task.dateCreated),
+                            status: "running"
+                        };
+                    }
+                });
+            });
+
+            setRunningCommands(runningState);
+
+        } catch (error) {
+            console.error("Error loading running TaskLogs:", error);
+        }
+    };
+
     const cleanupConnection = () => {
         if (connectionRef.current) {
             // Remove event handlers
@@ -193,8 +240,38 @@ function RealtimeConfigList() {
                 }
             }
 
-            // Send command via SignalR
+            // 1. Check for running TaskLogs and stop them
+            await stopRunningTasksForRobot(robotId);
+
+            // 2. Create new TaskLog for this command
+            const taskLogId = await createTaskLog(robotId, topicType, commandParams);
+
+            // 3. Send command via SignalR
             await connectionRef.current.invoke("SendCommand", robotId, topicType, JSON.stringify(commandParams));
+
+            // 4. Update local state to track running command
+            const commandId = `cmd_${Date.now()}_${robotId}`;
+            setRunningCommands(prev => ({
+                ...prev,
+                [robotId]: {
+                    id: commandId,
+                    taskLogId: taskLogId,
+                    command: topicType,
+                    parameters: commandParams,
+                    startTime: new Date(),
+                    status: "running"
+                }
+            }));
+
+            // 5. Add to command history
+            setCommandHistory(prev => [{
+                id: commandId,
+                robotId: robotId,
+                command: topicType,
+                parameters: commandParams,
+                timestamp: new Date(),
+                status: "sent"
+            }, ...prev.slice(0, 9)]); // Keep last 10 commands
 
             setCommandFeedback(`Command sent to robot ${robotId} for topic ${topicType}`);
             setTimeout(() => setCommandFeedback(""), 3000);
@@ -204,6 +281,93 @@ function RealtimeConfigList() {
         } catch (error) {
             console.error("Error sending command:", error);
             setCommandFeedback(`Error sending command: ${error.message}`);
+            setTimeout(() => setCommandFeedback(""), 5000);
+        }
+    };
+
+    const stopRunningTasksForRobot = async (robotId) => {
+        try {
+            // Get current TaskLogs to find running ones for this robot
+            const response = await axios.get(`${URL}/api/TaskLog`, {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${jwtService.getAccessToken()}`,
+                },
+            });
+
+            const taskLogs = response.data;
+            const runningTasks = taskLogs.filter(task =>
+                task.dateFinished === null &&
+                task.dateCancelled === null &&
+                task.robots?.some(robot => robot.id === robotId)
+            );
+
+            // Cancel all running tasks for this robot
+            for (const task of runningTasks) {
+                await axios.put(`${URL}/api/TaskLog/cancel/${robotId}`, {}, {
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${jwtService.getAccessToken()}`,
+                    },
+                });
+            }
+
+            if (runningTasks.length > 0) {
+                console.log(`Stopped ${runningTasks.length} running task(s) for robot ${robotId}`);
+            }
+
+        } catch (error) {
+            console.error("Error stopping running tasks:", error);
+        }
+    };
+
+    const createTaskLog = async (robotId, topicType, commandParams) => {
+        try {
+            // Map topic type to TaskTemplate
+            let taskTemplateId = 1; // Default task template
+
+            // You might want to create specific task templates for each command type
+            // For now, we'll use a generic one
+            const taskLogData = {
+                taskTemplateId: taskTemplateId,
+                robotIds: [robotId],
+                parameters: commandParams
+            };
+
+            const response = await axios.post(`${URL}/api/TaskLog`, taskLogData, {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${jwtService.getAccessToken()}`,
+                },
+            });
+
+            return response.data.id;
+        } catch (error) {
+            console.error("Error creating TaskLog:", error);
+            return null;
+        }
+    };
+
+    const stopCommand = async (robotId) => {
+        try {
+            // Stop the running command by cancelling its TaskLog
+            await stopRunningTasksForRobot(robotId);
+
+            // Update local state
+            setRunningCommands(prev => {
+                const updated = { ...prev };
+                if (updated[robotId]) {
+                    updated[robotId] = { ...updated[robotId], status: "stopped" };
+                }
+                return updated;
+            });
+
+            setCommandFeedback(`Command stopped for robot ${robotId}`);
+            setTimeout(() => setCommandFeedback(""), 3000);
+
+        } catch (error) {
+            console.error("Error stopping command:", error);
+            setCommandFeedback(`Error stopping command: ${error.message}`);
             setTimeout(() => setCommandFeedback(""), 5000);
         }
     };
@@ -236,6 +400,63 @@ function RealtimeConfigList() {
                 <VncViewer url="wss://websocket.zerav.la" username="rs" password="123456789" />
             </div>
             <div className="p-2 pb-8 flex flex-col">
+                {/* Running Commands Section */}
+                {Object.keys(runningCommands).length > 0 && (
+                    <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                        <h3 className="text-lg font-semibold text-blue-800 mb-3">Running Commands</h3>
+                        <div className="space-y-2">
+                            {Object.entries(runningCommands).map(([robotId, commandInfo]) => (
+                                <div key={robotId} className="flex items-center justify-between p-3 bg-white rounded border">
+                                    <div className="flex-1">
+                                        <div className="flex items-center space-x-2">
+                                            <span className="font-medium">Robot {robotId}</span>
+                                            <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full">
+                                                {commandInfo.command}
+                                            </span>
+                                            <span className="text-sm text-gray-600">
+                                                Started: {commandInfo.startTime.toLocaleTimeString()}
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => stopCommand(parseInt(robotId))}
+                                        className="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600 transition-colors"
+                                    >
+                                        Stop
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Command History Section */}
+                {commandHistory.length > 0 && (
+                    <div className="mb-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-3">Recent Commands</h3>
+                        <div className="space-y-2 max-h-40 overflow-y-auto">
+                            {commandHistory.map((historyItem) => (
+                                <div key={historyItem.id} className="flex items-center space-x-2 p-2 bg-white rounded border">
+                                    <span className="font-medium text-sm">Robot {historyItem.robotId}</span>
+                                    <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full">
+                                        {historyItem.command}
+                                    </span>
+                                    <span className="text-xs text-gray-600">
+                                        {historyItem.timestamp.toLocaleTimeString()}
+                                    </span>
+                                    <span className={`px-2 py-1 text-xs rounded-full ${
+                                        historyItem.status === "sent"
+                                            ? "bg-green-100 text-green-800"
+                                            : "bg-gray-100 text-gray-800"
+                                    }`}>
+                                        {historyItem.status}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
                 <div className="flex flex-col mb-4">
                     <div className="flex mb-4">
                         <div className="w-full mr-2">
