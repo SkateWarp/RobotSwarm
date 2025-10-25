@@ -18,6 +18,14 @@ const navigationGTSConfig = [
         url: "/apps/GTS/leafTypes",
     },
     {
+        id: "taskLogs",
+        title: "Task Logs",
+        type: "item",
+        icon: "history",
+        auth: authRoles.admin,
+        url: "/apps/GTS/taskLogs",
+    },
+    {
         id: "realtime",
         title: "Realtime",
         type: "item",

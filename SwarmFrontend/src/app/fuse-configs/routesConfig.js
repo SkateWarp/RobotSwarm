@@ -13,6 +13,7 @@ import TaskConfigAppConfig from "../main/apps/GeeTS/Tasks/TaskConfigAppConfig";
 
 // GeeTS
 import LeafTypesAppConfig from "../main/apps/GeeTS/LeafType/LeafTypeAppConfig";
+import TaskLogAppConfig from "../main/apps/GeeTS/TaskLog/TaskLogAppConfig";
 import BoothDashboardAppConfigGeeTS from "../main/apps/GeeTS/Dashboard/BoothDashboardAppConfig";
 import LeafSortingAppConfig from "../main/apps/GeeTS/LeafSorting/LeafSortingAppConfig";
 
@@ -30,6 +31,7 @@ const routeConfigs = [
 
     // GeeTS
     LeafTypesAppConfig,
+    TaskLogAppConfig,
     LeafSortingAppConfig,
     BoothDashboardAppConfigGeeTS,
 ];

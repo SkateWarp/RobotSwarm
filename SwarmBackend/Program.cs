@@ -129,7 +129,7 @@ app.MapGroup("SensorReadings")
     .MapSensorReading();
 app.MapGroup("TaskTemplate")
     .MapTaskTemplate();
-app.MapGroup("TaskLog")
+app.MapGroup("api/TaskLog")
     .MapTaskLog();
 app.MapGroup("RobotGroups")
     .MapRobotGroup();
