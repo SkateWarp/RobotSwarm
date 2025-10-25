@@ -241,10 +241,10 @@ function RealtimeConfigList() {
             }
 
             // 1. Check for running TaskLogs and stop them
-            await stopRunningTasksForRobot(robotId);
+            await stopRunningTasksForRobot(robotId, userId);
 
             // 2. Create new TaskLog for this command
-            const taskLogId = await createTaskLog(robotId, topicType, commandParams);
+            const taskLogId = await createTaskLog(robotId, topicType, commandParams, userId);
 
             // 3. Send command via SignalR
             await connectionRef.current.invoke("SendCommand", robotId, topicType, JSON.stringify(commandParams));
@@ -285,36 +285,17 @@ function RealtimeConfigList() {
         }
     };
 
-    const stopRunningTasksForRobot = async (robotId) => {
+    const stopRunningTasksForRobot = async (robotId, accountId) => {
         try {
-            // Get current TaskLogs to find running ones for this robot
-            const response = await axios.get(`${URL}/api/TaskLog`, {
+            // Use the new endpoint that accepts robot ID and account ID
+            await axios.put(`${URL}/api/TaskLog/cancel/robot/${robotId}`, {}, {
                 headers: {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${jwtService.getAccessToken()}`,
                 },
             });
 
-            const taskLogs = response.data;
-            const runningTasks = taskLogs.filter(task =>
-                task.dateFinished === null &&
-                task.dateCancelled === null &&
-                task.robots?.some(robot => robot.id === robotId)
-            );
-
-            // Cancel all running tasks for this robot
-            for (const task of runningTasks) {
-                await axios.put(`${URL}/api/TaskLog/cancel/${robotId}`, {}, {
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${jwtService.getAccessToken()}`,
-                    },
-                });
-            }
-
-            if (runningTasks.length > 0) {
-                console.log(`Stopped ${runningTasks.length} running task(s) for robot ${robotId}`);
-            }
+            console.log(`Stopped running tasks for robot ${robotId} (user ${accountId})`);
 
         } catch (error) {
             console.error("Error stopping running tasks:", error);

@@ -14,6 +14,7 @@ public static class TaskLogRoute
         group.MapPost("", Create);
         group.MapPost("/{robotId:int}", CreateByRobot);
         group.MapPut("/{id}", Update);
+        group.MapPut("/cancel/robot/{robotId}", CancelTasksByRobot);
 
         return group;
     }
@@ -55,6 +56,31 @@ public static class TaskLogRoute
     {
         var response = await service.Update(id, request);
         return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    public static async Task<IResult> CancelTasksByRobot(int robotId, ITaskLogService service, HttpContext context)
+    {
+        try
+        {
+            var accountId = GetAccountId(context);
+            if (!accountId.HasValue)
+            {
+                return Results.Unauthorized();
+            }
+
+            var response = await service.CancelTasksByRobot(robotId, accountId.Value);
+            return response.Match(Results.Ok, Results.BadRequest);
+        }
+        catch (Exception ex)
+        {
+            return Results.Problem($"Error cancelling tasks: {ex.Message}");
+        }
+    }
+
+    private static int? GetAccountId(HttpContext context)
+    {
+        var accountIdClaim = context.User.FindFirst("id");
+        return accountIdClaim != null ? int.Parse(accountIdClaim.Value) : null;
     }
 
 
