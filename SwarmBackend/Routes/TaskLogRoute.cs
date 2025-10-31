@@ -13,6 +13,7 @@ public static class TaskLogRoute
         group.MapGet("", GetAll);
         group.MapPost("", Create);
         group.MapPost("/{robotId:int}", CreateByRobot);
+        group.MapGet("/{robotId:int}", GetAllByRobot);
         group.MapPut("/{id}", Update);
         group.MapPut("/cancel/robot/{robotId}", CancelTasksByRobot);
 
@@ -70,6 +71,25 @@ public static class TaskLogRoute
 
             var response = await service.CancelTasksByRobot(robotId, accountId.Value);
             return response.Match(Results.Ok, Results.BadRequest);
+        }
+        catch (Exception ex)
+        {
+            return Results.Problem($"Error cancelling tasks: {ex.Message}");
+        }
+    }
+
+    public static async Task<IResult> GetAllByRobot(int robotId, ITaskLogService service, HttpContext context)
+    {
+        try
+        {
+            var accountId = GetAccountId(context);
+            if (!accountId.HasValue)
+            {
+                return Results.Unauthorized();
+            }
+
+            var response = await service.GetByRobot(robotId);
+            return Results.Ok(response);
         }
         catch (Exception ex)
         {

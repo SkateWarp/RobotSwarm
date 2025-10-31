@@ -31,7 +31,7 @@ public class TaskLogService(DataContext context, IHubContext<RobotHub> hubContex
         var taskType = await context.TaskTemplates
             .Where(x => x.Id == request.TaskTemplateId)
             .Select(x => x.TaskType)
-            .FirstOrDefaultAsync(); 
+            .FirstOrDefaultAsync();
 
         await hubContext.Clients.All.SendAsync("ExecuteCommand", new
         {
@@ -236,4 +236,15 @@ public class TaskLogService(DataContext context, IHubContext<RobotHub> hubContex
         }
     }
 
+    public async Task<IEnumerable<TaskLogResponse>> GetByRobot(int robotId)
+    {
+        var taskLogs = context.TaskLogs
+            .Include(x => x.TaskTemplate)
+            .Include(x => x.Robots)
+            .Where(x => x.Robots.Any(r => r.Id == robotId))
+            .OrderBy(x => x.DateCreated)
+            .Select(x => TaskLogResponse.From(x));
+
+        return await taskLogs.ToListAsync();
+    }
 }
