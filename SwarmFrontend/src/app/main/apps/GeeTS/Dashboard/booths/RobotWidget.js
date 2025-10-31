@@ -1,5 +1,6 @@
 import { memo, useEffect, useState, useRef } from "react";
 import PropTypes from "prop-types";
+import { useNavigate } from "react-router-dom";
 import {
     Box,
     Chip,
@@ -19,6 +20,7 @@ import jwtService from "../../../../../services/jwtService";
 import singletonInstance from "../../../../../services/SignalRService/signalRConnectionService";
 
 function RobotWidget({ robot }) {
+    const navigate = useNavigate();
     const connectionRef = useRef(null);
     const eventHandlerRef = useRef(null);
     const [readings, setReadings] = useState([]);
@@ -124,7 +126,16 @@ function RobotWidget({ robot }) {
     }, [robot.id]);
 
     return (
-        <Box className="w-full p-12">
+        <Box
+            className="w-full p-12 cursor-pointer transition-all hover:bg-gray-50"
+            onClick={() => navigate(`/apps/GTS/robot/${robot.id}`)}
+            sx={{
+                '&:hover': {
+                    transform: 'scale(1.02)',
+                    boxShadow: 3,
+                }
+            }}
+        >
             {/* Header Section */}
             <Box className="flex items-center justify-between mb-12">
                 <Box className="flex items-center gap-6">
