@@ -11,16 +11,16 @@ function RobotDashboardApp() {
 
         <div className="w-full inline-flex m-auto justify-center">
             {robots.length > 0 ? (
-                <div className="w-full sm:p-8 container inline-flex m-auto justify-center mx-24 ml-96">
+                <div className="w-full sm:p-8 container m-auto mx-24 ml-96">
                     <motion.div
-                        className="widget flex flex-col sm:flex-row flex-wrap w-full p-16 text-center justify-center"
+                        className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 gap-16 p-16"
                         enter={{
                             animation: "transition.slideUpBigIn",
                             duration: 300,
                         }}
                     >
                         {robots.map((robot, index) => (
-                            <Card key={index} className="h-auto w-512 my-16 sm:m-16 items-center rounded-8">
+                            <Card key={index} className="h-auto rounded-8">
                                 <BoothWidget robot={robot}/>
                             </Card>
                         ))}
