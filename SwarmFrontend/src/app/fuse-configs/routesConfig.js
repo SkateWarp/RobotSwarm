@@ -44,7 +44,7 @@ const getInitialDashboard = () => {
     }
 
     if (settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish") {
-        return { path: "/", exact: true, element: <Navigate to="/apps/GTS/leafSorting" /> };
+        return { path: "/", exact: true, element: <Navigate to="/apps/GTS/dashboard/booths" /> };
     }
 
     throw Error("Proyecto mal configurado en routesConfig");
