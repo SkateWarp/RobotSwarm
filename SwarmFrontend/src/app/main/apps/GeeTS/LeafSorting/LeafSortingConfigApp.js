@@ -7,7 +7,6 @@ import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAp
 import { getLeafSorting, openNewLeafSortingConfigDialog } from "./store/leafSortingConfigSlice";
 import LeafSortingConfigList from "./LeafSortingConfigList";
 import LeafSortingConfigDialog from "./LeafSortingConfigDialog";
-import SimpleSidebarContent from "../../../../shared-components/SimpleSidebarContent";
 import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHeader";
 
 // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -25,16 +24,19 @@ function LeafSortingConfigApp() {
         <>
             <Root
                 header={
-                    <SimpleGeneralHeader pageLayout={pageLayout} headerName="Robots" iconType="settings" />
-                }
-                content={<LeafSortingConfigList />}
-                leftSidebarContent={
-                    <SimpleSidebarContent
-                        buttonText="Crear"
-                        openDialogFunction={openNewLeafSortingConfigDialog}
+                    <SimpleGeneralHeader
+                        pageLayout={pageLayout}
+                        headerName="Robots"
+                        iconType="settings"
+                        hasSidebar={false}
+                        actionButton={{
+                            text: "CREAR",
+                            onClick: () => dispatch(openNewLeafSortingConfigDialog()),
+                            icon: "add"
+                        }}
                     />
                 }
-                sidebarInner
+                content={<LeafSortingConfigList />}
                 ref={pageLayout}
                 innerScroll
             />

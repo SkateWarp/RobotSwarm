@@ -4,9 +4,8 @@ import { useEffect, useRef } from "react";
 import { useDispatch } from "react-redux";
 import TaskConfigDialog from "./TaskConfigDialog";
 import TaskConfigList from "./TaskConfigList";
-import TaskConfigSidebarContent from "./TaskConfigSidebarContent";
 import reducer from "./store";
-import { getTasks } from "./store/taskConfigSlice";
+import { getTasks, openNewTaskConfigDialog } from "./store/taskConfigSlice";
 import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAppStyle";
 import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHeader";
 
@@ -25,11 +24,19 @@ function TaskConfigApp() {
         <>
             <Root
                 header={
-                    <SimpleGeneralHeader pageLayout={pageLayout} headerName="Sensores" iconType="adjust" />
+                    <SimpleGeneralHeader
+                        pageLayout={pageLayout}
+                        headerName="Tareas"
+                        iconType="adjust"
+                        hasSidebar={false}
+                        actionButton={{
+                            text: "CREAR",
+                            onClick: () => dispatch(openNewTaskConfigDialog()),
+                            icon: "add"
+                        }}
+                    />
                 }
                 content={<TaskConfigList />}
-                leftSidebarContent={<TaskConfigSidebarContent />}
-                sidebarInner
                 ref={pageLayout}
                 innerScroll
             />

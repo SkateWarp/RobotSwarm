@@ -2,9 +2,7 @@
 import withReducer from "app/store/withReducer";
 import { useEffect, useRef } from "react";
 import { useDispatch } from "react-redux";
-import RealtimeConfigDialog from "./RealtimeConfigDialog";
-import RealtimeConfigList from "./RealtimeConfigList";
-import RealtimeConfigSidebarContent from "./RealtimeConfigSidebarContent";
+import RealtimeConfigListImproved from "./RealtimeConfigListImproved";
 import reducer from "./store";
 import { getTasks } from "./store/realtimeConfigSlice";
 import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAppStyle";
@@ -25,15 +23,17 @@ function RealtimeConfigApp() {
         <>
             <Root
                 header={
-                    <SimpleGeneralHeader pageLayout={pageLayout} headerName="Realtime" iconType="adjust" />
+                    <SimpleGeneralHeader
+                        pageLayout={pageLayout}
+                        headerName="Control en Tiempo Real"
+                        iconType="settings_remote"
+                        hasSidebar={false}
+                    />
                 }
-                content={<RealtimeConfigList />}
-                // leftSidebarContent={<RealtimeConfigSidebarContent />}
-                sidebarInner
+                content={<RealtimeConfigListImproved />}
                 ref={pageLayout}
                 innerScroll
             />
-            {/* <RealtimeConfigDialog /> */}
         </>
     );
 }

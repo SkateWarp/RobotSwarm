@@ -7,7 +7,6 @@ import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAp
 import { getLeafTypes, openNewLeafTypesConfigDialog } from "./store/leafTypeConfigSlice";
 import LeafTypesConfigList from "./LeafTypeConfigList";
 import LeafTypesConfigDialog from "./LeafTypeConfigDialog";
-import SimpleSidebarContent from "../../../../shared-components/SimpleSidebarContent";
 import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHeader";
 
 // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -25,16 +24,19 @@ function LeafTypesConfigApp() {
         <>
             <Root
                 header={
-                    <SimpleGeneralHeader pageLayout={pageLayout} headerName="Tareas" iconType="add_task" />
-                }
-                content={<LeafTypesConfigList />}
-                leftSidebarContent={
-                    <SimpleSidebarContent
-                        buttonText="Crear"
-                        openDialogFunction={openNewLeafTypesConfigDialog}
+                    <SimpleGeneralHeader
+                        pageLayout={pageLayout}
+                        headerName="Tipos de Hojas"
+                        iconType="add_task"
+                        hasSidebar={false}
+                        actionButton={{
+                            text: "CREAR",
+                            onClick: () => dispatch(openNewLeafTypesConfigDialog()),
+                            icon: "add"
+                        }}
                     />
                 }
-                sidebarInner
+                content={<LeafTypesConfigList />}
                 ref={pageLayout}
                 innerScroll
             />

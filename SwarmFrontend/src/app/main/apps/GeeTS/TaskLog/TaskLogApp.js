@@ -7,7 +7,6 @@ import useGeneralAppStyle from "app/shared-components/hooks/useGeneralAppStyle";
 import { getTaskLogs } from "./store/taskLogSlice";
 import TaskLogList from "./TaskLogList";
 import TaskLogDialog from "./TaskLogDialog";
-import SimpleSidebarContent from "app/shared-components/SimpleSidebarContent";
 import SimpleGeneralHeader from "app/shared-components/SimpleGeneralHeader";
 
 // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -25,16 +24,19 @@ function TaskLogApp() {
         <>
             <Root
                 header={
-                    <SimpleGeneralHeader pageLayout={pageLayout} headerName="Task Logs" iconType="history" />
-                }
-                content={<TaskLogList />}
-                leftSidebarContent={
-                    <SimpleSidebarContent
-                        buttonText="Refresh"
-                        openDialogFunction={() => dispatch(getTaskLogs())}
+                    <SimpleGeneralHeader
+                        pageLayout={pageLayout}
+                        headerName="Task Logs"
+                        iconType="history"
+                        hasSidebar={false}
+                        actionButton={{
+                            text: "ACTUALIZAR",
+                            onClick: () => dispatch(getTaskLogs()),
+                            icon: "refresh"
+                        }}
                     />
                 }
-                sidebarInner
+                content={<TaskLogList />}
                 ref={pageLayout}
                 innerScroll
             />
