@@ -26,7 +26,7 @@ function LeafTypesConfigApp() {
                 header={
                     <SimpleGeneralHeader
                         pageLayout={pageLayout}
-                        headerName="Tipos de Hojas"
+                        headerName="TAREAS"
                         iconType="add_task"
                         hasSidebar={false}
                         actionButton={{
