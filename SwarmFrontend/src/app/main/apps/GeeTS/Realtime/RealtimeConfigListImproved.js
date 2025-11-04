@@ -291,7 +291,7 @@ function RealtimeConfigListImproved() {
                         <Typography variant="h6" className="font-bold mb-16">
                             Robot View
                         </Typography>
-                        <VncViewer url="wss://websocket.zerav.la" username="rs" password="123456789" />
+                        <VncViewer url="wss://websocket.zerav.la?aneyelo=gei" username="rs" password="123456789" />
                     </Paper>
                 </Grid>
 

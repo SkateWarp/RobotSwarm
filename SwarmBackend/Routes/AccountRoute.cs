@@ -1,5 +1,7 @@
-﻿using SwarmBackend.Interfaces;
+﻿using SwarmBackend.Entities;
+using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
+using System.Security.Claims;
 
 namespace SwarmBackend.Routes;
 
@@ -19,7 +21,12 @@ public static class AccountRoute
           .Produces<AuthenticateResponse>();
 
         group.MapGet("", GetAll)
-      .Produces<IEnumerable<AccountResponse>>();
+            .RequireAuthorization()
+            .Produces<IEnumerable<AccountResponse>>();
+
+        group.MapGet("/{accountId}", GetById)
+            .RequireAuthorization()
+            .Produces<AccountResponse>();
 
         group.MapPut("/{accountId}", Update)
             .RequireAuthorization()
@@ -33,6 +40,18 @@ public static class AccountRoute
             .RequireAuthorization()
             .Produces<bool>();
         return group;
+    }
+
+    private static int? GetAccountId(HttpContext context)
+    {
+        var accountIdClaim = context.User.FindFirst("id");
+        return accountIdClaim != null ? int.Parse(accountIdClaim.Value) : null;
+    }
+
+    private static Role? GetRole(HttpContext context)
+    {
+        var roleClaim = context.User.FindFirst(ClaimTypes.Role);
+        return roleClaim != null && Enum.TryParse<Role>(roleClaim.Value, out var role) ? role : null;
     }
 
     public static async Task<IResult> Authenticate(AuthenticateRequest request, IAccountService accountService)
@@ -53,10 +72,38 @@ public static class AccountRoute
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> GetAll(IAccountService accountService)
+    public static async Task<IResult> GetAll(IAccountService accountService, HttpContext context)
     {
-        var response = await accountService.GetAll();
+        var accountId = GetAccountId(context);
+        var role = GetRole(context);
+
+        if (!accountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        var response = await accountService.GetAll(accountId, role);
         return Results.Ok(response);
+    }
+
+    public static async Task<IResult> GetById(int accountId, IAccountService accountService, HttpContext context)
+    {
+        var currentAccountId = GetAccountId(context);
+        var role = GetRole(context);
+
+        if (!currentAccountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        // Non-admin users can only see their own account
+        if (role != Role.Admin && accountId != currentAccountId.Value)
+        {
+            return Results.Forbid();
+        }
+
+        var response = await accountService.GetById(accountId);
+        return response.Match(Results.Ok, Results.BadRequest);
     }
 
     public static async Task<IResult> Update(int accountId, AccountRequest request, IAccountService accountService)

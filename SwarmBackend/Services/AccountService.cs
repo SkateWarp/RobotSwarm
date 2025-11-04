@@ -150,6 +150,7 @@ public class AccountService : IAccountService
             {
                 new(ClaimTypes.Name, account.FirstName),
                 new("id", account.Id.ToString()),
+                new(ClaimTypes.Role, account.Role.ToString()),
             };
 
         return claims;
@@ -206,11 +207,35 @@ public class AccountService : IAccountService
 
     }
 
-    public async Task<IEnumerable<AccountResponse>> GetAll()
+    public async Task<IEnumerable<AccountResponse>> GetAll(int? accountId, Role? role)
     {
+        // If user is not admin, only return their own account
+        if (role != Role.Admin && accountId.HasValue)
+        {
+            return await _dataContext.Accounts
+                .Where(x => x.Id == accountId.Value)
+                .Select(x => AccountResponse.From(x))
+                .ToListAsync();
+        }
+
+        // Admin can see all accounts
         return await _dataContext.Accounts
             .Select(x => AccountResponse.From(x))
             .ToListAsync();
+    }
+
+    public async Task<Result<AccountResponse>> GetById(int accountId)
+    {
+        var account = await _dataContext.Accounts
+            .Where(x => x.Id == accountId)
+            .FirstOrDefaultAsync();
+
+        if (account == null)
+        {
+            return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        return AccountResponse.From(account);
     }
 
     public async Task<Result<AccountResponse>> Update(int accountId, AccountRequest request)

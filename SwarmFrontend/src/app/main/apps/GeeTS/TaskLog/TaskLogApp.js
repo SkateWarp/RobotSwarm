@@ -2,6 +2,7 @@
 import withReducer from "app/store/withReducer";
 import { useEffect, useRef } from "react";
 import { useDispatch } from "react-redux";
+import { useNavigate } from "react-router-dom";
 import reducer from "./store";
 import useGeneralAppStyle from "app/shared-components/hooks/useGeneralAppStyle";
 import { getTaskLogs } from "./store/taskLogSlice";
@@ -14,6 +15,7 @@ const Root = useGeneralAppStyle();
 
 function TaskLogApp() {
     const dispatch = useDispatch();
+    const navigate = useNavigate();
     const pageLayout = useRef(null);
 
     useEffect(() => {
@@ -30,9 +32,9 @@ function TaskLogApp() {
                         iconType="history"
                         hasSidebar={false}
                         actionButton={{
-                            text: "ACTUALIZAR",
-                            onClick: () => dispatch(getTaskLogs()),
-                            icon: "refresh"
+                            text: "CREAR TAREA",
+                            onClick: () => navigate("/apps/GTS/realtime"),
+                            icon: "add"
                         }}
                     />
                 }

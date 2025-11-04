@@ -41,6 +41,14 @@ const navigationGTSConfig = [
         auth: authRoles.admin,
         url: "/apps/GTS/leafSorting",
     },
+    {
+        id: "accounts",
+        title: "Cuentas",
+        type: "item",
+        icon: "account_box",
+        auth: authRoles.admin,
+        url: "/apps/accounts",
+    },
 ];
 
 export default navigationGTSConfig;
