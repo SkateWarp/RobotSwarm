@@ -91,9 +91,7 @@ export const getAccounts = createAsyncThunk(
     async (routeParams, { getState }) => {
         routeParams = routeParams || getState().accountsApp.accounts.routeParams;
 
-        const response = await axios.get(`${URL}/api/Accounts`, {
-            params: routeParams,
-        });
+        const response = await axios.get(`${URL}/api/Accounts`);
 
         const data = await response.data;
 
