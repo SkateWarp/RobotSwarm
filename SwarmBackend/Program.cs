@@ -96,7 +96,7 @@ using (var scope = app.Services.CreateScope())
     var accountService = scope.ServiceProvider.GetRequiredService<IAccountService>();
 
 
-    if (!accountService.GetAll().GetAwaiter().GetResult().Any())
+    if (!accountService.GetAll(null, null).GetAwaiter().GetResult().Any())
     {
         await accountService.Create(Seed.GetAccount());
     }

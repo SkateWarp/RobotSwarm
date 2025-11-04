@@ -209,8 +209,8 @@ public class AccountService : IAccountService
 
     public async Task<IEnumerable<AccountResponse>> GetAll(int? accountId, Role? role)
     {
-        // If user is not admin, only return their own account
-        if (role != Role.Admin && accountId.HasValue)
+        // If user is not admin and we have an accountId, only return their own account
+        if (role.HasValue && role != Role.Admin && accountId.HasValue)
         {
             return await _dataContext.Accounts
                 .Where(x => x.Id == accountId.Value)
@@ -218,7 +218,7 @@ public class AccountService : IAccountService
                 .ToListAsync();
         }
 
-        // Admin can see all accounts
+        // Admin or internal operations (null role) can see all accounts
         return await _dataContext.Accounts
             .Select(x => AccountResponse.From(x))
             .ToListAsync();
