@@ -255,33 +255,67 @@ const accountsSlice = createSlice({
         [addAccount.fulfilled]: accountsAdapter.addOne,
         [getAccounts.fulfilled]: (state, action) => {
             const { data, routeParams } = action.payload;
-            accountsAdapter.setAll(state, data.data);
-            state.accounts = data;
-            state.routeParams = routeParams;
-            state.pagination = {
-                pageNumber: data.pageNumber,
-                pageSize: data.pageSize,
-                totalPages: data.totalPages,
-                totalRecords: data.totalRecords,
-                searchFilter: data.searchFilter, // add this
-                sortColumn: data.sortColumn, // add this
-                sortDesc: data.sortDesc, // add this
-            };
+            // Handle simple array response (not paginated)
+            if (Array.isArray(data)) {
+                accountsAdapter.setAll(state, data);
+                state.accounts = data;
+                state.routeParams = routeParams;
+                state.pagination = {
+                    pageNumber: 1,
+                    pageSize: data.length,
+                    totalPages: 1,
+                    totalRecords: data.length,
+                    searchFilter: "",
+                    sortColumn: "",
+                    sortDesc: false,
+                };
+            } else {
+                // Handle paginated response (legacy format)
+                accountsAdapter.setAll(state, data.data);
+                state.accounts = data;
+                state.routeParams = routeParams;
+                state.pagination = {
+                    pageNumber: data.pageNumber,
+                    pageSize: data.pageSize,
+                    totalPages: data.totalPages,
+                    totalRecords: data.totalRecords,
+                    searchFilter: data.searchFilter,
+                    sortColumn: data.sortColumn,
+                    sortDesc: data.sortDesc,
+                };
+            }
         },
         [getAccountsByCompany.fulfilled]: (state, action) => {
             const { data, routeParams } = action.payload;
-            accountsAdapter.setAll(state, data);
-            state.accounts = data;
-            state.routeParams = routeParams;
-            state.pagination = {
-                pageNumber: data.pageNumber,
-                pageSize: data.pageSize,
-                totalPages: data.totalPages,
-                totalRecords: data.totalRecords,
-                searchFilter: data.searchFilter, // add this
-                sortColumn: data.sortColumn, // add this
-                sortDesc: data.sortDesc, // add this
-            };
+            // Handle simple array response (not paginated)
+            if (Array.isArray(data)) {
+                accountsAdapter.setAll(state, data);
+                state.accounts = data;
+                state.routeParams = routeParams;
+                state.pagination = {
+                    pageNumber: 1,
+                    pageSize: data.length,
+                    totalPages: 1,
+                    totalRecords: data.length,
+                    searchFilter: "",
+                    sortColumn: "",
+                    sortDesc: false,
+                };
+            } else {
+                // Handle paginated response (legacy format)
+                accountsAdapter.setAll(state, data.data || data);
+                state.accounts = data;
+                state.routeParams = routeParams;
+                state.pagination = {
+                    pageNumber: data.pageNumber,
+                    pageSize: data.pageSize,
+                    totalPages: data.totalPages,
+                    totalRecords: data.totalRecords,
+                    searchFilter: data.searchFilter,
+                    sortColumn: data.sortColumn,
+                    sortDesc: data.sortDesc,
+                };
+            }
         },
     },
 });

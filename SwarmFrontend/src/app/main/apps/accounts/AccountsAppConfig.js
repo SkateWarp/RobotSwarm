@@ -20,7 +20,7 @@ const AccountsAppConfig = {
     },
     {
       path: '/apps/accounts',
-      element: <Navigate to="/apps/accounts/accounts" />,
+      element: <Navigate to="/apps/accounts/all" />,
     },
   ],
 };

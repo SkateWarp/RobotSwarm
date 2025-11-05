@@ -58,16 +58,31 @@ function AccountsSidebarContent() {
                     <StyledListItem
                         button
                         component={NavLinkAdapter}
-                        to="/apps/accounts/accounts"
+                        to="/apps/accounts/all"
                         activeClassName="active"
                     >
                         <Icon className="list-item-icon text-16" color="action">
                             people
                         </Icon>
-                        <ListItemText className="truncate" primary="Usuarios" disableTypography />
+                        <ListItemText className="truncate" primary="Todos" disableTypography />
                     </StyledListItem>
-                    {settingsConfig.layout.project === "task" ||
-                    settingsConfig.layout.project === "panelTemp" ? null : (
+                    {settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish" ? (
+                        <StyledListItem
+                            button
+                            component={NavLinkAdapter}
+                            to="/apps/accounts/users"
+                            activeClassName="active"
+                        >
+                            <Icon className="list-item-icon text-16" color="action">
+                                person
+                            </Icon>
+                            <ListItemText className="truncate" primary="Usuarios" disableTypography />
+                        </StyledListItem>
+                    ) : null}
+                    {settingsConfig.layout.project !== "task" &&
+                    settingsConfig.layout.project !== "panelTemp" &&
+                    settingsConfig.layout.project !== "GTS" &&
+                    settingsConfig.layout.project !== "GTS-swedish" ? (
                         <StyledListItem
                             button
                             component={NavLinkAdapter}
@@ -79,7 +94,7 @@ function AccountsSidebarContent() {
                             </Icon>
                             <ListItemText className="truncate" primary="Operadores" disableTypography />
                         </StyledListItem>
-                    )}
+                    ) : null}
                 </List>
             </Paper>
         </div>

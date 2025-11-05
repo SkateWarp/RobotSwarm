@@ -51,9 +51,6 @@ function AccountsList() {
                         if (row.original.role === "User") {
                             return <div>Usuario</div>;
                         }
-                        if (row.original.role === "Operator") {
-                            return <div>Operador</div>;
-                        }
                         if (row.original.role === "Maintenance") {
                             return <div>Mantenimiento</div>;
                         }
@@ -73,9 +70,6 @@ function AccountsList() {
                         if (row.original.role === "User") {
                             return <div>Usuario</div>;
                         }
-                        if (row.original.role === "Operator") {
-                            return <div>Operador</div>;
-                        }
                         if (row.original.role === "Maintenance") {
                             return <div>Mantenimiento</div>;
                         }
@@ -87,21 +81,20 @@ function AccountsList() {
                         }
                         return <div>{row.original.role}</div>;
                     }
+                    // GTS and other projects - only Admin and User roles
+                    if (row.original.role === "User") {
+                        return <div>Usuario</div>;
+                    }
+                    if (row.original.role === "Admin") {
+                        return <div>Administrador</div>;
+                    }
+                    return <div>{row.original.role}</div>;
                 },
                 sortable: true,
             },
             {
                 Header: "Correo Electrónico",
                 accessor: "email",
-                sortable: true,
-            },
-            {
-                Header: "Activar",
-                accessor: "enabled",
-                className: "justify-center",
-                Cell: ({ row }) => {
-                    return <Icon>{row.original.enabled ? "check" : "clear"}</Icon>;
-                },
                 sortable: true,
             },
             {
@@ -162,9 +155,19 @@ function AccountsList() {
                 setPreviousSearch(searchText);
             }
 
-            setFilteredData(accounts);
+            // Filter accounts based on route param for GTS project
+            let filtered = accounts;
+            if (settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish") {
+                if (routeParams.param === "users") {
+                    // Show only regular users (not admins)
+                    filtered = accounts.filter((account) => account.role === "User");
+                }
+                // "all" or any other param shows all accounts (no filter)
+            }
 
-            if (accounts.length) {
+            setFilteredData(filtered);
+
+            if (filtered.length) {
                 setStatusFilter(true);
             } else if (filteredData !== null) {
                 setStatusFilter(true);
