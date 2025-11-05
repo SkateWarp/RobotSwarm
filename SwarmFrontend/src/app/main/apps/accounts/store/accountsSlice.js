@@ -132,7 +132,7 @@ export const updateAccountPanelTemp = createAsyncThunk(
                 Authorization: `Bearer ${jwtService.getAccessToken()}`,
             },
         });
-        const data = await response.data;
+        const data = response;
         return data;
     }
 );
@@ -140,13 +140,13 @@ export const updateAccountPanelTemp = createAsyncThunk(
 export const addAccount = createAsyncThunk(
     "accountsApp/accounts/addAccount",
     async (account, { dispatch }) => {
-        const response = await axios.post(`${URL}/api/Accounts`, account, {
+        const response = await axios.post(`${URL}/Accounts`, account, {
             headers: {
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${jwtService.getAccessToken()}`,
             },
         });
-        const data = await response.data;
+        const data = response;
 
         dispatch(getAccounts());
 
@@ -270,7 +270,7 @@ const accountsSlice = createSlice({
         },
         [getAccountsByCompany.fulfilled]: (state, action) => {
             const { data, routeParams } = action.payload;
-            accountsAdapter.setAll(state, data.data);
+            accountsAdapter.setAll(state, data);
             state.accounts = data;
             state.routeParams = routeParams;
             state.pagination = {
