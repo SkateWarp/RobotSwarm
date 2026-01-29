@@ -16,8 +16,8 @@ const VncViewer = ({ url, username, password }) => {
             scaleViewport
             background="#000000"
             style={{
-                width: "75vw",
-                height: "75vh",
+                width: "100%",
+                height: "65vh",
             }}
             ref={ref}
         />

@@ -285,9 +285,9 @@ function RealtimeConfigListImproved() {
             </Paper>
 
             <Grid container spacing={3}>
-                {/* VNC Viewer */}
-                <Grid item xs={12}>
-                    <Paper elevation={2} sx={{ p: 2 }}>
+                {/* VNC Viewer - 2/3 width on desktop */}
+                <Grid item xs={12} lg={8}>
+                    <Paper elevation={2} sx={{ p: 2, height: '100%' }}>
                         <Typography variant="h6" className="font-bold mb-16">
                             Robot View
                         </Typography>
@@ -295,8 +295,8 @@ function RealtimeConfigListImproved() {
                     </Paper>
                 </Grid>
 
-                {/* Command Panel */}
-                <Grid item xs={12} lg={6}>
+                {/* Command Panel - 1/3 width on desktop */}
+                <Grid item xs={12} lg={4}>
                     <CommandPanel
                         robots={robots}
                         selectedRobot={selectedRobot}
@@ -307,8 +307,8 @@ function RealtimeConfigListImproved() {
                     />
                 </Grid>
 
-                {/* Command Status */}
-                <Grid item xs={12} lg={6}>
+                {/* Command Status - Full width below */}
+                <Grid item xs={12}>
                     <CommandStatus
                         runningCommands={runningCommands}
                         commandHistory={commandHistory}
