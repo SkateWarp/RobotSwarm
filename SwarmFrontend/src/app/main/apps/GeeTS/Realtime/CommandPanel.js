@@ -30,12 +30,17 @@ import {
     Code
 } from "@mui/icons-material";
 
+// Valid sensor types that match backend SensorTypeEnum
+const SENSOR_TYPES = ["Speed", "LaserDistance", "Encoder", "Inercial", "MotorSpeedPercentage"];
+
 const COMMAND_TEMPLATES = {
     sensor_data: {
         name: "Sensor Data",
         icon: <Sensors />,
         color: "primary",
         template: {
+            name: "Robot_1",           // Robot identifier for display
+            sensorType: "Speed",       // For backend SensorTypeEnum lookup
             left_ticks: 0,
             right_ticks: 0,
             left_diff: 0,
@@ -164,18 +169,48 @@ function CommandPanel({
             const data = JSON.parse(commandData);
             return (
                 <Grid container spacing={2} sx={{ mt: 1 }}>
-                    {Object.keys(template.template).map((key) => (
-                        <Grid item xs={6} md={4} key={key}>
-                            <TextField
-                                fullWidth
-                                size="small"
-                                label={key.replace(/_/g, ' ').toUpperCase()}
-                                type="number"
-                                value={data[key] || 0}
-                                onChange={(e) => handleFieldChange(key, e.target.value)}
-                            />
-                        </Grid>
-                    ))}
+                    {/* Robot name field */}
+                    <Grid item xs={6} md={4}>
+                        <TextField
+                            fullWidth
+                            size="small"
+                            label="ROBOT NAME"
+                            value={data.name || "Robot_1"}
+                            onChange={(e) => handleFieldChange("name", e.target.value)}
+                        />
+                    </Grid>
+                    {/* Sensor type dropdown */}
+                    <Grid item xs={6} md={4}>
+                        <FormControl fullWidth size="small">
+                            <InputLabel>SENSOR TYPE</InputLabel>
+                            <Select
+                                value={data.sensorType || "Speed"}
+                                onChange={(e) => handleFieldChange("sensorType", e.target.value)}
+                                label="SENSOR TYPE"
+                            >
+                                {SENSOR_TYPES.map((type) => (
+                                    <MenuItem key={type} value={type}>
+                                        {type}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    </Grid>
+                    {/* Numeric sensor fields */}
+                    {Object.keys(template.template)
+                        .filter((key) => key !== "name" && key !== "sensorType")
+                        .map((key) => (
+                            <Grid item xs={6} md={4} key={key}>
+                                <TextField
+                                    fullWidth
+                                    size="small"
+                                    label={key.replace(/_/g, ' ').toUpperCase()}
+                                    type="number"
+                                    value={data[key] || 0}
+                                    onChange={(e) => handleFieldChange(key, e.target.value)}
+                                />
+                            </Grid>
+                        ))}
                 </Grid>
             );
         }

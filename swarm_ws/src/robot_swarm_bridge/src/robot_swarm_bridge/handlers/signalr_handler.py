@@ -254,22 +254,59 @@ class SignalRHandler:
 
     def send_sensor_reading(self, robot_id, sensor_data):
         """
-        Send sensor reading to backend
-        
+        Send sensor reading to backend using batch method (single call for all fields)
+
         Args:
+            robot_id (int): Robot ID
             sensor_data (dict): Sensor reading data
         """
-        # rospy.loginfo(f"Robot {robot_id} sensor reading received from signalr")
-        # Format data to match SensorReadingRequest record
-        sensor_name = str(sensor_data.get("name"))
+        # Use sensorType for backend enum lookup (defaults to "Speed" for backwards compatibility)
+        sensor_name = str(sensor_data.get("sensorType", "Speed"))
+
+        # Exclude metadata fields from sensor values
+        excluded_keys = {"name", "sensorType"}
+
+        # Build batch request with all fields
+        fields = [
+            {"fieldName": str(key), "value": str(value)}
+            for key, value in sensor_data.items()
+            if key not in excluded_keys
+        ]
+
+        if not fields:
+            rospy.logwarn(f"No sensor fields to send for robot {robot_id}")
+            return
+
+        batch_request = {
+            "sensorName": sensor_name,
+            "fields": fields
+        }
+
+        rospy.loginfo(f"Sending batch sensor data ({len(fields)} fields) to robot {robot_id}: {sensor_name}")
+
+        self.connection.send("HandleSensorReadingsBatch", [
+            int(robot_id),
+            batch_request
+        ])
+
+    def send_sensor_reading_legacy(self, robot_id, sensor_data):
+        """
+        Legacy method: Send sensor readings one by one (fallback if batch fails)
+
+        Args:
+            robot_id (int): Robot ID
+            sensor_data (dict): Sensor reading data
+        """
+        sensor_name = str(sensor_data.get("sensorType", "Speed"))
+        excluded_keys = {"name", "sensorType"}
+
         for key, value in sensor_data.items():
-            if key != "name":
+            if key not in excluded_keys:
                 reading_request = {
                     "value": str(value),
-                    "sensorName":sensor_name,
+                    "sensorName": sensor_name,
                     "notes": str(key)
                 }
-                rospy.loginfo(f"Sensor data to sned: {reading_request} to robot {robot_id} convertido {int(robot_id)}")
 
                 self.connection.send("HandleSensorReading", [
                     int(robot_id),

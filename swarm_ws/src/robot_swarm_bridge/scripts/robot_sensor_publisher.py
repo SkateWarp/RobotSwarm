@@ -32,9 +32,15 @@ class RobotSensorPublisher:
         # Store robot ID and create namespace
         self.robot_id = robot_id
         self.robot_ns = f"/robot/{robot_id}"
-        
+
+        # Get sensor type from ROS parameter (allows multiple publishers per robot)
+        # Valid types: Speed, LaserDistance, Encoder, Inercial, MotorSpeedPercentage
+        self.sensor_type = rospy.get_param("~sensor_type", "Speed")
+
         # Initialize sensor data dictionary with default values
         self.sensor_data = {
+            "name": f"Robot_{robot_id}",      # Robot identifier for display
+            "sensorType": self.sensor_type,   # Configurable via ROS param
             "left_ticks": 0.0,
             "right_ticks": 0.0,
             "left_diff": 0.0,
@@ -45,8 +51,7 @@ class RobotSensorPublisher:
             "left_speed": 0.0,
             "right_speed": 0.0,
             "left_speed_filtered": 0.0,
-            "right_speed_filtered": 0.0,
-            "name": f"Robot_{robot_id}"
+            "right_speed_filtered": 0.0
         }
         
         # Store previous values for calculating differences
@@ -84,7 +89,7 @@ class RobotSensorPublisher:
             self.publish_sensor_data
         )
         
-        rospy.loginfo(f"Sensor publisher initialized for robot {robot_id}")
+        rospy.loginfo(f"Sensor publisher initialized for robot {robot_id} with sensor type: {self.sensor_type}")
     
     def joint_callback(self, msg):
         """

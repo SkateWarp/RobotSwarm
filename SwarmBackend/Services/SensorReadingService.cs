@@ -64,6 +64,82 @@ public class SensorReadingService(DataContext context, ILogger<SensorReadingServ
         return SensorReadingResponse.From(sensorReading);
     }
 
+    public async Task<IEnumerable<SensorReadingResponse>> CreateBatch(int robotId, RosBatchSensorReadingRequest request)
+    {
+        if (!SensorTypeEnumUtils.TryParseFromString(request.SensorName, out var type))
+        {
+            logger.LogError("Sensor type {SensorName} not found for robot {RobotId}", request.SensorName, robotId);
+            return [];
+        }
+
+        var sensor = await context.Sensors.FirstOrDefaultAsync(x => x.RobotId == robotId && x.SensorType == type);
+        if (sensor == null)
+        {
+            sensor = new Sensor
+            {
+                RobotId = robotId,
+                SensorType = type,
+                Notes = "",
+                Description = "",
+                DateCreated = DateTime.Now,
+            };
+
+            context.Sensors.Add(sensor);
+            await context.SaveChangesAsync();
+        }
+
+        var readings = request.Fields.Select(field => new SensorReading
+        {
+            SensorId = sensor.Id,
+            Value = field.Value,
+            DateCreated = DateTime.UtcNow,
+            Notes = field.FieldName,
+        }).ToList();
+
+        context.SensorReadings.AddRange(readings);
+        await context.SaveChangesAsync();
+
+        return readings.Select(SensorReadingResponse.From);
+    }
+
+    public async Task<IEnumerable<SensorReadingResponse>> CreateFromClient(int robotId, ClientSensorReadingRequest request)
+    {
+        if (!SensorTypeEnumUtils.TryParseFromString(request.SensorName, out var type))
+        {
+            logger.LogError("Sensor type {SensorName} not found for robot {RobotId}", request.SensorName, robotId);
+            return [];
+        }
+
+        var sensor = await context.Sensors.FirstOrDefaultAsync(x => x.RobotId == robotId && x.SensorType == type);
+        if (sensor == null)
+        {
+            sensor = new Sensor
+            {
+                RobotId = robotId,
+                SensorType = type,
+                Notes = "",
+                Description = "",
+                DateCreated = DateTime.Now,
+            };
+
+            context.Sensors.Add(sensor);
+            await context.SaveChangesAsync();
+        }
+
+        var readings = request.SensorFields.Select(field => new SensorReading
+        {
+            SensorId = sensor.Id,
+            Value = field.Value?.ToString() ?? "0",
+            DateCreated = DateTime.UtcNow,
+            Notes = field.Key,
+        }).ToList();
+
+        context.SensorReadings.AddRange(readings);
+        await context.SaveChangesAsync();
+
+        return readings.Select(SensorReadingResponse.From);
+    }
+
     public async Task<IEnumerable<SensorReadingResponse>> GetAllByRobot(int robotId, DateTime startDate,
         DateTime endDate)
     {

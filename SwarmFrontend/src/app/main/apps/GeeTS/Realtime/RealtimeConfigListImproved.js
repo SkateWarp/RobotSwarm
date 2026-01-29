@@ -181,6 +181,35 @@ function RealtimeConfigListImproved() {
         }
 
         try {
+            // Handle sensor_data command type differently - send directly to sensor endpoint
+            if (commandType === "sensor_data") {
+                const sensorName = commandParams.sensorType || "Speed";
+                const sensorFields = { ...commandParams };
+                delete sensorFields.name;
+                delete sensorFields.sensorType;
+
+                await connectionRef.current.invoke(
+                    "HandleSensorReadingFromClient",
+                    robotId,
+                    sensorName,
+                    sensorFields
+                );
+
+                // Add to history
+                const commandId = `sensor_${Date.now()}_${robotId}`;
+                setCommandHistory(prev => [{
+                    id: commandId,
+                    robotId: robotId,
+                    command: commandType,
+                    parameters: commandParams,
+                    timestamp: new Date(),
+                    status: "sent"
+                }, ...prev.slice(0, 9)]);
+
+                showFeedback(`Sensor data sent to Robot ${robotId}`, "success");
+                return;
+            }
+
             // 1. Stop running tasks
             await stopRunningTasksForRobot(robotId);
 
@@ -295,25 +324,23 @@ function RealtimeConfigListImproved() {
                     </Paper>
                 </Grid>
 
-                {/* Command Panel - 1/3 width on desktop */}
+                {/* Command Panel & Status - 1/3 width on desktop */}
                 <Grid item xs={12} lg={4}>
-                    <CommandPanel
-                        robots={robots}
-                        selectedRobot={selectedRobot}
-                        onRobotChange={setSelectedRobot}
-                        onSendCommand={handleSendCommand}
-                        connectionStatus={connectionStatus}
-                        userId={userId}
-                    />
-                </Grid>
-
-                {/* Command Status - Full width below */}
-                <Grid item xs={12}>
-                    <CommandStatus
-                        runningCommands={runningCommands}
-                        commandHistory={commandHistory}
-                        onStopCommand={handleStopCommand}
-                    />
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                        <CommandPanel
+                            robots={robots}
+                            selectedRobot={selectedRobot}
+                            onRobotChange={setSelectedRobot}
+                            onSendCommand={handleSendCommand}
+                            connectionStatus={connectionStatus}
+                            userId={userId}
+                        />
+                        <CommandStatus
+                            runningCommands={runningCommands}
+                            commandHistory={commandHistory}
+                            onStopCommand={handleStopCommand}
+                        />
+                    </Box>
                 </Grid>
             </Grid>
 

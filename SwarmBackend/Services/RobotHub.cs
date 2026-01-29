@@ -137,6 +137,67 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         }
     }
 
+    /// <summary>
+    /// Handle sensor reading from frontend client
+    /// </summary>
+    public async Task HandleSensorReadingFromClient(int robotId, string sensorName, Dictionary<string, object> sensorFields)
+    {
+        try
+        {
+            var request = new ClientSensorReadingRequest(sensorName, sensorFields);
+            var responses = await sensorReadingService.CreateFromClient(robotId, request);
+            var lastReadings = sensorReadingService.GetLastByRobot(robotId);
+
+            // Broadcast each new reading
+            foreach (var response in responses)
+            {
+                await Clients.All.SendAsync("NewSensorReading", response);
+            }
+
+            await Clients.All.SendAsync($"AllSensorReadings/{robotId}", lastReadings);
+
+            logger.LogInformation("Processed {Count} sensor readings from client for robot {RobotId}",
+                responses.Count(), robotId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Error processing client sensor reading for robot {RobotId}, sensor {SensorName}: {Message}",
+                robotId, sensorName, ex.Message);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Handle batch sensor readings from ROS Bridge (more efficient - single call for all fields)
+    /// </summary>
+    public async Task HandleSensorReadingsBatch(int robotId, RosBatchSensorReadingRequest request)
+    {
+        try
+        {
+            var responses = await sensorReadingService.CreateBatch(robotId, request);
+            var lastReadings = sensorReadingService.GetLastByRobot(robotId);
+
+            // Broadcast each new reading
+            foreach (var response in responses)
+            {
+                await Clients.All.SendAsync("NewSensorReading", response);
+            }
+
+            await Clients.All.SendAsync($"AllSensorReadings/{robotId}", lastReadings);
+
+            logger.LogInformation("Processed batch of {Count} sensor readings for robot {RobotId}",
+                responses.Count(), robotId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Error processing batch sensor reading for robot {RobotId}, sensor {SensorName}: {Message}",
+                robotId, request?.SensorName, ex.Message);
+            throw;
+        }
+    }
+
 
     public async Task SendCommand(int robotId, string command, string parameters)
     {
