@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.SignalR;
+﻿using System.Text.Json;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -11,6 +12,12 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     : Hub, IRealtimeService
 {
     private static readonly Dictionary<int, string> RobotConnections = [];
+
+    /// <summary>Tracks whether the ROS bridge client is connected</summary>
+    private static bool _rosBridgeConnected;
+
+    /// <summary>Connection ID of the ROS bridge client (identified by first ForwardSwarmStatus call)</summary>
+    private static string? _bridgeConnectionId;
 
 
     public override async Task OnConnectedAsync()
@@ -41,6 +48,15 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
     {
         try
         {
+            // Check if the disconnecting client is the ROS bridge
+            if (_bridgeConnectionId == Context.ConnectionId)
+            {
+                _rosBridgeConnected = false;
+                _bridgeConnectionId = null;
+                logger.LogWarning("ROS bridge disconnected");
+                await Clients.All.SendAsync("RosConnectionChanged", new { connected = false, timestamp = DateTime.UtcNow });
+            }
+
             var robotId = RobotConnections.FirstOrDefault(x => x.Value == Context.ConnectionId).Key;
             if (robotId != 0)
             {
@@ -276,5 +292,191 @@ public class RobotHub(ILogger<RobotHub> logger, DataContext context, ISensorRead
         logger.LogInformation("Available robots: {RobotIds}", string.Join(", ", robotIds));
 
         return robotIds;
+    }
+
+    // ==================== Swarm Control Methods ====================
+    // These methods are invoked by the frontend and forward commands to the ROS bridge via SwarmCommand event.
+
+    public async Task<bool> SpawnRobots(int count, string pattern)
+    {
+        logger.LogInformation("SpawnRobots: count={Count}, pattern={Pattern}", count, pattern);
+        var command = new { command = "spawn_robots", parameters = new { robot_count = count, spawn_pattern = pattern } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        return true;
+    }
+
+    public async Task<bool> SpawnRobotsWithIds(List<RobotDeploymentInfo> robots, string pattern)
+    {
+        logger.LogInformation("SpawnRobotsWithIds: {Count} robots, pattern={Pattern}", robots.Count, pattern);
+
+        // Assign namespaces to database robots
+        for (var i = 0; i < robots.Count; i++)
+        {
+            var ns = $"tb3_{i}";
+            if (int.TryParse(robots[i].Id, out var dbId))
+            {
+                var robot = await context.Robots.FindAsync(dbId);
+                if (robot != null)
+                {
+                    robot.Namespace = ns;
+                    robot.IsConnected = true;
+                    robot.Status = RobotStatus.Working;
+                }
+            }
+        }
+        await context.SaveChangesAsync();
+
+        var command = new { command = "spawn_robots", parameters = new { robot_count = robots.Count, spawn_pattern = pattern, robot_ids = robots } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+
+        // Notify frontend of deployment
+        var deploymentInfo = robots.Select((r, i) => new { id = r.Id, name = r.Name, @namespace = $"tb3_{i}" });
+        await Clients.All.SendAsync("RobotDeploymentResponse", JsonSerializer.Serialize(deploymentInfo));
+
+        return true;
+    }
+
+    public async Task<bool> DeleteRobots(List<string> robotIds)
+    {
+        logger.LogInformation("DeleteRobots: {RobotIds}", string.Join(", ", robotIds));
+
+        // Clear namespaces for deleted robots
+        var robots = await context.Robots.Where(r => r.Namespace != null).ToListAsync();
+        foreach (var robot in robots)
+        {
+            if (!robotIds.Any() || robotIds.Contains(robot.Namespace!))
+            {
+                robot.Namespace = null;
+                robot.IsConnected = false;
+                robot.Status = RobotStatus.Idle;
+            }
+        }
+        await context.SaveChangesAsync();
+
+        var command = new { command = "delete_robots", parameters = new { robot_ids = robotIds } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        return true;
+    }
+
+    public async Task<bool> StartFollowLeader(int robotCount, string leaderMode, object config)
+    {
+        logger.LogInformation("StartFollowLeader: {RobotCount} robots, mode={Mode}", robotCount, leaderMode);
+        var command = new
+        {
+            command = "start_task",
+            parameters = new { task_type = "follow_leader", robot_count = robotCount, leader_mode = leaderMode, config }
+        };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        await Clients.All.SendAsync("TaskEvent", JsonSerializer.Serialize(new { type = "started", task = "follow_leader" }));
+        return true;
+    }
+
+    public async Task<bool> StartFormation(int robotCount, string formationType, string movementMode, object config)
+    {
+        logger.LogInformation("StartFormation: {RobotCount} robots, type={Type}, mode={Mode}", robotCount, formationType, movementMode);
+        var command = new
+        {
+            command = "start_task",
+            parameters = new { task_type = "formation", robot_count = robotCount, formation_type = formationType, movement_mode = movementMode, config }
+        };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        await Clients.All.SendAsync("TaskEvent", JsonSerializer.Serialize(new { type = "started", task = "formation" }));
+        return true;
+    }
+
+    public async Task<bool> StartTransport(int robotCount, double targetX, double targetY, object config)
+    {
+        logger.LogInformation("StartTransport: {RobotCount} robots, target=({X},{Y})", robotCount, targetX, targetY);
+        var command = new
+        {
+            command = "start_task",
+            parameters = new { task_type = "transport", robot_count = robotCount, target_x = targetX, target_y = targetY, config }
+        };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        await Clients.All.SendAsync("TaskEvent", JsonSerializer.Serialize(new { type = "started", task = "transport" }));
+        return true;
+    }
+
+    public async Task<bool> StopTask()
+    {
+        logger.LogInformation("StopTask requested");
+        var command = new { command = "stop_task", parameters = new { } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        await Clients.All.SendAsync("TaskEvent", JsonSerializer.Serialize(new { type = "stopped" }));
+        return true;
+    }
+
+    public async Task<bool> EmergencyStop()
+    {
+        logger.LogWarning("EMERGENCY STOP requested");
+        var command = new { command = "emergency_stop", parameters = new { } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        await Clients.All.SendAsync("EmergencyStop", JsonSerializer.Serialize(new { timestamp = DateTime.UtcNow }));
+        return true;
+    }
+
+    public async Task<bool> ControlLeader(double linearVelocity, double angularVelocity)
+    {
+        var command = new { command = "control_leader", parameters = new { linear_velocity = linearVelocity, angular_velocity = angularVelocity } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        return true;
+    }
+
+    public async Task<bool> SpawnObstacles(string density)
+    {
+        logger.LogInformation("SpawnObstacles: density={Density}", density);
+        var command = new { command = "spawn_obstacles", parameters = new { density } };
+        await Clients.All.SendAsync("SwarmCommand", JsonSerializer.Serialize(command));
+        return true;
+    }
+
+    public Task<bool> GetRosConnectionStatus()
+    {
+        return Task.FromResult(_rosBridgeConnected);
+    }
+
+    // ==================== Bridge Forwarding Methods ====================
+    // Called by the ROS bridge to push data to frontend clients.
+
+    public async Task ForwardSwarmStatus(string statusJson)
+    {
+        // Detect bridge connection state transition
+        if (!_rosBridgeConnected)
+        {
+            _rosBridgeConnected = true;
+            _bridgeConnectionId = Context.ConnectionId;
+            logger.LogInformation("ROS bridge connected (ID: {ConnectionId})", Context.ConnectionId);
+            await Clients.All.SendAsync("RosConnectionChanged", new { connected = true, timestamp = DateTime.UtcNow });
+        }
+
+        // Broadcast full swarm status to frontend
+        await Clients.Others.SendAsync("SwarmStatusUpdate", statusJson);
+
+        // Extract per-robot sensor data and send individual RobotSensorUpdate events
+        try
+        {
+            using var doc = JsonDocument.Parse(statusJson);
+            if (doc.RootElement.TryGetProperty("robots", out var robots))
+            {
+                foreach (var robot in robots.EnumerateArray())
+                {
+                    var id = robot.GetProperty("id").GetString();
+                    if (id != null && robot.TryGetProperty("sensors", out var sensors))
+                    {
+                        await Clients.Others.SendAsync("RobotSensorUpdate", id, sensors.GetRawText());
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not extract per-robot sensor data from status");
+        }
+    }
+
+    public async Task ForwardFleetEvent(string eventJson)
+    {
+        _rosBridgeConnected = true;
+        await Clients.Others.SendAsync("RobotDeploymentResponse", eventJson);
     }
 }

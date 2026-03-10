@@ -1,0 +1,8 @@
+# Spawn random obstacles
+string density             # low, medium, high
+string[] obstacle_types    # box, cylinder, wall
+bool clear_existing        # Clear existing obstacles first
+---
+bool success
+string message
+uint8 obstacle_count

@@ -1,0 +1,5 @@
+# Configure swarm parameters
+string config_json         # JSON string with configuration
+---
+bool success
+string message

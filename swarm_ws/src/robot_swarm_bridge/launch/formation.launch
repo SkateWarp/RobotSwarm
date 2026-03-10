@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- ================================================================= -->
+  <!-- FORMATION CONTROL: Geometric shape formation with movement        -->
+  <!-- Usage: roslaunch robot_swarm_bridge formation.launch               -->
+  <!--        robot_count:=6 formation_type:=triangle movement_mode:=moving -->
+  <!-- ================================================================= -->
+
+  <!-- Behavior parameters -->
+  <arg name="robot_count" default="6"/>
+  <arg name="formation_type" default="triangle"/>  <!-- triangle, square, circle, line, v_formation, diamond, or letter: A,T,L,etc -->
+  <arg name="movement_mode" default="moving"/>     <!-- static, moving, adaptive -->
+  <arg name="spacing" default="1.0"/>
+  <arg name="centroid_speed" default="0.1"/>
+  <arg name="centroid_path" default="circular"/>   <!-- circular, linear, waypoints -->
+  <arg name="max_linear_vel" default="0.2"/>
+  <arg name="max_angular_vel" default="1.5"/>
+  <arg name="path_radius" default="2.5"/>
+  <arg name="obstacle_density" default="none"/>
+
+  <!-- Gazebo parameters -->
+  <arg name="gui" default="true"/>
+  <arg name="rviz" default="false"/>
+
+  <!-- Include main swarm -->
+  <include file="$(find robot_swarm_bridge)/launch/swarm_main.launch">
+    <arg name="robot_count" value="$(arg robot_count)"/>
+    <arg name="obstacle_density" value="$(arg obstacle_density)"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+  </include>
+
+  <!-- Formation Controller -->
+  <node pkg="robot_swarm_bridge" type="formation_control.py" name="formation_control"
+        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+    <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="formation_type" value="$(arg formation_type)"/>
+    <param name="movement_mode" value="$(arg movement_mode)"/>
+    <param name="spacing" value="$(arg spacing)"/>
+    <param name="centroid_speed" value="$(arg centroid_speed)"/>
+    <param name="centroid_path" value="$(arg centroid_path)"/>
+    <param name="max_linear_vel" value="$(arg max_linear_vel)"/>
+    <param name="max_angular_vel" value="$(arg max_angular_vel)"/>
+    <param name="path_radius" value="$(arg path_radius)"/>
+  </node>
+
+</launch>

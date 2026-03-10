@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(dir \"c:\\\\Users\\\\Anyel\\\\RobotSwarm\\\\SwarmFrontend\\\\src\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:qiniu.pattern.swarma.org)",
+      "WebFetch(domain:www.semanticscholar.org)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.researchgate.net)",
+      "WebFetch(domain:assets-eu.researchsquare.com)",
+      "WebFetch(domain:rezeck.github.io)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "Bash(gh api:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(dotnet build:*)"
+    ]
+  }
+}

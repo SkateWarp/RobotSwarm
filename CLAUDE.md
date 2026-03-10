@@ -5,31 +5,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 RobotSwarm is a robotic swarm management system consisting of three main components:
-- **SwarmFrontend**: React web application for robot control and monitoring
-- **SwarmBackend**: .NET 8 API backend with PostgreSQL and SignalR for real-time communication
-- **swarm_ws**: ROS (Robot Operating System) workspace with a Python bridge connecting ROS to the backend
+- **SwarmFrontend**: React 17 web app built on the Fuse React admin template (MUI 5, Redux Toolkit, craco)
+- **SwarmBackend**: .NET 8 Minimal API backend with PostgreSQL, EF Core, and SignalR for real-time communication
+- **swarm_ws**: ROS (Robot Operating System) workspace with a Python bridge connecting ROS to the backend via SignalR
 
 ## Common Commands
 
 ### Frontend (SwarmFrontend/)
 ```bash
-npm start          # Development server at localhost:3000
-npm run build      # Production build
-npm run test       # Run tests
+npm start          # Dev server at localhost:3000 (uses craco)
+npm run build      # Production build (no sourcemaps via cross-env)
+npm run test       # Run tests (craco test --env=node)
 npm run lint       # ESLint
 ```
 
 ### Backend (SwarmBackend/)
 ```bash
-dotnet run                    # Run backend (listens on port 44336)
-dotnet ef database update     # Apply EF Core migrations
-dotnet ef migrations add <Name>  # Create new migration
+dotnet run                           # Run backend (HTTP on port 44336)
+dotnet ef database update            # Apply EF Core migrations
+dotnet ef migrations add <Name>      # Create new migration
 ```
+Swagger UI is always enabled at `/swagger`.
 
-### Database (from project root)
+### Database
 ```bash
-docker compose -f docker-compose.prod.yml up -d  # Production PostgreSQL
-docker compose -f SwarmBackend/docker-compose.local.yml up -d  # Local development
+# Local development (postgres/postgres/swarm on port 5432)
+docker compose -f SwarmBackend/docker-compose.local.yml up -d
+
+# Production (uses .env for DB_USER, DB_PASSWORD, DB_NAME)
+docker compose -f docker-compose.prod.yml up -d
 ```
 
 ### ROS Workspace (swarm_ws/)
@@ -46,47 +50,97 @@ rosrun robot_swarm_bridge bridge.py  # Run the SignalR-ROS bridge
 React Frontend <--SignalR--> .NET Backend <--SignalR--> ROS Bridge <--ROS Topics--> Robots
 ```
 
-1. **Frontend** connects to backend via SignalR hub at `/hubs/robot`
-2. **Backend** (RobotHub.cs) handles real-time robot status, sensor readings, and task logs
-3. **ROS Bridge** (robot_swarm_bridge) connects to SignalR and translates messages to/from ROS topics
+1. **Frontend** connects to backend SignalR hub at `/hubs/robot` using `@microsoft/signalr`
+2. **Backend** (`RobotHub.cs`) handles real-time robot status, sensor readings, commands, and task logs
+3. **ROS Bridge** (`bridge.py`) connects to SignalR using `signalrcore` Python library and translates messages to/from ROS topics
+
+### SignalR Hub Methods (Backend → called by clients)
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| `UpdateStatus` | `robotId, status` | Update robot status (Idle/Working/Disabled) |
+| `HandleSensorReading` | `robotId, reading` | Single sensor reading from ROS |
+| `HandleSensorReadingsBatch` | `robotId, request` | Batch sensor readings (preferred) |
+| `HandleSensorReadingFromClient` | `robotId, sensorName, sensorFields` | Sensor reading from frontend |
+| `SendCommand` | `robotId, command, parameters` | Send command to robots |
+| `HandleTaskLog` | `robotId, request` | Start a task log |
+| `HandleFinishTaskLog` | `robotId` | Finish active task |
+| `HandleCancelTaskLog` | `robotId, accountId` | Cancel active tasks |
+
+### SignalR Events (Backend → broadcast to clients)
+
+| Event | Description |
+|-------|-------------|
+| `RobotConnectionChanged/{robotId}` | Robot connected/disconnected |
+| `RobotStatusChanged/{robotId}` | Robot status changed |
+| `NewSensorReading` | New individual sensor reading |
+| `AllSensorReadings/{robotId}` | All latest readings for a robot |
+| `ExecuteCommand` | Command sent to robot(s) |
+| `RobotsAvailable` | List of non-disabled robot IDs |
+| `NewTaskLog` | New task log created |
+| `RobotCreated` | New robot created |
+
+### ROS Topics (per robot)
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `/robot/{id}/commands` | Bridge → ROS | Commands from frontend |
+| `/robot/{id}/status` | ROS → Bridge | Status updates (Working/Idle) |
+| `/robot/{id}/sensor_data` | ROS → Bridge | Sensor data (JSON) |
+| `/robot/{id}/task/start` | ROS → Bridge | Task started |
+| `/robot/{id}/task/finish` | ROS → Bridge | Task finished |
+| `/robot/{id}/task/cancel` | ROS → Bridge | Task cancelled |
+| `/listOfAvailableRobots` | Bridge → ROS | Available robot IDs |
 
 ### Frontend Structure (SwarmFrontend/src/)
-- `app/fuse-configs/settingsConfig.js`: Project selector (GTS, task, baldom, fraga)
-- `app/fuse-configs/routesConfig.js`: Route configuration based on project
-- `app/services/SignalRService/`: SignalR connection singleton
-- `app/main/apps/GeeTS/`: GTS (Gee Tobacco Sorting) application modules
-- `app/store/`: Redux store with async reducer injection
+- `@fuse/`: Fuse React admin template framework (layouts, navigation, themes) — avoid modifying
+- `app/fuse-configs/settingsConfig.js`: Project selector — `layout.project` controls which app loads
+- `app/fuse-configs/routesConfig.js`: Route configuration based on selected project
+- `app/services/SignalRService/signalRConnectionService.js`: SignalR connection singleton
+- `app/constants/constants.js`: API URL (`URL`) and branding
+- `app/main/apps/GeeTS/`: Main application modules:
+  - `Dashboard/` — Robot dashboard with widgets
+  - `Realtime/` — Real-time control panel, VNC viewer, command sending
+  - `RobotDetail/` — Individual robot view with sensor charts and task logs
+  - `TaskLog/`, `Tasks/` — Task management
+  - `LeafType/`, `LeafSorting/` — Domain-specific configuration
+- Each module follows pattern: `*AppConfig.js` (routes), `*App.js` (main component), `store/` (Redux slice)
 
 ### Backend Structure (SwarmBackend/)
-- `Program.cs`: Application entry point, middleware config, route groups
-- `Services/RobotHub.cs`: SignalR hub for real-time robot communication
-- `Entities/`: EF Core entity models (Robot, Sensor, TaskLog, Account, etc.)
-- `Routes/`: Minimal API route definitions
-- `Services/`: Business logic services
+- `Program.cs`: Entry point — DI, middleware, Minimal API route groups
+- `Services/RobotHub.cs`: SignalR hub (implements `IRealtimeService`)
+- `Entities/`: EF Core models — `Robot`, `Sensor`, `SensorReading`, `TaskLog`, `TaskTemplate`, `Account`, `RobotGroup`
+- `Routes/`: Minimal API route extensions (`MapGroup("Robots").MapRobot()`)
+- `Services/`: Business logic (each service implements an interface from `Interfaces/`)
+- `Models/`: Request/response records
+- `Helpers/DataContext.cs`: EF Core DbContext
+- Uses `LanguageExt` for functional error handling (`response.Match(Results.Ok, Results.BadRequest)`)
 
 ### ROS Bridge (swarm_ws/src/robot_swarm_bridge/)
-- `src/robot_swarm_bridge/bridge.py`: Main bridge connecting SignalR to ROS
-- `handlers/signalr_handler.py`: SignalR client for backend communication
-- `handlers/ros_handler.py`: ROS publisher/subscriber management
+- `src/robot_swarm_bridge/bridge.py`: Main entry point — creates SignalRHandler + ROSHandler per robot
+- `src/robot_swarm_bridge/handlers/signalr_handler.py`: SignalR client with auto-reconnect and message queuing
+- `src/robot_swarm_bridge/handlers/ros_handler.py`: ROS pub/sub with rate limiting (status: 5s, sensor: 1s, task: 5s)
+- `scripts/behaviors/`: Swarm behaviors — follow_leader, formation_control, collaborative_transport
+- `scripts/core/`: Fleet management, obstacle avoidance, task orchestration
 
-### Key Entities
-- **Robot**: Managed robots with status (Idle, Working, Disabled) and connection state
-- **RobotGroup**: Grouping for robot organization
-- **Sensor/SensorReading**: Robot sensor data
-- **TaskLog/TaskTemplate**: Task execution tracking
-
-## Project Configuration
-
-The frontend supports multiple projects configured in `settingsConfig.js`:
-- `GTS` / `GTS-swedish`: Gee Tobacco Sorting
-- `task`: Task dashboard
-- `baldom`, `fraga`: Other projects
-- `fakeBaldom`, `fakeFraga`: Mockup modes
+### Key Enums
+- **RobotStatus**: `Idle`, `Working`, `Disabled`
+- **TaskTypeEnum**: `None`, `Transport`, `FollowLeader`, `Formation`
+- **SensorTypeEnum**: Defined in `Entities/SensorTypeEnum.cs`, mapped as PostgreSQL enum
 
 ## Environment
 
-Backend expects PostgreSQL with connection configured via:
-- Environment variables: `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-- Or connection string in `appsettings.json`
+Backend PostgreSQL connection:
+- **Local dev**: `docker-compose.local.yml` uses hardcoded `postgres/postgres/swarm`
+- **Production**: `.env` file at project root with `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- Connection string in `appsettings.json` uses `${DB_USER}` env var substitution
 
-Frontend API URL configured in `src/app/constants/constants.js`.
+Frontend API URL: set in `src/app/constants/constants.js` (production: `https://robot.zerav.la`)
+
+JWT auth configured in `appsettings.json` under `AppSettings` (Secret is base64-encoded).
+
+## CI/CD
+
+GitHub Actions (`frontend_workflow.yml`) deploys frontend on push to `main` when `SwarmFrontend/**` changes:
+- Self-hosted runner, Node.js 18
+- Builds and copies to `/var/www/html/`

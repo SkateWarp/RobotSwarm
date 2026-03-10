@@ -1,0 +1,6 @@
+# Delete robots from Gazebo
+string[] robot_ids         # Robot IDs to delete (empty = delete all)
+---
+bool success
+string message
+uint8 deleted_count

@@ -1,0 +1,10 @@
+# Spawn robots in Gazebo
+uint8 robot_count          # Number of robots to spawn
+string spawn_pattern       # grid, circle, line
+geometry_msgs/Point center # Spawn center point
+float32 spacing            # Spacing between robots
+string[] robot_ids         # Optional: custom robot IDs (if empty, auto-generate)
+---
+bool success
+string message
+string[] robot_ids         # IDs of spawned robots

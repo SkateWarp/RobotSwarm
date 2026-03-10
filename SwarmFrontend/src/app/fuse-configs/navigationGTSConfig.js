@@ -34,6 +34,14 @@ const navigationGTSConfig = [
         url: "/apps/GTS/realtime",
     },
     {
+        id: "swarmControl",
+        title: "Swarm Control",
+        type: "item",
+        icon: "settings_remote",
+        auth: authRoles.admin,
+        url: "/apps/GTS/swarm-control",
+    },
+    {
         id: "leafSorting",
         title: "Robots",
         type: "item",

@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- ================================================================= -->
+  <!-- COLLABORATIVE TRANSPORT: GRF-based multi-robot object pushing     -->
+  <!-- Usage: roslaunch robot_swarm_bridge transport.launch               -->
+  <!--        robot_count:=4 target_x:=3.0 target_y:=3.0                -->
+  <!-- ================================================================= -->
+
+  <!-- Behavior parameters -->
+  <arg name="robot_count" default="4"/>
+  <arg name="object_name" default="transport_object"/>
+  <arg name="target_x" default="3.0"/>
+  <arg name="target_y" default="3.0"/>
+  <arg name="vmax" default="0.15"/>
+  <arg name="sensing_range" default="2.0"/>
+  <arg name="arrival_tolerance" default="0.5"/>
+  <arg name="obstacle_density" default="none"/>
+
+  <!-- Gazebo parameters -->
+  <arg name="gui" default="true"/>
+  <arg name="rviz" default="false"/>
+
+  <!-- Include main swarm (arena already has transport_object and target_marker) -->
+  <include file="$(find robot_swarm_bridge)/launch/swarm_main.launch">
+    <arg name="robot_count" value="$(arg robot_count)"/>
+    <arg name="obstacle_density" value="$(arg obstacle_density)"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+  </include>
+
+  <!-- Collaborative Transport Controller -->
+  <node pkg="robot_swarm_bridge" type="collaborative_transport.py" name="collaborative_transport"
+        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+    <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="object_name" value="$(arg object_name)"/>
+    <param name="target_x" value="$(arg target_x)"/>
+    <param name="target_y" value="$(arg target_y)"/>
+    <param name="vmax" value="$(arg vmax)"/>
+    <param name="sensing_range" value="$(arg sensing_range)"/>
+    <param name="arrival_tolerance" value="$(arg arrival_tolerance)"/>
+  </node>
+
+</launch>

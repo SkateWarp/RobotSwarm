@@ -10,6 +10,14 @@ project(robot_swarm_bridge)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  gazebo_msgs
+  message_generation
+  tf
+  visualization_msgs
+  std_srvs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -46,31 +54,35 @@ catkin_python_setup()
 ##   * add every package in MSG_DEP_SET to generate_messages(DEPENDENCIES ...)
 
 ## Generate messages in the 'msg' folder
-# add_message_files(
-#   FILES
-#   Message1.msg
-#   Message2.msg
-# )
+add_message_files(
+  FILES
+  RobotStatus.msg
+  TaskProgress.msg
+  TaskRequest.msg
+  SwarmStatus.msg
+  FormationShape.msg
+  TransportTask.msg
+  RobotAssignment.msg
+)
 
 ## Generate services in the 'srv' folder
-# add_service_files(
-#   FILES
-#   Service1.srv
-#   Service2.srv
-# )
-
-## Generate actions in the 'action' folder
-# add_action_files(
-#   FILES
-#   Action1.action
-#   Action2.action
-# )
+add_service_files(
+  FILES
+  SpawnRobots.srv
+  DeleteRobots.srv
+  GetFleetStatus.srv
+  SpawnObstacles.srv
+  StartTask.srv
+  StopTask.srv
+  ConfigureSwarm.srv
+)
 
 ## Generate added messages and services with any dependencies listed here
-# generate_messages(
-#   DEPENDENCIES
-#   std_msgs
-# )
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+  geometry_msgs
+)
 
 ################################################
 ## Declare ROS dynamic reconfigure parameters ##
@@ -102,10 +114,7 @@ catkin_python_setup()
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES robot_swarm_bridge
-#  CATKIN_DEPENDS rospy std_msgs
-#  DEPENDS system_lib
+  CATKIN_DEPENDS rospy std_msgs geometry_msgs nav_msgs sensor_msgs gazebo_msgs message_runtime tf visualization_msgs std_srvs
 )
 
 ###########

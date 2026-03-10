@@ -1,0 +1,7 @@
+# Start a new swarm task
+string task_type           # follow_leader, formation, transport
+string parameters_json     # JSON string with task-specific parameters
+---
+bool success
+string message
+string task_id

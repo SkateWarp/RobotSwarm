@@ -1,0 +1,4 @@
+# Stop current task
+---
+bool success
+string message

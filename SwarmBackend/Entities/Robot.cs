@@ -14,6 +14,9 @@ public class Robot
     public RobotStatus Status { get; set; } = RobotStatus.Idle;
     public bool IsPublic { get; set; } = true;
 
+    /// <summary>ROS namespace for this robot (e.g., "tb3_0", "tb3_1")</summary>
+    public string? Namespace { get; set; }
+
     public int? RobotGroupId { get; set; }
     public RobotGroup? RobotGroup { get; set; }
 

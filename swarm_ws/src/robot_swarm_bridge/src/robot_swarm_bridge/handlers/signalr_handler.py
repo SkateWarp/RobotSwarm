@@ -9,19 +9,22 @@ from queue import Queue
 import traceback
 
 class SignalRHandler:
-    def __init__(self, backend_url, robot_ids, command_callback, robots_available_callback=None):
+    def __init__(self, backend_url, robot_ids, command_callback, robots_available_callback=None, swarm_command_callback=None):
         """
         Initialize SignalR handler
-        
+
         Args:
             backend_url (str): URL of the SignalR hub
             robot_ids (int or list): ID(s) of the robot(s)
             command_callback (callable): Callback for handling commands from backend
+            robots_available_callback (callable): Callback when robots list is received
+            swarm_command_callback (callable): Callback for swarm commands from backend
         """
         self.url = backend_url
         self.robot_ids = robot_ids if isinstance(robot_ids, list) else [robot_ids]
         self.command_callback = command_callback
         self.robots_available_callback = robots_available_callback
+        self.swarm_command_callback = swarm_command_callback
         self.connection = None
         self.is_connected = False
         self.reconnect_attempt = 0
@@ -64,6 +67,10 @@ class SignalRHandler:
             # Register command handler
             self.connection.on("ExecuteCommand", lambda *command: self._handle_command(*command))
             self.connection.on("RobotsAvailable", lambda robots: self.robots_available_callback(robots))
+
+            # Swarm command handler - receives commands from hub for task_orchestrator
+            self.connection.on("SwarmCommand", lambda *args: self._handle_swarm_command(*args))
+
             rospy.loginfo("SignalR connection setup complete")
 
         except Exception as e:
@@ -76,8 +83,8 @@ class SignalRHandler:
         self.reconnect_attempt = 0
         self.logger.info("Connected to SignalR hub")
         
-        # Send initial status
-        self.send_status_update("Idle")
+        # Log connection (no per-robot status to send at bridge level)
+        rospy.loginfo("SignalR bridge connected to hub")
         
         # Process any queued messages
         self._process_queued_messages()
@@ -322,24 +329,25 @@ class SignalRHandler:
     def send_task(self, robot_id, task_data):
         """
         Send task log to backend
-        
+
         Args:
             robot_id (int): ID of the robot
             task_data (dict): Task log data
         """
         rospy.loginfo(f"Robot {robot_id} task log received from signalr")
         rospy.loginfo(f"Task data: {task_data}")
-        # Format data to match TaskLogRequest record
+        # Format data to match RosTaskTemplateRequest(string TaskType, List<int> RobotIds, JsonElement Parameters)
         task_request = {
-            "taskType": str(task_data.get("taskType")),  # string TaskType
-            "parameters": json.dumps(task_data.get("parameters")),  # JsonElement Parameters
+            "taskType": str(task_data.get("taskType")),
+            "robotIds": task_data.get("robotIds", [int(robot_id)]),
+            "parameters": json.dumps(task_data.get("parameters", {})),
         }
-        
+
         # Send to SignalR hub with both robotId and task
         # Note: Parameters must be in same order as C# method signature
         self.connection.send("HandleTaskLog", [
-            int(robot_id),  # First parameter as integer
-            task_request  # Second parameter as object
+            int(robot_id),
+            task_request
         ])
         
         
@@ -355,16 +363,18 @@ class SignalRHandler:
             int(robot_id),  # First parameter as integer
         ])
 
-    def send_cancel_task(self, robot_id):
+    def send_cancel_task(self, robot_id, account_id=0):
         """
         Send cancel task log to backend
-        
+
         Args:
             robot_id (int): ID of the robot
+            account_id (int): ID of the account (defaults to 0 for system-initiated cancels)
         """
         rospy.loginfo(f"Robot {robot_id} cancel task log received from signalr")
         self.connection.send("HandleCancelTaskLog", [
-            int(robot_id),  # First parameter as integer
+            int(robot_id),
+            int(account_id),
         ])
         
         
@@ -393,6 +403,43 @@ class SignalRHandler:
             except Exception as e:
                 # self.logger.error(f"Error processing queued message: {e}")
                 break
+
+    def _handle_swarm_command(self, *args):
+        """Handle swarm commands from SignalR hub -> forward to ROS"""
+        try:
+            # signalrcore wraps args in a list
+            command_json = args[0] if isinstance(args[0], str) else args[0][0]
+            rospy.loginfo(f"Received SwarmCommand: {command_json}")
+            if self.swarm_command_callback:
+                self.swarm_command_callback(command_json)
+        except Exception as e:
+            rospy.logerr(f"Error handling swarm command: {e}")
+            rospy.logerr(f"Stack trace: {traceback.format_exc()}")
+
+    def send_swarm_status(self, status_json):
+        """
+        Forward swarm status to backend hub (ForwardSwarmStatus).
+        Called at 10 Hz from bridge.py when /swarm/status is received.
+        """
+        try:
+            if self.is_connected:
+                self.connection.send("ForwardSwarmStatus", [status_json])
+            else:
+                self.message_queue.put(("ForwardSwarmStatus", status_json))
+        except Exception as e:
+            rospy.logerr_throttle(5.0, f"Error sending swarm status: {e}")
+
+    def send_fleet_event(self, event_json):
+        """
+        Forward fleet events (spawn/delete results) to backend hub (ForwardFleetEvent).
+        """
+        try:
+            if self.is_connected:
+                self.connection.send("ForwardFleetEvent", [event_json])
+            else:
+                self.message_queue.put(("ForwardFleetEvent", event_json))
+        except Exception as e:
+            rospy.logerr(f"Error sending fleet event: {e}")
 
     def send_heartbeat(self):
         """Send heartbeat to backend"""

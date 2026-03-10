@@ -1,0 +1,307 @@
+# ============================================================================
+# Multi-Robot Swarm System Configuration
+# ROS Noetic + Gazebo + TurtleBot3
+# ============================================================================
+
+# Fleet Configuration
+fleet:
+  max_robots: 20                    # Maximum number of robots supported
+  default_robot_count: 5            # Default number to spawn
+  robot_model: "turtlebot3_waffle"  # turtlebot3_burger or turtlebot3_waffle
+  spawn_pattern: "grid"             # grid, circle, line
+  spawn_spacing: 1.0                # Meters between robots at spawn
+
+# Arena Configuration
+arena:
+  size:
+    x: 10.0                         # Arena width in meters
+    y: 10.0                         # Arena depth in meters
+  center:
+    x: 0.0                          # Arena center X
+    y: 0.0                          # Arena center Y
+  boundaries_enabled: true          # Enable arena boundary enforcement
+
+# WebSocket Configuration
+websocket:
+  enabled: true
+  host: "0.0.0.0"                   # Listen on all interfaces
+  port: 8080                        # WebSocket port
+  signalr_hub: "/hubs/swarm"        # SignalR hub endpoint
+  reconnect_delay: 5.0              # Seconds between reconnection attempts
+  max_reconnect_attempts: 10        # Max reconnection attempts
+  heartbeat_interval: 10.0          # Heartbeat interval in seconds
+
+# Safety Parameters - CRITICAL FOR NO-PUSH OBSTACLE AVOIDANCE
+safety:
+  # Multi-layer safety zones (in meters)
+  absolute_min_distance: 0.20       # NEVER get closer than this
+  emergency_stop_distance: 0.25     # Trigger emergency stop
+  critical_zone: 0.30               # Critical danger zone
+  danger_zone: 0.50                 # Strong repulsion zone
+  warning_zone: 1.00                # Start slowing down
+  safe_distance: 0.80               # Comfortable clearance
+
+  # Robot-to-robot safety
+  robot_min_distance: 0.50          # Minimum inter-robot distance
+  robot_safe_distance: 0.70         # Comfortable robot spacing
+
+  # Velocity limits (TurtleBot3 Waffle specs)
+  max_linear_velocity: 0.26         # m/s (TurtleBot3 max: 0.26)
+  max_angular_velocity: 1.82        # rad/s (TurtleBot3 max: 1.82)
+
+  # Obstacle avoidance tuning
+  repulsion_gain: 1.5               # Strength of repulsive force
+  robot_repulsion_gain: 1.0         # Robot-robot repulsion
+  velocity_reduction_start: 1.0     # Start reducing velocity at this distance
+
+  # Stuck detection
+  stuck_timeout: 5.0                # Seconds before declaring stuck
+  stuck_distance_threshold: 0.05    # Meters - minimum progress expected
+  recovery_timeout: 10.0            # Seconds to attempt recovery
+
+# Obstacle Generation
+obstacles:
+  default_density: "medium"         # low, medium, high
+  types: ["box", "cylinder", "wall"]  # Obstacle types to spawn
+  dynamic_respawn: false            # Respawn obstacles periodically
+  respawn_interval: 60.0            # Seconds between respawns
+
+  # Density definitions (number of obstacles in 10x10m arena)
+  density_levels:
+    low: 5
+    medium: 12
+    high: 20
+
+  # Obstacle size ranges (meters)
+  box_size:
+    min: 0.2
+    max: 0.5
+  cylinder_radius:
+    min: 0.15
+    max: 0.30
+  cylinder_height: 0.5
+  wall_thickness: 0.1
+  wall_length:
+    min: 1.0
+    max: 3.0
+
+  # Clearance requirements
+  min_distance_from_robots: 2.0     # Meters from robot spawn positions
+  min_distance_from_boundaries: 0.5  # Meters from arena edges
+  min_obstacle_spacing: 0.3         # Meters between obstacles
+
+# Behavior-Specific Configurations
+
+# Follow-the-Leader Behavior
+follow_leader:
+  following_distance: 0.70          # Meters behind previous robot
+  time_delay: 0.5                   # Seconds between robots (snake effect)
+  path_type: "waypoint"             # waypoint, circular, square, figure8, random
+
+  # Leader control modes
+  leader_mode: "waypoint"           # waypoint, manual, exploration, random
+
+  # Default waypoints (can be overridden from UI)
+  default_waypoints:
+    - {x: 2.0, y: 0.0}
+    - {x: 2.0, y: 2.0}
+    - {x: 0.0, y: 2.0}
+    - {x: 0.0, y: 0.0}
+
+  # Predefined path parameters (can be overridden from UI)
+  circular_path:
+    radius: 3.0                     # Default radius in meters
+    angular_velocity: 0.3
+  square_path:
+    side_length: 4.0                # Default side length in meters
+  figure8_path:
+    width: 4.0
+    height: 3.0
+
+  # Random exploration
+  random_exploration:
+    update_interval: 5.0            # Seconds between new random goals
+    max_distance: 4.0               # Maximum distance for random goal
+
+  # PID tuning for follower tracking
+  follower_pid:
+    linear:
+      kp: 0.5
+      ki: 0.0
+      kd: 0.1
+    angular:
+      kp: 1.0
+      ki: 0.0
+      kd: 0.2
+
+# Geometric Formation Behavior
+formation:
+  default_type: "triangle"          # line, triangle, circle, square, v, diamond
+  default_spacing: 1.0              # Meters between robots in formation (can be overridden from UI)
+  movement_mode: "static"           # static, moving, adaptive
+
+  # Default center and target (can be overridden from UI)
+  default_center:
+    x: 0.0
+    y: 0.0
+  default_target:                   # Used for moving mode
+    x: 3.0
+    y: 3.0
+
+  # Formation-specific parameters
+  formations:
+    line:
+      orientation: 0.0              # Radians
+    triangle:
+      orientation: 0.0
+    circle:
+      auto_radius: true             # Auto-calculate based on robot count
+      fixed_radius: 2.0             # Used if auto_radius is false
+    square:
+      auto_arrange: true            # Auto-arrange in closest square grid
+    v_formation:
+      angle: 60.0                   # Degrees between V arms
+    diamond:
+      aspect_ratio: 1.0             # Width/height ratio
+
+  # Moving formation parameters
+  moving:
+    velocity: 0.15                  # m/s when formation is moving
+    rotation_speed: 0.3             # rad/s for formation rotation
+
+  # Adaptive formation (obstacle avoidance)
+  adaptive:
+    deformation_enabled: true       # Allow formation to deform
+    max_deformation: 0.5            # Maximum deviation from ideal (meters)
+    reformation_threshold: 2.0      # Distance from obstacle to start reforming
+    open_space_seeking: true        # Search for wider paths
+
+  # Formation PID control
+  formation_pid:
+    position:
+      kp: 0.6
+      ki: 0.01
+      kd: 0.15
+    orientation:
+      kp: 0.8
+      ki: 0.0
+      kd: 0.1
+
+# Collaborative Transportation Behavior
+collaborative_transport:
+  # Object properties
+  default_object_mass: 2.0          # kg
+  min_robots_per_object: 2          # Minimum required robots (no max - dynamic N support)
+
+  # Distributed Encirclement + Force Consensus algorithm (N-robot support)
+  encirclement_margin: 0.3          # Extra margin around object for robot positioning
+  force_gain: 1.0                   # Force consensus gain
+  transport_velocity: 0.12          # m/s - transport speed (lower for coordination)
+
+  # Force and pushing
+  push_force_per_robot: 0.5         # Newtons per robot
+  force_threshold: 0.1              # Minimum force to be useful
+
+  # Default object and target positions (can be overridden from UI)
+  default_object_position:
+    x: 0.0
+    y: 0.0
+  default_object_size: 0.5          # Object diameter in meters
+  default_target_location:
+    x: 3.0
+    y: 3.0
+
+  # Object spawning
+  object_spawn_mode: "static"       # static, random, timed
+  timed_spawn_interval: 60.0        # Seconds between spawns
+
+  # Object types and masses
+  object_types:
+    small_box:
+      mass: 1.0
+      size: [0.3, 0.3, 0.3]
+    medium_box:
+      mass: 2.5
+      size: [0.5, 0.5, 0.4]
+    large_box:
+      mass: 4.0
+      size: [0.7, 0.7, 0.5]
+
+  # Detection method
+  detection_method: "position"      # position, apriltag, visual
+
+  # GRF (Gibbs Random Field) optimization
+  grf:
+    max_iterations: 100             # Maximum optimization iterations
+    convergence_threshold: 0.01     # Convergence criterion
+    temperature: 1.0                # Simulated annealing temperature
+    cooling_rate: 0.95              # Temperature reduction per iteration
+
+  # Path planning for object transport
+  path_planning:
+    algorithm: "a_star"             # a_star, rrt, potential_field
+    clearance_buffer: 0.3           # Extra clearance for object size
+    replan_interval: 2.0            # Seconds between replanning
+
+  # Transport control
+  transport_pid:
+    linear:
+      kp: 0.4
+      ki: 0.01
+      kd: 0.1
+    angular:
+      kp: 0.6
+      ki: 0.0
+      kd: 0.15
+
+  # Coordination
+  coordination:
+    force_balance_threshold: 0.1    # Maximum force imbalance allowed
+    position_sync_rate: 10.0        # Hz - position synchronization frequency
+    leader_assignment: "front"      # front, auto, manual
+
+# Sensor Configuration
+sensors:
+  lidar:
+    update_rate: 10.0               # Hz
+    sector_count: 36                # Divide 360° into sectors
+    min_range: 0.12                 # Minimum valid range (m)
+    max_range: 3.5                  # Maximum valid range (m)
+    threat_threshold: 1.0           # Distance considered threatening
+
+  odometry:
+    update_rate: 30.0               # Hz
+    covariance_threshold: 0.1       # Maximum acceptable covariance
+
+# Control Loop Rates
+control:
+  main_loop_rate: 30.0              # Hz - Main control loop
+  status_publish_rate: 5.0          # Hz - Status updates
+  visualization_rate: 10.0          # Hz - RViz markers
+  websocket_update_rate: 10.0       # Hz - Frontend updates
+
+# Logging Configuration
+logging:
+  level: "INFO"                     # DEBUG, INFO, WARN, ERROR, FATAL
+  log_to_file: true
+  log_file: "/tmp/swarm_log.txt"
+  log_ros_topics: true
+  log_websocket_messages: false     # Can be verbose
+  max_log_size_mb: 100              # Maximum log file size
+
+# Visualization (RViz)
+visualization:
+  enabled: true
+  show_robot_paths: true
+  show_formation_outline: true
+  show_obstacle_zones: true
+  show_repulsion_vectors: false     # Debug - can be cluttered
+  show_goal_markers: true
+  marker_lifetime: 1.0              # Seconds
+
+# Performance Tuning
+performance:
+  use_threading: true               # Multi-threading for parallel processing
+  max_worker_threads: 4             # Thread pool size
+  enable_caching: true              # Cache computed values
+  cache_timeout: 1.0                # Seconds before cache invalidation

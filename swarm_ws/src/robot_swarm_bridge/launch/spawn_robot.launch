@@ -1,0 +1,29 @@
+<launch>
+  <!-- Single robot spawner - reusable for multi-robot setups -->
+  <arg name="robot_name" default="tb3_0"/>
+  <arg name="x_pos" default="0.0"/>
+  <arg name="y_pos" default="0.0"/>
+  <arg name="z_pos" default="0.0"/>
+  <arg name="yaw" default="0.0"/>
+  <arg name="model" default="waffle"/>
+
+  <group ns="$(arg robot_name)">
+    <!-- Load robot URDF -->
+    <param name="robot_description"
+           command="$(find xacro)/xacro $(find turtlebot3_description)/urdf/turtlebot3_$(arg model).urdf.xacro" />
+
+    <!-- Spawn in Gazebo -->
+    <node pkg="gazebo_ros" type="spawn_model" name="spawn_urdf"
+          args="-urdf -model $(arg robot_name)
+                -x $(arg x_pos) -y $(arg y_pos) -z $(arg z_pos)
+                -Y $(arg yaw)
+                -param robot_description"
+          output="screen"/>
+
+    <!-- Robot state publisher -->
+    <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher" output="screen">
+      <param name="publish_frequency" type="double" value="50.0"/>
+      <param name="tf_prefix" value="$(arg robot_name)"/>
+    </node>
+  </group>
+</launch>

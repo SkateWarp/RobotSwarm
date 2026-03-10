@@ -17,7 +17,8 @@ public record RobotResponse(
     string StatusDescription,
     bool IsConnected,
     bool IsPublic,
-    int? AccountId)
+    int? AccountId,
+    string? Namespace)
 {
     /// <summary>
     /// Creates a RobotResponse from a Robot entity
@@ -35,8 +36,14 @@ public record RobotResponse(
         robot.Status.GetDescriptionAttribute(),
         robot.IsConnected,
         robot.IsPublic,
-        robot.AccountId);
+        robot.AccountId,
+        robot.Namespace);
 }
+
+/// <summary>
+/// Info for spawning a robot with a database ID
+/// </summary>
+public record RobotDeploymentInfo(string Id, string Name);
 
 /// <summary>
 /// Represents the request model for creating or updating a Robot

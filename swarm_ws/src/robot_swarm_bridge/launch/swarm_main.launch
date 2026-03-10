@@ -1,0 +1,174 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- ================================================================= -->
+  <!-- SWARM MAIN LAUNCH: Gazebo + Arena + Robot Fleet + Core Nodes      -->
+  <!-- This is the base launch file included by all behavior launches    -->
+  <!-- ================================================================= -->
+
+  <!-- Arguments -->
+  <arg name="robot_count" default="5"/>
+  <arg name="robot_model" default="waffle"/>
+  <arg name="world_file" default="swarm_arena"/>
+  <arg name="gui" default="true"/>
+  <arg name="rviz" default="false"/>
+  <arg name="spawn_pattern" default="grid"/>
+  <arg name="spawn_spacing" default="1.0"/>
+  <arg name="obstacle_density" default="none"/>
+  <arg name="paused" default="false"/>
+
+  <!-- Set TurtleBot3 model environment variable -->
+  <env name="TURTLEBOT3_MODEL" value="$(arg robot_model)"/>
+
+  <!-- ==================== GAZEBO ==================== -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(find robot_swarm_bridge)/worlds/$(arg world_file).world"/>
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="debug" value="false"/>
+    <arg name="verbose" value="false"/>
+  </include>
+
+  <!-- ==================== SPAWN ROBOTS ==================== -->
+  <!-- Spawn via helper launch file with conditional includes -->
+
+  <!-- Robot 0 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 1)">
+    <arg name="robot_name" value="tb3_0"/>
+    <arg name="x_pos" value="0.0"/>
+    <arg name="y_pos" value="0.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 1 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 2)">
+    <arg name="robot_name" value="tb3_1"/>
+    <arg name="x_pos" value="1.0"/>
+    <arg name="y_pos" value="0.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 2 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 3)">
+    <arg name="robot_name" value="tb3_2"/>
+    <arg name="x_pos" value="-1.0"/>
+    <arg name="y_pos" value="0.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 3 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 4)">
+    <arg name="robot_name" value="tb3_3"/>
+    <arg name="x_pos" value="0.0"/>
+    <arg name="y_pos" value="1.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 4 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 5)">
+    <arg name="robot_name" value="tb3_4"/>
+    <arg name="x_pos" value="0.0"/>
+    <arg name="y_pos" value="-1.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 5 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 6)">
+    <arg name="robot_name" value="tb3_5"/>
+    <arg name="x_pos" value="1.0"/>
+    <arg name="y_pos" value="1.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 6 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 7)">
+    <arg name="robot_name" value="tb3_6"/>
+    <arg name="x_pos" value="-1.0"/>
+    <arg name="y_pos" value="1.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 7 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 8)">
+    <arg name="robot_name" value="tb3_7"/>
+    <arg name="x_pos" value="1.0"/>
+    <arg name="y_pos" value="-1.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 8 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 9)">
+    <arg name="robot_name" value="tb3_8"/>
+    <arg name="x_pos" value="-1.0"/>
+    <arg name="y_pos" value="-1.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- Robot 9 -->
+  <include file="$(find robot_swarm_bridge)/launch/spawn_robot.launch" if="$(eval arg('robot_count') >= 10)">
+    <arg name="robot_name" value="tb3_9"/>
+    <arg name="x_pos" value="2.0"/>
+    <arg name="y_pos" value="0.0"/>
+    <arg name="model" value="$(arg robot_model)"/>
+  </include>
+
+  <!-- For >10 robots, use the dynamic spawner script -->
+  <node pkg="robot_swarm_bridge" type="spawn_robots.py" name="dynamic_spawner"
+        output="screen" if="$(eval arg('robot_count') > 10)">
+    <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="start_index" value="10"/>
+    <param name="spawn_pattern" value="$(arg spawn_pattern)"/>
+    <param name="spacing" value="$(arg spawn_spacing)"/>
+    <param name="model" value="$(arg robot_model)"/>
+  </node>
+
+  <!-- ==================== CORE NODES ==================== -->
+  <!-- Fleet manager (tracks robots, publishes /fleet/robot_list) -->
+  <node pkg="robot_swarm_bridge" type="fleet_manager.py" name="fleet_manager" output="screen">
+    <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="auto_spawn" value="false"/>
+  </node>
+
+  <!-- Task orchestrator (command routing and status) -->
+  <node pkg="robot_swarm_bridge" type="task_orchestrator.py" name="task_orchestrator" output="screen"/>
+
+  <!-- Obstacle generator (provides /environment/spawn_obstacles service) -->
+  <node pkg="robot_swarm_bridge" type="obstacle_generator.py" name="obstacle_generator" output="screen"/>
+
+  <!-- Spawn initial obstacles if requested -->
+  <node if="$(eval arg('obstacle_density') != 'none')"
+        pkg="rostopic" type="rostopic" name="spawn_obstacles_trigger"
+        args="pub -1 /environment/spawn_obstacles_cmd std_msgs/String 'data: $(arg obstacle_density)'"
+        launch-prefix="bash -c 'sleep 10; $0 $@'"/>
+
+  <!-- ==================== BEHAVIOR NODES (idle until triggered) ==================== -->
+  <!-- All three run simultaneously; each waits for its /start topic from task_orchestrator -->
+  <node pkg="robot_swarm_bridge" type="follow_leader.py" name="follow_leader"
+        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+    <param name="robot_count" value="$(arg robot_count)"/>
+  </node>
+
+  <node pkg="robot_swarm_bridge" type="formation_control.py" name="formation_control"
+        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+    <param name="robot_count" value="$(arg robot_count)"/>
+  </node>
+
+  <node pkg="robot_swarm_bridge" type="collaborative_transport.py" name="collaborative_transport"
+        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+    <param name="robot_count" value="$(arg robot_count)"/>
+  </node>
+
+  <!-- ==================== SIGNALR BRIDGE ==================== -->
+  <!-- Connects ROS topics to .NET backend via SignalR -->
+  <arg name="backend_url" default="ws://localhost:44336/hubs/robot"/>
+  <node pkg="robot_swarm_bridge" type="bridge.py" name="signalr_bridge"
+        output="screen" launch-prefix="bash -c 'sleep 20; $0 $@'">
+    <param name="backend_url" value="$(arg backend_url)"/>
+    <param name="robot_ids" value="[]"/>
+  </node>
+
+  <!-- ==================== RVIZ (optional) ==================== -->
+  <node if="$(arg rviz)" pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find robot_swarm_bridge)/rviz/swarm.rviz"/>
+
+</launch>

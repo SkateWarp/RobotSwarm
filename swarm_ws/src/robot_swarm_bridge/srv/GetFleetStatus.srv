@@ -1,0 +1,6 @@
+# Get fleet status
+---
+bool success
+string[] robot_ids
+string[] robot_statuses    # active, idle, error, stuck
+geometry_msgs/Pose[] robot_poses
