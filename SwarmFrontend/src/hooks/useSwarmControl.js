@@ -4,76 +4,19 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import swarmService, {
-  SwarmStatusUpdate,
-  RobotStatus,
-  RobotSensors,
-  TaskStatus,
-  Waypoint,
-  FormationType,
-  MovementMode,
-  LeaderMode,
-  SpawnPattern,
-  ObstacleDensity
-} from '../services/SwarmService';
+import swarmService from '../services/SwarmService';
 
-export interface UseSwarmControlReturn {
-  // Connection state
-  isConnected: boolean;
-  isRosConnected: boolean;
-  connect: () => Promise<void>;
-  disconnect: () => Promise<void>;
-
-  // Status
-  robots: RobotStatus[];
-  taskStatus: TaskStatus | null;
-  robotCount: number;
-  isEmergencyStopped: boolean;
-  lastUpdate: string | null;
-
-  // Sensor data (keyed by robot ID)
-  sensorData: Map<string, RobotSensors>;
-
-  // Deployment
-  spawnRobots: (count: number, pattern?: SpawnPattern) => Promise<void>;
-  deleteRobots: (robotIds?: string[]) => Promise<void>;
-  deleteAllRobots: () => Promise<void>;
-
-  // Tasks
-  startFollowLeader: (options?: {
-    waypoints?: Waypoint[];
-    leaderMode?: LeaderMode;
-  }) => Promise<void>;
-  startFormation: (options?: {
-    formationType?: FormationType;
-    movementMode?: MovementMode;
-  }) => Promise<void>;
-  startTransport: (targetLocation: { x: number; y: number }) => Promise<void>;
-  stopTask: () => Promise<void>;
-  emergencyStop: () => Promise<void>;
-
-  // Leader control
-  controlLeader: (linear: number, angular: number) => Promise<void>;
-
-  // Environment
-  spawnObstacles: (density: ObstacleDensity) => Promise<void>;
-
-  // Error handling
-  error: string | null;
-  clearError: () => void;
-}
-
-export function useSwarmControl(): UseSwarmControlReturn {
+export function useSwarmControl() {
   // State
   const [isConnected, setIsConnected] = useState(false);
   const [isRosConnected, setIsRosConnected] = useState(false);
-  const [robots, setRobots] = useState<RobotStatus[]>([]);
-  const [taskStatus, setTaskStatus] = useState<TaskStatus | null>(null);
+  const [robots, setRobots] = useState([]);
+  const [taskStatus, setTaskStatus] = useState(null);
   const [robotCount, setRobotCount] = useState(0);
   const [isEmergencyStopped, setIsEmergencyStopped] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<string | null>(null);
-  const [sensorData, setSensorData] = useState<Map<string, RobotSensors>>(new Map());
-  const [error, setError] = useState<string | null>(null);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [sensorData, setSensorData] = useState(new Map());
+  const [error, setError] = useState(null);
 
   // Refs to track mounted state
   const isMounted = useRef(true);
@@ -83,7 +26,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
     isMounted.current = true;
 
     // Status update callback
-    swarmService.setStatusCallback((status: SwarmStatusUpdate) => {
+    swarmService.setStatusCallback((status) => {
       if (!isMounted.current) return;
 
       setRobots(status.robots);
@@ -94,7 +37,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
     });
 
     // Sensor update callback
-    swarmService.setSensorCallback((robotId: string, sensors: RobotSensors) => {
+    swarmService.setSensorCallback((robotId, sensors) => {
       if (!isMounted.current) return;
 
       setSensorData(prev => {
@@ -105,19 +48,19 @@ export function useSwarmControl(): UseSwarmControlReturn {
     });
 
     // Error callback
-    swarmService.setErrorCallback((errorMsg: string) => {
+    swarmService.setErrorCallback((errorMsg) => {
       if (!isMounted.current) return;
       setError(errorMsg);
     });
 
     // Connection callback (SignalR)
-    swarmService.setConnectionCallback((connected: boolean) => {
+    swarmService.setConnectionCallback((connected) => {
       if (!isMounted.current) return;
       setIsConnected(connected);
     });
 
     // ROS connection callback
-    swarmService.setRosConnectionCallback((connected: boolean) => {
+    swarmService.setRosConnectionCallback((connected) => {
       if (!isMounted.current) return;
       setIsRosConnected(connected);
     });
@@ -145,7 +88,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
   }, []);
 
   // Deployment
-  const spawnRobots = useCallback(async (count: number, pattern: SpawnPattern = 'grid') => {
+  const spawnRobots = useCallback(async (count, pattern = 'grid') => {
     try {
       await swarmService.spawnRobots(count, pattern);
     } catch (err) {
@@ -153,7 +96,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
     }
   }, []);
 
-  const deleteRobots = useCallback(async (robotIds?: string[]) => {
+  const deleteRobots = useCallback(async (robotIds) => {
     try {
       await swarmService.deleteRobots(robotIds);
     } catch (err) {
@@ -166,10 +109,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
   }, [deleteRobots]);
 
   // Tasks
-  const startFollowLeader = useCallback(async (options?: {
-    waypoints?: Waypoint[];
-    leaderMode?: LeaderMode;
-  }) => {
+  const startFollowLeader = useCallback(async (options) => {
     try {
       await swarmService.startFollowLeader(
         robotCount,
@@ -181,10 +121,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
     }
   }, [robotCount]);
 
-  const startFormation = useCallback(async (options?: {
-    formationType?: FormationType;
-    movementMode?: MovementMode;
-  }) => {
+  const startFormation = useCallback(async (options) => {
     try {
       await swarmService.startFormation(
         robotCount,
@@ -196,10 +133,10 @@ export function useSwarmControl(): UseSwarmControlReturn {
     }
   }, [robotCount]);
 
-  const startTransport = useCallback(async (targetLocation: { x: number; y: number }) => {
+  const startTransport = useCallback(async (targetLocation) => {
     try {
       await swarmService.startTransport(
-        robotCount,  // Use all available robots - task adapts dynamically to N robots
+        robotCount,
         targetLocation.x,
         targetLocation.y
       );
@@ -225,7 +162,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
   }, []);
 
   // Leader control
-  const controlLeader = useCallback(async (linear: number, angular: number) => {
+  const controlLeader = useCallback(async (linear, angular) => {
     try {
       await swarmService.controlLeader(linear, angular);
     } catch (err) {
@@ -235,7 +172,7 @@ export function useSwarmControl(): UseSwarmControlReturn {
   }, []);
 
   // Environment
-  const spawnObstacles = useCallback(async (density: ObstacleDensity) => {
+  const spawnObstacles = useCallback(async (density) => {
     try {
       await swarmService.spawnObstacles(density);
     } catch (err) {

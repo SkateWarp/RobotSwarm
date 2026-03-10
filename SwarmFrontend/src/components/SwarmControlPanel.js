@@ -5,10 +5,9 @@
 
 import React, { useState, useEffect } from 'react';
 import useSwarmControl from '../hooks/useSwarmControl';
-import { FormationType, LeaderMode, ObstacleDensity, Waypoint } from '../services/SwarmService';
 
 // Styles (inline for simplicity - move to CSS file in production)
-const styles: { [key: string]: React.CSSProperties } = {
+const styles = {
   container: {
     fontFamily: 'Arial, sans-serif',
     padding: '20px',
@@ -48,7 +47,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     display: 'flex',
     gap: '15px',
     marginBottom: '15px',
-    flexWrap: 'wrap' as const,
+    flexWrap: 'wrap',
   },
   button: {
     padding: '10px 20px',
@@ -89,7 +88,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   },
   label: {
     display: 'flex',
-    flexDirection: 'column' as const,
+    flexDirection: 'column',
     gap: '5px',
     fontSize: '14px',
   },
@@ -139,7 +138,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   },
 };
 
-const SwarmControlPanel: React.FC = () => {
+const SwarmControlPanel = () => {
   const {
     // Connection
     isConnected,
@@ -180,15 +179,15 @@ const SwarmControlPanel: React.FC = () => {
 
   // Local state for form inputs
   const [robotCountInput, setRobotCountInput] = useState(5);
-  const [spawnPattern, setSpawnPattern] = useState<'grid' | 'circle' | 'line'>('grid');
-  const [formationType, setFormationType] = useState<FormationType>('triangle');
-  const [leaderMode, setLeaderMode] = useState<LeaderMode>('waypoint');
-  const [obstacleDensity, setObstacleDensity] = useState<ObstacleDensity>('medium');
+  const [spawnPattern, setSpawnPattern] = useState('grid');
+  const [formationType, setFormationType] = useState('triangle');
+  const [leaderMode, setLeaderMode] = useState('waypoint');
+  const [obstacleDensity, setObstacleDensity] = useState('medium');
   const [targetX, setTargetX] = useState(7);
   const [targetY, setTargetY] = useState(7);
 
   // Waypoints for follow-leader
-  const [waypoints, setWaypointsState] = useState<Waypoint[]>([
+  const [waypoints, setWaypointsState] = useState([
     { x: 2, y: 2 },
     { x: 4, y: 2 },
     { x: 4, y: 4 },
@@ -207,12 +206,12 @@ const SwarmControlPanel: React.FC = () => {
   };
 
   // Handler for removing waypoint
-  const removeWaypoint = (index: number) => {
+  const removeWaypoint = (index) => {
     setWaypointsState(waypoints.filter((_, i) => i !== index));
   };
 
   // Handler for updating waypoint
-  const updateWaypoint = (index: number, field: 'x' | 'y', value: number) => {
+  const updateWaypoint = (index, field, value) => {
     const newWaypoints = [...waypoints];
     newWaypoints[index][field] = value;
     setWaypointsState(newWaypoints);
@@ -322,7 +321,7 @@ const SwarmControlPanel: React.FC = () => {
             Spawn Pattern
             <select
               value={spawnPattern}
-              onChange={(e) => setSpawnPattern(e.target.value as any)}
+              onChange={(e) => setSpawnPattern(e.target.value)}
               style={styles.select}
             >
               <option value="grid">Grid</option>
@@ -360,7 +359,7 @@ const SwarmControlPanel: React.FC = () => {
               Leader Mode
               <select
                 value={leaderMode}
-                onChange={(e) => setLeaderMode(e.target.value as LeaderMode)}
+                onChange={(e) => setLeaderMode(e.target.value)}
                 style={styles.select}
               >
                 <option value="waypoint">Waypoint</option>
@@ -452,7 +451,7 @@ const SwarmControlPanel: React.FC = () => {
               Formation Type
               <select
                 value={formationType}
-                onChange={(e) => setFormationType(e.target.value as FormationType)}
+                onChange={(e) => setFormationType(e.target.value)}
                 style={styles.select}
               >
                 <option value="line">Line</option>
@@ -514,7 +513,7 @@ const SwarmControlPanel: React.FC = () => {
             Obstacle Density
             <select
               value={obstacleDensity}
-              onChange={(e) => setObstacleDensity(e.target.value as ObstacleDensity)}
+              onChange={(e) => setObstacleDensity(e.target.value)}
               style={styles.select}
             >
               <option value="low">Low (5 obstacles)</option>
