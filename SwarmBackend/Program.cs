@@ -116,7 +116,8 @@ app.UseSwagger();
 app.UseSwaggerUI();
 //}
 
-app.UseHttpsRedirection();
+// HTTPS is handled by Cloudflare tunnel — no redirect needed at backend level
+// app.UseHttpsRedirection();
 
 app.MapGroup("Accounts")
     .MapAccount();
