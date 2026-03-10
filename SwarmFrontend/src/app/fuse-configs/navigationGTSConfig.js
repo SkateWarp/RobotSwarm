@@ -19,7 +19,7 @@ const navigationGTSConfig = [
     },
     {
         id: "taskLogs",
-        title: "Task Logs",
+        title: "Historial de Tareas",
         type: "item",
         icon: "history",
         auth: authRoles.admin,
@@ -27,19 +27,11 @@ const navigationGTSConfig = [
     },
     {
         id: "realtime",
-        title: "Realtime",
-        type: "item",
-        icon: "add_task",
-        auth: authRoles.admin,
-        url: "/apps/GTS/realtime",
-    },
-    {
-        id: "swarmControl",
-        title: "Swarm Control",
+        title: "Control en Tiempo Real",
         type: "item",
         icon: "settings_remote",
         auth: authRoles.admin,
-        url: "/apps/GTS/swarm-control",
+        url: "/apps/GTS/realtime",
     },
     {
         id: "leafSorting",

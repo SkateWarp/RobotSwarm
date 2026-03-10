@@ -6,7 +6,7 @@ import MailConfirmPageConfig from "app/main/mail-confirm/MailConfirmPageConfig";
 import ResetPasswordPageConfig from "app/main/reset-password/ResetPasswordPageConfig";
 import AccountsAppConfig from "app/main/apps/accounts/AccountsAppConfig";
 import RealtimeConfigAppConfig from "app/main/apps/GeeTS/Realtime/RealtimeConfigAppConfig";
-import SwarmControlAppConfig from "app/main/apps/GeeTS/SwarmControl/SwarmControlAppConfig";
+// SwarmControl fue fusionado en la página de Tiempo Real
 import ForgotPasswordPageConfig from "../main/forgot-password/ForgotPasswordPageConfig";
 import TaskDashboardAppConfig from "../main/apps/dashboards/tasks/TaskDashboardAppConfig";
 import settingsConfig from "./settingsConfig";
@@ -30,7 +30,6 @@ const routeConfigs = [
     TaskDashboardAppConfig,
     TaskConfigAppConfig,
     RealtimeConfigAppConfig,
-    SwarmControlAppConfig,
 
     // GeeTS
     LeafTypesAppConfig,

@@ -30,17 +30,17 @@ import {
     Code
 } from "@mui/icons-material";
 
-// Valid sensor types that match backend SensorTypeEnum
+// Tipos de sensor válidos que coinciden con el SensorTypeEnum del backend
 const SENSOR_TYPES = ["Speed", "LaserDistance", "Encoder", "Inercial", "MotorSpeedPercentage"];
 
 const COMMAND_TEMPLATES = {
     sensor_data: {
-        name: "Sensor Data",
+        name: "Datos de Sensor",
         icon: <Sensors />,
         color: "primary",
         template: {
-            name: "Robot_1",           // Robot identifier for display
-            sensorType: "Speed",       // For backend SensorTypeEnum lookup
+            name: "Robot_1",
+            sensorType: "Speed",
             left_ticks: 0,
             right_ticks: 0,
             left_diff: 0,
@@ -55,7 +55,7 @@ const COMMAND_TEMPLATES = {
         }
     },
     task: {
-        name: "Task",
+        name: "Tarea",
         icon: <PlayArrow />,
         color: "success",
         template: {
@@ -67,7 +67,7 @@ const COMMAND_TEMPLATES = {
         }
     },
     status: {
-        name: "Status",
+        name: "Estado",
         icon: <Settings />,
         color: "warning",
         options: ["Working", "Idle", "Error", "Maintenance"]
@@ -97,24 +97,16 @@ function CommandPanel({
         }
     };
 
-    const handleQuickSend = (type) => {
-        handleCommandTypeChange(type);
-        setTimeout(() => {
-            handleSend();
-        }, 100);
-    };
-
     const handleSend = () => {
         if (!selectedRobot || !commandType || !commandData) return;
 
         let parsedData = commandData;
 
-        // Parse JSON if needed
         if (commandType !== "status") {
             try {
                 parsedData = JSON.parse(commandData);
             } catch (error) {
-                alert("Invalid JSON format");
+                alert("Formato JSON inválido");
                 return;
             }
         }
@@ -135,7 +127,7 @@ function CommandPanel({
             current[keys[keys.length - 1]] = parseFloat(value) || value;
             setCommandData(JSON.stringify(data, null, 2));
         } catch (error) {
-            console.error("Error updating field:", error);
+            console.error("Error al actualizar campo:", error);
         }
     };
 
@@ -144,15 +136,14 @@ function CommandPanel({
 
         const template = COMMAND_TEMPLATES[commandType];
 
-        // Status - dropdown
         if (commandType === "status") {
             return (
                 <FormControl fullWidth sx={{ mt: 2 }}>
-                    <InputLabel>Status</InputLabel>
+                    <InputLabel>Estado</InputLabel>
                     <Select
                         value={commandData}
                         onChange={(e) => setCommandData(e.target.value)}
-                        label="Status"
+                        label="Estado"
                     >
                         {template.options.map((option) => (
                             <MenuItem key={option} value={option}>
@@ -164,29 +155,26 @@ function CommandPanel({
             );
         }
 
-        // Sensor Data - form fields
         if (commandType === "sensor_data") {
             const data = JSON.parse(commandData);
             return (
                 <Grid container spacing={2} sx={{ mt: 1 }}>
-                    {/* Robot name field */}
                     <Grid item xs={6} md={4}>
                         <TextField
                             fullWidth
                             size="small"
-                            label="ROBOT NAME"
+                            label="NOMBRE DEL ROBOT"
                             value={data.name || "Robot_1"}
                             onChange={(e) => handleFieldChange("name", e.target.value)}
                         />
                     </Grid>
-                    {/* Sensor type dropdown */}
                     <Grid item xs={6} md={4}>
                         <FormControl fullWidth size="small">
-                            <InputLabel>SENSOR TYPE</InputLabel>
+                            <InputLabel>TIPO DE SENSOR</InputLabel>
                             <Select
                                 value={data.sensorType || "Speed"}
                                 onChange={(e) => handleFieldChange("sensorType", e.target.value)}
-                                label="SENSOR TYPE"
+                                label="TIPO DE SENSOR"
                             >
                                 {SENSOR_TYPES.map((type) => (
                                     <MenuItem key={type} value={type}>
@@ -196,7 +184,6 @@ function CommandPanel({
                             </Select>
                         </FormControl>
                     </Grid>
-                    {/* Numeric sensor fields */}
                     {Object.keys(template.template)
                         .filter((key) => key !== "name" && key !== "sensorType")
                         .map((key) => (
@@ -215,7 +202,6 @@ function CommandPanel({
             );
         }
 
-        // Task - nested form fields
         if (commandType === "task") {
             const data = JSON.parse(commandData);
             return (
@@ -224,7 +210,7 @@ function CommandPanel({
                         <TextField
                             fullWidth
                             size="small"
-                            label="Task Type"
+                            label="Tipo de Tarea"
                             value={data.taskType || ""}
                             onChange={(e) => handleFieldChange("taskType", e.target.value)}
                         />
@@ -233,7 +219,7 @@ function CommandPanel({
                         <TextField
                             fullWidth
                             size="small"
-                            label="Sensor Name"
+                            label="Nombre del Sensor"
                             value={data.parameters?.sensorName || ""}
                             onChange={(e) => handleFieldChange("parameters.sensorName", e.target.value)}
                         />
@@ -242,7 +228,7 @@ function CommandPanel({
                         <TextField
                             fullWidth
                             size="small"
-                            label="Value"
+                            label="Valor"
                             type="number"
                             value={data.parameters?.value || 0}
                             onChange={(e) => handleFieldChange("parameters.value", e.target.value)}
@@ -259,23 +245,23 @@ function CommandPanel({
         <Card elevation={3}>
             <CardContent>
                 <Typography variant="h6" className="font-bold mb-16">
-                    Send Command
+                    Enviar Comando
                 </Typography>
 
-                {/* Robot Selection */}
+                {/* Selección de Robot */}
                 <FormControl fullWidth sx={{ mb: 3 }}>
-                    <InputLabel>Select Robot</InputLabel>
+                    <InputLabel>Seleccionar Robot</InputLabel>
                     <Select
                         value={selectedRobot}
                         onChange={(e) => onRobotChange(e.target.value)}
-                        label="Select Robot"
+                        label="Seleccionar Robot"
                     >
                         {robots.map((robot) => (
                             <MenuItem key={robot.id} value={robot.id}>
                                 <Box className="flex items-center justify-between w-full">
                                     <span>Robot {robot.id} - {robot.name}</span>
                                     <Chip
-                                        label={robot.accountId === userId ? "Mine" : robot.isPublic ? "Public" : "Private"}
+                                        label={robot.accountId === userId ? "Mío" : robot.isPublic ? "Público" : "Privado"}
                                         size="small"
                                         color={robot.accountId === userId ? "primary" : "default"}
                                         sx={{ ml: 2 }}
@@ -286,10 +272,10 @@ function CommandPanel({
                     </Select>
                 </FormControl>
 
-                {/* Quick Action Buttons */}
+                {/* Acciones Rápidas */}
                 <Box sx={{ mb: 3 }}>
                     <Typography variant="subtitle2" className="mb-8" color="textSecondary">
-                        Quick Actions
+                        Acciones Rápidas
                     </Typography>
                     <Grid container spacing={2}>
                         {Object.entries(COMMAND_TEMPLATES).map(([key, template]) => (
@@ -309,14 +295,14 @@ function CommandPanel({
                     </Grid>
                 </Box>
 
-                {/* Command Configuration */}
+                {/* Configuración del Comando */}
                 {commandType && (
                     <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                         <Box className="flex items-center justify-between mb-12">
                             <Typography variant="subtitle1" className="font-semibold">
-                                Configure {COMMAND_TEMPLATES[commandType].name}
+                                Configurar {COMMAND_TEMPLATES[commandType].name}
                             </Typography>
-                            <Tooltip title="Toggle Raw JSON Mode">
+                            <Tooltip title="Alternar modo JSON">
                                 <IconButton
                                     size="small"
                                     onClick={() => setRawMode(!rawMode)}
@@ -334,7 +320,7 @@ function CommandPanel({
                                 rows={8}
                                 value={commandData}
                                 onChange={(e) => setCommandData(e.target.value)}
-                                label="Command Data (JSON)"
+                                label="Datos del Comando (JSON)"
                                 variant="outlined"
                                 sx={{ fontFamily: 'monospace' }}
                             />
@@ -344,7 +330,7 @@ function CommandPanel({
                     </Paper>
                 )}
 
-                {/* Send Button */}
+                {/* Botón Enviar */}
                 <Button
                     fullWidth
                     variant="contained"
@@ -355,12 +341,12 @@ function CommandPanel({
                     disabled={!selectedRobot || !commandType || !commandData || connectionStatus !== "connected"}
                     sx={{ mt: 2 }}
                 >
-                    Send Command
+                    Enviar Comando
                 </Button>
 
                 {connectionStatus !== "connected" && (
                     <Typography variant="caption" color="error" sx={{ display: 'block', mt: 1, textAlign: 'center' }}>
-                        Not connected to server
+                        Sin conexión al servidor
                     </Typography>
                 )}
             </CardContent>

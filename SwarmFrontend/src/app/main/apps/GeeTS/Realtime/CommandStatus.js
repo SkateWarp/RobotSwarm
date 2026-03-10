@@ -60,7 +60,7 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
 
     return (
         <Box>
-            {/* Running Commands */}
+            {/* Comandos Activos */}
             {runningCommandsList.length > 0 && (
                 <Card elevation={2} sx={{ mb: 3 }}>
                     <CardContent>
@@ -68,7 +68,7 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
                             <Box className="flex items-center gap-8">
                                 <PlayCircle color="success" />
                                 <Typography variant="h6" className="font-bold">
-                                    Active Commands
+                                    Comandos Activos
                                 </Typography>
                                 <Chip
                                     label={runningCommandsList.length}
@@ -121,14 +121,14 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
                                             secondary={
                                                 <Box className="flex items-center gap-16 mt-4">
                                                     <Typography variant="caption" color="textSecondary">
-                                                        Started: {new Date(commandInfo.startTime).toLocaleTimeString()}
+                                                        Inicio: {new Date(commandInfo.startTime).toLocaleTimeString()}
                                                     </Typography>
                                                     <Typography variant="caption" color="textSecondary">
-                                                        Duration: {formatDuration(commandInfo.startTime)}
+                                                        Duración: {formatDuration(commandInfo.startTime)}
                                                     </Typography>
                                                     {commandInfo.taskLogId && (
                                                         <Typography variant="caption" color="textSecondary">
-                                                            Task ID: {commandInfo.taskLogId}
+                                                            ID Tarea: {commandInfo.taskLogId}
                                                         </Typography>
                                                     )}
                                                 </Box>
@@ -142,7 +142,7 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
                 </Card>
             )}
 
-            {/* Command History */}
+            {/* Historial de Comandos */}
             {commandHistory.length > 0 && (
                 <Card elevation={1}>
                     <CardContent>
@@ -153,7 +153,7 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
                             <Box className="flex items-center gap-8">
                                 <History color="action" />
                                 <Typography variant="h6" className="font-bold">
-                                    Command History
+                                    Historial de Comandos
                                 </Typography>
                                 <Chip
                                     label={commandHistory.length}
@@ -200,7 +200,7 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
                 </Card>
             )}
 
-            {/* Empty State */}
+            {/* Estado Vacío */}
             {runningCommandsList.length === 0 && commandHistory.length === 0 && (
                 <Paper
                     variant="outlined"
@@ -212,10 +212,10 @@ function CommandStatus({ runningCommands, commandHistory, onStopCommand }) {
                 >
                     <History sx={{ fontSize: 48, color: 'text.secondary', mb: 2 }} />
                     <Typography variant="h6" color="textSecondary">
-                        No commands sent yet
+                        No se han enviado comandos
                     </Typography>
                     <Typography variant="body2" color="textSecondary">
-                        Send a command to see it here
+                        Envía un comando para verlo aquí
                     </Typography>
                 </Paper>
             )}

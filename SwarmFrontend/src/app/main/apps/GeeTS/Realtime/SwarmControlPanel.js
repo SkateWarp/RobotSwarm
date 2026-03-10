@@ -1,6 +1,6 @@
 /**
- * SwarmControlPanel - Control panel for swarm robot deployment and task assignment
- * Allows selecting robots from database, deploying to Gazebo, and assigning swarm tasks
+ * SwarmControlPanel - Panel de control para despliegue de robots y asignación de tareas
+ * Permite seleccionar robots de la base de datos, desplegarlos en Gazebo y asignar tareas de enjambre
  */
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
@@ -53,52 +53,52 @@ import {
     Circle
 } from "@mui/icons-material";
 
-// Formation types available
+// Tipos de formación disponibles
 const FORMATION_TYPES = [
-    { value: 'line', label: 'Line', description: 'Robots line up in a row' },
-    { value: 'triangle', label: 'Triangle', description: 'Triangular formation' },
-    { value: 'circle', label: 'Circle', description: 'Circular formation' },
-    { value: 'square', label: 'Square', description: 'Square grid formation' },
-    { value: 'v', label: 'V-Shape', description: 'V-shaped flying formation' },
-    { value: 'diamond', label: 'Diamond', description: 'Diamond pattern' }
+    { value: 'line', label: 'Línea', description: 'Los robots se alinean en fila' },
+    { value: 'triangle', label: 'Triángulo', description: 'Formación triangular' },
+    { value: 'circle', label: 'Círculo', description: 'Formación circular' },
+    { value: 'square', label: 'Cuadrado', description: 'Formación en cuadrícula' },
+    { value: 'v', label: 'V', description: 'Formación en V' },
+    { value: 'diamond', label: 'Diamante', description: 'Formación en diamante' }
 ];
 
-// Leader movement modes
+// Modos de movimiento del líder
 const LEADER_MODES = [
-    { value: 'waypoint', label: 'Waypoint', description: 'Follow predefined waypoints' },
-    { value: 'manual', label: 'Manual', description: 'Control leader with keyboard/joystick' },
-    { value: 'circular', label: 'Circular Path', description: 'Leader follows circular path' },
-    { value: 'square', label: 'Square Path', description: 'Leader follows square path' },
-    { value: 'figure8', label: 'Figure-8', description: 'Leader follows figure-8 path' },
-    { value: 'random', label: 'Random Walk', description: 'Leader moves randomly avoiding obstacles' }
+    { value: 'waypoint', label: 'Puntos de ruta', description: 'Seguir puntos de ruta predefinidos' },
+    { value: 'manual', label: 'Manual', description: 'Controlar al líder manualmente' },
+    { value: 'circular', label: 'Trayectoria circular', description: 'El líder sigue una trayectoria circular' },
+    { value: 'square', label: 'Trayectoria cuadrada', description: 'El líder sigue una trayectoria cuadrada' },
+    { value: 'figure8', label: 'Figura 8', description: 'El líder sigue una trayectoria en forma de 8' },
+    { value: 'random', label: 'Exploración aleatoria', description: 'El líder se mueve aleatoriamente evitando obstáculos' }
 ];
 
-// Spawn patterns
+// Patrones de despliegue
 const SPAWN_PATTERNS = [
-    { value: 'grid', label: 'Grid', description: 'Spawn in grid pattern' },
-    { value: 'circle', label: 'Circle', description: 'Spawn in circular pattern' },
-    { value: 'line', label: 'Line', description: 'Spawn in a line' }
+    { value: 'grid', label: 'Cuadrícula', description: 'Desplegar en cuadrícula' },
+    { value: 'circle', label: 'Círculo', description: 'Desplegar en círculo' },
+    { value: 'line', label: 'Línea', description: 'Desplegar en línea' }
 ];
 
-// Task types
+// Tipos de tareas
 const SWARM_TASKS = {
     follow_leader: {
-        name: 'Follow Leader',
+        name: 'Seguir al Líder',
         icon: <Timeline />,
         color: 'primary',
-        description: 'Robots follow a leader in snake-like formation'
+        description: 'Los robots siguen a un líder en formación tipo serpiente'
     },
     formation: {
-        name: 'Formation',
+        name: 'Formación',
         icon: <Category />,
         color: 'secondary',
-        description: 'Robots maintain geometric formations'
+        description: 'Los robots mantienen formaciones geométricas'
     },
     transport: {
-        name: 'Collaborative Transport',
+        name: 'Transporte Colaborativo',
         icon: <LocalShipping />,
         color: 'success',
-        description: 'Robots work together to transport an object'
+        description: 'Los robots trabajan juntos para transportar un objeto'
     }
 };
 
@@ -111,16 +111,16 @@ function SwarmControlPanel({
     swarmStatus,
     onError
 }) {
-    // State
+    // Estado
     const [selectedRobots, setSelectedRobots] = useState([]);
     const [deployedRobots, setDeployedRobots] = useState([]);
     const [isDeploying, setIsDeploying] = useState(false);
     const [spawnPattern, setSpawnPattern] = useState('grid');
 
-    // Task configuration
+    // Configuración de tareas
     const [selectedTask, setSelectedTask] = useState(null);
 
-    // Follow Leader settings
+    // Configuración Seguir al Líder
     const [leaderMode, setLeaderMode] = useState('waypoint');
     const [waypoints, setWaypoints] = useState([
         { x: 2.0, y: 0.0 },
@@ -128,29 +128,29 @@ function SwarmControlPanel({
         { x: 0.0, y: 2.0 },
         { x: 0.0, y: 0.0 }
     ]);
-    const [pathRadius, setPathRadius] = useState(3.0);      // For circular path
-    const [pathSideLength, setPathSideLength] = useState(4.0); // For square path
+    const [pathRadius, setPathRadius] = useState(3.0);
+    const [pathSideLength, setPathSideLength] = useState(4.0);
 
-    // Formation settings
+    // Configuración de Formación
     const [formationType, setFormationType] = useState('triangle');
     const [movementMode, setMovementMode] = useState('static');
     const [formationCenter, setFormationCenter] = useState({ x: 0.0, y: 0.0 });
     const [formationSpacing, setFormationSpacing] = useState(1.0);
-    const [formationTarget, setFormationTarget] = useState({ x: 3.0, y: 3.0 }); // For moving mode
+    const [formationTarget, setFormationTarget] = useState({ x: 3.0, y: 3.0 });
 
-    // Transport settings
+    // Configuración de Transporte
     const [objectPosition, setObjectPosition] = useState({ x: 0.0, y: 0.0 });
     const [targetLocation, setTargetLocation] = useState({ x: 3.0, y: 3.0 });
-    const [objectSize, setObjectSize] = useState(0.5); // Diameter
+    const [objectSize, setObjectSize] = useState(0.5);
 
-    // Update deployed robots from swarm status
+    // Actualizar robots desplegados desde el estado del enjambre
     useEffect(() => {
         if (swarmStatus?.robots) {
             setDeployedRobots(swarmStatus.robots);
         }
     }, [swarmStatus]);
 
-    // Robot selection handlers
+    // Manejadores de selección
     const handleRobotToggle = (robotId) => {
         setSelectedRobots(prev => {
             if (prev.includes(robotId)) {
@@ -169,16 +169,15 @@ function SwarmControlPanel({
         }
     };
 
-    // Deploy selected robots to Gazebo
+    // Desplegar robots seleccionados en Gazebo
     const handleDeployRobots = async () => {
         if (selectedRobots.length === 0) {
-            onError?.('Please select at least one robot to deploy');
+            onError?.('Selecciona al menos un robot para desplegar');
             return;
         }
 
         setIsDeploying(true);
         try {
-            // Get robot details for the selected IDs
             const robotDetails = selectedRobots.map(id => {
                 const robot = robots.find(r => r.id === id);
                 return {
@@ -187,18 +186,16 @@ function SwarmControlPanel({
                 };
             });
 
-            // Deploy robots with their database IDs
             await swarmService.spawnRobotsWithIds(robotDetails, spawnPattern);
-
         } catch (error) {
-            console.error('Failed to deploy robots:', error);
-            onError?.('Failed to deploy robots: ' + error.message);
+            console.error('Error al desplegar robots:', error);
+            onError?.('Error al desplegar robots: ' + error.message);
         } finally {
             setIsDeploying(false);
         }
     };
 
-    // Delete deployed robots
+    // Eliminar robots desplegados
     const handleDeleteRobots = async (robotIds = null) => {
         try {
             if (robotIds) {
@@ -207,27 +204,26 @@ function SwarmControlPanel({
                 await swarmService.deleteRobots([]);
             }
         } catch (error) {
-            console.error('Failed to delete robots:', error);
-            onError?.('Failed to delete robots');
+            console.error('Error al eliminar robots:', error);
+            onError?.('Error al eliminar robots');
         }
     };
 
-    // Start swarm task
+    // Iniciar tarea de enjambre
     const handleStartTask = async () => {
         if (!selectedTask) {
-            onError?.('Please select a task');
+            onError?.('Selecciona una tarea');
             return;
         }
 
         if (deployedRobots.length === 0) {
-            onError?.('No robots deployed. Please deploy robots first.');
+            onError?.('No hay robots desplegados. Despliega robots primero.');
             return;
         }
 
         try {
             switch (selectedTask) {
                 case 'follow_leader':
-                    // Build path config based on leader mode
                     const pathConfig = {
                         mode: leaderMode,
                         waypoints: leaderMode === 'waypoint' ? waypoints : undefined,
@@ -241,7 +237,6 @@ function SwarmControlPanel({
                     );
                     break;
                 case 'formation':
-                    // Build formation config with all parameters
                     const formationConfig = {
                         type: formationType,
                         movementMode: movementMode,
@@ -257,14 +252,13 @@ function SwarmControlPanel({
                     );
                     break;
                 case 'transport':
-                    // Build transport config with object and target positions
                     const transportConfig = {
                         objectPosition: objectPosition,
                         objectSize: objectSize,
                         targetLocation: targetLocation
                     };
                     await swarmService.startTransport(
-                        deployedRobots.length,  // Use all deployed robots - task adapts dynamically
+                        deployedRobots.length,
                         targetLocation.x,
                         targetLocation.y,
                         transportConfig
@@ -272,32 +266,32 @@ function SwarmControlPanel({
                     break;
             }
         } catch (error) {
-            console.error('Failed to start task:', error);
-            onError?.('Failed to start task: ' + error.message);
+            console.error('Error al iniciar tarea:', error);
+            onError?.('Error al iniciar tarea: ' + error.message);
         }
     };
 
-    // Stop current task
+    // Detener tarea actual
     const handleStopTask = async () => {
         try {
             await swarmService.stopTask();
         } catch (error) {
-            console.error('Failed to stop task:', error);
-            onError?.('Failed to stop task');
+            console.error('Error al detener tarea:', error);
+            onError?.('Error al detener tarea');
         }
     };
 
-    // Emergency stop
+    // Parada de emergencia
     const handleEmergencyStop = async () => {
         try {
             await swarmService.emergencyStop();
         } catch (error) {
-            console.error('Emergency stop failed:', error);
-            onError?.('Emergency stop failed');
+            console.error('Error en parada de emergencia:', error);
+            onError?.('Error en parada de emergencia');
         }
     };
 
-    // Get robot status color
+    // Color de estado del robot
     const getRobotStatusColor = (status) => {
         switch (status) {
             case 'active': return 'success';
@@ -309,7 +303,7 @@ function SwarmControlPanel({
         }
     };
 
-    // Render task configuration based on selected task
+    // Renderizar configuración según tarea seleccionada
     const renderTaskConfiguration = () => {
         if (!selectedTask) return null;
 
@@ -318,11 +312,11 @@ function SwarmControlPanel({
                 return (
                     <Box sx={{ mt: 2 }}>
                         <FormControl fullWidth sx={{ mb: 2 }}>
-                            <InputLabel>Leader Mode</InputLabel>
+                            <InputLabel>Modo del Líder</InputLabel>
                             <Select
                                 value={leaderMode}
                                 onChange={(e) => setLeaderMode(e.target.value)}
-                                label="Leader Mode"
+                                label="Modo del Líder"
                             >
                                 {LEADER_MODES.map((mode) => (
                                     <MenuItem key={mode.value} value={mode.value}>
@@ -340,7 +334,7 @@ function SwarmControlPanel({
                         {leaderMode === 'waypoint' && (
                             <Paper variant="outlined" sx={{ p: 2 }}>
                                 <Typography variant="subtitle2" gutterBottom>
-                                    Waypoints (x, y)
+                                    Puntos de ruta (x, y)
                                 </Typography>
                                 <Grid container spacing={1}>
                                     {waypoints.map((wp, idx) => (
@@ -348,7 +342,7 @@ function SwarmControlPanel({
                                             <Box sx={{ display: 'flex', gap: 1 }}>
                                                 <TextField
                                                     size="small"
-                                                    label={`WP${idx + 1} X`}
+                                                    label={`PR${idx + 1} X`}
                                                     type="number"
                                                     value={wp.x}
                                                     onChange={(e) => {
@@ -360,7 +354,7 @@ function SwarmControlPanel({
                                                 />
                                                 <TextField
                                                     size="small"
-                                                    label={`WP${idx + 1} Y`}
+                                                    label={`PR${idx + 1} Y`}
                                                     type="number"
                                                     value={wp.y}
                                                     onChange={(e) => {
@@ -380,16 +374,16 @@ function SwarmControlPanel({
                         {leaderMode === 'circular' && (
                             <Paper variant="outlined" sx={{ p: 2 }}>
                                 <Typography variant="subtitle2" gutterBottom>
-                                    Circular Path Settings
+                                    Configuración de Trayectoria Circular
                                 </Typography>
                                 <TextField
                                     fullWidth
-                                    label="Path Radius (m)"
+                                    label="Radio de trayectoria (m)"
                                     type="number"
                                     value={pathRadius}
                                     onChange={(e) => setPathRadius(parseFloat(e.target.value))}
                                     inputProps={{ step: 0.5, min: 0.5, max: 10 }}
-                                    helperText="Radius of the circular path"
+                                    helperText="Radio de la trayectoria circular"
                                 />
                             </Paper>
                         )}
@@ -397,16 +391,16 @@ function SwarmControlPanel({
                         {leaderMode === 'square' && (
                             <Paper variant="outlined" sx={{ p: 2 }}>
                                 <Typography variant="subtitle2" gutterBottom>
-                                    Square Path Settings
+                                    Configuración de Trayectoria Cuadrada
                                 </Typography>
                                 <TextField
                                     fullWidth
-                                    label="Side Length (m)"
+                                    label="Longitud del lado (m)"
                                     type="number"
                                     value={pathSideLength}
                                     onChange={(e) => setPathSideLength(parseFloat(e.target.value))}
                                     inputProps={{ step: 0.5, min: 1, max: 10 }}
-                                    helperText="Length of each side of the square"
+                                    helperText="Longitud de cada lado del cuadrado"
                                 />
                             </Paper>
                         )}
@@ -417,11 +411,11 @@ function SwarmControlPanel({
                 return (
                     <Box sx={{ mt: 2 }}>
                         <FormControl fullWidth sx={{ mb: 2 }}>
-                            <InputLabel>Formation Type</InputLabel>
+                            <InputLabel>Tipo de Formación</InputLabel>
                             <Select
                                 value={formationType}
                                 onChange={(e) => setFormationType(e.target.value)}
-                                label="Formation Type"
+                                label="Tipo de Formación"
                             >
                                 {FORMATION_TYPES.map((type) => (
                                     <MenuItem key={type.value} value={type.value}>
@@ -437,28 +431,28 @@ function SwarmControlPanel({
                         </FormControl>
 
                         <FormControl fullWidth sx={{ mb: 2 }}>
-                            <InputLabel>Movement Mode</InputLabel>
+                            <InputLabel>Modo de Movimiento</InputLabel>
                             <Select
                                 value={movementMode}
                                 onChange={(e) => setMovementMode(e.target.value)}
-                                label="Movement Mode"
+                                label="Modo de Movimiento"
                             >
-                                <MenuItem value="static">Static (hold position)</MenuItem>
-                                <MenuItem value="moving">Moving (follow leader)</MenuItem>
-                                <MenuItem value="adaptive">Adaptive (avoid obstacles)</MenuItem>
+                                <MenuItem value="static">Estático (mantener posición)</MenuItem>
+                                <MenuItem value="moving">En movimiento (seguir al líder)</MenuItem>
+                                <MenuItem value="adaptive">Adaptativo (evitar obstáculos)</MenuItem>
                             </Select>
                         </FormControl>
 
                         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                             <Typography variant="subtitle2" gutterBottom>
-                                Formation Center Position
+                                Posición Central de la Formación
                             </Typography>
                             <Grid container spacing={2}>
                                 <Grid item xs={6}>
                                     <TextField
                                         fullWidth
                                         size="small"
-                                        label="Center X (m)"
+                                        label="Centro X (m)"
                                         type="number"
                                         value={formationCenter.x}
                                         onChange={(e) => setFormationCenter({
@@ -472,7 +466,7 @@ function SwarmControlPanel({
                                     <TextField
                                         fullWidth
                                         size="small"
-                                        label="Center Y (m)"
+                                        label="Centro Y (m)"
                                         type="number"
                                         value={formationCenter.y}
                                         onChange={(e) => setFormationCenter({
@@ -487,30 +481,30 @@ function SwarmControlPanel({
 
                         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                             <Typography variant="subtitle2" gutterBottom>
-                                Formation Spacing
+                                Espaciado de la Formación
                             </Typography>
                             <TextField
                                 fullWidth
-                                label="Robot Spacing (m)"
+                                label="Distancia entre robots (m)"
                                 type="number"
                                 value={formationSpacing}
                                 onChange={(e) => setFormationSpacing(parseFloat(e.target.value))}
                                 inputProps={{ step: 0.1, min: 0.3, max: 5 }}
-                                helperText="Distance between robots in formation"
+                                helperText="Distancia entre robots en la formación"
                             />
                         </Paper>
 
                         {movementMode === 'moving' && (
                             <Paper variant="outlined" sx={{ p: 2 }}>
                                 <Typography variant="subtitle2" gutterBottom>
-                                    Target Position (for moving formation)
+                                    Posición Destino (para formación en movimiento)
                                 </Typography>
                                 <Grid container spacing={2}>
                                     <Grid item xs={6}>
                                         <TextField
                                             fullWidth
                                             size="small"
-                                            label="Target X (m)"
+                                            label="Destino X (m)"
                                             type="number"
                                             value={formationTarget.x}
                                             onChange={(e) => setFormationTarget({
@@ -524,7 +518,7 @@ function SwarmControlPanel({
                                         <TextField
                                             fullWidth
                                             size="small"
-                                            label="Target Y (m)"
+                                            label="Destino Y (m)"
                                             type="number"
                                             value={formationTarget.y}
                                             onChange={(e) => setFormationTarget({
@@ -545,14 +539,14 @@ function SwarmControlPanel({
                     <Box sx={{ mt: 2 }}>
                         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                             <Typography variant="subtitle2" gutterBottom>
-                                Object Position (starting location)
+                                Posición del Objeto (ubicación inicial)
                             </Typography>
                             <Grid container spacing={2}>
                                 <Grid item xs={6}>
                                     <TextField
                                         fullWidth
                                         size="small"
-                                        label="Object X (m)"
+                                        label="Objeto X (m)"
                                         type="number"
                                         value={objectPosition.x}
                                         onChange={(e) => setObjectPosition({
@@ -566,7 +560,7 @@ function SwarmControlPanel({
                                     <TextField
                                         fullWidth
                                         size="small"
-                                        label="Object Y (m)"
+                                        label="Objeto Y (m)"
                                         type="number"
                                         value={objectPosition.y}
                                         onChange={(e) => setObjectPosition({
@@ -581,29 +575,29 @@ function SwarmControlPanel({
 
                         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                             <Typography variant="subtitle2" gutterBottom>
-                                Object Size
+                                Tamaño del Objeto
                             </Typography>
                             <TextField
                                 fullWidth
-                                label="Object Diameter (m)"
+                                label="Diámetro del objeto (m)"
                                 type="number"
                                 value={objectSize}
                                 onChange={(e) => setObjectSize(parseFloat(e.target.value))}
                                 inputProps={{ step: 0.1, min: 0.2, max: 2.0 }}
-                                helperText="Diameter of the object to transport"
+                                helperText="Diámetro del objeto a transportar"
                             />
                         </Paper>
 
                         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                             <Typography variant="subtitle2" gutterBottom>
-                                Target Location (destination)
+                                Ubicación Destino
                             </Typography>
                             <Grid container spacing={2}>
                                 <Grid item xs={6}>
                                     <TextField
                                         fullWidth
                                         size="small"
-                                        label="Target X (m)"
+                                        label="Destino X (m)"
                                         type="number"
                                         value={targetLocation.x}
                                         onChange={(e) => setTargetLocation({
@@ -617,7 +611,7 @@ function SwarmControlPanel({
                                     <TextField
                                         fullWidth
                                         size="small"
-                                        label="Target Y (m)"
+                                        label="Destino Y (m)"
                                         type="number"
                                         value={targetLocation.y}
                                         onChange={(e) => setTargetLocation({
@@ -631,8 +625,8 @@ function SwarmControlPanel({
                         </Paper>
 
                         <Alert severity="info" sx={{ mt: 2 }}>
-                            Collaborative transport uses all {deployedRobots.length} deployed robots.
-                            Robots will encircle the object and push it to the target location.
+                            El transporte colaborativo usa los {deployedRobots.length} robots desplegados.
+                            Los robots rodearán el objeto y lo empujarán hacia la ubicación destino.
                         </Alert>
                     </Box>
                 );
@@ -645,37 +639,37 @@ function SwarmControlPanel({
     return (
         <Card elevation={3}>
             <CardContent>
-                {/* Header */}
+                {/* Encabezado */}
                 <Box className="flex items-center justify-between mb-16">
                     <Typography variant="h6" className="font-bold">
-                        Swarm Control
+                        Control del Enjambre
                     </Typography>
                     <Box className="flex items-center gap-8">
                         <Chip
                             icon={<Circle sx={{ fontSize: 12 }} />}
-                            label={isConnected ? "Server Connected" : "Disconnected"}
+                            label={isConnected ? "Servidor Conectado" : "Desconectado"}
                             color={isConnected ? "success" : "error"}
                             size="small"
                         />
                         <Chip
                             icon={<Circle sx={{ fontSize: 12 }} />}
-                            label={isRosConnected ? "ROS Connected" : "ROS Offline"}
+                            label={isRosConnected ? "ROS Conectado" : "ROS Sin Conexión"}
                             color={isRosConnected ? "success" : "warning"}
                             size="small"
                         />
                     </Box>
                 </Box>
 
-                {/* Robot Selection Section */}
+                {/* Sección de Selección de Robots */}
                 <Accordion defaultExpanded>
                     <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                         <Box className="flex items-center gap-8">
                             <SmartToy color="primary" />
                             <Typography variant="subtitle1" className="font-semibold">
-                                Robot Selection
+                                Selección de Robots
                             </Typography>
                             <Chip
-                                label={`${selectedRobots.length} selected`}
+                                label={`${selectedRobots.length} seleccionados`}
                                 size="small"
                                 color="primary"
                             />
@@ -691,14 +685,14 @@ function SwarmControlPanel({
                                         onChange={handleSelectAll}
                                     />
                                 }
-                                label="Select All"
+                                label="Seleccionar Todos"
                             />
                             <FormControl size="small" sx={{ minWidth: 120 }}>
-                                <InputLabel>Pattern</InputLabel>
+                                <InputLabel>Patrón</InputLabel>
                                 <Select
                                     value={spawnPattern}
                                     onChange={(e) => setSpawnPattern(e.target.value)}
-                                    label="Pattern"
+                                    label="Patrón"
                                 >
                                     {SPAWN_PATTERNS.map((p) => (
                                         <MenuItem key={p.value} value={p.value}>
@@ -726,11 +720,11 @@ function SwarmControlPanel({
                                         </ListItemIcon>
                                         <ListItemText
                                             primary={`${robot.name} (ID: ${robot.id})`}
-                                            secondary={robot.description || 'No description'}
+                                            secondary={robot.description || 'Sin descripción'}
                                         />
                                         <ListItemSecondaryAction>
                                             <Chip
-                                                label={robot.accountId === userId ? "Mine" : "Public"}
+                                                label={robot.accountId === userId ? "Mío" : "Público"}
                                                 size="small"
                                                 color={robot.accountId === userId ? "primary" : "default"}
                                             />
@@ -749,7 +743,7 @@ function SwarmControlPanel({
                                 disabled={!isConnected || !isRosConnected || selectedRobots.length === 0 || isDeploying}
                                 fullWidth
                             >
-                                {isDeploying ? 'Deploying...' : `Deploy ${selectedRobots.length} Robot(s)`}
+                                {isDeploying ? 'Desplegando...' : `Desplegar ${selectedRobots.length} Robot(s)`}
                             </Button>
                             <Button
                                 variant="outlined"
@@ -758,23 +752,23 @@ function SwarmControlPanel({
                                 onClick={() => handleDeleteRobots()}
                                 disabled={!isConnected || !isRosConnected || deployedRobots.length === 0}
                             >
-                                Delete All
+                                Eliminar
                             </Button>
                         </Box>
                     </AccordionDetails>
                 </Accordion>
 
-                {/* Deployed Robots Status */}
+                {/* Estado de Robots Desplegados */}
                 {deployedRobots.length > 0 && (
                     <Accordion defaultExpanded sx={{ mt: 2 }}>
                         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                             <Box className="flex items-center gap-8">
                                 <CheckCircle color="success" />
                                 <Typography variant="subtitle1" className="font-semibold">
-                                    Deployed Robots
+                                    Robots Desplegados
                                 </Typography>
                                 <Chip
-                                    label={`${deployedRobots.length} active`}
+                                    label={`${deployedRobots.length} activos`}
                                     size="small"
                                     color="success"
                                 />
@@ -814,13 +808,13 @@ function SwarmControlPanel({
 
                 <Divider sx={{ my: 2 }} />
 
-                {/* Task Assignment Section */}
+                {/* Sección de Asignación de Tareas */}
                 <Accordion defaultExpanded>
                     <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                         <Box className="flex items-center gap-8">
                             <PlayArrow color="secondary" />
                             <Typography variant="subtitle1" className="font-semibold">
-                                Task Assignment
+                                Asignación de Tareas
                             </Typography>
                             {swarmStatus?.task?.status === 'running' && (
                                 <Chip
@@ -832,7 +826,7 @@ function SwarmControlPanel({
                         </Box>
                     </AccordionSummary>
                     <AccordionDetails>
-                        {/* Task Type Selection */}
+                        {/* Selección de Tipo de Tarea */}
                         <Grid container spacing={2} sx={{ mb: 2 }}>
                             {Object.entries(SWARM_TASKS).map(([key, task]) => (
                                 <Grid item xs={12} sm={4} key={key}>
@@ -857,10 +851,10 @@ function SwarmControlPanel({
                             </Alert>
                         )}
 
-                        {/* Task Configuration */}
+                        {/* Configuración de Tarea */}
                         {renderTaskConfiguration()}
 
-                        {/* Task Control Buttons */}
+                        {/* Botones de Control de Tarea */}
                         <Box className="flex gap-8 mt-16">
                             <Button
                                 variant="contained"
@@ -876,7 +870,7 @@ function SwarmControlPanel({
                                 }
                                 fullWidth
                             >
-                                Start Task
+                                Iniciar Tarea
                             </Button>
                             <Button
                                 variant="outlined"
@@ -885,13 +879,13 @@ function SwarmControlPanel({
                                 onClick={handleStopTask}
                                 disabled={!isConnected || swarmStatus?.task?.status !== 'running'}
                             >
-                                Stop
+                                Detener
                             </Button>
                         </Box>
                     </AccordionDetails>
                 </Accordion>
 
-                {/* Emergency Stop */}
+                {/* Parada de Emergencia */}
                 <Button
                     variant="contained"
                     color="error"
@@ -902,22 +896,22 @@ function SwarmControlPanel({
                     size="large"
                     sx={{ mt: 2 }}
                 >
-                    EMERGENCY STOP
+                    PARADA DE EMERGENCIA
                 </Button>
 
-                {/* Task Status */}
+                {/* Estado de la Tarea */}
                 {swarmStatus?.task && (
                     <Paper variant="outlined" sx={{ p: 2, mt: 2 }}>
                         <Typography variant="subtitle2" gutterBottom>
-                            Current Task Status
+                            Estado de la Tarea Actual
                         </Typography>
                         <Grid container spacing={2}>
                             <Grid item xs={6}>
-                                <Typography variant="caption" color="textSecondary">Type</Typography>
-                                <Typography variant="body2">{swarmStatus.task.task_type || 'None'}</Typography>
+                                <Typography variant="caption" color="textSecondary">Tipo</Typography>
+                                <Typography variant="body2">{swarmStatus.task.task_type || 'Ninguna'}</Typography>
                             </Grid>
                             <Grid item xs={6}>
-                                <Typography variant="caption" color="textSecondary">Status</Typography>
+                                <Typography variant="caption" color="textSecondary">Estado</Typography>
                                 <Chip
                                     label={swarmStatus.task.status}
                                     size="small"
@@ -928,7 +922,7 @@ function SwarmControlPanel({
                                 />
                             </Grid>
                             <Grid item xs={12}>
-                                <Typography variant="caption" color="textSecondary">Progress</Typography>
+                                <Typography variant="caption" color="textSecondary">Progreso</Typography>
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                                     <Box sx={{ flex: 1 }}>
                                         <Slider

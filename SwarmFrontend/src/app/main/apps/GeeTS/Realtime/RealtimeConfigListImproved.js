@@ -5,7 +5,9 @@ import {
     Paper,
     Typography,
     Alert,
-    Snackbar
+    Snackbar,
+    Tabs,
+    Tab
 } from "@mui/material";
 import axios from "axios";
 import { URL } from "../../../../constants/constants";
@@ -15,6 +17,8 @@ import singletonInstance from "../../../../services/SignalRService/signalRConnec
 import useLoggedUserId from "../../../../shared-components/hooks/useLoggedUserId";
 import CommandPanel from "./CommandPanel";
 import CommandStatus from "./CommandStatus";
+import SwarmControlPanel from "./SwarmControlPanel";
+import swarmService from "../../../../../services/SwarmService";
 
 function RealtimeConfigListImproved() {
     const [robots, setRobots] = useState([]);
@@ -23,6 +27,12 @@ function RealtimeConfigListImproved() {
     const [commandFeedback, setCommandFeedback] = useState({ open: false, message: "", severity: "info" });
     const [runningCommands, setRunningCommands] = useState({});
     const [commandHistory, setCommandHistory] = useState([]);
+    const [rightPanelTab, setRightPanelTab] = useState(0);
+
+    // Estado del enjambre (swarm)
+    const [swarmConnected, setSwarmConnected] = useState(false);
+    const [rosConnected, setRosConnected] = useState(false);
+    const [swarmStatus, setSwarmStatus] = useState(null);
 
     const userId = useLoggedUserId();
     const connectionRef = useRef(null);
@@ -31,11 +41,35 @@ function RealtimeConfigListImproved() {
         setupSignalRConnection();
         fetchUserRobots();
         loadRunningTaskLogs();
+        setupSwarmService();
 
         return () => {
             cleanupConnection();
+            swarmService.disconnect();
         };
     }, [userId]);
+
+    // Configurar servicio de enjambre
+    const setupSwarmService = async () => {
+        swarmService.setStatusCallback((status) => {
+            setSwarmStatus(status);
+        });
+        swarmService.setConnectionCallback((connected) => {
+            setSwarmConnected(connected);
+        });
+        swarmService.setRosConnectionCallback((connected) => {
+            setRosConnected(connected);
+        });
+        swarmService.setErrorCallback((errorMsg) => {
+            showFeedback(errorMsg, "error");
+        });
+
+        try {
+            await swarmService.connect();
+        } catch (error) {
+            console.error("Error al conectar servicio de enjambre:", error);
+        }
+    };
 
     const setupSignalRConnection = async () => {
         try {
@@ -44,9 +78,9 @@ function RealtimeConfigListImproved() {
             await singletonInstance.getConnectionPromise();
             setupEventHandlers();
             setConnectionStatus("connected");
-            console.log("SignalR connection established successfully");
+            console.log("Conexión SignalR establecida correctamente");
         } catch (error) {
-            console.error("Error establishing SignalR connection:", error);
+            console.error("Error al establecer conexión SignalR:", error);
             setConnectionStatus("error");
         }
     };
@@ -55,8 +89,8 @@ function RealtimeConfigListImproved() {
         if (!connectionRef.current) return;
 
         connectionRef.current.on("ExecuteCommand", (commandData) => {
-            console.log("Command executed:", commandData);
-            showFeedback(`Command executed: ${commandData.command}`, "success");
+            console.log("Comando ejecutado:", commandData);
+            showFeedback(`Comando ejecutado: ${commandData.command}`, "success");
         });
 
         connectionRef.current.onreconnecting(() => setConnectionStatus("reconnecting"));
@@ -79,8 +113,8 @@ function RealtimeConfigListImproved() {
 
             setRobots(accessibleRobots);
         } catch (error) {
-            console.error("Error fetching robots:", error);
-            showFeedback("Error fetching robots", "error");
+            console.error("Error al obtener robots:", error);
+            showFeedback("Error al obtener robots", "error");
         }
     };
 
@@ -107,7 +141,7 @@ function RealtimeConfigListImproved() {
                         runningState[robot.id] = {
                             id: `task_${task.id}`,
                             taskLogId: task.id,
-                            command: task.taskTemplate?.name || "Unknown",
+                            command: task.taskTemplate?.name || "Desconocido",
                             parameters: task.parameters,
                             startTime: new Date(task.dateCreated),
                             status: "running"
@@ -118,7 +152,7 @@ function RealtimeConfigListImproved() {
 
             setRunningCommands(runningState);
         } catch (error) {
-            console.error("Error loading running TaskLogs:", error);
+            console.error("Error al cargar tareas activas:", error);
         }
     };
 
@@ -146,9 +180,9 @@ function RealtimeConfigListImproved() {
                 },
             });
 
-            console.log(`Stopped running tasks for robot ${robotId}`);
+            console.log(`Tareas detenidas para robot ${robotId}`);
         } catch (error) {
-            console.error("Error stopping running tasks:", error);
+            console.error("Error al detener tareas:", error);
             throw error;
         }
     };
@@ -156,7 +190,7 @@ function RealtimeConfigListImproved() {
     const createTaskLog = async (robotId, taskType, parameters) => {
         try {
             const taskLogData = {
-                taskTemplateId: 1, // You might want to map task types to template IDs
+                taskTemplateId: 1,
                 robotIds: [robotId],
                 parameters: parameters
             };
@@ -170,7 +204,7 @@ function RealtimeConfigListImproved() {
 
             return response.data.id;
         } catch (error) {
-            console.error("Error creating TaskLog:", error);
+            console.error("Error al crear registro de tarea:", error);
             return null;
         }
     };
@@ -181,7 +215,6 @@ function RealtimeConfigListImproved() {
         }
 
         try {
-            // Handle sensor_data command type differently - send directly to sensor endpoint
             if (commandType === "sensor_data") {
                 const sensorName = commandParams.sensorType || "Speed";
                 const sensorFields = { ...commandParams };
@@ -195,7 +228,6 @@ function RealtimeConfigListImproved() {
                     sensorFields
                 );
 
-                // Add to history
                 const commandId = `sensor_${Date.now()}_${robotId}`;
                 setCommandHistory(prev => [{
                     id: commandId,
@@ -206,20 +238,14 @@ function RealtimeConfigListImproved() {
                     status: "sent"
                 }, ...prev.slice(0, 9)]);
 
-                showFeedback(`Sensor data sent to Robot ${robotId}`, "success");
+                showFeedback(`Datos de sensor enviados al Robot ${robotId}`, "success");
                 return;
             }
 
-            // 1. Stop running tasks
             await stopRunningTasksForRobot(robotId);
-
-            // 2. Create task log
             const taskLogId = await createTaskLog(robotId, commandType, commandParams);
-
-            // 3. Send command via SignalR
             await connectionRef.current.invoke("SendCommand", robotId, commandType, JSON.stringify(commandParams));
 
-            // 4. Update local state
             const commandId = `cmd_${Date.now()}_${robotId}`;
             setRunningCommands(prev => ({
                 ...prev,
@@ -233,7 +259,6 @@ function RealtimeConfigListImproved() {
                 }
             }));
 
-            // 5. Add to history
             setCommandHistory(prev => [{
                 id: commandId,
                 robotId: robotId,
@@ -243,11 +268,11 @@ function RealtimeConfigListImproved() {
                 status: "sent"
             }, ...prev.slice(0, 9)]);
 
-            showFeedback(`Command sent to Robot ${robotId}`, "success");
+            showFeedback(`Comando enviado al Robot ${robotId}`, "success");
 
         } catch (error) {
-            console.error("Error sending command:", error);
-            showFeedback(`Error sending command: ${error.message}`, "error");
+            console.error("Error al enviar comando:", error);
+            showFeedback(`Error al enviar comando: ${error.message}`, "error");
         }
     };
 
@@ -261,10 +286,10 @@ function RealtimeConfigListImproved() {
                 return updated;
             });
 
-            showFeedback(`Command stopped for Robot ${robotId}`, "success");
+            showFeedback(`Comando detenido para Robot ${robotId}`, "success");
         } catch (error) {
-            console.error("Error stopping command:", error);
-            showFeedback(`Error stopping command: ${error.message}`, "error");
+            console.error("Error al detener comando:", error);
+            showFeedback(`Error al detener comando: ${error.message}`, "error");
         }
     };
 
@@ -283,9 +308,20 @@ function RealtimeConfigListImproved() {
         }
     };
 
+    const getConnectionLabel = () => {
+        switch (connectionStatus) {
+            case "connected": return "CONECTADO";
+            case "connecting": return "CONECTANDO";
+            case "reconnecting": return "RECONECTANDO";
+            case "error": return "ERROR";
+            case "disconnected": return "DESCONECTADO";
+            default: return connectionStatus.toUpperCase();
+        }
+    };
+
     return (
         <Box className="p-24 h-full">
-            {/* Connection Status */}
+            {/* Estado de Conexión */}
             <Paper
                 elevation={2}
                 sx={{
@@ -308,43 +344,73 @@ function RealtimeConfigListImproved() {
                         }}
                     />
                     <Typography variant="h6" className="font-bold">
-                        Connection Status: {connectionStatus.toUpperCase()}
+                        Estado de Conexión: {getConnectionLabel()}
                     </Typography>
                 </Box>
             </Paper>
 
             <Grid container spacing={3}>
-                {/* VNC Viewer - 2/3 width on desktop */}
-                <Grid item xs={12} lg={8}>
+                {/* Visor VNC - mitad izquierda */}
+                <Grid item xs={12} lg={6}>
                     <Paper elevation={2} sx={{ p: 2, height: '100%' }}>
                         <Typography variant="h6" className="font-bold mb-16">
-                            Robot View
+                            Vista de Robots
                         </Typography>
                         <VncViewer url="wss://websocket.zerav.la?aneyelo=gei" username="rs" password="123456789" />
                     </Paper>
                 </Grid>
 
-                {/* Command Panel & Status - 1/3 width on desktop */}
-                <Grid item xs={12} lg={4}>
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                        <CommandPanel
-                            robots={robots}
-                            selectedRobot={selectedRobot}
-                            onRobotChange={setSelectedRobot}
-                            onSendCommand={handleSendCommand}
-                            connectionStatus={connectionStatus}
-                            userId={userId}
-                        />
-                        <CommandStatus
-                            runningCommands={runningCommands}
-                            commandHistory={commandHistory}
-                            onStopCommand={handleStopCommand}
-                        />
-                    </Box>
+                {/* Panel derecho - mitad derecha con pestañas */}
+                <Grid item xs={12} lg={6}>
+                    <Paper elevation={2} sx={{ p: 2, height: '100%' }}>
+                        <Tabs
+                            value={rightPanelTab}
+                            onChange={(e, newValue) => setRightPanelTab(newValue)}
+                            variant="fullWidth"
+                            sx={{ mb: 2 }}
+                        >
+                            <Tab label="Control del Enjambre" />
+                            <Tab label="Enviar Comando" />
+                        </Tabs>
+
+                        {/* Pestaña: Control del Enjambre */}
+                        {rightPanelTab === 0 && (
+                            <Box sx={{ maxHeight: '70vh', overflow: 'auto' }}>
+                                <SwarmControlPanel
+                                    robots={robots}
+                                    userId={userId}
+                                    swarmService={swarmService}
+                                    isConnected={swarmConnected}
+                                    isRosConnected={rosConnected}
+                                    swarmStatus={swarmStatus}
+                                    onError={(msg) => showFeedback(msg, "error")}
+                                />
+                            </Box>
+                        )}
+
+                        {/* Pestaña: Enviar Comando */}
+                        {rightPanelTab === 1 && (
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: '70vh', overflow: 'auto' }}>
+                                <CommandPanel
+                                    robots={robots}
+                                    selectedRobot={selectedRobot}
+                                    onRobotChange={setSelectedRobot}
+                                    onSendCommand={handleSendCommand}
+                                    connectionStatus={connectionStatus}
+                                    userId={userId}
+                                />
+                                <CommandStatus
+                                    runningCommands={runningCommands}
+                                    commandHistory={commandHistory}
+                                    onStopCommand={handleStopCommand}
+                                />
+                            </Box>
+                        )}
+                    </Paper>
                 </Grid>
             </Grid>
 
-            {/* Feedback Snackbar */}
+            {/* Snackbar de Retroalimentación */}
             <Snackbar
                 open={commandFeedback.open}
                 autoHideDuration={5000}
