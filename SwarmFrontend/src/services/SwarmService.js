@@ -5,6 +5,7 @@
  */
 
 import * as signalR from '@microsoft/signalr';
+import { URL } from 'app/constants/constants';
 
 /**
  * SwarmService - Main service for controlling robot swarm via SignalR
@@ -247,7 +248,7 @@ class SwarmService {
 // Determine hub URL based on environment
 const getHubUrl = () => {
   if (process.env.NODE_ENV === 'production') {
-    return '/hubs/robot';
+    return `${URL}/hubs/robot`;
   }
   return process.env.REACT_APP_API_URL
     ? `${process.env.REACT_APP_API_URL}/hubs/robot`
