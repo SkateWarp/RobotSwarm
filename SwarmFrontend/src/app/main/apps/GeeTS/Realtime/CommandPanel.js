@@ -159,7 +159,7 @@ function CommandPanel({
             const data = JSON.parse(commandData);
             return (
                 <Grid container spacing={2} sx={{ mt: 1 }}>
-                    <Grid item xs={6} md={4}>
+                    <Grid item xs={12} sm={6}>
                         <TextField
                             fullWidth
                             size="small"
@@ -168,7 +168,7 @@ function CommandPanel({
                             onChange={(e) => handleFieldChange("name", e.target.value)}
                         />
                     </Grid>
-                    <Grid item xs={6} md={4}>
+                    <Grid item xs={12} sm={6}>
                         <FormControl fullWidth size="small">
                             <InputLabel>TIPO DE SENSOR</InputLabel>
                             <Select
@@ -187,7 +187,7 @@ function CommandPanel({
                     {Object.keys(template.template)
                         .filter((key) => key !== "name" && key !== "sensorType")
                         .map((key) => (
-                            <Grid item xs={6} md={4} key={key}>
+                            <Grid item xs={6} sm={4} key={key}>
                                 <TextField
                                     fullWidth
                                     size="small"
@@ -279,7 +279,7 @@ function CommandPanel({
                     </Typography>
                     <Grid container spacing={2}>
                         {Object.entries(COMMAND_TEMPLATES).map(([key, template]) => (
-                            <Grid item xs={12} sm={4} key={key}>
+                            <Grid item xs={4} key={key}>
                                 <Button
                                     fullWidth
                                     variant={commandType === key ? "contained" : "outlined"}
@@ -287,6 +287,7 @@ function CommandPanel({
                                     startIcon={template.icon}
                                     onClick={() => handleCommandTypeChange(key)}
                                     disabled={!selectedRobot || connectionStatus !== "connected"}
+                                    sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' }, px: 1 }}
                                 >
                                     {template.name}
                                 </Button>
