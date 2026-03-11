@@ -740,7 +740,7 @@ function SwarmControlPanel({
                                 color="primary"
                                 startIcon={isDeploying ? <CircularProgress size={20} color="inherit" /> : <RocketLaunch />}
                                 onClick={handleDeployRobots}
-                                disabled={!isConnected || selectedRobots.length === 0 || isDeploying}
+                                disabled={!isConnected || !isRosConnected || selectedRobots.length === 0 || isDeploying}
                                 fullWidth
                             >
                                 {isDeploying ? 'Desplegando...' : `Desplegar ${selectedRobots.length} Robot(s)`}
@@ -750,7 +750,7 @@ function SwarmControlPanel({
                                 color="error"
                                 startIcon={<Delete />}
                                 onClick={() => handleDeleteRobots()}
-                                disabled={!isConnected || deployedRobots.length === 0}
+                                disabled={!isConnected || !isRosConnected || deployedRobots.length === 0}
                             >
                                 Eliminar
                             </Button>
@@ -836,7 +836,7 @@ function SwarmControlPanel({
                                         color={task.color}
                                         startIcon={task.icon}
                                         onClick={() => setSelectedTask(key)}
-                                        disabled={!isConnected || deployedRobots.length === 0}
+                                        disabled={!isConnected || !isRosConnected || deployedRobots.length === 0}
                                         sx={{ py: 1.5 }}
                                     >
                                         {task.name}
@@ -863,6 +863,7 @@ function SwarmControlPanel({
                                 onClick={handleStartTask}
                                 disabled={
                                     !isConnected ||
+                                    !isRosConnected ||
                                     !selectedTask ||
                                     deployedRobots.length === 0 ||
                                     swarmStatus?.task?.status === 'running'
@@ -876,7 +877,7 @@ function SwarmControlPanel({
                                 color="warning"
                                 startIcon={<Stop />}
                                 onClick={handleStopTask}
-                                disabled={!isConnected || swarmStatus?.task?.status !== 'running'}
+                                disabled={!isConnected || !isRosConnected || swarmStatus?.task?.status !== 'running'}
                             >
                                 Detener
                             </Button>
@@ -890,7 +891,7 @@ function SwarmControlPanel({
                     color="error"
                     startIcon={<Warning />}
                     onClick={handleEmergencyStop}
-                    disabled={!isConnected}
+                    disabled={!isConnected || !isRosConnected}
                     fullWidth
                     size="large"
                     sx={{ mt: 2 }}
