@@ -362,12 +362,12 @@ function RealtimeConfigListImproved() {
 
                 {/* Panel derecho - mitad derecha con pestañas */}
                 <Grid item xs={12} lg={6}>
-                    <Paper elevation={2} sx={{ p: 2, height: '100%' }}>
+                    <Paper elevation={2} sx={{ p: 2, display: 'flex', flexDirection: 'column', maxHeight: 'calc(100vh - 200px)' }}>
                         <Tabs
                             value={rightPanelTab}
                             onChange={(e, newValue) => setRightPanelTab(newValue)}
                             variant="fullWidth"
-                            sx={{ mb: 2 }}
+                            sx={{ mb: 2, flexShrink: 0 }}
                         >
                             <Tab label="Control del Enjambre" />
                             <Tab label="Enviar Comando" />
@@ -375,7 +375,7 @@ function RealtimeConfigListImproved() {
 
                         {/* Pestaña: Control del Enjambre */}
                         {rightPanelTab === 0 && (
-                            <Box sx={{ maxHeight: '70vh', overflow: 'auto' }}>
+                            <Box sx={{ overflow: 'auto', flex: 1 }}>
                                 <SwarmControlPanel
                                     robots={robots}
                                     userId={userId}
@@ -390,7 +390,7 @@ function RealtimeConfigListImproved() {
 
                         {/* Pestaña: Enviar Comando */}
                         {rightPanelTab === 1 && (
-                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: '70vh', overflow: 'auto' }}>
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, overflow: 'auto', flex: 1 }}>
                                 <CommandPanel
                                     robots={robots}
                                     selectedRobot={selectedRobot}
