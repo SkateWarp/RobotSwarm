@@ -166,6 +166,8 @@ class TaskOrchestrator:
                 self.robots[rid]['role'] = 'formation_member'
             elif task_type == 'transport':
                 self.robots[rid]['role'] = 'transporter'
+            elif task_type == 'target_tracking':
+                self.robots[rid]['role'] = 'tracker'
             else:
                 self.robots[rid]['role'] = 'follower'
 
@@ -196,6 +198,14 @@ class TaskOrchestrator:
                 'target_y': params.get('target_y', 3.0),
             }
             start_topic = '/transport/start'
+        elif task_type == 'target_tracking':
+            start_config = {
+                'strategy': params.get('strategy', 'surround'),
+                'standoff_radius': config.get('standoff_radius', 1.5),
+                'prediction_horizon': config.get('prediction_horizon', 1.0),
+                'target_model': config.get('target_model', 'target_box'),
+            }
+            start_topic = '/target_tracking/start'
         else:
             rospy.logwarn(f"Unknown task type: {task_type}")
             return
@@ -211,7 +221,7 @@ class TaskOrchestrator:
             return
 
         # Signal stop to all behavior nodes
-        for topic in ['/follow_leader/stop', '/formation/stop', '/transport/stop']:
+        for topic in ['/follow_leader/stop', '/formation/stop', '/transport/stop', '/target_tracking/stop']:
             pub = rospy.Publisher(topic, Empty, queue_size=1)
             rospy.sleep(0.05)
             pub.publish(Empty())
