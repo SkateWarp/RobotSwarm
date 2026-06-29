@@ -7,10 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RobotSwarm is a robotic swarm management system consisting of three main components:
 - **SwarmFrontend**: React 17 web app built on the Fuse React admin template (MUI 5, Redux Toolkit, craco)
 - **SwarmBackend**: .NET 8 Minimal API backend with PostgreSQL, EF Core, and SignalR for real-time communication
-- **swarm_ws**: ROS Noetic (catkin) workspace built on the HeRo robot platform (`hero_common` packages, Gazebo simulation) with a Python bridge connecting ROS to the backend via SignalR
+- **swarm_ws**: ROS Noetic (catkin) workspace with Gazebo simulation and a Python bridge connecting ROS to the backend via SignalR
 
 Supporting components:
-- **firmware/**: ESP32/Arduino robot firmware (`esp32.ino`, `motor.ino`) with relay-feedback PID autotuning (`PID_AutoTune.cpp/.h`)
 - **ros_wss/**: Standalone experimental .NET console app that talks to ROS via a rosbridge WebSocket (`RosbridgeNet`); not part of the main SignalR flow
 
 Extensive reference docs live at the repo root: `ARCHITECTURE.md`, `BACKEND_INTEGRATION.md`, `FRONTEND_API.md`, `QUICKSTART.md`, `IMPLEMENTATION_STATUS.md`, `IMPLEMENTATION_SUMMARY.md`.
