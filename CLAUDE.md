@@ -7,7 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RobotSwarm is a robotic swarm management system consisting of three main components:
 - **SwarmFrontend**: React 17 web app built on the Fuse React admin template (MUI 5, Redux Toolkit, craco)
 - **SwarmBackend**: .NET 8 Minimal API backend with PostgreSQL, EF Core, and SignalR for real-time communication
-- **swarm_ws**: ROS (Robot Operating System) workspace with a Python bridge connecting ROS to the backend via SignalR
+- **swarm_ws**: ROS Noetic (catkin) workspace built on the HeRo robot platform (`hero_common` packages, Gazebo simulation) with a Python bridge connecting ROS to the backend via SignalR
+
+Supporting components:
+- **firmware/**: ESP32/Arduino robot firmware (`esp32.ino`, `motor.ino`) with relay-feedback PID autotuning (`PID_AutoTune.cpp/.h`)
+- **ros_wss/**: Standalone experimental .NET console app that talks to ROS via a rosbridge WebSocket (`RosbridgeNet`); not part of the main SignalR flow
+
+Extensive reference docs live at the repo root: `ARCHITECTURE.md`, `BACKEND_INTEGRATION.md`, `FRONTEND_API.md`, `QUICKSTART.md`, `IMPLEMENTATION_STATUS.md`, `IMPLEMENTATION_SUMMARY.md`.
 
 ## Common Commands
 
@@ -29,18 +35,30 @@ Swagger UI is always enabled at `/swagger`.
 
 ### Database
 ```bash
-# Local development (postgres/postgres/swarm on port 5432)
+# Local development DB only (postgres/postgres/swarm on port 5432)
 docker compose -f SwarmBackend/docker-compose.local.yml up -d
 
-# Production (uses .env for DB_USER, DB_PASSWORD, DB_NAME)
+# DB + backend, built from source (used by start.sh; reads root .env)
+docker compose -f docker-compose.yml up --build -d
+
+# Production DB + backend (uses .env for DB_USER, DB_PASSWORD, DB_NAME)
 docker compose -f docker-compose.prod.yml up -d
 ```
+The backend toolchain is pinned via `SwarmBackend/mise.toml` (dotnet 8).
 
-### ROS Workspace (swarm_ws/)
+### ROS Workspace (swarm_ws/) — ROS Noetic
 ```bash
 catkin_make                   # Build ROS packages
 source devel/setup.bash       # Source workspace
-rosrun robot_swarm_bridge bridge.py  # Run the SignalR-ROS bridge
+export TURTLEBOT3_MODEL=waffle
+rosrun robot_swarm_bridge bridge.py  # Run the SignalR-ROS bridge alone
+roslaunch robot_swarm_bridge swarm_main.launch robot_count:=5  # Full sim (Gazebo + bridge)
+```
+Other launch files in `swarm_ws/src/robot_swarm_bridge/launch/`: `formation.launch`, `follow_leader.launch`, `transport.launch`, `arena.launch`, `bridge.launch`, etc.
+
+### Full stack (DB + Backend + ROS/Gazebo)
+```bash
+./start.sh [ROBOT_COUNT]   # default 5; brings up docker-compose.yml then roslaunch swarm_main
 ```
 
 ## Architecture
@@ -141,6 +159,6 @@ JWT auth configured in `appsettings.json` under `AppSettings` (Secret is base64-
 
 ## CI/CD
 
-GitHub Actions (`frontend_workflow.yml`) deploys frontend on push to `main` when `SwarmFrontend/**` changes:
-- Self-hosted runner, Node.js 18
-- Builds and copies to `/var/www/html/`
+Both workflows run on a **self-hosted runner** and deploy on push to `main` (no tests/lint gate in CI):
+- `frontend_workflow.yml` — triggered by `SwarmFrontend/**` changes. Node.js 18; builds and copies to `/var/www/html/`.
+- `backend_workflow.yml` — triggered by `SwarmBackend/**`, `swarm_ws/**`, or `docker-compose.prod.yml` changes. Rebuilds the backend Docker image and redeploys via `docker-compose.prod.yml`, then prunes images/logs.
