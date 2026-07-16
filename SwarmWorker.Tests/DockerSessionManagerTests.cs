@@ -51,6 +51,72 @@ public sealed class DockerSessionManagerTests
     }
 
     [Fact]
+    public async Task ReadsSwarmStatusWithoutRosYamlFolding()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var taskRunId = Guid.NewGuid();
+        var statusJson = JsonSerializer.Serialize(new
+        {
+            task = new
+            {
+                task_id = taskRunId,
+                status = "running",
+                progress = 0.25
+            },
+            robots = Enumerable.Range(0, 20).Select(index => new
+            {
+                id = $"tb3_{index}",
+                ranges = Enumerable.Repeat(3.5, 360)
+            })
+        });
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(
+                0,
+                $"data: {JsonSerializer.Serialize(statusJson)}\n",
+                string.Empty));
+        var manager = new DockerSessionManager(
+            docker,
+            Options.Create(new WorkerOptions
+            {
+                BackendUrl = "https://backend.example.test",
+                WorkerId = workerId,
+                WorkerSecret = new string('a', 32),
+                Name = "test-worker",
+                SessionImage = "robotswarm/ros-noetic:test"
+            }),
+            NullLogger<DockerSessionManager>.Instance);
+        var session = new ManagedSessionInfo(
+            sessionId,
+            "container-1",
+            SessionResourceNames.Container(sessionId),
+            "robotswarm/ros-noetic:test",
+            true,
+            "running",
+            new Dictionary<string, string>
+            {
+                [SessionLabels.WorkerId] = workerId.ToString("D")
+            });
+
+        var status = await manager.ReadTaskStatusAsync(
+            session,
+            CancellationToken.None);
+
+        Assert.NotNull(status);
+        Assert.Equal(taskRunId, status.TaskRunId);
+        Assert.Equal("Running", status.State);
+        Assert.Equal(0.25, status.Progress);
+
+        var arguments = Assert.Single(docker.Calls);
+        Assert.Contains("rospy.wait_for_message", arguments[4]);
+        Assert.Contains("timeout=5.0", arguments[4]);
+        Assert.Contains("json.dumps(message.data)", arguments[4]);
+        Assert.DoesNotContain(
+            "rostopic echo -n 1 /swarm/status",
+            arguments[4]);
+    }
+
+    [Fact]
     public async Task PublishesSwarmJsonAsASeparateDockerArgument()
     {
         var workerId = Guid.NewGuid();

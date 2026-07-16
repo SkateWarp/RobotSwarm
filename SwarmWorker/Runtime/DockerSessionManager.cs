@@ -58,7 +58,15 @@ public sealed class DockerSessionManager
     private const string ReadSwarmStatusScript =
         "source /opt/ros/noetic/setup.bash"
         + " && source /catkin_ws/devel/setup.bash"
-        + " && exec rostopic echo -n 1 /swarm/status";
+        // rostopic folds large String messages across YAML lines. Read the
+        // message field directly so the status parsers receive one full line.
+        + " && exec python3 -c 'import json, rospy; "
+        + "from std_msgs.msg import String; "
+        + "rospy.init_node(\"swarm_worker_status_reader\", "
+        + "anonymous=True, disable_signals=True); "
+        + "message = rospy.wait_for_message("
+        + "\"/swarm/status\", String, timeout=5.0); "
+        + "print(\"data: \" + json.dumps(message.data))'";
 
     private readonly IDockerCli _docker;
     private readonly WorkerOptions _options;
