@@ -29,6 +29,17 @@ jobs:
             --project SwarmBackend/SwarmBackend.csproj \
             --output /tmp/robotswarm-migrations.sql
 
+      - name: Check production Compose
+        run: docker compose -f docker-compose.prod.yml config --quiet
+        env:
+          DB_USER: test
+          DB_PASSWORD: test
+          DB_NAME: test
+          AppSettings__Secret: test
+          AppSettings__Issuer: https://robot.zerav.la
+          Cors__Origins__0: https://rs.zerav.la
+          BACKEND_PUBLISH_IP: 10.0.0.126
+
       - name: Test GPU worker
         run: dotnet test SwarmWorker.Tests/SwarmWorker.Tests.csproj --configuration Release
 

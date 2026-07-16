@@ -48,7 +48,7 @@ services:
       - Workers__OrphanAfterSeconds=${Workers__OrphanAfterSeconds:-90}
       - Sessions__MaxRobotsPerSession=${Sessions__MaxRobotsPerSession:-10}
     ports:
-      - "127.0.0.1:44336:44336"
+      - "${BACKEND_PUBLISH_IP:-127.0.0.1}:44336:44336"
     depends_on:
       db:
         condition: service_healthy
