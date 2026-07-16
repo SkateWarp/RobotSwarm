@@ -1,0 +1,26 @@
+[Unit]
+Description=RobotSwarm GPU compute worker
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=%h/.config/robotswarm/gpu-worker-identity.env
+EnvironmentFile=%h/.local/share/robotswarm-gpu-worker/current/gpu-worker-release.env
+WorkingDirectory=%h/.local/share/robotswarm-gpu-worker/current
+ExecStartPre=/usr/bin/env docker info
+ExecStart=%h/.local/share/robotswarm-gpu-worker/current/SwarmWorker
+Restart=always
+RestartSec=10
+TimeoutStartSec=45
+TimeoutStopSec=75
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

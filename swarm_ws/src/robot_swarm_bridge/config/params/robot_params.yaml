@@ -1,0 +1,6 @@
+robot_model: burger
+robot_radius: 0.11
+max_linear_velocity: 0.22
+max_angular_velocity: 2.84
+spawn_spacing: 0.60
+arena_size: 10.0

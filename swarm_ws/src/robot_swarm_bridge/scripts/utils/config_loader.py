@@ -131,7 +131,7 @@ class ConfigLoader:
             ('safety.absolute_min_distance', float, 0.1, 1.0),
             ('safety.max_linear_velocity', float, 0.0, 1.0),
             ('safety.max_angular_velocity', float, 0.0, 5.0),
-            ('fleet.max_robots', int, 1, 100),
+            ('fleet.max_robots', int, 0, 10000),
             ('arena.size.x', float, 1.0, 100.0),
             ('arena.size.y', float, 1.0, 100.0),
         ]
@@ -160,9 +160,9 @@ class ConfigLoader:
         """
         return {
             'fleet': {
-                'max_robots': 20,
+                'max_robots': 0,
                 'default_robot_count': 5,
-                'robot_model': 'turtlebot3_waffle',
+                'robot_model': 'turtlebot3_burger',
             },
             'arena': {
                 'size': {'x': 10.0, 'y': 10.0},
@@ -175,8 +175,8 @@ class ConfigLoader:
                 'danger_zone': 0.50,
                 'warning_zone': 1.00,
                 'safe_distance': 0.80,
-                'max_linear_velocity': 0.26,
-                'max_angular_velocity': 1.82,
+                'max_linear_velocity': 0.22,
+                'max_angular_velocity': 2.84,
                 'repulsion_gain': 1.5,
             },
             'control': {

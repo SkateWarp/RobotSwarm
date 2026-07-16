@@ -1,6 +1,7 @@
 import os
 import yaml
 import rospy
+import rospkg
 
 def load_config():
     """Load configuration from YAML file"""
@@ -10,7 +11,7 @@ def load_config():
         
         if not config_file or not os.path.exists(config_file):
             # Fallback to default config path
-            package_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            package_path = rospkg.RosPack().get_path('robot_swarm_bridge')
             config_file = os.path.join(package_path, 'config', 'config.yaml')
 
         with open(config_file, 'r') as f:

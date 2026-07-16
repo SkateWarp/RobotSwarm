@@ -15,7 +15,7 @@ Phases:
   PUSH     - GRF-based coordinated pushing with MCMC velocity sampling
   DONE     - Object delivered to target; all robots stop
 
-Works with any N >= 2 TurtleBot3 Waffle robots in Gazebo.
+Works with dynamically changing TurtleBot3 Burger fleets in Gazebo.
 """
 
 import rospy
@@ -30,7 +30,7 @@ from enum import Enum
 from geometry_msgs.msg import Twist, Point, Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String, Bool
 from gazebo_msgs.msg import ModelStates
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -38,7 +38,25 @@ from visualization_msgs.msg import Marker, MarkerArray
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+package_source = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', '..', 'src')
+)
+if package_source not in sys.path:
+    sys.path.insert(0, package_source)
+
 from core.obstacle_avoidance import ObstacleAvoidance
+from utils.robot_ids import sort_robot_ids
+from robot_swarm_bridge.algorithms.grf_adapter import (
+    build_transport_snapshot,
+    mcmc_iterations_for_fleet,
+)
+from robot_swarm_bridge.algorithms.grf_transport import (
+    GRFConfig,
+    GibbsRandomFieldTransport,
+    InteractionMode,
+    RobotSnapshot,
+    Vec2,
+)
 
 
 class TransportPhase(Enum):
@@ -128,6 +146,53 @@ class CollaborativeTransport:
         self.mcmc_sigma = rospy.get_param('~mcmc_sigma', 0.05)
         self.mcmc_burnin = rospy.get_param('~mcmc_burnin', 0.6)
         self.arrival_tolerance = rospy.get_param('~arrival_tolerance', 0.5)
+        self.min_ready_robots = max(
+            1, int(rospy.get_param('~min_ready_robots', 1))
+        )
+        planner = str(
+            rospy.get_param('~transport_planner', 'grf')
+        ).strip().lower()
+        if planner not in ('grf', 'legacy'):
+            rospy.logwarn(
+                "[transport] unknown planner '%s'; using grf", planner
+            )
+            planner = 'grf'
+        self.transport_planner = planner
+
+        self.grf_mcmc_iterations = max(
+            1,
+            int(rospy.get_param(
+                '~grf_mcmc_iterations', self.mcmc_iterations
+            )),
+        )
+        self.grf_large_fleet_threshold = max(
+            1,
+            int(rospy.get_param('~grf_large_fleet_threshold', 20)),
+        )
+        requested_large_iterations = max(
+            1,
+            int(rospy.get_param(
+                '~grf_large_fleet_iterations',
+                min(24, self.grf_mcmc_iterations),
+            )),
+        )
+        self.grf_large_fleet_iterations = min(
+            self.grf_mcmc_iterations,
+            requested_large_iterations,
+        )
+        self.grf_temperature = float(
+            rospy.get_param('~grf_temperature', 1.0)
+        )
+        self.grf_random_seed = int(
+            rospy.get_param('~grf_random_seed', 0)
+        )
+        self.grf_object_radius = float(
+            rospy.get_param('~grf_object_radius', 0.2)
+        )
+        self.grf_contour_samples = max(
+            3,
+            int(rospy.get_param('~grf_contour_samples', 16)),
+        )
 
         # ---- GRF energy parameters -----------------------------------------
         # U_s  (obstacle avoidance) -- same-sign charges -> repulsion
@@ -156,10 +221,20 @@ class CollaborativeTransport:
 
         # Velocity consensus weight inside U_st
         self.velocity_consensus_weight = 0.5
+        self._grf_kernels: Dict[int, GibbsRandomFieldTransport] = {}
+        self._grf_step_index = 0
+        self._active_planner = self.transport_planner
+        self._active_grf_iterations = 0
 
         # ---- Phase / state --------------------------------------------------
         self.phase = TransportPhase.IDLE
+        self.is_running = False
+        self.is_paused = False
+        self.emergency_stop_active = False
+        self.current_task_id = None
+        self.command_epoch = 0
         self.phase_lock = threading.Lock()
+        self.command_lock = threading.RLock()
 
         # ---- Robot bookkeeping ----------------------------------------------
         # Populated dynamically from /fleet/robot_list
@@ -182,6 +257,8 @@ class CollaborativeTransport:
 
         # ---- Publishers (per-robot cmd_vel created in _setup_robot) ----------
         self.cmd_vel_pubs: Dict[str, rospy.Publisher] = {}
+        self.odom_subs: Dict[str, rospy.Subscriber] = {}
+        self.scan_subs: Dict[str, rospy.Subscriber] = {}
 
         self.status_pub = rospy.Publisher(
             '/transport/status', String, queue_size=1
@@ -204,8 +281,20 @@ class CollaborativeTransport:
             self._start_callback, queue_size=1
         )
         rospy.Subscriber(
-            '/transport/stop', Empty,
+            '/transport/stop', String,
             self._stop_callback, queue_size=1
+        )
+        rospy.Subscriber(
+            '/transport/pause', String,
+            self._pause_callback, queue_size=1
+        )
+        rospy.Subscriber(
+            '/transport/resume', String,
+            self._resume_callback, queue_size=1
+        )
+        rospy.Subscriber(
+            '/swarm/emergency_stop', Bool,
+            self._emergency_stop_callback, queue_size=1
         )
 
         # ---- Seed default fleet if no /fleet/robot_list is published --------
@@ -219,9 +308,10 @@ class CollaborativeTransport:
 
         rospy.loginfo(
             "[transport] GRF collaborative transport initialised  "
-            "robots=%d  object='%s'  target=(%.1f, %.1f)",
+            "robots=%d  object='%s'  target=(%.1f, %.1f)  planner=%s",
             self.robot_count, self.object_name,
             self.target_x, self.target_y,
+            self.transport_planner,
         )
 
     # ======================================================================
@@ -235,24 +325,32 @@ class CollaborativeTransport:
 
     def _fleet_callback(self, msg: String):
         """Handle /fleet/robot_list (comma-separated namespace strings)."""
-        if not msg.data:
-            return
-        ns_list = [s.strip() for s in msg.data.split(',') if s.strip()]
+        ns_list = sort_robot_ids(
+            s.strip() for s in msg.data.split(',') if s.strip()
+        )
         self._update_fleet(ns_list)
 
     def _update_fleet(self, ns_list: List[str]):
         """Synchronise internal bookkeeping with the given namespace list."""
-        with self.data_lock:
-            # Add new robots
-            for ns in ns_list:
-                if ns not in self.robot_namespaces:
-                    self._setup_robot(ns)
-            # Remove departed robots
-            for ns in list(self.robot_namespaces):
-                if ns not in ns_list:
-                    self._teardown_robot(ns)
-            self.robot_namespaces = list(ns_list)
-            self.robot_count = len(self.robot_namespaces)
+        with self.command_lock:
+            if not ns_list and (self.is_running or self.is_paused):
+                self.is_running = False
+                self.is_paused = False
+                self.command_epoch += 1
+                with self.phase_lock:
+                    self.phase = TransportPhase.IDLE
+
+            with self.data_lock:
+                # Add new robots
+                for ns in ns_list:
+                    if ns not in self.robot_namespaces:
+                        self._setup_robot(ns)
+                # Remove departed robots
+                for ns in list(self.robot_namespaces):
+                    if ns not in ns_list:
+                        self._teardown_robot(ns)
+                self.robot_namespaces = list(ns_list)
+                self.robot_count = len(self.robot_namespaces)
 
     def _setup_robot(self, ns: str):
         """Create subscribers, publishers, and avoidance module for one robot."""
@@ -262,12 +360,12 @@ class CollaborativeTransport:
         )
 
         # Subscribers
-        rospy.Subscriber(
+        self.odom_subs[ns] = rospy.Subscriber(
             f'/{ns}/odom', Odometry,
             lambda msg, _ns=ns: self._odom_callback(_ns, msg),
             queue_size=1,
         )
-        rospy.Subscriber(
+        self.scan_subs[ns] = rospy.Subscriber(
             f'/{ns}/scan', LaserScan,
             lambda msg, _ns=ns: self._scan_callback(_ns, msg),
             queue_size=1,
@@ -285,9 +383,25 @@ class CollaborativeTransport:
 
     def _teardown_robot(self, ns: str):
         """Remove bookkeeping for a robot that left the fleet."""
+        pub = self.cmd_vel_pubs.pop(ns, None)
+        if pub is not None:
+            pub.publish(Twist())
+            pub.unregister()
+
+        odom_sub = self.odom_subs.pop(ns, None)
+        if odom_sub is not None:
+            odom_sub.unregister()
+
+        scan_sub = self.scan_subs.pop(ns, None)
+        if scan_sub is not None:
+            scan_sub.unregister()
+
+        avoidance = self.avoidance_modules.pop(ns, None)
+        if avoidance is not None:
+            avoidance.shutdown()
+
         for d in (self.robot_positions, self.robot_yaws,
-                  self.robot_velocities, self.robot_scans,
-                  self.cmd_vel_pubs, self.avoidance_modules):
+                  self.robot_velocities, self.robot_scans):
             d.pop(ns, None)
         if ns in self.robot_namespaces:
             self.robot_namespaces.remove(ns)
@@ -301,10 +415,19 @@ class CollaborativeTransport:
         pos = msg.pose.pose.position
         yaw = self._quat_to_yaw(msg.pose.pose.orientation)
         with self.data_lock:
+            if ns not in self.cmd_vel_pubs:
+                return
             self.robot_positions[ns] = np.array([pos.x, pos.y])
             self.robot_yaws[ns] = yaw
             v = msg.twist.twist
-            self.robot_velocities[ns] = np.array([v.linear.x, v.linear.y])
+            # Odometry twist is expressed in the robot body frame. Convert it
+            # before comparing with GRF samples, which are world-frame vectors.
+            cos_yaw = math.cos(yaw)
+            sin_yaw = math.sin(yaw)
+            self.robot_velocities[ns] = np.array([
+                v.linear.x * cos_yaw - v.linear.y * sin_yaw,
+                v.linear.x * sin_yaw + v.linear.y * cos_yaw,
+            ])
 
         # Keep obstacle avoidance module in sync
         av = self.avoidance_modules.get(ns)
@@ -313,6 +436,8 @@ class CollaborativeTransport:
 
     def _scan_callback(self, ns: str, msg: LaserScan):
         with self.data_lock:
+            if ns not in self.cmd_vel_pubs:
+                return
             self.robot_scans[ns] = msg
 
     def _model_states_callback(self, msg: ModelStates):
@@ -326,8 +451,8 @@ class CollaborativeTransport:
                 if name == self.object_name:
                     self.object_position = np.array([px, py])
                     found = True
-                elif name != 'ground_plane' and not name.startswith('tb3_'):
-                    # Treat all other models as static obstacles
+                elif name.startswith('obstacle_') or name.startswith('wall_'):
+                    # Only explicitly named arena obstacles are included.
                     self.obstacle_positions.append(np.array([px, py]))
             if found and not self.object_found:
                 rospy.loginfo(
@@ -345,25 +470,127 @@ class CollaborativeTransport:
         except (json.JSONDecodeError, AttributeError):
             config = {}
 
-        # Apply runtime config
-        if 'target_x' in config:
-            self.target_x = float(config['target_x'])
-        if 'target_y' in config:
-            self.target_y = float(config['target_y'])
-
-        with self.phase_lock:
-            if self.phase == TransportPhase.IDLE or self.phase == TransportPhase.DONE:
-                self.phase = TransportPhase.SEARCH
-                rospy.loginfo(
-                    "[transport] >>> phase SEARCH  target=(%.1f, %.1f)",
-                    self.target_x, self.target_y,
+        with self.command_lock:
+            if self.emergency_stop_active:
+                rospy.logwarn(
+                    "[transport] Start rejected while emergency stop is active"
                 )
+                return
+            with self.data_lock:
+                if not self.robot_namespaces:
+                    rospy.logwarn(
+                        "[transport] Start rejected without an active fleet"
+                    )
+                    return
 
-    def _stop_callback(self, _msg: Empty):
-        with self.phase_lock:
-            self.phase = TransportPhase.IDLE
-        self._stop_all_robots()
+            # Apply runtime config
+            if 'target_x' in config:
+                self.target_x = float(config['target_x'])
+            if 'target_y' in config:
+                self.target_y = float(config['target_y'])
+
+            requested_planner = config.get(
+                'transport_planner', config.get('planner')
+            )
+            if requested_planner is not None:
+                requested_planner = str(requested_planner).strip().lower()
+                if requested_planner in ('grf', 'legacy'):
+                    self.transport_planner = requested_planner
+                else:
+                    rospy.logwarn(
+                        "[transport] ignoring unknown planner '%s'",
+                        requested_planner,
+                    )
+
+            if 'grf_mcmc_iterations' in config:
+                self.grf_mcmc_iterations = max(
+                    1, int(config['grf_mcmc_iterations'])
+                )
+            if 'grf_large_fleet_threshold' in config:
+                self.grf_large_fleet_threshold = max(
+                    1, int(config['grf_large_fleet_threshold'])
+                )
+            if 'grf_large_fleet_iterations' in config:
+                self.grf_large_fleet_iterations = max(
+                    1, int(config['grf_large_fleet_iterations'])
+                )
+            self.grf_large_fleet_iterations = min(
+                self.grf_mcmc_iterations,
+                self.grf_large_fleet_iterations,
+            )
+            self._grf_kernels.clear()
+            self._grf_step_index = 0
+            self._active_planner = self.transport_planner
+            self._active_grf_iterations = 0
+            self.current_task_id = config.get('task_id')
+            self.is_running = True
+            self.is_paused = False
+            self.command_epoch += 1
+
+            with self.phase_lock:
+                self.phase = TransportPhase.SEARCH
+            rospy.loginfo(
+                "[transport] >>> phase SEARCH  target=(%.1f, %.1f) "
+                "planner=%s",
+                self.target_x, self.target_y, self.transport_planner,
+            )
+
+    def _stop_callback(self, msg: String):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            self.is_running = False
+            self.is_paused = False
+            self.command_epoch += 1
+            with self.phase_lock:
+                self.phase = TransportPhase.IDLE
+            self._stop_all_robots()
         rospy.loginfo("[transport] stopped (IDLE)")
+
+    def _pause_callback(self, msg: String):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            if not self.is_running or self.is_paused:
+                return
+            self.is_paused = True
+            self.command_epoch += 1
+            self._stop_all_robots()
+        rospy.loginfo("[transport] paused")
+
+    def _resume_callback(self, msg: String):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            if (
+                not self.is_running
+                or not self.is_paused
+                or self.emergency_stop_active
+            ):
+                return
+            self.is_paused = False
+            self.command_epoch += 1
+        rospy.loginfo("[transport] resumed")
+
+    def _task_command_matches(self, msg: String) -> bool:
+        try:
+            payload = json.loads(msg.data) if msg.data else {}
+        except (json.JSONDecodeError, AttributeError):
+            payload = {}
+        requested_id = payload.get('task_id')
+        return bool(requested_id) and requested_id == self.current_task_id
+
+    def _emergency_stop_callback(self, msg: Bool):
+        with self.command_lock:
+            self.emergency_stop_active = bool(msg.data)
+            self.command_epoch += 1
+            if self.emergency_stop_active:
+                self.is_running = False
+                self.is_paused = False
+                with self.phase_lock:
+                    self.phase = TransportPhase.IDLE
+                self._stop_all_robots()
+                rospy.logwarn("[transport] Emergency stop latched")
 
     # ======================================================================
     # Helpers
@@ -385,8 +612,42 @@ class CollaborativeTransport:
 
     def _stop_all_robots(self):
         stop = Twist()
-        for pub in self.cmd_vel_pubs.values():
+        with self.data_lock:
+            pubs = list(self.cmd_vel_pubs.values())
+        for pub in pubs:
             pub.publish(stop)
+
+    def _command_allowed(self, expected_epoch: int) -> bool:
+        return (
+            self.command_epoch == expected_epoch
+            and self.is_running
+            and not self.is_paused
+            and not self.emergency_stop_active
+        )
+
+    def _publish_command(
+        self, namespace: str, command: Twist, expected_epoch: int
+    ) -> bool:
+        """Publish only while the control cycle still owns the active epoch."""
+        with self.command_lock:
+            if not self._command_allowed(expected_epoch):
+                return False
+            with self.data_lock:
+                pub = self.cmd_vel_pubs.get(namespace)
+                if pub is None:
+                    return False
+                pub.publish(command)
+            return True
+
+    def _set_phase(
+        self, phase: TransportPhase, expected_epoch: int
+    ) -> bool:
+        with self.command_lock:
+            if not self._command_allowed(expected_epoch):
+                return False
+            with self.phase_lock:
+                self.phase = phase
+            return True
 
     def _holonomic_to_diff_drive(self, vx: float, vy: float,
                                   yaw: float) -> Twist:
@@ -410,8 +671,192 @@ class CollaborativeTransport:
             linear *= 0.3
 
         cmd.linear.x = linear
-        cmd.angular.z = max(-1.82, min(1.82, angular))
+        cmd.angular.z = max(-2.84, min(2.84, angular))
         return cmd
+
+    def _grf_kernel_for_fleet(self, fleet_size: int):
+        iterations = mcmc_iterations_for_fleet(
+            fleet_size,
+            self.grf_mcmc_iterations,
+            self.grf_large_fleet_threshold,
+            self.grf_large_fleet_iterations,
+        )
+        kernel = self._grf_kernels.get(iterations)
+        if kernel is None:
+            kernel = GibbsRandomFieldTransport(
+                GRFConfig(
+                    time_step=0.1,
+                    max_speed=self.vmax,
+                    sensing_radius=self.sensing_range,
+                    obstacle_influence_radius=self.safezone,
+                    mcmc_iterations=iterations,
+                    proposal_sigma=self.mcmc_sigma,
+                    burn_in_fraction=self.mcmc_burnin,
+                    temperature=self.grf_temperature,
+                    random_seed=self.grf_random_seed,
+                    velocity_consensus_weight=(
+                        self.velocity_consensus_weight
+                    ),
+                )
+            )
+            self._grf_kernels[iterations] = kernel
+        return kernel, iterations
+
+    def _build_grf_snapshot(self, namespaces, object_pos, obstacles):
+        robots = []
+        positions = {}
+        yaws = {}
+
+        with self.data_lock:
+            for ns in namespaces:
+                position = self.robot_positions.get(ns)
+                if position is None:
+                    continue
+                velocity = self.robot_velocities.get(ns, np.zeros(2))
+                yaw = float(self.robot_yaws.get(ns, 0.0))
+                positions[ns] = position.copy()
+                yaws[ns] = yaw
+                robots.append(
+                    RobotSnapshot(
+                        robot_id=ns,
+                        position=Vec2(
+                            float(position[0]), float(position[1])
+                        ),
+                        velocity=Vec2(
+                            float(velocity[0]), float(velocity[1])
+                        ),
+                        heading=yaw,
+                    )
+                )
+
+        snapshot = build_transport_snapshot(
+            robots=robots,
+            object_center=Vec2(
+                float(object_pos[0]), float(object_pos[1])
+            ),
+            target=Vec2(self.target_x, self.target_y),
+            obstacle_points=tuple(
+                Vec2(float(point[0]), float(point[1]))
+                for point in obstacles
+            ),
+            object_radius=self.grf_object_radius,
+            contour_samples=self.grf_contour_samples,
+        )
+        return snapshot, positions, yaws
+
+    def _grf_push_commands(
+        self, namespaces, object_pos, obstacles, expected_epoch
+    ):
+        snapshot, positions, yaws = self._build_grf_snapshot(
+            namespaces, object_pos, obstacles
+        )
+        kernel, iterations = self._grf_kernel_for_fleet(
+            len(snapshot.robots)
+        )
+        with self.command_lock:
+            if not self._command_allowed(expected_epoch):
+                return {}, yaws
+            step_index = self._grf_step_index
+        step = kernel.compute(snapshot, step_index=step_index)
+
+        commands = {}
+        for result in step.robots:
+            if result.interaction_mode == InteractionMode.INVALID:
+                commands[result.robot_id] = None
+                continue
+
+            if result.interaction_mode == InteractionMode.NO_OBJECT:
+                position = positions[result.robot_id]
+                difference = object_pos - position
+                distance = float(np.linalg.norm(difference))
+                if distance > 0.01:
+                    speed = min(self.vmax, 0.5 * distance)
+                    direction = difference / distance
+                    commands[result.robot_id] = Vec2(
+                        float(direction[0] * speed),
+                        float(direction[1] * speed),
+                    )
+                else:
+                    commands[result.robot_id] = Vec2()
+                continue
+
+            commands[result.robot_id] = result.velocity
+
+        with self.command_lock:
+            if not self._command_allowed(expected_epoch):
+                return {}, yaws
+            self._grf_step_index = max(
+                self._grf_step_index, step_index + 1
+            )
+            self._active_planner = 'grf'
+            self._active_grf_iterations = iterations
+        return commands, yaws
+
+    def _publish_grf_commands(
+        self, namespaces, commands, yaws, expected_epoch
+    ):
+        for ns in namespaces:
+            velocity = commands.get(ns)
+            yaw = yaws.get(ns)
+            if velocity is None or yaw is None or not math.isfinite(yaw):
+                self._publish_command(ns, Twist(), expected_epoch)
+                continue
+            if not velocity.is_finite():
+                self._publish_command(ns, Twist(), expected_epoch)
+                continue
+
+            cmd = self._holonomic_to_diff_drive(
+                velocity.x, velocity.y, yaw
+            )
+            with self.data_lock:
+                avoidance = self.avoidance_modules.get(ns)
+            if avoidance is not None:
+                cmd = avoidance.apply_avoidance(cmd)
+            self._publish_command(ns, cmd, expected_epoch)
+
+    def _legacy_push_step(
+        self, namespaces, yaws, expected_epoch, fallback=False
+    ):
+        with self.command_lock:
+            if not self._command_allowed(expected_epoch):
+                return
+            self._active_planner = (
+                'legacy_fallback' if fallback else 'legacy'
+            )
+            self._active_grf_iterations = 0
+        for ns in namespaces:
+            if ns not in yaws:
+                self._publish_command(ns, Twist(), expected_epoch)
+                continue
+
+            try:
+                sampled_vel = self._mcmc_sample_velocity(ns)
+            except Exception as exc:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[transport] legacy planner failed for {}: {}".format(
+                        ns, exc
+                    ),
+                )
+                self._publish_command(ns, Twist(), expected_epoch)
+                continue
+            if (
+                not np.all(np.isfinite(sampled_vel))
+                or not math.isfinite(yaws[ns])
+            ):
+                self._publish_command(ns, Twist(), expected_epoch)
+                continue
+
+            cmd = self._holonomic_to_diff_drive(
+                float(sampled_vel[0]),
+                float(sampled_vel[1]),
+                yaws[ns],
+            )
+            with self.data_lock:
+                avoidance = self.avoidance_modules.get(ns)
+            if avoidance is not None:
+                cmd = avoidance.apply_avoidance(cmd)
+            self._publish_command(ns, cmd, expected_epoch)
 
     # ======================================================================
     # GRF energy functions
@@ -459,7 +904,8 @@ class CollaborativeTransport:
 
     def _compute_obstacle_energy(self, robot_pos: np.ndarray,
                                   proposed_vel: np.ndarray,
-                                  scan: Optional[LaserScan]) -> float:
+                                  scan: Optional[LaserScan],
+                                  robot_yaw: float) -> float:
         """
         Repulsive energy from obstacles detected via LaserScan and from
         known obstacle model positions.
@@ -478,7 +924,9 @@ class CollaborativeTransport:
                     continue
                 if r < self.safezone:
                     # Effective distance after applying proposed step
-                    angle = scan.angle_min + i * scan.angle_increment
+                    angle = (
+                        robot_yaw + scan.angle_min + i * scan.angle_increment
+                    )
                     obs_dir = np.array([math.cos(angle), math.sin(angle)])
                     step = proposed_vel * 0.1  # dt = 0.1 s
                     effective_r = max(r - float(np.dot(step, obs_dir)), 1e-4)
@@ -548,8 +996,7 @@ class CollaborativeTransport:
 
     # ---- U_st: inter-robot interaction energy ----
 
-    def _compute_robot_energy(self, robot_idx: int,
-                               robot_pos: np.ndarray,
+    def _compute_robot_energy(self, robot_pos: np.ndarray,
                                proposed_vel: np.ndarray,
                                other_positions: List[np.ndarray],
                                other_velocities: List[np.ndarray]) -> float:
@@ -560,8 +1007,7 @@ class CollaborativeTransport:
         """
         energy = 0.0
 
-        for j, (opos, ovel) in enumerate(zip(other_positions,
-                                               other_velocities)):
+        for opos, ovel in zip(other_positions, other_velocities):
             d = float(np.linalg.norm(robot_pos - opos))
             if d < 1e-4:
                 d = 1e-4
@@ -591,7 +1037,7 @@ class CollaborativeTransport:
     # MCMC velocity sampling
     # ======================================================================
 
-    def _mcmc_sample_velocity(self, robot_idx: int) -> np.ndarray:
+    def _mcmc_sample_velocity(self, ns: str) -> np.ndarray:
         """
         Metropolis-Hastings MCMC sampling for one robot.
 
@@ -604,7 +1050,8 @@ class CollaborativeTransport:
         6. Return the mean of the remaining accepted samples.
         """
         with self.data_lock:
-            ns = self.robot_namespaces[robot_idx]
+            if ns not in self.robot_positions:
+                return np.zeros(2)
             robot_pos = self.robot_positions[ns].copy()
             robot_yaw = self.robot_yaws[ns]
             current_vel = self.robot_velocities[ns].copy()
@@ -613,8 +1060,8 @@ class CollaborativeTransport:
             # Build lists of other robots' positions and velocities
             other_positions = []
             other_velocities = []
-            for j, other_ns in enumerate(self.robot_namespaces):
-                if j == robot_idx:
+            for other_ns in self.robot_namespaces:
+                if other_ns == ns:
                     continue
                 other_positions.append(self.robot_positions[other_ns].copy())
                 other_velocities.append(self.robot_velocities[other_ns].copy())
@@ -626,10 +1073,12 @@ class CollaborativeTransport:
 
         # --- Energy helper ---
         def total_energy(vel: np.ndarray) -> float:
-            e_s = self._compute_obstacle_energy(robot_pos, vel, scan)
+            e_s = self._compute_obstacle_energy(
+                robot_pos, vel, scan, robot_yaw
+            )
             e_t = self._compute_object_energy(robot_pos, vel,
                                                object_pos, target_pos)
-            e_st = self._compute_robot_energy(robot_idx, robot_pos, vel,
+            e_st = self._compute_robot_energy(robot_pos, vel,
                                                other_positions,
                                                other_velocities)
             return e_s + e_t + e_st
@@ -678,7 +1127,7 @@ class CollaborativeTransport:
     # Phase behaviours
     # ======================================================================
 
-    def _search_phase(self):
+    def _search_phase(self, expected_epoch):
         """
         SEARCH: random walk with obstacle avoidance until the transport
         object is within sensing_range of *any* robot.
@@ -704,8 +1153,9 @@ class CollaborativeTransport:
                         "[transport] %s found object at distance %.2f  "
                         ">>> phase APPROACH", ns, d,
                     )
-                    with self.phase_lock:
-                        self.phase = TransportPhase.APPROACH
+                    self._set_phase(
+                        TransportPhase.APPROACH, expected_epoch
+                    )
                     return
 
         # Random walk for every robot
@@ -720,23 +1170,23 @@ class CollaborativeTransport:
             cmd.angular.z = rand_ang
 
             # Let the ObstacleAvoidance module keep us safe
-            if ns in self.avoidance_modules:
-                cmd = self.avoidance_modules[ns].apply_avoidance(cmd)
+            with self.data_lock:
+                avoidance = self.avoidance_modules.get(ns)
+            if avoidance is not None:
+                cmd = avoidance.apply_avoidance(cmd)
 
-            if ns in self.cmd_vel_pubs:
-                self.cmd_vel_pubs[ns].publish(cmd)
+            self._publish_command(ns, cmd, expected_epoch)
 
-    def _approach_phase(self):
+    def _approach_phase(self, expected_epoch):
         """
-        APPROACH: all robots navigate toward the transport object using
-        an attractive potential.  Transition to PUSH when every robot is
-        within sensing_range.
+        APPROACH: robots navigate toward the transport object using an
+        attractive potential. Transition once the configured useful subset is
+        ready; late joiners continue converging during PUSH.
         """
         with self.model_lock:
             if self.object_position is None:
                 # Object lost -- fall back to SEARCH
-                with self.phase_lock:
-                    self.phase = TransportPhase.SEARCH
+                self._set_phase(TransportPhase.SEARCH, expected_epoch)
                 rospy.logwarn("[transport] object lost  >>> phase SEARCH")
                 return
             obj_pos = self.object_position.copy()
@@ -748,18 +1198,17 @@ class CollaborativeTransport:
             yaws = {ns: self.robot_yaws[ns]
                     for ns in namespaces if ns in self.robot_yaws}
 
-        all_close = True
+        ready_count = 0
 
         for ns in namespaces:
             if ns not in positions or ns not in yaws:
-                all_close = False
                 continue
 
             diff = obj_pos - positions[ns]
             d = float(np.linalg.norm(diff))
 
-            if d > self.sensing_range:
-                all_close = False
+            if d <= self.sensing_range:
+                ready_count += 1
 
             # Simple attractive velocity toward the object
             if d > 0.01:
@@ -772,18 +1221,22 @@ class CollaborativeTransport:
             cmd = self._holonomic_to_diff_drive(vx, vy, yaws[ns])
 
             # Safety layer
-            if ns in self.avoidance_modules:
-                cmd = self.avoidance_modules[ns].apply_avoidance(cmd)
+            with self.data_lock:
+                avoidance = self.avoidance_modules.get(ns)
+            if avoidance is not None:
+                cmd = avoidance.apply_avoidance(cmd)
 
-            if ns in self.cmd_vel_pubs:
-                self.cmd_vel_pubs[ns].publish(cmd)
+            self._publish_command(ns, cmd, expected_epoch)
 
-        if all_close and len(namespaces) >= 2:
-            rospy.loginfo("[transport] all robots near object  >>> phase PUSH")
-            with self.phase_lock:
-                self.phase = TransportPhase.PUSH
+        required_count = min(len(namespaces), self.min_ready_robots)
+        if required_count > 0 and ready_count >= required_count:
+            rospy.loginfo(
+                "[transport] %d/%d ready near object  >>> phase PUSH",
+                ready_count, len(namespaces),
+            )
+            self._set_phase(TransportPhase.PUSH, expected_epoch)
 
-    def _push_phase(self):
+    def _push_phase(self, expected_epoch):
         """
         PUSH: GRF-based coordinated pushing using MCMC velocity sampling.
         Transition to DONE when the object is within arrival_tolerance
@@ -791,11 +1244,13 @@ class CollaborativeTransport:
         """
         with self.model_lock:
             if self.object_position is None:
-                with self.phase_lock:
-                    self.phase = TransportPhase.SEARCH
+                self._set_phase(TransportPhase.SEARCH, expected_epoch)
                 rospy.logwarn("[transport] object lost during push  >>> SEARCH")
                 return
             obj_pos = self.object_position.copy()
+            obstacles = [
+                point.copy() for point in self.obstacle_positions
+            ]
 
         target_pos = np.array([self.target_x, self.target_y])
         dist_to_target = float(np.linalg.norm(obj_pos - target_pos))
@@ -806,59 +1261,132 @@ class CollaborativeTransport:
                 "[transport] object delivered (dist=%.2f)  >>> phase DONE",
                 dist_to_target,
             )
-            with self.phase_lock:
-                self.phase = TransportPhase.DONE
-            self._stop_all_robots()
+            with self.command_lock:
+                if not self._command_allowed(expected_epoch):
+                    return
+                self.is_running = False
+                self.command_epoch += 1
+                with self.phase_lock:
+                    self.phase = TransportPhase.DONE
+                self._stop_all_robots()
             return
 
-        # MCMC for each robot
         with self.data_lock:
             namespaces = list(self.robot_namespaces)
             yaws = {ns: self.robot_yaws[ns]
                     for ns in namespaces if ns in self.robot_yaws}
 
-        for idx, ns in enumerate(namespaces):
-            if ns not in yaws:
-                continue
-
-            sampled_vel = self._mcmc_sample_velocity(idx)
-            cmd = self._holonomic_to_diff_drive(
-                float(sampled_vel[0]),
-                float(sampled_vel[1]),
-                yaws[ns],
+        if self.transport_planner == 'legacy':
+            self._legacy_push_step(
+                namespaces, yaws, expected_epoch
             )
+            return
 
-            if ns in self.cmd_vel_pubs:
-                self.cmd_vel_pubs[ns].publish(cmd)
+        try:
+            commands, grf_yaws = self._grf_push_commands(
+                namespaces, obj_pos, obstacles, expected_epoch
+            )
+        except Exception as exc:
+            rospy.logwarn_throttle(
+                5.0,
+                "[transport] GRF planner failed ({}); "
+                "using legacy planner for this step".format(exc),
+            )
+            self._legacy_push_step(
+                namespaces, yaws, expected_epoch, fallback=True
+            )
+            return
+
+        self._publish_grf_commands(
+            namespaces, commands, grf_yaws, expected_epoch
+        )
 
     # ======================================================================
     # 10 Hz control loop
     # ======================================================================
 
     def _control_loop(self, event):
+        with self.command_lock:
+            if (
+                not self.is_running
+                or self.is_paused
+                or self.emergency_stop_active
+            ):
+                return
+            expected_epoch = self.command_epoch
+            expected_task_id = self.current_task_id
+
+        with self.data_lock:
+            positions = [
+                (
+                    namespace,
+                    Point(
+                        x=float(self.robot_positions[namespace][0]),
+                        y=float(self.robot_positions[namespace][1]),
+                        z=0.0,
+                    ),
+                )
+                for namespace in self.robot_namespaces
+                if namespace in self.robot_positions
+            ]
+            avoidance_modules = list(self.avoidance_modules.items())
+        for namespace, avoidance in avoidance_modules:
+            avoidance.update_robot_positions(positions)
+
         with self.phase_lock:
             phase = self.phase
 
         if phase == TransportPhase.SEARCH:
-            self._search_phase()
+            self._search_phase(expected_epoch)
         elif phase == TransportPhase.APPROACH:
-            self._approach_phase()
+            self._approach_phase(expected_epoch)
         elif phase == TransportPhase.PUSH:
-            self._push_phase()
+            self._push_phase(expected_epoch)
         elif phase == TransportPhase.DONE:
             pass  # remain idle
         elif phase == TransportPhase.IDLE:
             pass
 
-        # Always publish status and visualisation
-        self._publish_status(phase)
+        with self.phase_lock:
+            phase = self.phase
+
+        with self.command_lock:
+            if self.current_task_id != expected_task_id:
+                return
+            if phase == TransportPhase.DONE:
+                with self.phase_lock:
+                    live_phase = self.phase
+                if (
+                    live_phase != TransportPhase.DONE
+                    or self.is_running
+                    or self.command_epoch != expected_epoch + 1
+                ):
+                    return
+            elif self.command_epoch != expected_epoch:
+                return
+
+            # Keep task identity and lifecycle state stable through the status
+            # publish. A new start cannot pair this cycle's terminal phase
+            # with a later task ID.
+            self._publish_status(
+                phase,
+                task_id=expected_task_id,
+                paused=self.is_paused,
+            )
+
+        # Status is correlated above; visualisation may safely follow unlocked.
         self._publish_markers(phase)
 
     # ======================================================================
     # Status publishing
     # ======================================================================
 
-    def _publish_status(self, phase: TransportPhase):
+    def _publish_status(
+        self,
+        phase: TransportPhase,
+        task_id=None,
+        paused=None,
+    ):
         with self.model_lock:
             obj = self.object_position.tolist() if self.object_position is not None else [0, 0]
 
@@ -876,11 +1404,15 @@ class CollaborativeTransport:
                 }
 
         status = {
+            'task_id': self.current_task_id if task_id is None else task_id,
+            'paused': self.is_paused if paused is None else paused,
             'phase': phase.value,
             'object_pos': {'x': round(obj[0], 3), 'y': round(obj[1], 3)},
             'target_pos': {'x': target[0], 'y': target[1]},
             'distance_to_target': round(dist, 3),
             'progress': round(max(0.0, 1.0 - dist / max(dist + 0.01, 1.0)), 3),
+            'planner': self._active_planner,
+            'grf_mcmc_iterations': self._active_grf_iterations,
             'robot_assignments': assignments,
         }
         self.status_pub.publish(String(data=json.dumps(status)))

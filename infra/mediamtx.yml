@@ -1,0 +1,36 @@
+logLevel: info
+logDestinations: [stdout]
+
+authMethod: http
+authHTTPAddress: http://backend:44336/api/viewer/auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+api: false
+metrics: false
+pprof: false
+playback: false
+
+rtsp: true
+rtspTransports: [tcp]
+rtspAddress: :8554
+rtmp: false
+hls: false
+srt: false
+
+webrtc: true
+webrtcAddress: :8889
+webrtcAllowOrigins: ['https://rs.zerav.la']
+webrtcLocalUDPAddress: :8189
+webrtcAdditionalHosts: []
+webrtcICEServers2: []
+
+pathDefaults:
+  source: publisher
+  overridePublisher: false
+  maxReaders: 1
+
+paths:
+  all_others:

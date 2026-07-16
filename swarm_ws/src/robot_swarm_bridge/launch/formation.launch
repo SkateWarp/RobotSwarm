@@ -22,6 +22,16 @@
   <arg name="gui" default="true"/>
   <arg name="rviz" default="false"/>
 
+  <!-- Parameters are addressed to the controller launched by swarm_main. -->
+  <param name="/formation_control/formation_type" value="$(arg formation_type)"/>
+  <param name="/formation_control/movement_mode" value="$(arg movement_mode)"/>
+  <param name="/formation_control/spacing" value="$(arg spacing)"/>
+  <param name="/formation_control/centroid_speed" value="$(arg centroid_speed)"/>
+  <param name="/formation_control/centroid_path" value="$(arg centroid_path)"/>
+  <param name="/formation_control/max_linear_vel" value="$(arg max_linear_vel)"/>
+  <param name="/formation_control/max_angular_vel" value="$(arg max_angular_vel)"/>
+  <param name="/formation_control/path_radius" value="$(arg path_radius)"/>
+
   <!-- Include main swarm -->
   <include file="$(find robot_swarm_bridge)/launch/swarm_main.launch">
     <arg name="robot_count" value="$(arg robot_count)"/>
@@ -29,19 +39,5 @@
     <arg name="gui" value="$(arg gui)"/>
     <arg name="rviz" value="$(arg rviz)"/>
   </include>
-
-  <!-- Formation Controller -->
-  <node pkg="robot_swarm_bridge" type="formation_control.py" name="formation_control"
-        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
-    <param name="robot_count" value="$(arg robot_count)"/>
-    <param name="formation_type" value="$(arg formation_type)"/>
-    <param name="movement_mode" value="$(arg movement_mode)"/>
-    <param name="spacing" value="$(arg spacing)"/>
-    <param name="centroid_speed" value="$(arg centroid_speed)"/>
-    <param name="centroid_path" value="$(arg centroid_path)"/>
-    <param name="max_linear_vel" value="$(arg max_linear_vel)"/>
-    <param name="max_angular_vel" value="$(arg max_angular_vel)"/>
-    <param name="path_radius" value="$(arg path_radius)"/>
-  </node>
 
 </launch>

@@ -5,22 +5,38 @@ using SwarmBackend.Routes;
 using SwarmBackend.Services;
 using System.Text.Json;
 
-// trigger
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddLogging(logging =>
+
+var corsOrigins = builder.Configuration
+    .GetSection("Cors:Origins")
+    .GetChildren()
+    .Select(origin => origin.Value?.TrimEnd('/'))
+    .Where(origin => !string.IsNullOrWhiteSpace(origin))
+    .Cast<string>()
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
+if (corsOrigins.Length == 0 && builder.Environment.IsDevelopment())
 {
-    logging.ClearProviders();
-    logging.AddConsole();
-    logging.AddDebug();
-    logging.SetMinimumLevel(LogLevel.Debug);
-});
+    corsOrigins =
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ];
+}
+else if (corsOrigins.Length == 0)
+{
+    throw new InvalidOperationException(
+        "Cors:Origins must contain at least one frontend origin outside Development.");
+}
+
 builder.Services
     .AddDbContext<DataContext>(options => { options.UseNpgsql(builder.Configuration.GetConnectionString("Default")); });
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddAuthentication();
 builder.Services.AddAuthorization();
 builder.Services.GetConfigureJwt(builder.Configuration);
 builder.Services.AddControllers();
@@ -32,57 +48,57 @@ builder.Services.AddScoped<ITaskLogService, TaskLogService>();
 builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
 builder.Services.AddScoped<IRobotGroupService, RobotGroupService>();
+builder.Services.AddScoped<WorkerCommandService>();
+builder.Services.AddHostedService<SimulationSessionScheduler>();
 builder.Services.AddSignalR(hubOptions =>
 {
-    hubOptions.EnableDetailedErrors = true;
+    hubOptions.EnableDetailedErrors = builder.Environment.IsDevelopment();
     hubOptions.KeepAliveInterval = TimeSpan.FromSeconds(15);
     hubOptions.HandshakeTimeout = TimeSpan.FromSeconds(15);
 })
 .AddJsonProtocol(options =>
 {
-    // Configure to use camelCase for all JSON serialization
     options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     options.PayloadSerializerOptions.PropertyNameCaseInsensitive = true;
 });
-
-builder.Services.AddLogging(logging =>
+builder.Services.AddCors(options =>
 {
-    logging.ClearProviders();
-    logging.AddConsole(options =>
+    options.AddPolicy("Frontend", policy =>
     {
-        options.FormatterName = "Simple";
+        policy.WithOrigins(corsOrigins)
+            .AllowAnyMethod()
+            .AllowAnyHeader()
+            .AllowCredentials();
     });
-    logging.AddDebug();
-    logging.SetMinimumLevel(LogLevel.Trace);
-    logging.AddFilter("Microsoft.AspNetCore.SignalR", LogLevel.Debug);
-    logging.AddFilter("Microsoft.AspNetCore.Http.Connections", LogLevel.Debug);
 });
+builder.Services.AddHealthChecks();
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-builder.Services.ConfigureSwagger();
-builder.Services.AddCors(
-    options =>
-    {
-        options.AddPolicy("AllowAll",
-            policyBuilder =>
-            {
-                policyBuilder
-                    //.AllowAnyOrigin()
-                    .SetIsOriginAllowed(_ => true)
-                    .AllowAnyMethod()
-                    .AllowAnyHeader()
-                    .AllowCredentials();
-            });
-    }
-);
-
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.ConfigureSwagger();
+}
 
 var app = builder.Build();
-app.UseCors("AllowAll");
+var legacyControlEnabled = app.Configuration.GetValue<bool>("LegacyControl:Enabled");
+if (legacyControlEnabled && !app.Environment.IsDevelopment())
+{
+    app.Logger.LogWarning(
+        "Legacy ROS control is enabled for rollout compatibility. Disable it after the session workspace is live.");
+}
+
+await using (var scope = app.Services.CreateAsyncScope())
+{
+    var dataContext = scope.ServiceProvider.GetRequiredService<DataContext>();
+    await dataContext.Database.MigrateAsync();
+    await AdminBootstrapper.EnsureAdminExists(
+        dataContext,
+        app.Configuration,
+        app.Logger);
+}
+
 app.UseRouting();
+app.UseCors("Frontend");
 app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(120),
@@ -90,40 +106,16 @@ app.UseWebSockets(new WebSocketOptions
 app.UseAuthentication();
 app.UseAuthorization();
 
-using (var scope = app.Services.CreateScope())
+if (app.Environment.IsDevelopment())
 {
-    var scopedContext = scope.ServiceProvider.GetRequiredService<DataContext>();
-    var accountService = scope.ServiceProvider.GetRequiredService<IAccountService>();
-
-
-    if (!accountService.GetAll(null, null).GetAwaiter().GetResult().Any())
-    {
-        await accountService.Create(Seed.GetAccount());
-    }
-
-
-    scopedContext.SaveChanges();
+    app.UseSwagger();
+    app.UseSwaggerUI();
 }
-
-
-
-
-
-// Configure the HTTP request pipeline.
-//if (app.Environment.IsDevelopment())
-//{
-app.UseSwagger();
-app.UseSwaggerUI();
-//}
-
-// HTTPS is handled by Cloudflare tunnel — no redirect needed at backend level
-// app.UseHttpsRedirection();
 
 app.MapGroup("Accounts")
     .MapAccount();
 app.MapGroup("Robots")
-    .MapRobot()
-    .MapGet("/hubs/robot/test", () => "SignalR Hub is running");
+    .MapRobot();
 app.MapGroup("Sensors")
     .MapSensor();
 app.MapGroup("SensorReadings")
@@ -134,37 +126,25 @@ app.MapGroup("TaskLog")
     .MapTaskLog();
 app.MapGroup("RobotGroups")
     .MapRobotGroup();
+app.MapGroup("/api/sessions")
+    .MapSimulationSession()
+    .MapSessionControl();
+app.MapGroup("/api/workers")
+    .MapComputeWorker();
+app.MapGroup("/api/viewer")
+    .MapViewerAuth();
 
-app.MapGroup("WebSocket")
-    .MapWebSocket();
+app.MapHub<SessionHub>("/hubs/session");
+app.MapHub<WorkerHub>("/hubs/worker");
+if (legacyControlEnabled)
+{
+    app.MapGroup("WebSocket")
+        .MapWebSocket();
+    app.MapHub<RobotHub>("/hubs/robot");
+    app.MapGet("/hubs/robot/test", () => "Legacy SignalR Hub is running");
+}
 
-// Add UseEndpoints
-app.MapHub<RobotHub>("/hubs/robot");
-app.MapGet("/hubs/robot/test", () => "SignalR Hub is running");
+app.MapHealthChecks("/health");
 app.MapControllers();
-
-// app.Use(async (context, next) =>
-// {
-//     if (context.Request.Path == "/ws")
-//     {
-//         if (context.WebSockets.IsWebSocketRequest)
-//         {
-//             var webSocket = await context.WebSockets.AcceptWebSocketAsync();
-//             var hubContext = context.RequestServices.GetRequiredService<IHubContext<RobotHub>>();
-
-//             // Handle the WebSocket connection and forward messages to SignalR
-//             await  HandleWebSocketConnection(webSocket, hubContext);
-//         }
-//         else
-//         {
-//             context.Response.StatusCode = 400; // Bad Request
-//         }
-//     }
-//     else
-//     {
-//         await next();
-//     }
-// });
-
 
 app.Run();

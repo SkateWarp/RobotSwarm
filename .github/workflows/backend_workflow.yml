@@ -1,38 +1,126 @@
 name: Deploy Backend and Database
+
 on:
-  push:
+  workflow_run:
+    workflows: ["Check project"]
     branches: [main]
-    paths:
-      - "SwarmBackend/**"
-      - "swarm_ws/**"
-      - "docker-compose.prod.yml"
+    types: [completed]
+
+concurrency:
+  group: production-backend
+  cancel-in-progress: false
+
 jobs:
-  deploy:
-    runs-on: self-hosted
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.changes.outputs.deploy }}
     steps:
-      - uses: actions/checkout@v3
-      - name: Build Backend Docker image
+      - name: Require successful CI
+        if: github.event.workflow_run.conclusion != 'success'
         run: |
-          docker build -t swarmbackend:latest -f SwarmBackend/Dockerfile .
+          echo "The project checks did not pass; backend deployment is blocked." >&2
+          exit 1
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+
+      - name: Check backend deployment scope
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git rev-parse HEAD^ >/dev/null 2>&1
+          then
+            changed_files="$(git diff --name-only HEAD^ HEAD)"
+          else
+            changed_files="$(git ls-tree -r --name-only HEAD)"
+          fi
+
+          deploy=false
+          while IFS= read -r path
+          do
+            case "$path" in
+              SwarmBackend/*|infra/*|docker-compose.prod.yml|.dockerignore|.github/workflows/backend_workflow.yml)
+                deploy=true
+                break
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: scope
+    if: needs.scope.outputs.deploy == 'true'
+    runs-on: [self-hosted, backend-prod]
+    environment: production
+    defaults:
+      run:
+        working-directory: _deploy/backend-source
+    env:
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      BACKEND_IMAGE: swarmbackend:${{ github.event.workflow_run.head_sha }}
+      AppSettings__Secret: ${{ secrets.APPSETTINGS_SECRET }}
+      AppSettings__Issuer: https://robot.zerav.la
+      Cors__Origins__0: https://rs.zerav.la
+      LegacyControl__Enabled: "true"
+      Viewer__PublicBaseUrl: ${{ vars.VIEWER_PUBLIC_BASE_URL }}
+      Viewer__WorkerPublishingEnabled: "false"
+      BootstrapAdmin__Email: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+      BootstrapAdmin__Password: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+      MEDIA_PUBLISH_IP: ${{ vars.MEDIA_PUBLISH_IP }}
+      MEDIA_WEBRTC_IP: ${{ vars.MEDIA_WEBRTC_IP }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: _deploy/backend-source
+
+      - name: Check production configuration
+        run: |
+          test -n "$DB_USER"
+          test -n "$DB_PASSWORD"
+          test -n "$DB_NAME"
+          test -n "$AppSettings__Secret"
+
+      - name: Build Backend Docker image
+        run: docker build -t "$BACKEND_IMAGE" -f SwarmBackend/Dockerfile .
+
       - name: Deploy with Docker Compose
         run: |
-          docker-compose -f docker-compose.prod.yml down
-          docker-compose -f docker-compose.prod.yml up -d
-      # - name: Check logs
-      #   run: |
-      #     echo "Backend Logs:"
-      #     docker-compose -f docker-compose.prod.yml logs backend
-      #     echo "Database Logs:"
-      #     docker-compose -f docker-compose.prod.yml logs db
+          previous_image="$(docker inspect backend_prod --format '{{.Config.Image}}' 2>/dev/null || true)"
+          compose_service="$(
+            docker inspect backend_prod \
+              --format '{{index .Config.Labels "com.docker.compose.service"}}' \
+              2>/dev/null || true
+          )"
+
+          if test -n "$previous_image" && test "$compose_service" != "backend"
+          then
+            echo "Adopting the backend container created by the previous deployment workflow."
+            docker stop backend_prod
+            docker rm backend_prod
+          fi
+
+          if ! docker compose -f docker-compose.prod.yml up -d --remove-orphans --wait --wait-timeout 180 db backend media
+          then
+            docker compose -f docker-compose.prod.yml ps
+            docker compose -f docker-compose.prod.yml logs --tail=200 backend media
+            if test -n "$previous_image"
+            then
+              echo "Restoring the backend image that was active before this deployment."
+              BACKEND_IMAGE="$previous_image" \
+                docker compose -f docker-compose.prod.yml up -d --no-deps --wait --wait-timeout 180 backend
+            fi
+            exit 1
+          fi
+
       - name: Prune old Docker images
-        run: docker system prune -af
-
-      - name: Clean up old log files
-        run: |
-          echo "Cleaning up Docker logs older than 7 days..."
-          docker system df
-          journalctl --vacuum-time=7d 2>/dev/null || true
-          echo "Log cleanup completed"
-
-      - name: Give permission to script
-        run: find . -type f -name "*.py" -exec chmod +x {} \;
+        run: docker image prune -f --filter "until=168h"

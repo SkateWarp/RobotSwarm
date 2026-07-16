@@ -84,6 +84,60 @@ namespace SwarmBackend.Migrations
                     b.ToTable("Accounts");
                 });
 
+            modelBuilder.Entity("SwarmBackend.Entities.ComputeWorker", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<JsonDocument>("Capabilities")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("CredentialCreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("CredentialHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime?>("CredentialRevokedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("ImageVersion")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("LastHeartbeatAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<int>("MaxConcurrentSessions")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int>("State")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.HasIndex("State", "LastHeartbeatAt");
+
+                    b.ToTable("ComputeWorkers");
+                });
+
             modelBuilder.Entity("SwarmBackend.Entities.RefreshToken", b =>
                 {
                     b.Property<int>("Id")
@@ -259,6 +313,120 @@ namespace SwarmBackend.Migrations
                     b.ToTable("SensorReadings");
                 });
 
+            modelBuilder.Entity("SwarmBackend.Entities.SessionRobot", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("SimulationSessionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("State")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SimulationSessionId", "Namespace")
+                        .IsUnique();
+
+                    b.HasIndex("SimulationSessionId", "Ordinal")
+                        .IsUnique();
+
+                    b.HasIndex("SimulationSessionId", "RuntimeId")
+                        .IsUnique();
+
+                    b.ToTable("SessionRobots");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.SimulationSession", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AccountId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ArenaVersion")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid?>("ComputeWorkerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<int>("DesiredRobotCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("FailureReason")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<bool>("IsEmergencyStopped")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<int>("State")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("StoppedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("WorkerImageVersion")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId")
+                        .IsUnique()
+                        .HasFilter("\"State\" < 6");
+
+                    b.HasIndex("ComputeWorkerId");
+
+                    b.HasIndex("State", "CreatedAt", "Id");
+
+                    b.ToTable("SimulationSessions", t =>
+                        {
+                            t.HasCheckConstraint("CK_SimulationSessions_DesiredRobotCount_Positive", "\"DesiredRobotCount\" > 0");
+                        });
+                });
+
             modelBuilder.Entity("SwarmBackend.Entities.TaskLog", b =>
                 {
                     b.Property<int>("Id")
@@ -293,6 +461,60 @@ namespace SwarmBackend.Migrations
                     b.HasIndex("TaskTemplateId");
 
                     b.ToTable("TaskLogs");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.TaskRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("CommandRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<JsonDocument>("Parameters")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<double>("Progress")
+                        .HasColumnType("double precision");
+
+                    b.Property<JsonDocument>("Result")
+                        .HasColumnType("jsonb");
+
+                    b.Property<Guid>("SimulationSessionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<int>("State")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SimulationSessionId", "CreatedAt");
+
+                    b.ToTable("TaskRuns", t =>
+                        {
+                            t.HasCheckConstraint("CK_TaskRuns_Progress_Range", "\"Progress\" >= 0 AND \"Progress\" <= 1");
+                        });
                 });
 
             modelBuilder.Entity("SwarmBackend.Entities.TaskTemplate", b =>
@@ -355,6 +577,134 @@ namespace SwarmBackend.Migrations
                         });
                 });
 
+            modelBuilder.Entity("SwarmBackend.Entities.ViewerLease", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AccountId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("RobotRuntimeId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("SimulationSessionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Source")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("SimulationSessionId", "ExpiresAt");
+
+                    b.HasIndex("SimulationSessionId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.ToTable("ViewerLeases");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.WorkerCommand", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("AcknowledgedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<Guid?>("ComputeWorkerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CorrelationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("DispatchedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<JsonDocument>("Payload")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<JsonDocument>("Result")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("SimulationSessionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("State")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid?>("TaskRunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ComputeWorkerId");
+
+                    b.HasIndex("TaskRunId");
+
+                    b.HasIndex("SimulationSessionId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("SimulationSessionId", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("WorkerCommands");
+                });
+
             modelBuilder.Entity("SwarmBackend.Entities.RefreshToken", b =>
                 {
                     b.HasOne("SwarmBackend.Entities.Account", "Account")
@@ -405,6 +755,35 @@ namespace SwarmBackend.Migrations
                     b.Navigation("Sensor");
                 });
 
+            modelBuilder.Entity("SwarmBackend.Entities.SessionRobot", b =>
+                {
+                    b.HasOne("SwarmBackend.Entities.SimulationSession", "SimulationSession")
+                        .WithMany("Robots")
+                        .HasForeignKey("SimulationSessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SimulationSession");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.SimulationSession", b =>
+                {
+                    b.HasOne("SwarmBackend.Entities.Account", "Account")
+                        .WithMany("SimulationSessions")
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SwarmBackend.Entities.ComputeWorker", "ComputeWorker")
+                        .WithMany("Sessions")
+                        .HasForeignKey("ComputeWorkerId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Account");
+
+                    b.Navigation("ComputeWorker");
+                });
+
             modelBuilder.Entity("SwarmBackend.Entities.TaskLog", b =>
                 {
                     b.HasOne("SwarmBackend.Entities.RobotGroup", null)
@@ -420,11 +799,77 @@ namespace SwarmBackend.Migrations
                     b.Navigation("TaskTemplate");
                 });
 
+            modelBuilder.Entity("SwarmBackend.Entities.TaskRun", b =>
+                {
+                    b.HasOne("SwarmBackend.Entities.SimulationSession", "SimulationSession")
+                        .WithMany("TaskRuns")
+                        .HasForeignKey("SimulationSessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SimulationSession");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.ViewerLease", b =>
+                {
+                    b.HasOne("SwarmBackend.Entities.Account", "Account")
+                        .WithMany("ViewerLeases")
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SwarmBackend.Entities.SimulationSession", "SimulationSession")
+                        .WithMany("ViewerLeases")
+                        .HasForeignKey("SimulationSessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Account");
+
+                    b.Navigation("SimulationSession");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.WorkerCommand", b =>
+                {
+                    b.HasOne("SwarmBackend.Entities.ComputeWorker", "ComputeWorker")
+                        .WithMany("Commands")
+                        .HasForeignKey("ComputeWorkerId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("SwarmBackend.Entities.SimulationSession", "SimulationSession")
+                        .WithMany("Commands")
+                        .HasForeignKey("SimulationSessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SwarmBackend.Entities.TaskRun", "TaskRun")
+                        .WithMany("Commands")
+                        .HasForeignKey("TaskRunId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("ComputeWorker");
+
+                    b.Navigation("SimulationSession");
+
+                    b.Navigation("TaskRun");
+                });
+
             modelBuilder.Entity("SwarmBackend.Entities.Account", b =>
                 {
                     b.Navigation("RefreshTokens");
 
                     b.Navigation("Robots");
+
+                    b.Navigation("SimulationSessions");
+
+                    b.Navigation("ViewerLeases");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.ComputeWorker", b =>
+                {
+                    b.Navigation("Commands");
+
+                    b.Navigation("Sessions");
                 });
 
             modelBuilder.Entity("SwarmBackend.Entities.Robot", b =>
@@ -439,9 +884,25 @@ namespace SwarmBackend.Migrations
                     b.Navigation("TaskLogs");
                 });
 
+            modelBuilder.Entity("SwarmBackend.Entities.SimulationSession", b =>
+                {
+                    b.Navigation("Commands");
+
+                    b.Navigation("Robots");
+
+                    b.Navigation("TaskRuns");
+
+                    b.Navigation("ViewerLeases");
+                });
+
             modelBuilder.Entity("SwarmBackend.Entities.TaskLog", b =>
                 {
                     b.Navigation("Robots");
+                });
+
+            modelBuilder.Entity("SwarmBackend.Entities.TaskRun", b =>
+                {
+                    b.Navigation("Commands");
                 });
 #pragma warning restore 612, 618
         }

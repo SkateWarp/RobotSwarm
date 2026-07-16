@@ -21,7 +21,7 @@ from geometry_msgs.msg import Pose
 import tf.transformations as tft
 
 
-def get_robot_urdf(model='waffle'):
+def get_robot_urdf(model='burger'):
     """Process TurtleBot3 xacro into URDF string"""
     rospack = rospkg.RosPack()
     tb3_desc = rospack.get_path('turtlebot3_description')
@@ -83,7 +83,7 @@ def main():
     start_index = rospy.get_param('~start_index', 0)
     pattern = rospy.get_param('~spawn_pattern', 'grid')
     spacing = rospy.get_param('~spacing', 1.0)
-    model = rospy.get_param('~model', 'waffle')
+    model = rospy.get_param('~model', 'burger')
 
     rospy.loginfo(f"Spawning {robot_count} robots starting at index {start_index}")
 

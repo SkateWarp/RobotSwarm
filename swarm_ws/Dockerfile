@@ -10,22 +10,24 @@ ENV ROS_PACKAGE=robot_swarm_bridge
 RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-catkin-tools \
+    ros-noetic-actionlib \
+    ros-noetic-actionlib-msgs \
     ros-noetic-tf \
     ros-noetic-gazebo-ros \
     ros-noetic-gazebo-ros-pkgs \
+    ros-noetic-robot-state-publisher \
     ros-noetic-turtlebot3 \
     ros-noetic-turtlebot3-simulations \
     ros-noetic-nav-msgs \
     ros-noetic-sensor-msgs \
     ros-noetic-geometry-msgs \
     ros-noetic-visualization-msgs \
+    ros-noetic-xacro \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN pip3 install \
-    websockets \
-    asyncio \
-    pyyaml
+COPY src/robot_swarm_bridge/requirements.txt /tmp/robot_swarm_requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/robot_swarm_requirements.txt
 
 # Create catkin workspace
 RUN mkdir -p ${ROS_WS}/src
@@ -45,15 +47,12 @@ RUN echo '#!/bin/bash\n\
 set -e\n\
 source /opt/ros/noetic/setup.bash\n\
 source ${ROS_WS}/devel/setup.bash\n\
-export TURTLEBOT3_MODEL=${TURTLEBOT3_MODEL:-waffle}\n\
+export TURTLEBOT3_MODEL=${TURTLEBOT3_MODEL:-burger}\n\
 export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}\n\
 exec "$@"' > /ros_entrypoint.sh && chmod +x /ros_entrypoint.sh
-
-# Expose ROS Master port
-EXPOSE 11311
 
 # Set entrypoint
 ENTRYPOINT ["/ros_entrypoint.sh"]
 
 # Default command
-CMD ["roslaunch", "robot_swarm_bridge", "swarm_main.launch", "robot_count:=0"]
+CMD ["roslaunch", "robot_swarm_bridge", "swarm_main.launch", "robot_count:=0", "robot_model:=burger", "gui:=false"]
