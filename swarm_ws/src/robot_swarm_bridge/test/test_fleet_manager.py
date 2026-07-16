@@ -7,6 +7,7 @@ import sys
 import threading
 import types
 import unittest
+from unittest import mock
 
 
 SCRIPT = (
@@ -153,6 +154,7 @@ def make_manager(max_robots=0):
     manager._lock = threading.Lock()
     manager._spawn_lock = threading.Lock()
     manager._next_index = 0
+    manager._retired_robot_ids = set()
     manager.robot_list_pub = Publisher()
     return manager
 
@@ -231,6 +233,84 @@ class FleetManagerSpawnTests(unittest.TestCase):
             [0, 1],
             sorted(len(result) for result in results.values()),
         )
+
+
+class FleetManagerDeleteTests(unittest.TestCase):
+    def test_stale_model_state_does_not_restore_deleted_robots(self):
+        manager = make_manager()
+        manager.robots = {
+            "tb3_0": FLEET_MANAGER.RobotRecord(
+                "tb3_0", make_pose(-0.3, 0.0)
+            ),
+            "tb3_1": FLEET_MANAGER.RobotRecord(
+                "tb3_1", make_pose(0.3, 0.0)
+            ),
+        }
+
+        def delete(robot_name):
+            with manager._lock:
+                manager.robots.pop(robot_name, None)
+            return True
+
+        manager.delete_single_robot = delete
+        stale_snapshot = Message(
+            name=["ground_plane", "tb3_0", "tb3_1"],
+            pose=[
+                make_pose(0.0, 0.0),
+                make_pose(-0.3, 0.0),
+                make_pose(0.3, 0.0),
+            ],
+        )
+
+        self.assertEqual(2, manager.delete_robots())
+        manager._on_model_states(stale_snapshot)
+
+        self.assertEqual([], manager.get_robot_names())
+        self.assertEqual({"tb3_0", "tb3_1"}, manager._retired_robot_ids)
+
+        manager._on_model_states(
+            Message(name=["ground_plane"], pose=[make_pose(0.0, 0.0)])
+        )
+        manager._on_model_states(stale_snapshot)
+
+        self.assertEqual([], manager.get_robot_names())
+        self.assertEqual({"tb3_0", "tb3_1"}, manager._retired_robot_ids)
+
+    def test_successful_spawn_reactivates_a_retired_robot_id(self):
+        manager = make_manager()
+        manager._retired_robot_ids.add("tb3_0")
+        manager._robot_description_xml = "<robot />"
+        manager._spawn_srv = lambda _request: Message(
+            success=True, status_message=""
+        )
+        manager._launch_state_publisher = lambda _robot_name: None
+
+        with mock.patch.object(
+            FLEET_MANAGER.rospy,
+            "set_param",
+            create=True,
+        ):
+            spawned = manager.spawn_single_robot(
+                "tb3_0", make_pose(0.0, 0.0)
+            )
+
+        self.assertTrue(spawned)
+        self.assertEqual(["tb3_0"], manager.get_robot_names())
+        self.assertEqual(set(), manager._retired_robot_ids)
+
+    def test_failed_gazebo_delete_keeps_the_robot_active(self):
+        manager = make_manager()
+        manager.robots["tb3_0"] = FLEET_MANAGER.RobotRecord(
+            "tb3_0", make_pose(0.0, 0.0)
+        )
+        manager._delete_srv = lambda _request: Message(
+            success=False,
+            status_message="model is busy",
+        )
+
+        self.assertEqual(0, manager.delete_robots(["tb3_0"]))
+        self.assertEqual(["tb3_0"], manager.get_robot_names())
+        self.assertEqual(set(), manager._retired_robot_ids)
 
 
 if __name__ == "__main__":
