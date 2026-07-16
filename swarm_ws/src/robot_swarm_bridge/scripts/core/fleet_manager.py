@@ -91,6 +91,7 @@ class FleetManager:
         self._lock = threading.Lock()
         self._spawn_lock = threading.Lock()
         self._next_index: int = 0  # monotonically increasing robot index
+        self._retired_robot_ids = set()
 
         # ----- prepare URDF template once -----
         self._robot_description_xml: str = self._process_urdf()
@@ -350,6 +351,7 @@ class FleetManager:
         record = RobotRecord(robot_name, pose)
         record.state_pub_proc = proc
         with self._lock:
+            self._retired_robot_ids.discard(robot_name)
             self.robots[robot_name] = record
 
         rospy.loginfo("Spawned robot '%s' at (%.2f, %.2f).",
@@ -397,6 +399,7 @@ class FleetManager:
             resp = self._delete_srv(req)
             if not resp.success:
                 rospy.logwarn("Gazebo delete for '%s': %s", robot_name, resp.status_message)
+                return False
         except rospy.ServiceException as exc:
             rospy.logerr("Delete service call failed for '%s': %s", robot_name, exc)
             return False
@@ -525,11 +528,21 @@ class FleetManager:
             if not robot_ids:
                 with self._lock:
                     robot_ids = list(self.robots.keys())
+            else:
+                robot_ids = list(robot_ids)
+
+            # Gazebo can deliver old model-state snapshots after deletion.
+            # Ignore those IDs until this manager explicitly spawns them again.
+            with self._lock:
+                self._retired_robot_ids.update(robot_ids)
 
             deleted = 0
             for rid in robot_ids:
                 if self.delete_single_robot(rid):
                     deleted += 1
+                else:
+                    with self._lock:
+                        self._retired_robot_ids.discard(rid)
         self._publish_robot_list(None)
         return deleted
 
@@ -635,7 +648,11 @@ class FleetManager:
 
                 # Auto-detect new tb3_* models spawned externally
                 for i, model_name in enumerate(msg.name):
-                    if model_name.startswith('tb3_') and model_name not in self.robots:
+                    if (
+                        model_name.startswith('tb3_')
+                        and model_name not in self.robots
+                        and model_name not in self._retired_robot_ids
+                    ):
                         rospy.loginfo(
                             "Auto-detected externally spawned robot: %s",
                             model_name,
