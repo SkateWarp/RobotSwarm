@@ -69,11 +69,18 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Prepare ROS test environment
+        run: |
+          python3 -m venv /tmp/robotswarm-ros-ci
+          /tmp/robotswarm-ros-ci/bin/pip install \
+            --disable-pip-version-check \
+            numpy==1.26.4
+
       - name: Test swarm algorithms
         run: |
           PYTHONDONTWRITEBYTECODE=1 \
           PYTHONPATH=swarm_ws/src/robot_swarm_bridge/src:swarm_ws/src/robot_swarm_bridge/scripts \
-            python3 -m unittest discover \
+            /tmp/robotswarm-ros-ci/bin/python -m unittest discover \
               -s swarm_ws/src/robot_swarm_bridge/test \
               -p "test_*.py" \
               -v
