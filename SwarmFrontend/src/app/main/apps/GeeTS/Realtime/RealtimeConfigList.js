@@ -378,7 +378,7 @@ function RealtimeConfigList() {
             </div>
 
             <div className="pb-32">
-                <VncViewer url="wss://websocket.zerav.la" username="rs" password="123456789" />
+                <VncViewer />
             </div>
             <div className="p-2 pb-8 flex flex-col">
                 {/* Running Commands Section */}

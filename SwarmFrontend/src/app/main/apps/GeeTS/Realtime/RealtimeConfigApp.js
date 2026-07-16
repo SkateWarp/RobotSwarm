@@ -1,10 +1,8 @@
 /* eslint-disable */
 import withReducer from "app/store/withReducer";
-import { useEffect, useRef } from "react";
-import { useDispatch } from "react-redux";
-import RealtimeConfigListImproved from "./RealtimeConfigListImproved";
+import { useRef } from "react";
+import SimulationWorkspace from "./SimulationWorkspace";
 import reducer from "./store";
-import { getTasks } from "./store/realtimeConfigSlice";
 import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAppStyle";
 import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHeader";
 
@@ -12,12 +10,7 @@ import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHead
 const Root = useGeneralAppStyle();
 
 function RealtimeConfigApp() {
-    const dispatch = useDispatch();
     const pageLayout = useRef(null);
-
-    useEffect(() => {
-        dispatch(getTasks());
-    }, []);
 
     return (
         <>
@@ -30,7 +23,7 @@ function RealtimeConfigApp() {
                         hasSidebar={false}
                     />
                 }
-                content={<RealtimeConfigListImproved />}
+                content={<SimulationWorkspace />}
                 ref={pageLayout}
                 innerScroll
             />

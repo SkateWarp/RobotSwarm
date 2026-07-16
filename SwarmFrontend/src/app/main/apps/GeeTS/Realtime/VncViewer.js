@@ -4,15 +4,20 @@ import { VncScreen } from "react-vnc";
 const VncViewer = ({ url, username, password }) => {
     const ref = useRef();
 
+    if (!url) {
+        return null;
+    }
+
     return (
         <VncScreen
             url={url}
-            rfbOptions={{
-                credentials: {
-                    username,
-                    password,
-                },
-            }}
+            rfbOptions={
+                username || password
+                    ? {
+                          credentials: { username, password },
+                      }
+                    : {}
+            }
             scaleViewport
             background="#000000"
             style={{

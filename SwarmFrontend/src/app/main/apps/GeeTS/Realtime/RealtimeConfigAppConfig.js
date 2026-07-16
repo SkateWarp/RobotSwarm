@@ -10,7 +10,7 @@ const RealtimeConfigAppConfig = {
         },
     },
 
-    auth: authRoles.admin,
+    auth: authRoles.user,
 
     routes: [
         {
