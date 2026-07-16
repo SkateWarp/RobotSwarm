@@ -107,6 +107,13 @@ the current live values there before the tracked `.env` removal reaches
 `main`. Media addresses and the future public viewer URL are repository
 environment variables rather than secrets.
 
+`robot.zerav.la` terminates TLS at Nginx Proxy Manager. Set the repository
+variable `BACKEND_PUBLISH_IP` to the backend VM's fixed LAN address so NPM can
+proxy to `http://10.0.0.126:44336`. Port 44336 must stay LAN-only and should be
+accepted only from the NPM host. PostgreSQL is not published by Compose and
+must remain private. Keep WebSocket support enabled on the NPM proxy host so
+the SignalR hubs can upgrade their connections.
+
 Gazebo Classic and ROS Noetic are kept for compatibility with the current
 project. They should stay pinned inside the worker image while a ROS 2 / modern
 Gazebo migration is evaluated separately.

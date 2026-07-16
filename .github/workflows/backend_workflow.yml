@@ -70,6 +70,7 @@ jobs:
       AppSettings__Issuer: https://robot.zerav.la
       Cors__Origins__0: https://rs.zerav.la
       LegacyControl__Enabled: "true"
+      BACKEND_PUBLISH_IP: ${{ vars.BACKEND_PUBLISH_IP }}
       Viewer__PublicBaseUrl: ${{ vars.VIEWER_PUBLIC_BASE_URL }}
       Viewer__WorkerPublishingEnabled: "false"
       BootstrapAdmin__Email: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
@@ -89,13 +90,33 @@ jobs:
           test -n "$DB_PASSWORD"
           test -n "$DB_NAME"
           test -n "$AppSettings__Secret"
+          test -n "$BACKEND_PUBLISH_IP"
 
       - name: Build Backend Docker image
         run: docker build -t "$BACKEND_IMAGE" -f SwarmBackend/Dockerfile .
 
       - name: Deploy with Docker Compose
         run: |
+          deploy_stack() {
+            docker compose -f docker-compose.prod.yml \
+              up -d --remove-orphans --wait --wait-timeout 180 \
+              db backend media || return
+
+            published_endpoint="$(docker port backend_prod 44336/tcp)" || return
+            if test "$published_endpoint" != "$BACKEND_PUBLISH_IP:44336"
+            then
+              echo "Backend published at $published_endpoint; expected $BACKEND_PUBLISH_IP:44336." >&2
+              return 1
+            fi
+
+            curl --fail --show-error --silent \
+              --connect-timeout 5 --max-time 15 \
+              "http://$BACKEND_PUBLISH_IP:44336/health" >/dev/null
+          }
+
           previous_image="$(docker inspect backend_prod --format '{{.Config.Image}}' 2>/dev/null || true)"
+          previous_endpoint="$(docker port backend_prod 44336/tcp 2>/dev/null || true)"
+          previous_publish_ip="${previous_endpoint%:44336}"
           compose_service="$(
             docker inspect backend_prod \
               --format '{{index .Config.Labels "com.docker.compose.service"}}' \
@@ -109,7 +130,7 @@ jobs:
             docker rm backend_prod
           fi
 
-          if ! docker compose -f docker-compose.prod.yml up -d --remove-orphans --wait --wait-timeout 180 db backend media
+          if ! deploy_stack
           then
             docker compose -f docker-compose.prod.yml ps
             docker compose -f docker-compose.prod.yml logs --tail=200 backend media
@@ -117,6 +138,7 @@ jobs:
             then
               echo "Restoring the backend image that was active before this deployment."
               BACKEND_IMAGE="$previous_image" \
+              BACKEND_PUBLISH_IP="${previous_publish_ip:-127.0.0.1}" \
                 docker compose -f docker-compose.prod.yml up -d --no-deps --wait --wait-timeout 180 backend
             fi
             exit 1
