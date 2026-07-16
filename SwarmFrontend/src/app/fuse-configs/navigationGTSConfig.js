@@ -6,7 +6,7 @@ const navigationGTSConfig = [
         title: "Dashboard",
         type: "item",
         icon: "adjust",
-        auth: authRoles.admin,
+        auth: authRoles.user,
         url: "/apps/GTS/dashboard/booths/",
     },
     {
