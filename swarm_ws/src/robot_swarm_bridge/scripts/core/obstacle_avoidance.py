@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Obstacle Avoidance Module for TurtleBot3 Waffle Swarm
+Obstacle Avoidance Module for TurtleBot3 Burger swarms.
 
 Smooth potential-field avoidance with:
   - Cosine proximity scaling (gradual deceleration, no sudden stops)
@@ -95,17 +95,30 @@ class ObstacleAvoidance:
 
         # ----- tuneable parameters (from param server) --------------------
         # Awareness radius: robot starts gently decelerating here
-        self.awareness_radius: float = rospy.get_param('~awareness_radius', 1.0)
+        self.awareness_radius: float = rospy.get_param('~awareness_radius', 0.8)
         # Safety radius: significant deceleration zone
-        self.safety_radius: float = rospy.get_param('~safety_radius', 0.5)
+        self.safety_radius: float = rospy.get_param('~safety_radius', 0.4)
         # Emergency radius: hard stop (last resort)
-        self.emergency_radius: float = rospy.get_param('~emergency_radius', 0.15)
+        self.emergency_radius: float = rospy.get_param('~emergency_radius', 0.14)
         # Steering gain (how strongly to steer away)
         self.steer_gain: float = rospy.get_param('~steer_gain', 0.8)
         # Robot physical radius
-        self.robot_radius: float = rospy.get_param('~robot_radius', 0.22)
+        self.robot_radius: float = rospy.get_param('~robot_radius', 0.11)
         # Inter-robot interaction distance
-        self.robot_interact_dist: float = rospy.get_param('~robot_interact_dist', 0.9)
+        self.robot_interact_dist: float = rospy.get_param('~robot_interact_dist', 0.6)
+        self.max_linear_velocity: float = rospy.get_param(
+            '~max_linear_velocity', 0.22
+        )
+        self.max_angular_velocity: float = rospy.get_param(
+            '~max_angular_velocity', 2.84
+        )
+        self.max_linear_acceleration: float = rospy.get_param(
+            '~max_linear_acceleration', 0.5
+        )
+        self.max_angular_acceleration: float = rospy.get_param(
+            '~max_angular_acceleration', 3.0
+        )
+        self.control_dt: float = rospy.get_param('~control_dt', 0.05)
 
         # Velocity smoothing factor (0 = no smoothing, 1 = frozen)
         # 0.4 at 20Hz gives a ~80ms time constant — responsive but smooth
@@ -152,6 +165,13 @@ class ObstacleAvoidance:
             self.emergency_radius, self.steer_gain, self.robot_radius,
             self.smoothing_alpha,
         )
+
+    def shutdown(self) -> None:
+        """Release the scan subscription owned by this helper."""
+        scan_sub = self._scan_sub
+        self._scan_sub = None
+        if scan_sub is not None:
+            scan_sub.unregister()
 
     # ------------------------------------------------------------------
     # Position setter
@@ -202,7 +222,9 @@ class ObstacleAvoidance:
     # Core: proximity speed scale
     # ------------------------------------------------------------------
 
-    def _proximity_speed_scale(self) -> float:
+    def _proximity_speed_scale(
+        self, linear_velocity: float, angular_velocity: float = 0.0
+    ) -> float:
         """
         Compute a [0, 1] multiplier for the desired speed based on the
         closest obstacle distance.
@@ -214,7 +236,9 @@ class ObstacleAvoidance:
         The result is a smooth S-curve across the full range with no
         discontinuities in velocity or acceleration.
         """
-        min_dist = self._overall_min_distance()
+        min_dist = self._minimum_distance_for_motion(
+            linear_velocity, angular_velocity
+        )
 
         if min_dist >= self.awareness_radius:
             return 1.0
@@ -331,6 +355,7 @@ class ObstacleAvoidance:
         desired_vx: float,
         desired_vy: float,
         other_robot_positions: Optional[List[Tuple[float, float]]] = None,
+        desired_angular: float = 0.0,
     ) -> Tuple[float, float]:
         """
         Compute a modified velocity that smoothly avoids obstacles and robots.
@@ -340,7 +365,7 @@ class ObstacleAvoidance:
         3. Add inter-robot repulsion
         """
         # Emergency stop (last resort safety net)
-        if self._is_emergency():
+        if self._is_emergency(desired_vx, desired_angular):
             rospy.logwarn_throttle(
                 2.0, "[%s] EMERGENCY STOP – obstacle within %.2fm!",
                 self.robot_name, self.emergency_radius,
@@ -348,7 +373,9 @@ class ObstacleAvoidance:
             return (0.0, 0.0)
 
         # 1. Scale desired speed smoothly based on proximity
-        speed_scale = self._proximity_speed_scale()
+        speed_scale = self._proximity_speed_scale(
+            desired_vx, desired_angular
+        )
         mod_vx = desired_vx * speed_scale
         mod_vy = desired_vy * speed_scale
 
@@ -415,11 +442,18 @@ class ObstacleAvoidance:
         others = getattr(self, '_other_positions', None)
 
         mod_vx, mod_vy = self.compute_avoidance_velocity(
-            cmd.linear.x, 0.0, others
+            cmd.linear.x,
+            0.0,
+            others,
+            desired_angular=cmd.angular.z,
         )
 
         safe = Twist()
-        if mod_vx == 0.0 and mod_vy == 0.0 and self._is_emergency():
+        if (
+            mod_vx == 0.0
+            and mod_vy == 0.0
+            and self._is_emergency(cmd.linear.x, cmd.angular.z)
+        ):
             # Emergency stop — reset smoothing state so we don't drift
             self._prev_linear = 0.0
             self._prev_angular = 0.0
@@ -434,13 +468,27 @@ class ObstacleAvoidance:
         smooth_linear = alpha * self._prev_linear + (1.0 - alpha) * raw_linear
         smooth_angular = alpha * self._prev_angular + (1.0 - alpha) * raw_angular
 
-        # Store for next frame
-        self._prev_linear = smooth_linear
-        self._prev_angular = smooth_angular
+        # Acceleration limiting removes the final abrupt command changes that
+        # an exponential average alone can still produce.
+        linear_delta = self.max_linear_acceleration * self.control_dt
+        angular_delta = self.max_angular_acceleration * self.control_dt
+        limited_linear = self._prev_linear + max(
+            -linear_delta, min(linear_delta, smooth_linear - self._prev_linear)
+        )
+        limited_angular = self._prev_angular + max(
+            -angular_delta, min(angular_delta, smooth_angular - self._prev_angular)
+        )
 
-        # Clamp to TurtleBot3 limits
-        safe.linear.x = max(-0.26, min(0.26, smooth_linear))
-        safe.angular.z = max(-1.82, min(1.82, smooth_angular))
+        safe.linear.x = max(
+            -self.max_linear_velocity,
+            min(self.max_linear_velocity, limited_linear),
+        )
+        safe.angular.z = max(
+            -self.max_angular_velocity,
+            min(self.max_angular_velocity, limited_angular),
+        )
+        self._prev_linear = safe.linear.x
+        self._prev_angular = safe.angular.z
         return safe
 
     def compute_threat_level(self) -> float:
@@ -460,8 +508,28 @@ class ObstacleAvoidance:
         with self._scan_lock:
             return min(self.sector_min) if self.sector_min else self.max_valid_range
 
-    def _is_emergency(self) -> bool:
-        return self._overall_min_distance() < self.emergency_radius
+    def _minimum_distance_for_motion(
+        self, linear_velocity: float, angular_velocity: float = 0.0
+    ) -> float:
+        """Return clearance in the swept half of the Burger footprint."""
+        with self._scan_lock:
+            if not self.sector_min:
+                return self.max_valid_range
+            if abs(linear_velocity) < 1e-3 or abs(angular_velocity) > 0.4:
+                indices = range(NUM_SECTORS)
+            elif linear_velocity > 0.0:
+                indices = (7, 0, 1, 6, 2)
+            else:
+                indices = (3, 4, 5, 2, 6)
+            return min(self.sector_min[index] for index in indices)
+
+    def _is_emergency(
+        self, linear_velocity: float = 0.0, angular_velocity: float = 0.0
+    ) -> bool:
+        return (
+            self._minimum_distance_for_motion(linear_velocity, angular_velocity)
+            < self.emergency_radius
+        )
 
     # ------------------------------------------------------------------
     # Visualisation helpers (used by standalone mode)

@@ -1,22 +1,24 @@
-version: '3.3'  # Adjust this version if needed
+version: '3.8'
+name: robotswarm
 
 services:
   db:
     image: postgres:17.0
     container_name: db_prod
     restart: always
-    env_file:
-      - .env
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     networks:
       - swarm_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     logging:
       driver: "json-file"
       options:
@@ -24,29 +26,69 @@ services:
         max-file: "10"
 
   backend:
-    image: swarmbackend:latest
+    image: ${BACKEND_IMAGE:-swarmbackend:latest}
     container_name: backend_prod
     restart: always
-    env_file:
-      - .env
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ConnectionStrings__Default=Host=db;Port=5432;Database=${DB_NAME};Username=${DB_USER};Password=${DB_PASSWORD}
+      # Kept during the first rollout so the pre-control-plane image can still
+      # start if the workflow has to roll back.
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
+      - AppSettings__Secret=${AppSettings__Secret}
+      - AppSettings__Issuer=${AppSettings__Issuer}
+      - Cors__Origins__0=${Cors__Origins__0}
+      - LegacyControl__Enabled=${LegacyControl__Enabled:-false}
+      - Viewer__PublicBaseUrl=${Viewer__PublicBaseUrl:-}
+      - Viewer__WorkerPublishingEnabled=${Viewer__WorkerPublishingEnabled:-false}
+      - BootstrapAdmin__Email=${BootstrapAdmin__Email:-}
+      - BootstrapAdmin__Password=${BootstrapAdmin__Password:-}
+      - Workers__OrphanAfterSeconds=${Workers__OrphanAfterSeconds:-90}
+      - Sessions__MaxRobotsPerSession=${Sessions__MaxRobotsPerSession:-10}
     ports:
-      - "44336:44336"  # HTTP
-      - "44337:44337"  # HTTPS
+      - "127.0.0.1:44336:44336"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - swarm_network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl --fail --silent http://127.0.0.1:44336/health >/dev/null || curl --fail --silent http://127.0.0.1:44336/swagger/index.html >/dev/null"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 15s
     logging:
       driver: "json-file"
       options:
         max-size: "100m"
         max-file: "10"
+
+  media:
+    image: bluenviron/mediamtx:1.18.2
+    container_name: media_prod
+    restart: always
+    depends_on:
+      - backend
+    volumes:
+      - ./infra/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "${MEDIA_PUBLISH_IP:-127.0.0.1}:8554:8554"
+      - "127.0.0.1:8889:8889"
+      - "${MEDIA_WEBRTC_IP:-127.0.0.1}:8189:8189/udp"
+    networks:
+      - swarm_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   postgres_data:

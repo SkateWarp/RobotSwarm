@@ -1,5 +1,11 @@
 # README: Proyecto de Enjambre Robótico https://rs.zerav.la/login
 
+The React frontend is hosted by Cloudflare Workers and deployed from GitHub.
+The .NET API remains available separately at `https://robot.zerav.la`.
+Frontend-only commits do not restart the backend VM. GPU worker releases use a
+separate, manually approved maintenance workflow until worker draining is
+available.
+
 ## Objetivos
 
 1. Desarrollar un sistema de enjambre robótico escalable y eficiente.

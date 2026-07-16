@@ -22,9 +22,11 @@ public class Account
     public DateTime Created { get; set; }
     public DateTime? Updated { get; set; }
     public bool Enabled { get; set; }
-    public Role Role { get; set; }
+    public Role Role { get; set; } = Role.User;
     public List<RefreshToken> RefreshTokens { get; set; } = new();
     public ICollection<Robot> Robots { get; set; } = new List<Robot>();
+    public ICollection<SimulationSession> SimulationSessions { get; set; } = new List<SimulationSession>();
+    public ICollection<ViewerLease> ViewerLeases { get; set; } = new List<ViewerLease>();
 
     public bool OwnsToken(string token)
     {

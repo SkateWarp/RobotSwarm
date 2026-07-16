@@ -18,6 +18,8 @@ find_package(catkin REQUIRED COMPONENTS
   tf
   visualization_msgs
   std_srvs
+  actionlib
+  actionlib_msgs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -69,12 +71,15 @@ add_message_files(
 add_service_files(
   FILES
   SpawnRobots.srv
+  SpawnRobot.srv
   DeleteRobots.srv
+  DeleteRobot.srv
   GetFleetStatus.srv
   SpawnObstacles.srv
   StartTask.srv
   StopTask.srv
   ConfigureSwarm.srv
+  AssignTask.srv
 )
 
 ## Generate added messages and services with any dependencies listed here
@@ -82,6 +87,7 @@ generate_messages(
   DEPENDENCIES
   std_msgs
   geometry_msgs
+  actionlib_msgs
 )
 
 ################################################
@@ -114,7 +120,7 @@ generate_messages(
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-  CATKIN_DEPENDS rospy std_msgs geometry_msgs nav_msgs sensor_msgs gazebo_msgs message_runtime tf visualization_msgs std_srvs
+  CATKIN_DEPENDS rospy std_msgs geometry_msgs nav_msgs sensor_msgs gazebo_msgs message_runtime tf visualization_msgs std_srvs actionlib actionlib_msgs
 )
 
 ###########
@@ -167,10 +173,17 @@ include_directories(
 
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
-# catkin_install_python(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+catkin_install_python(PROGRAMS
+  scripts/bridge.py
+  scripts/spawn_robots.py
+  scripts/core/fleet_manager.py
+  scripts/core/task_orchestrator.py
+  scripts/environment/obstacle_generator.py
+  scripts/behaviors/follow_leader.py
+  scripts/behaviors/formation_control.py
+  scripts/behaviors/collaborative_transport.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
 ## Mark executables for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_executables.html
@@ -194,11 +207,13 @@ include_directories(
 # )
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
+install(DIRECTORY
+  config
+  launch
+  rviz
+  worlds
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
 
 #############
 ## Testing ##

@@ -5,11 +5,11 @@
 
 # Fleet Configuration
 fleet:
-  max_robots: 20                    # Maximum number of robots supported
+  max_robots: 0                     # 0 disables a software cap; worker/arena capacity still applies
   default_robot_count: 5            # Default number to spawn
-  robot_model: "turtlebot3_waffle"  # turtlebot3_burger or turtlebot3_waffle
+  robot_model: "turtlebot3_burger"
   spawn_pattern: "grid"             # grid, circle, line
-  spawn_spacing: 1.0                # Meters between robots at spawn
+  spawn_spacing: 0.6                # Meters between robot centers at spawn
 
 # Arena Configuration
 arena:
@@ -34,20 +34,23 @@ websocket:
 # Safety Parameters - CRITICAL FOR NO-PUSH OBSTACLE AVOIDANCE
 safety:
   # Multi-layer safety zones (in meters)
-  absolute_min_distance: 0.20       # NEVER get closer than this
-  emergency_stop_distance: 0.25     # Trigger emergency stop
-  critical_zone: 0.30               # Critical danger zone
-  danger_zone: 0.50                 # Strong repulsion zone
-  warning_zone: 1.00                # Start slowing down
-  safe_distance: 0.80               # Comfortable clearance
+  absolute_min_distance: 0.20       # Minimum center clearance beyond the footprint
+  emergency_stop_distance: 0.20     # Trigger emergency stop
+  critical_zone: 0.25               # Critical danger zone
+  danger_zone: 0.40                 # Strong repulsion zone
+  warning_zone: 0.80                # Start slowing down
+  safe_distance: 0.50               # Comfortable clearance
 
   # Robot-to-robot safety
-  robot_min_distance: 0.50          # Minimum inter-robot distance
-  robot_safe_distance: 0.70         # Comfortable robot spacing
+  robot_radius: 0.11                # Burger circumscribed footprint radius
+  robot_min_distance: 0.30          # Minimum inter-robot center distance
+  robot_safe_distance: 0.45         # Comfortable robot spacing
 
-  # Velocity limits (TurtleBot3 Waffle specs)
-  max_linear_velocity: 0.26         # m/s (TurtleBot3 max: 0.26)
-  max_angular_velocity: 1.82        # rad/s (TurtleBot3 max: 1.82)
+  # Velocity limits (TurtleBot3 Burger specs)
+  max_linear_velocity: 0.22         # m/s
+  max_angular_velocity: 2.84        # rad/s
+  max_linear_acceleration: 0.50     # m/s^2 command limiter
+  max_angular_acceleration: 3.00    # rad/s^2 command limiter
 
   # Obstacle avoidance tuning
   repulsion_gain: 1.5               # Strength of repulsive force
@@ -95,7 +98,6 @@ obstacles:
 # Follow-the-Leader Behavior
 follow_leader:
   following_distance: 0.70          # Meters behind previous robot
-  time_delay: 0.5                   # Seconds between robots (snake effect)
   path_type: "waypoint"             # waypoint, circular, square, figure8, random
 
   # Leader control modes

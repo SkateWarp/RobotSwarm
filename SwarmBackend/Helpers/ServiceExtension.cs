@@ -1,7 +1,9 @@
-﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
-using System.Text;
+using System.Security.Claims;
 
 namespace SwarmBackend.Helpers;
 
@@ -10,12 +12,37 @@ public static class ServiceExtension
     public static void GetConfigureJwt(this IServiceCollection services, IConfiguration configuration)
     {
         var jwtConfig = configuration.GetSection("AppSettings");
-        if (jwtConfig == null)
+        var secretValue = jwtConfig["Secret"];
+        var issuer = jwtConfig["Issuer"];
+        if (string.IsNullOrWhiteSpace(secretValue))
         {
-            throw new ArgumentNullException(nameof(jwtConfig));
+            throw new InvalidOperationException("AppSettings:Secret is required.");
         }
-        var dataDecoded = Convert.FromBase64String(jwtConfig["Secret"]!);
-        var secretKey = Encoding.UTF8.GetString(dataDecoded);
+
+        if (string.IsNullOrWhiteSpace(issuer)
+            || !Uri.TryCreate(issuer, UriKind.Absolute, out _))
+        {
+            throw new InvalidOperationException("AppSettings:Issuer must be an absolute URL.");
+        }
+
+        byte[] dataDecoded;
+        try
+        {
+            dataDecoded = Convert.FromBase64String(secretValue);
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidOperationException(
+                "AppSettings:Secret must be a valid base64 value.",
+                exception);
+        }
+
+        if (dataDecoded.Length < 32)
+        {
+            throw new InvalidOperationException(
+                "AppSettings:Secret must decode to at least 32 bytes.");
+        }
+
         services.AddAuthentication(opt =>
         {
             opt.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
@@ -23,18 +50,64 @@ public static class ServiceExtension
         })
         .AddJwtBearer(options =>
         {
-            //options.Authority = config["Issuer"];
             options.TokenValidationParameters = new TokenValidationParameters
             {
                 ValidateIssuer = true,
                 ValidateAudience = true,
                 ValidateLifetime = true,
                 ValidateIssuerSigningKey = true,
-                ValidIssuer = jwtConfig["Issuer"],
-                ValidAudience = jwtConfig["Issuer"],
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey))
+                ValidIssuer = issuer,
+                ValidAudience = issuer,
+                IssuerSigningKey = new SymmetricSecurityKey(dataDecoded)
             };
-        });
+            options.Events = new JwtBearerEvents
+            {
+                OnMessageReceived = context =>
+                {
+                    if (context.HttpContext.Request.Path.StartsWithSegments("/hubs/session")
+                        && context.Request.Query.TryGetValue("access_token", out var accessToken))
+                    {
+                        context.Token = accessToken;
+                    }
+
+                    return Task.CompletedTask;
+                },
+                OnTokenValidated = async context =>
+                {
+                    var accountIdValue = context.Principal?.FindFirst("id")?.Value;
+                    var roleValue = context.Principal?.FindFirst(ClaimTypes.Role)?.Value;
+                    var versionValue = context.Principal?.FindFirst("account_version")?.Value;
+                    if (!int.TryParse(accountIdValue, out var accountId)
+                        || !long.TryParse(versionValue, out var accountVersion)
+                        || string.IsNullOrWhiteSpace(roleValue))
+                    {
+                        context.Fail("The account token is missing required claims.");
+                        return;
+                    }
+
+                    var dataContext = context.HttpContext.RequestServices
+                        .GetRequiredService<DataContext>();
+                    var account = await dataContext.Accounts
+                        .AsNoTracking()
+                        .SingleOrDefaultAsync(
+                            candidate => candidate.Id == accountId,
+                            context.HttpContext.RequestAborted);
+                    var currentVersion = account?.Updated?.Ticks ?? 0L;
+                    if (account == null
+                        || !account.Enabled
+                        || !roleValue.Equals(
+                            account.Role.ToString(),
+                            StringComparison.Ordinal)
+                        || accountVersion != currentVersion)
+                    {
+                        context.Fail("The account token is no longer active.");
+                    }
+                }
+            };
+        })
+        .AddScheme<AuthenticationSchemeOptions, WorkerCredentialAuthenticationHandler>(
+            WorkerCredentialDefaults.AuthenticationScheme,
+            _ => { });
     }
 
 

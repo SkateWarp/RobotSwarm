@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Fleet Manager for TurtleBot3 Waffle Swarm
-Handles dynamic spawning, deletion, and tracking of TurtleBot3 Waffle robots
+Fleet Manager for TurtleBot3 Burger swarms.
+Handles dynamic spawning, deletion, and tracking of TurtleBot3 Burger robots
 in Gazebo using URDF/xacro processing and topic-based command interface.
 
 Robot namespaces: tb3_0, tb3_1, ..., tb3_{N-1}
@@ -22,6 +22,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
@@ -30,6 +31,9 @@ from geometry_msgs.msg import Pose, Point, Quaternion
 from gazebo_msgs.srv import SpawnModel, SpawnModelRequest, DeleteModel, DeleteModelRequest
 from gazebo_msgs.msg import ModelStates
 import tf.transformations
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.robot_ids import robot_id_sort_key, validate_robot_ids
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +55,7 @@ class RobotRecord:
 
 class FleetManager:
     """
-    Manages a fleet of TurtleBot3 Waffle robots in Gazebo.
+    Manages a fleet of TurtleBot3 Burger robots in Gazebo.
 
     Responsibilities
     ----------------
@@ -68,16 +72,24 @@ class FleetManager:
         rospy.init_node('fleet_manager', anonymous=False)
 
         # ----- configuration via rospy params -----
-        self.max_robots: int = rospy.get_param('~max_robots', 20)
+        # Zero means that the worker/arena capacity profile, not this node,
+        # decides the maximum fleet size.
+        self.max_robots: int = rospy.get_param('~max_robots', 0)
         self.default_count: int = rospy.get_param('~robot_count', 5)
         self.default_pattern: str = rospy.get_param('~spawn_pattern', 'grid')
-        self.default_spacing: float = rospy.get_param('~spawn_spacing', 1.5)
+        self.default_spacing: float = rospy.get_param('~spawn_spacing', 0.6)
         self.arena_size: float = rospy.get_param('~arena_size', 10.0)  # meters, centered at origin
+        self.robot_model: str = rospy.get_param('~robot_model', 'burger')
+        self.minimum_spawn_spacing: float = rospy.get_param(
+            '~minimum_spawn_spacing', 0.35
+        )
+        self.arena_margin: float = rospy.get_param('~arena_margin', 0.35)
         self.auto_spawn: bool = rospy.get_param('~auto_spawn', False)
 
         # ----- internal state -----
         self.robots: Dict[str, RobotRecord] = {}
         self._lock = threading.Lock()
+        self._spawn_lock = threading.Lock()
         self._next_index: int = 0  # monotonically increasing robot index
 
         # ----- prepare URDF template once -----
@@ -137,11 +149,13 @@ class FleetManager:
     # ------------------------------------------------------------------
 
     def _process_urdf(self) -> str:
-        """Process TurtleBot3 Waffle xacro into raw URDF XML string."""
+        """Process the configured TurtleBot3 xacro into raw URDF XML."""
         try:
             rospack = rospkg.RosPack()
             tb3_desc = rospack.get_path('turtlebot3_description')
-            urdf_path = os.path.join(tb3_desc, 'urdf', 'turtlebot3_waffle.urdf.xacro')
+            urdf_path = os.path.join(
+                tb3_desc, 'urdf', f'turtlebot3_{self.robot_model}.urdf.xacro'
+            )
             rospy.loginfo("Processing xacro: %s", urdf_path)
             doc = xacro.process_file(urdf_path)
             robot_description = doc.toxml()
@@ -162,13 +176,30 @@ class FleetManager:
 
         Supported patterns: ``grid``, ``circle``, ``line``.
         """
+        if count <= 0:
+            return []
+
         half = self.arena_size / 2.0
-        spacing = self.default_spacing
+        spacing = max(self.default_spacing, self.minimum_spawn_spacing)
+        usable_half = half - self.arena_margin
+        if usable_half <= 0.0:
+            rospy.logerr(
+                "Arena %.2fm is too small for margin %.2fm.",
+                self.arena_size, self.arena_margin,
+            )
+            return []
         poses: List[Pose] = []
 
         if pattern == 'grid':
             cols = int(math.ceil(math.sqrt(count)))
             rows = int(math.ceil(count / float(cols)))
+            if ((cols - 1) * spacing > 2.0 * usable_half or
+                    (rows - 1) * spacing > 2.0 * usable_half):
+                rospy.logerr(
+                    "A %dx%d grid with %.2fm spacing does not fit in the %.2fm arena.",
+                    cols, rows, spacing, self.arena_size,
+                )
+                return []
             # centre the grid
             x_off = -(cols - 1) * spacing / 2.0
             y_off = -(rows - 1) * spacing / 2.0
@@ -177,17 +208,23 @@ class FleetManager:
                 c = i % cols
                 x = x_off + c * spacing
                 y = y_off + r * spacing
-                # clamp to arena
-                x = max(-half + 0.5, min(half - 0.5, x))
-                y = max(-half + 0.5, min(half - 0.5, y))
                 pose = Pose()
                 pose.position = Point(x=x, y=y, z=0.0)
                 pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
                 poses.append(pose)
 
         elif pattern == 'circle':
-            radius = max(spacing, (count * spacing) / (2.0 * math.pi))
-            radius = min(radius, half - 0.5)  # keep inside arena
+            if count == 1:
+                radius = 0.0
+            else:
+                radius = spacing / (2.0 * math.sin(math.pi / count))
+            if radius > usable_half:
+                rospy.logerr(
+                    "A %d-robot circle with %.2fm spacing needs %.2fm radius; "
+                    "only %.2fm is available.",
+                    count, spacing, radius, usable_half,
+                )
+                return []
             for i in range(count):
                 angle = 2.0 * math.pi * i / count
                 x = radius * math.cos(angle)
@@ -201,11 +238,16 @@ class FleetManager:
 
         elif pattern == 'line':
             total_len = (count - 1) * spacing if count > 1 else 0.0
+            if total_len > 2.0 * usable_half:
+                rospy.logerr(
+                    "A %d-robot line with %.2fm spacing needs %.2fm; only %.2fm "
+                    "is available.",
+                    count, spacing, total_len, 2.0 * usable_half,
+                )
+                return []
             start_x = -total_len / 2.0
-            start_x = max(-half + 0.5, start_x)
             for i in range(count):
                 x = start_x + i * spacing
-                x = max(-half + 0.5, min(half - 0.5, x))
                 pose = Pose()
                 pose.position = Point(x=x, y=0.0, z=0.0)
                 pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
@@ -216,19 +258,58 @@ class FleetManager:
 
         return poses
 
+    def _generate_available_positions(
+        self,
+        count: int,
+        pattern: str,
+        existing_positions: List[Tuple[float, float]],
+    ) -> List[Pose]:
+        """Choose pattern positions that keep clear of the current fleet."""
+        if not existing_positions:
+            return self._generate_positions(count, pattern)
+
+        clearance = max(
+            self.default_spacing, self.minimum_spawn_spacing
+        )
+        candidate_count = len(existing_positions) + count
+
+        while True:
+            candidates = self._generate_positions(candidate_count, pattern)
+            if not candidates:
+                return []
+
+            available: List[Pose] = []
+            occupied = list(existing_positions)
+            for pose in candidates:
+                point = (pose.position.x, pose.position.y)
+                if all(
+                    math.hypot(point[0] - x, point[1] - y)
+                    >= clearance - 1e-9
+                    for x, y in occupied
+                ):
+                    available.append(pose)
+                    occupied.append(point)
+                    if len(available) == count:
+                        return available
+
+            candidate_count += 1
+
     # ------------------------------------------------------------------
     # Spawn / delete primitives
     # ------------------------------------------------------------------
 
-    def _allocate_name(self) -> str:
+    def _allocate_name(self, occupied_names=None) -> str:
         """Return the next ``tb3_N`` name and bump the counter."""
-        name = f"tb3_{self._next_index}"
-        self._next_index += 1
-        return name
+        occupied = occupied_names or set()
+        while True:
+            name = f"tb3_{self._next_index}"
+            self._next_index += 1
+            if name not in occupied:
+                return name
 
     def spawn_single_robot(self, robot_name: str, pose: Pose) -> bool:
         """
-        Spawn one TurtleBot3 Waffle in Gazebo.
+        Spawn one TurtleBot3 Burger in Gazebo.
 
         Steps
         -----
@@ -352,27 +433,85 @@ class FleetManager:
     # High-level spawn / delete
     # ------------------------------------------------------------------
 
-    def spawn_robots(self, count: int, pattern: str = 'grid') -> List[str]:
+    def spawn_robots(
+        self,
+        count: int,
+        pattern: str = 'grid',
+        robot_ids: Optional[List[str]] = None,
+    ) -> List[str]:
         """
         Spawn *count* robots using the given pattern.
 
         Returns list of successfully spawned robot names.
         """
-        with self._lock:
-            current = len(self.robots)
-        if current + count > self.max_robots:
-            rospy.logwarn("Cannot spawn %d robots (current %d, max %d).",
-                           count, current, self.max_robots)
-            count = self.max_robots - current
-            if count <= 0:
+        count = int(count)
+        if count <= 0:
+            rospy.logwarn("Robot count must be positive; received %d.", count)
+            return []
+
+        requested_names = None
+        if robot_ids is not None:
+            requested_names = validate_robot_ids(robot_ids)
+            if len(requested_names) != count:
+                raise ValueError(
+                    "robot_ids length ({}) must match count ({})".format(
+                        len(requested_names), count
+                    )
+                )
+
+        with self._spawn_lock:
+            with self._lock:
+                current = len(self.robots)
+                existing_names = set(self.robots.keys())
+                existing_positions = [
+                    (record.pose.position.x, record.pose.position.y)
+                    for record in self.robots.values()
+                ]
+
+            if self.max_robots > 0 and current + count > self.max_robots:
+                rospy.logwarn(
+                    "Cannot spawn %d robots (current %d, max %d).",
+                    count, current, self.max_robots,
+                )
                 return []
 
-        poses = self._generate_positions(count, pattern)
-        spawned: List[str] = []
-        for pose in poses:
-            name = self._allocate_name()
-            if self.spawn_single_robot(name, pose):
-                spawned.append(name)
+            if requested_names is not None:
+                conflicts = existing_names.intersection(requested_names)
+                if conflicts:
+                    raise ValueError(
+                        "robot IDs already exist: {}".format(
+                            ", ".join(sorted(
+                                conflicts, key=robot_id_sort_key
+                            ))
+                        )
+                    )
+                planned_names = requested_names
+            else:
+                occupied_names = set(existing_names)
+                planned_names = []
+                for _ in range(count):
+                    name = self._allocate_name(occupied_names)
+                    planned_names.append(name)
+                    occupied_names.add(name)
+
+            poses = self._generate_available_positions(
+                count, pattern, existing_positions
+            )
+            if len(poses) != count:
+                return []
+
+            spawned: List[str] = []
+            for name, pose in zip(planned_names, poses):
+                if self.spawn_single_robot(name, pose):
+                    spawned.append(name)
+                    if requested_names is not None:
+                        try:
+                            numeric_id = int(name.rsplit('_', 1)[1])
+                            self._next_index = max(
+                                self._next_index, numeric_id + 1
+                            )
+                        except (IndexError, ValueError):
+                            pass
         self._publish_robot_list(None)
         return spawned
 
@@ -382,14 +521,15 @@ class FleetManager:
 
         Returns the number of successfully deleted robots.
         """
-        if not robot_ids:
-            with self._lock:
-                robot_ids = list(self.robots.keys())
+        with self._spawn_lock:
+            if not robot_ids:
+                with self._lock:
+                    robot_ids = list(self.robots.keys())
 
-        deleted = 0
-        for rid in robot_ids:
-            if self.delete_single_robot(rid):
-                deleted += 1
+            deleted = 0
+            for rid in robot_ids:
+                if self.delete_single_robot(rid):
+                    deleted += 1
         self._publish_robot_list(None)
         return deleted
 
@@ -403,7 +543,7 @@ class FleetManager:
 
         Expected JSON payload::
 
-            {"count": 5, "pattern": "grid"}
+            {"count": 5, "pattern": "grid", "robot_ids": ["tb3_0", ...]}
 
         Publishes result on ``/fleet/spawn_result``.
         """
@@ -416,9 +556,21 @@ class FleetManager:
 
         count = int(data.get('count', self.default_count))
         pattern = str(data.get('pattern', self.default_pattern))
+        robot_ids = data.get('robot_ids')
 
         rospy.loginfo("Spawn command received: count=%d, pattern='%s'", count, pattern)
-        spawned = self.spawn_robots(count, pattern)
+        try:
+            spawned = self.spawn_robots(count, pattern, robot_ids)
+        except (TypeError, ValueError) as exc:
+            result = {
+                "success": False,
+                "requested": count,
+                "spawned": 0,
+                "robot_ids": [],
+                "error": str(exc),
+            }
+            self.spawn_result_pub.publish(String(data=json.dumps(result)))
+            return
 
         result = {
             "success": len(spawned) > 0,
@@ -469,28 +621,36 @@ class FleetManager:
         Update tracked robot poses from ``/gazebo/model_states``.
         Also auto-detect externally-spawned robots with the ``tb3_`` prefix.
         """
-        with self._lock:
-            # Update poses for already-tracked robots
-            for robot_name, record in self.robots.items():
-                try:
-                    idx = msg.name.index(robot_name)
-                    record.pose = msg.pose[idx]
-                except (ValueError, IndexError):
-                    pass
-
-            # Auto-detect new tb3_* models spawned externally
-            for i, model_name in enumerate(msg.name):
-                if model_name.startswith('tb3_') and model_name not in self.robots:
-                    rospy.loginfo("Auto-detected externally spawned robot: %s", model_name)
-                    self.robots[model_name] = RobotRecord(
-                        name=model_name, pose=msg.pose[i]
-                    )
-                    # Update next_index to avoid naming collisions
+        # External model discovery changes the same capacity/name/placement
+        # inputs as spawn_robots(), so serialize it with the spawn transaction.
+        with self._spawn_lock:
+            with self._lock:
+                # Update poses for already-tracked robots
+                for robot_name, record in self.robots.items():
                     try:
-                        idx_num = int(model_name.split('_')[1])
-                        self._next_index = max(self._next_index, idx_num + 1)
-                    except (IndexError, ValueError):
+                        idx = msg.name.index(robot_name)
+                        record.pose = msg.pose[idx]
+                    except (ValueError, IndexError):
                         pass
+
+                # Auto-detect new tb3_* models spawned externally
+                for i, model_name in enumerate(msg.name):
+                    if model_name.startswith('tb3_') and model_name not in self.robots:
+                        rospy.loginfo(
+                            "Auto-detected externally spawned robot: %s",
+                            model_name,
+                        )
+                        self.robots[model_name] = RobotRecord(
+                            name=model_name, pose=msg.pose[i]
+                        )
+                        # Update next_index to avoid naming collisions
+                        try:
+                            idx_num = int(model_name.split('_')[1])
+                            self._next_index = max(
+                                self._next_index, idx_num + 1
+                            )
+                        except (IndexError, ValueError):
+                            pass
 
     # ------------------------------------------------------------------
     # Fleet roster publishing
@@ -499,7 +659,7 @@ class FleetManager:
     def _publish_robot_list(self, _event):
         """Publish comma-separated list of active robot namespaces."""
         with self._lock:
-            names = sorted(self.robots.keys())
+            names = sorted(self.robots.keys(), key=robot_id_sort_key)
         roster = ','.join(names)
         self.robot_list_pub.publish(String(data=roster))
 
@@ -510,7 +670,7 @@ class FleetManager:
     def get_robot_names(self) -> List[str]:
         """Return sorted list of active robot namespaces."""
         with self._lock:
-            return sorted(self.robots.keys())
+            return sorted(self.robots.keys(), key=robot_id_sort_key)
 
     def get_robot_poses(self) -> List[Tuple[str, Pose]]:
         """Return list of ``(name, Pose)`` for all tracked robots."""

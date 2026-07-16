@@ -14,8 +14,11 @@ public static class AccountRoute
             .Produces<AuthenticateResponse>();
 
         group.MapPost("", Create)
-           // .RequireAuthorization()
            .Produces<AccountResponse>();
+
+        group.MapPost("/admin", CreateByAdmin)
+            .RequireAuthorization(policy => policy.RequireRole(Role.Admin.ToString()))
+            .Produces<AccountResponse>();
 
         group.MapPost("/refreshToken", RefreshToken)
           .Produces<AuthenticateResponse>();
@@ -66,6 +69,27 @@ public static class AccountRoute
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
+    public static async Task<IResult> CreateByAdmin(
+        AdminCreateAccountRequest request,
+        IAccountService accountService)
+    {
+        if (!Enum.IsDefined(request.Role))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(request.Role)] = new[] { "Role is not supported." }
+            });
+        }
+
+        var accountRequest = new AccountRequest(
+            request.FirstName,
+            request.LastName,
+            request.Email,
+            request.Password);
+        var response = await accountService.Create(accountRequest, request.Role);
+        return response.Match(Results.Ok, Results.BadRequest);
+    }
+
     public static async Task<IResult> RefreshToken(RefreshTokenRequest request, IAccountService accountService)
     {
         var response = await accountService.RefreshTokenAsync(request.RefreshToken, null);
@@ -77,7 +101,7 @@ public static class AccountRoute
         var accountId = GetAccountId(context);
         var role = GetRole(context);
 
-        if (!accountId.HasValue)
+        if (!accountId.HasValue || !role.HasValue)
         {
             return Results.Unauthorized();
         }
@@ -106,20 +130,80 @@ public static class AccountRoute
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> Update(int accountId, AccountRequest request, IAccountService accountService)
+    public static async Task<IResult> Update(
+        int accountId,
+        AccountRequest request,
+        IAccountService accountService,
+        HttpContext context)
     {
+        var currentAccountId = GetAccountId(context);
+        var role = GetRole(context);
+        if (!currentAccountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        if (role != Role.Admin && accountId != currentAccountId.Value)
+        {
+            return Results.Forbid();
+        }
+
         var response = await accountService.Update(accountId, request);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> Patch(int accountId, AccountPatchRequest request, IAccountService accountService)
+    public static async Task<IResult> Patch(
+        int accountId,
+        AccountPatchRequest request,
+        IAccountService accountService,
+        HttpContext context)
     {
+        var currentAccountId = GetAccountId(context);
+        var role = GetRole(context);
+        if (!currentAccountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        if (role != Role.Admin && accountId != currentAccountId.Value)
+        {
+            return Results.Forbid();
+        }
+
+        if (role != Role.Admin && request.Role.HasValue)
+        {
+            return Results.Forbid();
+        }
+
+        if (request.Role.HasValue && !Enum.IsDefined(request.Role.Value))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(request.Role)] = new[] { "Role is not supported." }
+            });
+        }
+
         var response = await accountService.Update(accountId, request);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> Delete(int accountId, IAccountService accountService)
+    public static async Task<IResult> Delete(
+        int accountId,
+        IAccountService accountService,
+        HttpContext context)
     {
+        var currentAccountId = GetAccountId(context);
+        var role = GetRole(context);
+        if (!currentAccountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        if (role != Role.Admin && accountId != currentAccountId.Value)
+        {
+            return Results.Forbid();
+        }
+
         var response = await accountService.Delete(accountId);
         return response ? Results.Ok() : Results.BadRequest();
     }

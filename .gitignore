@@ -2,6 +2,13 @@
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
+.env
+!.env.example
+**/bin/
+**/obj/
+**/__pycache__/
+*.pyc
+
 /SwarmBackend/obj
 /SwarmBackend/.vs
 /SwarmBackend/bin

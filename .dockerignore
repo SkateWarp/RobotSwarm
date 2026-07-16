@@ -1,0 +1,9 @@
+.git
+.github
+.env
+**/bin
+**/obj
+**/node_modules
+**/build
+**/__pycache__
+*.pyc

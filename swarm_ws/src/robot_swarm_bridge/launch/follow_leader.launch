@@ -10,7 +10,6 @@
   <arg name="robot_count" default="5"/>
   <arg name="leader_mode" default="circular"/>  <!-- circular, square, figure8, waypoint, manual -->
   <arg name="follow_distance" default="0.7"/>
-  <arg name="time_delay" default="1.0"/>
   <arg name="max_linear_vel" default="0.2"/>
   <arg name="max_angular_vel" default="1.5"/>
   <arg name="path_radius" default="2.0"/>
@@ -20,6 +19,13 @@
   <arg name="gui" default="true"/>
   <arg name="rviz" default="false"/>
 
+  <!-- Parameters are addressed to the controller launched by swarm_main. -->
+  <param name="/follow_leader/leader_mode" value="$(arg leader_mode)"/>
+  <param name="/follow_leader/follow_distance" value="$(arg follow_distance)"/>
+  <param name="/follow_leader/max_linear_vel" value="$(arg max_linear_vel)"/>
+  <param name="/follow_leader/max_angular_vel" value="$(arg max_angular_vel)"/>
+  <param name="/follow_leader/path_radius" value="$(arg path_radius)"/>
+
   <!-- Include main swarm (Gazebo + robots + core nodes) -->
   <include file="$(find robot_swarm_bridge)/launch/swarm_main.launch">
     <arg name="robot_count" value="$(arg robot_count)"/>
@@ -27,17 +33,5 @@
     <arg name="gui" value="$(arg gui)"/>
     <arg name="rviz" value="$(arg rviz)"/>
   </include>
-
-  <!-- Follow-the-Leader Controller -->
-  <node pkg="robot_swarm_bridge" type="follow_leader.py" name="follow_leader"
-        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
-    <param name="robot_count" value="$(arg robot_count)"/>
-    <param name="leader_mode" value="$(arg leader_mode)"/>
-    <param name="follow_distance" value="$(arg follow_distance)"/>
-    <param name="time_delay" value="$(arg time_delay)"/>
-    <param name="max_linear_vel" value="$(arg max_linear_vel)"/>
-    <param name="max_angular_vel" value="$(arg max_angular_vel)"/>
-    <param name="path_radius" value="$(arg path_radius)"/>
-  </node>
 
 </launch>

@@ -25,14 +25,14 @@ dotnet run                           # Run backend (HTTP on port 44336)
 dotnet ef database update            # Apply EF Core migrations
 dotnet ef migrations add <Name>      # Create new migration
 ```
-Swagger UI is always enabled at `/swagger`.
+Swagger UI is enabled in Development at `/swagger`.
 
 ### Database
 ```bash
 # Local development (postgres/postgres/swarm on port 5432)
 docker compose -f SwarmBackend/docker-compose.local.yml up -d
 
-# Production (uses .env for DB_USER, DB_PASSWORD, DB_NAME)
+# Production (export the values shown in .env.example first)
 docker compose -f docker-compose.prod.yml up -d
 ```
 
@@ -132,7 +132,9 @@ React Frontend <--SignalR--> .NET Backend <--SignalR--> ROS Bridge <--ROS Topics
 
 Backend PostgreSQL connection:
 - **Local dev**: `docker-compose.local.yml` uses hardcoded `postgres/postgres/swarm`
-- **Production**: `.env` file at project root with `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- **Production**: the protected GitHub `production` environment supplies
+  `DB_USER`, `DB_PASSWORD`, `DB_NAME`, and `APPSETTINGS_SECRET`
+- `.env.example` is a local template; a populated `.env` must remain untracked
 - Connection string in `appsettings.json` uses `${DB_USER}` env var substitution
 
 Frontend API URL: set in `src/app/constants/constants.js` (production: `https://robot.zerav.la`)
@@ -141,6 +143,10 @@ JWT auth configured in `appsettings.json` under `AppSettings` (Secret is base64-
 
 ## CI/CD
 
-GitHub Actions (`frontend_workflow.yml`) deploys frontend on push to `main` when `SwarmFrontend/**` changes:
-- Self-hosted runner, Node.js 18
-- Builds and copies to `/var/www/html/`
+Cloudflare Workers deploys the frontend from the connected GitHub repository
+after production-branch commits. GitHub Actions still builds the React app as
+a CI check.
+
+The `backend-prod` runner deploys only the backend, database, and media
+services, and only when those paths changed. GPU worker deployment is a
+separate manually approved maintenance workflow.

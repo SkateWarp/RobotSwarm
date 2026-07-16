@@ -17,6 +17,7 @@ public record AccountResponse(int Id, string FirstName, string LastName, string 
 
 
 public record AccountRequest(string FirstName, string LastName, string Email, string Password);
+public record AdminCreateAccountRequest(string FirstName, string LastName, string Email, string Password, Role Role);
 public record AuthenticateRequest(string Email, string Password);
 
 public record AccountPatchRequest(string? FirstName, string? LastName, string? Email, string? Password, Role? Role);

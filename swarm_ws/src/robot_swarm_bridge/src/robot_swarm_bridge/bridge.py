@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import rospy
 import json
-from handlers.signalr_handler import SignalRHandler
-from handlers.ros_handler import ROSHandler
-from utils.config import load_config
-from utils.logger import setup_logger
+from .handlers.signalr_handler import SignalRHandler
+from .handlers.ros_handler import ROSHandler
+from .utils.config import load_config
+from .utils.logger import setup_logger
 from std_msgs.msg import String
 
 class RobotSwarmBridge:

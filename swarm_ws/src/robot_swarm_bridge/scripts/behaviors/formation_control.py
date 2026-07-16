@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Formation Control Swarm Behavior for TurtleBot3 Waffle Robots in Gazebo
+Formation Control Swarm Behavior for TurtleBot3 Burger robots in Gazebo
 
 Implements geometric and letter-based formation shapes with static, moving, and
 adaptive movement modes. Robots maintain formation while the centroid follows
-configurable paths (circular, linear, waypoints). Includes greedy nearest-neighbor
+configurable paths (circular, linear, waypoints). Includes global minimum-cost
 assignment, PID-based differential drive control, obstacle avoidance integration,
 and RViz marker visualization.
 
@@ -13,7 +13,6 @@ Supported letters: A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, R, S, T, U, V
 """
 
 import rospy
-import numpy as np
 import json
 import math
 import threading
@@ -23,7 +22,7 @@ from enum import Enum
 # ROS messages
 from geometry_msgs.msg import Twist, Pose, Point, Quaternion
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String, Bool
 from visualization_msgs.msg import Marker, MarkerArray
 
 # Import obstacle avoidance from core
@@ -31,6 +30,11 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from core.obstacle_avoidance import ObstacleAvoidance
+from utils.robot_ids import sort_robot_ids
+from robot_swarm_bridge.algorithms.formation import (
+    minimum_distance_assignment,
+    sample_letter_formation,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -262,10 +266,10 @@ def quaternion_to_yaw(q: Quaternion) -> float:
 
 class FormationController:
     """
-    Formation Control node for TurtleBot3 Waffle swarms.
+    Formation Control node for TurtleBot3 Burger swarms.
 
     Computes geometric or letter-shaped target positions relative to a moving
-    centroid, assigns robots to positions via greedy nearest-neighbor, and drives
+    centroid, assigns robots to positions via global minimum-cost matching, and drives
     each robot with PID-based differential-drive control. Obstacle avoidance
     is applied per-robot before publishing cmd_vel.
 
@@ -290,7 +294,7 @@ class FormationController:
         /fleet/robot_list           std_msgs/String
         /formation/set_shape        std_msgs/String
         /formation/start            std_msgs/String  (JSON config)
-        /formation/stop             std_msgs/Empty
+        /formation/stop             std_msgs/String  (JSON task_id)
     """
 
     # ------------------------------------------------------------------
@@ -332,8 +336,12 @@ class FormationController:
 
         # ---- State ----
         self.is_running = False
+        self.is_paused = False
+        self.emergency_stop_active = False
+        self.current_task_id = None
         self.formation_state = FormationState.IDLE
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.command_lock = threading.RLock()
 
         # Centroid state
         self.centroid_x = 0.0
@@ -344,15 +352,15 @@ class FormationController:
 
         # Robots (populated from /fleet/robot_list or default namespace list)
         self.robot_ids: List[str] = []
-        self.robot_poses: Dict[str, Pose] = {}
+        self.robot_poses: Dict[str, Optional[Pose]] = {}
         self.robot_yaws: Dict[str, float] = {}
 
         # Formation positions: list of (x, y) offsets from centroid (unscaled)
         self.formation_offsets: List[Tuple[float, float]] = []
         # Mapping: robot_id -> index in formation_offsets
         self.assignments: Dict[str, int] = {}
-        self.last_assignment_time = 0.0
-        self.assignment_interval = 5.0  # seconds
+        self.assignment_pending = False
+        self._assignment_generation = 0
 
         # PID controllers per robot (linear, angular)
         self.pid_linear: Dict[str, PIDController] = {}
@@ -385,7 +393,17 @@ class FormationController:
             '/formation/start', String, self._start_cb, queue_size=1
         )
         rospy.Subscriber(
-            '/formation/stop', Empty, self._stop_cb, queue_size=1
+            '/formation/stop', String, self._stop_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/formation/pause', String, self._pause_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/formation/resume', String, self._resume_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/swarm/emergency_stop', Bool,
+            self._emergency_stop_cb, queue_size=1
         )
 
         # ---- Bootstrap robots from parameter if fleet topic not yet available ----
@@ -393,8 +411,11 @@ class FormationController:
             default_ids = [f'tb3_{i}' for i in range(self.robot_count)]
             self._update_robot_list(default_ids)
 
-        # Compute initial formation
-        self._recompute_formation()
+        # Compute the initial formation against the exact t=0 path pose.
+        with self.command_lock:
+            self._reset_centroid_path_pose_locked()
+            assignment_snapshot = self._recompute_formation_locked()
+        self._compute_and_commit_assignment(assignment_snapshot)
 
         # ---- Control timer at 20 Hz ----
         self.control_rate = 20.0
@@ -415,18 +436,44 @@ class FormationController:
     # ------------------------------------------------------------------
     def _fleet_list_cb(self, msg: String):
         """Handle /fleet/robot_list (comma-separated namespace list)."""
-        ids = [s.strip() for s in msg.data.split(',') if s.strip()]
-        if ids != self.robot_ids:
-            self._update_robot_list(ids)
-            self._recompute_formation()
+        ids = sort_robot_ids(
+            s.strip() for s in msg.data.split(',') if s.strip()
+        )
+        assignment_snapshot = None
+        with self.command_lock:
+            if ids != self.robot_ids:
+                if not ids:
+                    self.is_running = False
+                    self.is_paused = False
+                    self.formation_state = FormationState.STOPPED
+                    self.current_task_id = None
+                    self._cancel_pending_assignment_locked(
+                        clear_assignments=True
+                    )
+                    self._stop_all_robots()
+
+                self._update_robot_list(ids)
+                if ids:
+                    assignment_snapshot = self._recompute_formation_locked()
+                else:
+                    self.formation_offsets = []
+                    self.assignments = {}
+                    self.assignment_pending = False
+        self._compute_and_commit_assignment(assignment_snapshot)
 
     def _set_shape_cb(self, msg: String):
         """Dynamically change formation type at runtime."""
         new_type = msg.data.strip()
-        if new_type and new_type != self.formation_type:
-            rospy.loginfo("Formation shape changed: %s -> %s", self.formation_type, new_type)
-            self.formation_type = new_type
-            self._recompute_formation()
+        assignment_snapshot = None
+        with self.command_lock:
+            if new_type and new_type != self.formation_type:
+                rospy.loginfo(
+                    "Formation shape changed: %s -> %s",
+                    self.formation_type, new_type,
+                )
+                self.formation_type = new_type
+                assignment_snapshot = self._recompute_formation_locked()
+        self._compute_and_commit_assignment(assignment_snapshot)
 
     def _start_cb(self, msg):
         """Start the formation behavior with optional runtime config."""
@@ -436,72 +483,175 @@ class FormationController:
         except (json.JSONDecodeError, AttributeError):
             config = {}
 
-        # Apply runtime config
-        if 'formation_type' in config:
-            self.formation_type = config['formation_type']
-            self._recompute_formation()
-        if 'movement_mode' in config:
-            try:
-                self.movement_mode = MovementMode(config['movement_mode'])
-            except ValueError:
-                pass
+        assignment_snapshot = None
+        with self.command_lock:
+            if self.emergency_stop_active:
+                rospy.logwarn(
+                    "Formation start rejected while emergency stop is active"
+                )
+                return
+            if not self.robot_ids:
+                rospy.logwarn(
+                    "Formation start rejected because the fleet is empty"
+                )
+                return
 
-        self.is_running = True
-        self.formation_state = FormationState.FORMING
-        self.centroid_time = 0.0
-        # Reset PIDs
-        for pid in self.pid_linear.values():
-            pid.reset()
-        for pid in self.pid_angular.values():
-            pid.reset()
+            recompute = False
+            if 'formation_type' in config:
+                new_type = config['formation_type']
+                recompute = recompute or new_type != self.formation_type
+                self.formation_type = new_type
+            if 'movement_mode' in config:
+                try:
+                    self.movement_mode = MovementMode(config['movement_mode'])
+                except ValueError:
+                    pass
+            if 'spacing' in config:
+                try:
+                    new_spacing = max(0.35, float(config['spacing']))
+                    recompute = recompute or new_spacing != self.spacing
+                    self.spacing = new_spacing
+                except (TypeError, ValueError):
+                    pass
+            self.current_task_id = config.get('task_id')
+            self.is_running = True
+            self.is_paused = False
+            self.formation_state = FormationState.FORMING
+            self._reset_centroid_path_pose_locked()
+
+            if recompute:
+                assignment_snapshot = self._recompute_formation_locked()
+            else:
+                assignment_snapshot = self._prepare_assignment_locked()
+
+            for pid in self.pid_linear.values():
+                pid.reset()
+            for pid in self.pid_angular.values():
+                pid.reset()
+        self._compute_and_commit_assignment(assignment_snapshot)
         rospy.loginfo(
             "Formation control STARTED: type=%s, mode=%s",
             self.formation_type, self.movement_mode.value,
         )
 
-    def _stop_cb(self, msg: Empty):
+    def _stop_cb(self, msg: String):
         """Stop the formation behavior and halt all robots."""
-        self.is_running = False
-        self.formation_state = FormationState.STOPPED
-        self._stop_all_robots()
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            self.is_running = False
+            self.is_paused = False
+            self.formation_state = FormationState.STOPPED
+            self._cancel_pending_assignment_locked(clear_assignments=True)
+            self._stop_all_robots()
         rospy.loginfo("Formation control STOPPED")
+
+    def _pause_cb(self, msg: String):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            if not self.is_running or self.is_paused:
+                return
+            self.is_paused = True
+            self._stop_all_robots()
+        rospy.loginfo("Formation control PAUSED")
+
+    def _resume_cb(self, msg: String):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            if (
+                not self.is_running
+                or not self.is_paused
+                or self.emergency_stop_active
+            ):
+                return
+            self.is_paused = False
+        rospy.loginfo("Formation control RESUMED")
+
+    def _task_command_matches(self, msg: String) -> bool:
+        try:
+            payload = json.loads(msg.data) if msg.data else {}
+        except (json.JSONDecodeError, AttributeError):
+            payload = {}
+        requested_id = payload.get('task_id')
+        return (
+            isinstance(requested_id, str)
+            and bool(requested_id)
+            and requested_id == self.current_task_id
+        )
+
+    def _emergency_stop_cb(self, msg: Bool):
+        with self.command_lock:
+            self.emergency_stop_active = bool(msg.data)
+            if self.emergency_stop_active:
+                self.is_running = False
+                self.is_paused = False
+                self.formation_state = FormationState.STOPPED
+                self._cancel_pending_assignment_locked(
+                    clear_assignments=True
+                )
+                self._stop_all_robots()
+                rospy.logwarn("Formation emergency stop latched")
 
     def _odom_cb(self, msg: Odometry, robot_id: str):
         """Per-robot odometry callback."""
         pose = msg.pose.pose
         yaw = quaternion_to_yaw(pose.orientation)
+        should_assign = False
         with self.lock:
+            first_update = self.robot_poses.get(robot_id) is None
+            if robot_id not in self.robot_poses:
+                return
             self.robot_poses[robot_id] = pose
             self.robot_yaws[robot_id] = yaw
+            should_assign = (
+                first_update
+                and self.assignment_pending
+                and all(
+                    self.robot_poses.get(rid) is not None
+                    for rid in self.robot_ids
+                )
+            )
 
         # Keep obstacle avoidance module in sync
         av = self.avoidance.get(robot_id)
         if av is not None:
             av.set_position(pose.position.x, pose.position.y, yaw)
+        if should_assign:
+            with self.command_lock:
+                if self.assignment_pending:
+                    assignment_snapshot = self._prepare_assignment_locked()
+                else:
+                    assignment_snapshot = None
+            self._compute_and_commit_assignment(assignment_snapshot)
 
     # ------------------------------------------------------------------
     # Robot list management
     # ------------------------------------------------------------------
     def _update_robot_list(self, new_ids: List[str]):
         """Add/remove robots to match the given list."""
-        old_set = set(self.robot_ids)
-        new_set = set(new_ids)
+        with self.lock:
+            old_set = set(self.robot_ids)
+            new_set = set(new_ids)
 
-        # Remove departed robots
-        for rid in old_set - new_set:
-            self._remove_robot(rid)
+            # Remove departed robots
+            for rid in old_set - new_set:
+                self._remove_robot(rid)
 
-        # Add new robots
-        for rid in new_set - old_set:
-            self._add_robot(rid)
+            # Add new robots
+            for rid in new_set - old_set:
+                self._add_robot(rid)
 
-        # Maintain ordered list
-        self.robot_ids = [rid for rid in new_ids if rid in new_set]
-        self.robot_count = len(self.robot_ids)
+            # Maintain ordered list
+            self.robot_ids = sort_robot_ids(
+                rid for rid in new_ids if rid in new_set
+            )
+            self.robot_count = len(self.robot_ids)
 
     def _add_robot(self, robot_id: str):
         """Register publishers, subscribers, PID, and avoidance for a robot."""
-        self.robot_poses[robot_id] = Pose()
+        self.robot_poses[robot_id] = None
         self.robot_yaws[robot_id] = 0.0
 
         self.cmd_vel_pubs[robot_id] = rospy.Publisher(
@@ -525,16 +675,25 @@ class FormationController:
 
     def _remove_robot(self, robot_id: str):
         """Unregister a robot."""
-        for store in (
-            self.robot_poses, self.robot_yaws, self.cmd_vel_pubs,
-            self.pid_linear, self.pid_angular, self.avoidance,
-            self.assignments,
-        ):
-            store.pop(robot_id, None)
+        pub = self.cmd_vel_pubs.pop(robot_id, None)
+        if pub is not None:
+            pub.publish(Twist())
+            pub.unregister()
 
         sub = self._odom_subs.pop(robot_id, None)
         if sub is not None:
             sub.unregister()
+
+        avoidance = self.avoidance.pop(robot_id, None)
+        if avoidance is not None:
+            avoidance.shutdown()
+
+        for store in (
+            self.robot_poses, self.robot_yaws,
+            self.pid_linear, self.pid_angular,
+            self.assignments,
+        ):
+            store.pop(robot_id, None)
 
         rospy.loginfo("Removed robot: %s", robot_id)
 
@@ -543,16 +702,22 @@ class FormationController:
     # ------------------------------------------------------------------
     def _recompute_formation(self):
         """Recompute formation offsets and reassign robots."""
+        with self.command_lock:
+            assignment_snapshot = self._recompute_formation_locked()
+        self._compute_and_commit_assignment(assignment_snapshot)
+
+    def _recompute_formation_locked(self) -> Optional[Dict]:
+        """Recompute offsets and snapshot an assignment under command_lock."""
         n = len(self.robot_ids)
         if n == 0:
             self.formation_offsets = []
-            self.assignments = {}
-            return
+            self._cancel_pending_assignment_locked(clear_assignments=True)
+            return None
 
         self.formation_offsets = self._compute_formation_positions(
             self.formation_type, n, self.spacing
         )
-        self._assign_robots_to_positions()
+        return self._prepare_assignment_locked()
 
     def _compute_formation_positions(
         self, formation_type: str, n_robots: int, spacing: float
@@ -750,102 +915,113 @@ class FormationController:
         self, letter: str, n_robots: int, spacing: float
     ) -> List[Tuple[float, float]]:
         """
-        Convert a grid-based letter definition into world-coordinate offsets,
-        then select the best *n_robots* positions (or distribute extras).
+        Convert a grid-based letter definition into world-coordinate offsets
+        sampled at a safe density for any fleet size.
         """
         grid = LETTERS.get(letter)
         if grid is None:
             rospy.logwarn("Letter '%s' not defined, falling back to circle", letter)
             return self._circle_positions(n_robots, spacing)
 
-        # Scale grid to world coordinates.
-        # Grid columns span 0..4, rows 0..6. Center at (2, 3).
-        # Multiply by spacing * 0.6 to keep a reasonable size.
-        scale = spacing * 0.6
-        world_pts: List[Tuple[float, float]] = []
-        for (c, r) in grid:
-            x = (c - 2.0) * scale
-            y = (r - 3.0) * scale
-            world_pts.append((x, y))
-
-        if n_robots <= len(world_pts):
-            # More letter points than robots: pick the first n (they are
-            # ordered to give a good outline).
-            return world_pts[:n_robots]
-        else:
-            # More robots than letter points: duplicate positions with slight jitter
-            positions = list(world_pts)
-            extra = n_robots - len(world_pts)
-            for i in range(extra):
-                base = world_pts[i % len(world_pts)]
-                jitter = spacing * 0.15
-                angle = 2.0 * math.pi * i / max(1, extra)
-                px = base[0] + jitter * math.cos(angle)
-                py = base[1] + jitter * math.sin(angle)
-                positions.append((px, py))
-            return positions[:n_robots]
+        return sample_letter_formation(grid, n_robots, spacing)
 
     # ------------------------------------------------------------------
-    # Robot-to-position assignment (greedy nearest-neighbor)
+    # Robot-to-position assignment (global minimum cost)
     # ------------------------------------------------------------------
     def _assign_robots_to_positions(self):
+        """Snapshot state briefly, then solve without holding command_lock."""
+        with self.command_lock:
+            assignment_snapshot = self._prepare_assignment_locked()
+        return self._compute_and_commit_assignment(assignment_snapshot)
+
+    def _prepare_assignment_locked(self) -> Optional[Dict]:
         """
-        Greedy nearest-neighbor assignment: for each formation position in order,
-        assign the closest unassigned robot.
+        Capture an immutable assignment request while holding command_lock.
+
+        The Hungarian solver is deliberately invoked later, after command_lock
+        has been released, so emergency-stop and lifecycle callbacks are never
+        queued behind its O(n^3) computation.
         """
+        self._assignment_generation += 1
+        generation = self._assignment_generation
+
         n = min(len(self.robot_ids), len(self.formation_offsets))
         if n == 0:
             self.assignments = {}
-            return
+            self.assignment_pending = False
+            return None
 
-        # Current world positions of the target formation slots
-        target_world = self._get_world_targets()
+        target_world = tuple(self._get_world_targets()[:n])
+        robot_ids = tuple(self.robot_ids[:n])
+        robot_positions: List[Tuple[float, float]] = []
+        previous_slots: List[Optional[int]] = []
 
-        available = set(range(len(self.robot_ids)))
-        new_assignments: Dict[str, int] = {}
+        with self.lock:
+            poses = [self.robot_poses.get(robot_id) for robot_id in robot_ids]
+            if any(pose is None for pose in poses):
+                self.assignments = {}
+                self.assignment_pending = True
+                return None
 
-        for slot_idx in range(n):
-            tx, ty = target_world[slot_idx]
-            best_robot_idx = -1
-            best_dist = float('inf')
+            for robot_id, pose in zip(robot_ids, poses):
+                robot_positions.append((pose.position.x, pose.position.y))
+                previous_slots.append(self.assignments.get(robot_id))
 
-            for ri in available:
-                rid = self.robot_ids[ri]
-                pose = self.robot_poses.get(rid)
-                if pose is None:
-                    continue
-                dx = pose.position.x - tx
-                dy = pose.position.y - ty
-                d = math.sqrt(dx * dx + dy * dy)
-                if d < best_dist:
-                    best_dist = d
-                    best_robot_idx = ri
+        # Stop the control loop from using an assignment that belongs to the
+        # previous centroid/shape while the new solution is in flight.
+        self.assignments = {}
+        self.assignment_pending = True
+        return {
+            'generation': generation,
+            'robot_ids': robot_ids,
+            'robot_positions': tuple(robot_positions),
+            'target_world': target_world,
+            'previous_slots': tuple(previous_slots),
+            'switch_penalty': (self.spacing * 0.35) ** 2,
+        }
 
-            if best_robot_idx >= 0:
-                rid = self.robot_ids[best_robot_idx]
-                new_assignments[rid] = slot_idx
-                available.discard(best_robot_idx)
+    def _compute_and_commit_assignment(
+        self, assignment_snapshot: Optional[Dict]
+    ) -> bool:
+        """
+        Solve an assignment without command_lock and commit only if current.
 
-        # Assign any remaining robots (more robots than slots) to closest slot
-        for ri in available:
-            rid = self.robot_ids[ri]
-            pose = self.robot_poses.get(rid)
-            if pose is None:
-                new_assignments[rid] = 0
-                continue
-            best_slot = 0
-            best_dist = float('inf')
-            for si in range(len(self.formation_offsets)):
-                tx, ty = target_world[si] if si < len(target_world) else (self.centroid_x, self.centroid_y)
-                dx = pose.position.x - tx
-                dy = pose.position.y - ty
-                d = math.sqrt(dx * dx + dy * dy)
-                if d < best_dist:
-                    best_dist = d
-                    best_slot = si
-            new_assignments[rid] = best_slot
+        A newer shape/fleet/start request, stop, or emergency stop advances the
+        generation and makes this result stale before it can affect control.
+        """
+        if assignment_snapshot is None:
+            return False
 
-        self.assignments = new_assignments
+        slots = minimum_distance_assignment(
+            assignment_snapshot['robot_positions'],
+            assignment_snapshot['target_world'],
+            previous_slots=assignment_snapshot['previous_slots'],
+            switch_penalty=assignment_snapshot['switch_penalty'],
+        )
+
+        with self.command_lock:
+            if (
+                assignment_snapshot['generation']
+                != self._assignment_generation
+            ):
+                return False
+            self.assignments = {
+                robot_id: slot_index
+                for robot_id, slot_index in zip(
+                    assignment_snapshot['robot_ids'], slots
+                )
+            }
+            self.assignment_pending = False
+        return True
+
+    def _cancel_pending_assignment_locked(
+        self, clear_assignments: bool = False
+    ):
+        """Invalidate any solver result that was computed from older state."""
+        self._assignment_generation += 1
+        self.assignment_pending = False
+        if clear_assignments:
+            self.assignments = {}
 
     def _get_world_targets(self) -> List[Tuple[float, float]]:
         """
@@ -865,6 +1041,48 @@ class FormationController:
     # ------------------------------------------------------------------
     # Centroid update
     # ------------------------------------------------------------------
+    def _reset_centroid_path_pose_locked(self):
+        """Reset to the exact pose used by the configured path at t=0."""
+        self.centroid_time = 0.0
+        self.current_waypoint_idx = 0
+        self.centroid_x = 0.0
+        self.centroid_y = 0.0
+        self.centroid_heading = 0.0
+
+        if self.movement_mode == MovementMode.STATIC:
+            return
+
+        if self.centroid_path == CentroidPath.CIRCULAR:
+            self._set_circular_centroid_pose()
+            return
+
+        if (
+            self.centroid_path == CentroidPath.WAYPOINTS
+            and self.centroid_waypoints
+        ):
+            # Skip waypoints already at the deterministic path origin and set
+            # the heading that the first moving tick will use.
+            for _ in range(len(self.centroid_waypoints)):
+                wp = self.centroid_waypoints[
+                    self.current_waypoint_idx % len(self.centroid_waypoints)
+                ]
+                dx = wp.get('x', 0.0) - self.centroid_x
+                dy = wp.get('y', 0.0) - self.centroid_y
+                if math.hypot(dx, dy) >= 0.15:
+                    self.centroid_heading = math.atan2(dy, dx)
+                    break
+                self.current_waypoint_idx = (
+                    self.current_waypoint_idx + 1
+                ) % len(self.centroid_waypoints)
+
+    def _set_circular_centroid_pose(self):
+        """Set the circular path pose for the current centroid_time."""
+        angular_speed = self.centroid_speed / max(0.1, self.path_radius)
+        t = self.centroid_time * angular_speed
+        self.centroid_x = self.path_radius * math.cos(t)
+        self.centroid_y = self.path_radius * math.sin(t)
+        self.centroid_heading = t + math.pi / 2.0
+
     def _update_centroid(self, dt: float):
         """Advance the centroid along the configured path."""
         if self.movement_mode == MovementMode.STATIC:
@@ -874,13 +1092,7 @@ class FormationController:
         self.centroid_time += dt
 
         if self.centroid_path == CentroidPath.CIRCULAR:
-            # Parametric circle
-            angular_speed = self.centroid_speed / max(0.1, self.path_radius)
-            t = self.centroid_time * angular_speed
-            self.centroid_x = self.path_radius * math.cos(t)
-            self.centroid_y = self.path_radius * math.sin(t)
-            # Heading is tangent to the circle
-            self.centroid_heading = t + math.pi / 2.0
+            self._set_circular_centroid_pose()
 
         elif self.centroid_path == CentroidPath.LINEAR:
             # Move in a straight line along the current heading
@@ -911,6 +1123,16 @@ class FormationController:
     # 20 Hz control loop
     # ------------------------------------------------------------------
     def _control_loop(self, event):
+        with self.command_lock:
+            if (
+                not self.is_running
+                or self.is_paused
+                or self.emergency_stop_active
+            ):
+                return
+            self._control_step(event)
+
+    def _control_step(self, event):
         """Main 20 Hz timer callback."""
         if not self.is_running:
             return
@@ -923,12 +1145,6 @@ class FormationController:
 
         # ---- Update centroid ----
         self._update_centroid(dt)
-
-        # ---- Periodically reassign robots ----
-        now = rospy.get_time()
-        if now - self.last_assignment_time > self.assignment_interval:
-            self._assign_robots_to_positions()
-            self.last_assignment_time = now
 
         # ---- Compute world target positions ----
         world_targets = self._get_world_targets()
@@ -965,11 +1181,15 @@ class FormationController:
                     break
 
         # ---- Per-robot control ----
-        all_in_position = True
+        all_in_position = bool(self.robot_ids)
 
         for rid in self.robot_ids:
             slot_idx = self.assignments.get(rid)
             if slot_idx is None or slot_idx >= len(world_targets):
+                all_in_position = False
+                pub = self.cmd_vel_pubs.get(rid)
+                if pub is not None:
+                    pub.publish(Twist())
                 continue
 
             target_x, target_y = world_targets[slot_idx]
@@ -989,6 +1209,10 @@ class FormationController:
                 yaw = self.robot_yaws.get(rid, 0.0)
 
             if pose is None:
+                all_in_position = False
+                pub = self.cmd_vel_pubs.get(rid)
+                if pub is not None:
+                    pub.publish(Twist())
                 continue
 
             robot_x = pose.position.x
@@ -1057,7 +1281,9 @@ class FormationController:
     def _stop_all_robots(self):
         """Publish zero velocity to every robot."""
         stop = Twist()
-        for pub in self.cmd_vel_pubs.values():
+        with self.lock:
+            pubs = list(self.cmd_vel_pubs.values())
+        for pub in pubs:
             pub.publish(stop)
 
     # ------------------------------------------------------------------
@@ -1072,6 +1298,8 @@ class FormationController:
                 assignments_dict[rid] = {'slot': slot_idx, 'target_x': tx, 'target_y': ty}
 
         status = {
+            'task_id': self.current_task_id,
+            'paused': self.is_paused,
             'formation_type': self.formation_type,
             'movement_mode': self.movement_mode.value,
             'state': self.formation_state.value,

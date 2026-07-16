@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Follow-the-Leader Swarm Behavior Controller for TurtleBot3 Waffle in Gazebo
+Follow-the-Leader Swarm Behavior Controller for TurtleBot3 Burger in Gazebo
 
 Creates a chain: Leader -> Follower 1 -> Follower 2 -> ... -> Follower N
 The leader follows predefined parametric paths (circular, square, figure8, waypoint)
-or accepts manual velocity commands. Each follower tracks the robot immediately ahead
-of it using a time-delayed position history and PID control.
+or accepts manual velocity commands. Each follower tracks its own distance-based
+target along the leader's travelled path using PID control.
 
 Integrates with the ObstacleAvoidance module for safe navigation.
 Dynamically adapts to robots being added or removed via /fleet/robot_list.
@@ -17,19 +17,20 @@ import json
 import os
 import sys
 import threading
-from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 # ROS messages
 from geometry_msgs.msg import Twist, Point, Pose
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String, Bool
 import random as rng
 from visualization_msgs.msg import Marker, MarkerArray
 
 # Import ObstacleAvoidance from core
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from core.obstacle_avoidance import ObstacleAvoidance
+from utils.robot_ids import sort_robot_ids
+from robot_swarm_bridge.algorithms.path_trace import ArcLengthTrace
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +129,8 @@ class FollowTheLeader:
 
     Leader motion is generated internally according to the chosen *mode*
     (circular, square, figure8, waypoint, manual).  Follower motion uses a
-    time-delayed playback of the preceding robot's odometry history, combined
-    with a PID tracking loop.
+    distance-based playback of the leader's path, combined with a PID tracking
+    loop. Every follower receives a different point on the same path.
 
     All velocity commands pass through an :class:`ObstacleAvoidance` filter
     before being published.
@@ -144,7 +145,6 @@ class FollowTheLeader:
         self.robot_count = rospy.get_param('~robot_count', 5)
         self.leader_mode = rospy.get_param('~leader_mode', 'circular')
         self.follow_distance = rospy.get_param('~follow_distance', 0.7)
-        self.time_delay = rospy.get_param('~time_delay', 1.0)
         self.max_linear_vel = rospy.get_param('~max_linear_vel', 0.2)
         self.max_angular_vel = rospy.get_param('~max_angular_vel', 1.5)
         self.path_radius = rospy.get_param('~path_radius', 2.0)
@@ -155,8 +155,6 @@ class FollowTheLeader:
         # ---- Derived / internal constants ----------------------------------
         self.control_rate = 20.0  # Hz
         self.dt = 1.0 / self.control_rate
-        self.position_history_seconds = max(self.time_delay * 3.0, 10.0)
-        self.history_maxlen = int(self.control_rate * self.position_history_seconds)
         self.waypoint_tolerance = 0.15  # metres
 
         # ---- Leader path state ---------------------------------------------
@@ -167,7 +165,6 @@ class FollowTheLeader:
         self.robot_names = []  # sorted list, index 0 = leader
         self.poses = {}        # str -> Pose
         self.yaws = {}         # str -> float  (cache to avoid repeated quat conversion)
-        self.histories = {}    # str -> deque of (rospy.Time, x, y, yaw)
         self.linear_pids = {}  # str -> PIDController
         self.angular_pids = {} # str -> PIDController
         self.avoidance = {}    # str -> ObstacleAvoidance
@@ -176,8 +173,13 @@ class FollowTheLeader:
 
         # ---- Behaviour state -----------------------------------------------
         self.is_active = False
+        self.is_paused = False
+        self.emergency_stop_active = False
+        self.current_task_id = None
         self.manual_twist = Twist()
-        self.lock = threading.Lock()  # guards robot_names / per-robot dicts
+        self.leader_trace = ArcLengthTrace(minimum_step=0.015)
+        self.lock = threading.RLock()  # guards robot_names / per-robot dicts
+        self.command_lock = threading.RLock()
 
         # ---- Global publishers / subscribers --------------------------------
         self.status_pub = rospy.Publisher(
@@ -194,10 +196,20 @@ class FollowTheLeader:
             '/follow_leader/start', String, self._start_cb, queue_size=1
         )
         rospy.Subscriber(
-            '/follow_leader/stop', Empty, self._stop_cb, queue_size=1
+            '/follow_leader/stop', String, self._stop_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/follow_leader/pause', String, self._pause_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/follow_leader/resume', String, self._resume_cb, queue_size=1
         )
         rospy.Subscriber(
             '/leader/cmd_vel', Twist, self._manual_cmd_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/swarm/emergency_stop', Bool,
+            self._emergency_stop_cb, queue_size=1
         )
 
         # ---- Bootstrap default fleet if no /fleet/robot_list arrives -------
@@ -210,9 +222,9 @@ class FollowTheLeader:
 
         rospy.loginfo(
             "[follow_leader] Initialised: mode=%s, robots=%d, follow_dist=%.2f, "
-            "time_delay=%.2f, radius=%.2f",
+            "radius=%.2f",
             self.leader_mode, self.robot_count, self.follow_distance,
-            self.time_delay, self.path_radius,
+            self.path_radius,
         )
 
     # -- fleet management ---------------------------------------------------
@@ -231,8 +243,6 @@ class FollowTheLeader:
         Handle ``/fleet/robot_list`` (comma-separated namespace string).
         Adds/removes robots dynamically.
         """
-        if not msg.data.strip():
-            return
         names = [n.strip() for n in msg.data.split(',') if n.strip()]
         self._sync_fleet(names)
 
@@ -244,21 +254,32 @@ class FollowTheLeader:
         * Robots no longer in *new_names* are removed.
         * The list is sorted so that the chain order is deterministic.
         """
-        new_names_sorted = sorted(set(new_names))
+        new_names_sorted = sort_robot_ids(new_names)
 
-        with self.lock:
-            old_set = set(self.robot_names)
-            new_set = set(new_names_sorted)
+        with self.command_lock:
+            with self.lock:
+                old_leader = self.robot_names[0] if self.robot_names else None
+                old_set = set(self.robot_names)
+                new_set = set(new_names_sorted)
 
-            # Add new robots
-            for name in new_set - old_set:
-                self._add_robot(name)
+                if not new_set and (self.is_active or self.is_paused):
+                    self._stop_all()
+                    self.is_active = False
+                    self.is_paused = False
+                    self.leader_trace.clear()
 
-            # Remove departed robots
-            for name in old_set - new_set:
-                self._remove_robot(name)
+                # Add new robots
+                for name in new_set - old_set:
+                    self._add_robot(name)
 
-            self.robot_names = new_names_sorted
+                # Remove departed robots
+                for name in old_set - new_set:
+                    self._remove_robot(name)
+
+                self.robot_names = new_names_sorted
+                new_leader = self.robot_names[0] if self.robot_names else None
+                if old_leader != new_leader:
+                    self.leader_trace.clear()
 
         rospy.loginfo(
             "[follow_leader] Fleet synced: %s", ', '.join(new_names_sorted)
@@ -268,7 +289,6 @@ class FollowTheLeader:
         """Register publishers, subscribers, PID controllers, etc. for *name*."""
         self.poses[name] = None
         self.yaws[name] = 0.0
-        self.histories[name] = deque(maxlen=self.history_maxlen)
 
         self.linear_pids[name] = PIDController(
             kp=1.0, ki=0.0, kd=0.3,
@@ -293,16 +313,23 @@ class FollowTheLeader:
 
     def _remove_robot(self, name):
         """Unregister a robot and clean up resources."""
-        # Send a stop command before tearing down
-        if name in self.cmd_pubs:
-            self.cmd_pubs[name].publish(Twist())
+        pub = self.cmd_pubs.pop(name, None)
+        if pub is not None:
+            pub.publish(Twist())
+            pub.unregister()
 
-        if name in self.odom_subs:
-            self.odom_subs[name].unregister()
+        odom_sub = self.odom_subs.pop(name, None)
+        if odom_sub is not None:
+            odom_sub.unregister()
 
-        for d in (self.poses, self.yaws, self.histories,
-                  self.linear_pids, self.angular_pids,
-                  self.cmd_pubs, self.odom_subs, self.avoidance):
+        avoidance = self.avoidance.pop(name, None)
+        if avoidance is not None:
+            avoidance.shutdown()
+
+        for d in (
+            self.poses, self.yaws,
+            self.linear_pids, self.angular_pids,
+        ):
             d.pop(name, None)
 
         rospy.loginfo("[follow_leader] Removed robot: %s", name)
@@ -311,26 +338,21 @@ class FollowTheLeader:
 
     def _odom_cb(self, msg, robot_name):
         """
-        Store the latest pose and append to the position history ring buffer.
+        Store the latest pose.
         """
         pose = msg.pose.pose
         yaw = yaw_from_quaternion(pose.orientation)
 
-        self.poses[robot_name] = pose
-        self.yaws[robot_name] = yaw
+        with self.lock:
+            if robot_name not in self.poses:
+                return
+            self.poses[robot_name] = pose
+            self.yaws[robot_name] = yaw
+            avoidance = self.avoidance.get(robot_name)
 
         # Keep obstacle avoidance module in sync
-        if robot_name in self.avoidance:
-            self.avoidance[robot_name].set_position(
-                pose.position.x, pose.position.y, yaw
-            )
-
-        self.histories[robot_name].append((
-            rospy.Time.now(),
-            pose.position.x,
-            pose.position.y,
-            yaw,
-        ))
+        if avoidance is not None:
+            avoidance.set_position(pose.position.x, pose.position.y, yaw)
 
     def _start_cb(self, msg):
         # Parse config from task orchestrator (JSON String)
@@ -339,43 +361,137 @@ class FollowTheLeader:
         except (json.JSONDecodeError, AttributeError):
             config = {}
 
-        # Apply runtime config
-        if 'leader_mode' in config:
-            self.leader_mode = config['leader_mode']
-        if 'waypoints' in config and config['waypoints']:
-            self.waypoints = [[wp.get('x', wp[0]) if isinstance(wp, dict) else wp[0],
-                                wp.get('y', wp[1]) if isinstance(wp, dict) else wp[1]]
-                               for wp in config['waypoints']]
-        if 'radius' in config:
-            self.path_radius = config['radius']
+        with self.command_lock:
+            if self.emergency_stop_active:
+                rospy.logwarn(
+                    "[follow_leader] Start rejected while emergency stop is active"
+                )
+                return
+            with self.lock:
+                if not self.robot_names:
+                    rospy.logwarn(
+                        "[follow_leader] Start rejected without an active fleet"
+                    )
+                    return
 
-        # For 'random' mode, generate random waypoints inside the arena
-        if self.leader_mode == 'random':
-            self.waypoints = [[rng.uniform(-3.5, 3.5), rng.uniform(-3.5, 3.5)]
-                              for _ in range(8)]
-            self.leader_mode = 'waypoint'  # use waypoint logic with random points
+            # Apply runtime config while the control loop is quiescent.
+            if 'leader_mode' in config:
+                self.leader_mode = config['leader_mode']
+            if 'waypoints' in config and config['waypoints']:
+                parsed_waypoints = []
+                for waypoint in config['waypoints']:
+                    if isinstance(waypoint, dict):
+                        if 'x' not in waypoint or 'y' not in waypoint:
+                            continue
+                        parsed_waypoints.append([
+                            float(waypoint['x']), float(waypoint['y'])
+                        ])
+                    elif (
+                        isinstance(waypoint, (list, tuple))
+                        and len(waypoint) >= 2
+                    ):
+                        parsed_waypoints.append([
+                            float(waypoint[0]), float(waypoint[1])
+                        ])
+                if parsed_waypoints:
+                    self.waypoints = parsed_waypoints
+            if 'radius' in config:
+                try:
+                    self.path_radius = max(0.5, float(config['radius']))
+                except (TypeError, ValueError):
+                    pass
+            if 'follow_distance' in config:
+                try:
+                    self.follow_distance = max(
+                        0.35, float(config['follow_distance'])
+                    )
+                except (TypeError, ValueError):
+                    pass
 
-        self.is_active = True
-        self.path_t = 0.0
-        self.current_waypoint_idx = 0
-        # Reset all PIDs
-        with self.lock:
-            for pid in self.linear_pids.values():
-                pid.reset()
-            for pid in self.angular_pids.values():
-                pid.reset()
+            if self.leader_mode == 'random':
+                self.waypoints = [
+                    [rng.uniform(-3.5, 3.5), rng.uniform(-3.5, 3.5)]
+                    for _ in range(8)
+                ]
+                self.leader_mode = 'waypoint'
+
+            self.current_task_id = config.get('task_id')
+            self.is_active = True
+            self.is_paused = False
+            self.path_t = 0.0
+            self.current_waypoint_idx = 0
+            self.leader_trace.clear()
+            with self.lock:
+                names = list(self.robot_names)
+                if names:
+                    pose = self.poses.get(names[0])
+                    if pose is not None:
+                        self.leader_trace.seed_line(
+                            pose.position.x,
+                            pose.position.y,
+                            self.yaws.get(names[0], 0.0),
+                            max(0, len(names) - 1) * self.follow_distance,
+                        )
+                for pid in self.linear_pids.values():
+                    pid.reset()
+                for pid in self.angular_pids.values():
+                    pid.reset()
         rospy.loginfo(
             "[follow_leader] Behaviour STARTED: mode=%s, waypoints=%d, radius=%.2f",
             self.leader_mode, len(self.waypoints), self.path_radius,
         )
 
-    def _stop_cb(self, _msg):
-        self.is_active = False
-        self._stop_all()
+    def _stop_cb(self, msg):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            self.is_active = False
+            self.is_paused = False
+            self._stop_all()
         rospy.loginfo("[follow_leader] Behaviour STOPPED")
+
+    def _pause_cb(self, msg):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            if not self.is_active or self.is_paused:
+                return
+            self.is_paused = True
+            self._stop_all()
+        rospy.loginfo("[follow_leader] Behaviour PAUSED")
+
+    def _resume_cb(self, msg):
+        with self.command_lock:
+            if not self._task_command_matches(msg):
+                return
+            if (
+                not self.is_active
+                or not self.is_paused
+                or self.emergency_stop_active
+            ):
+                return
+            self.is_paused = False
+        rospy.loginfo("[follow_leader] Behaviour RESUMED")
+
+    def _task_command_matches(self, msg):
+        try:
+            payload = json.loads(msg.data) if msg.data else {}
+        except (json.JSONDecodeError, AttributeError):
+            payload = {}
+        requested_id = payload.get('task_id')
+        return bool(requested_id) and requested_id == self.current_task_id
 
     def _manual_cmd_cb(self, msg):
         self.manual_twist = msg
+
+    def _emergency_stop_cb(self, msg):
+        with self.command_lock:
+            self.emergency_stop_active = bool(msg.data)
+            if self.emergency_stop_active:
+                self.is_active = False
+                self.is_paused = False
+                self._stop_all()
+                rospy.logwarn("[follow_leader] Emergency stop latched")
 
     # -- leader path generation ---------------------------------------------
 
@@ -539,47 +655,14 @@ class FollowTheLeader:
 
     # -- follower update ----------------------------------------------------
 
-    def _get_delayed_pose(self, robot_name, delay):
-        """
-        Look up the pose of *robot_name* from *delay* seconds ago using its
-        position history ring buffer.
-
-        Returns:
-            (x, y, yaw) or *None* if no suitable record exists.
-        """
-        history = self.histories.get(robot_name)
-        if not history:
-            return None
-
-        target_time = rospy.Time.now() - rospy.Duration(delay)
-
-        # Walk backwards (most-recent first) and return the first entry
-        # that is at or before the target time.
-        best = None
-        for entry in reversed(history):
-            stamp = entry[0]
-            if stamp <= target_time:
-                best = entry
-                break
-
-        if best is not None:
-            return best[1], best[2], best[3]
-
-        # History exists but nothing old enough -- return the oldest record.
-        oldest = history[0]
-        return oldest[1], oldest[2], oldest[3]
-
     def _update_follower(self, robot_idx, dt):
         """
         Compute and return a ``Twist`` for the follower at *robot_idx*.
 
-        The follower aims for the position where the robot ahead of it
-        (robot_idx - 1) was ``self.time_delay`` seconds ago, keeping
-        ``self.follow_distance`` behind it.
+        Each follower tracks a point farther back on the leader's path.
         """
         cmd = Twist()
         name = self.robot_names[robot_idx]
-        ahead_name = self.robot_names[robot_idx - 1]
 
         pose = self.poses.get(name)
         if pose is None:
@@ -589,50 +672,37 @@ class FollowTheLeader:
         cur_y = pose.position.y
         cur_yaw = self.yaws.get(name, 0.0)
 
-        # Retrieve the delayed position of the robot ahead
-        delayed = self._get_delayed_pose(ahead_name, self.time_delay)
-        if delayed is None:
-            # Fallback: use current position of robot ahead
-            ahead_pose = self.poses.get(ahead_name)
-            if ahead_pose is None:
-                return cmd
-            target_x = ahead_pose.position.x
-            target_y = ahead_pose.position.y
-        else:
-            target_x, target_y, _ = delayed
+        try:
+            target = self.leader_trace.points_behind([
+                robot_idx * self.follow_distance
+            ])[0]
+        except ValueError:
+            return cmd
+        target_x = target.x
+        target_y = target.y
 
-        # Vector from follower to the delayed target
         dx = target_x - cur_x
         dy = target_y - cur_y
         dist = math.hypot(dx, dy)
-
-        # Error relative to desired follow distance
-        distance_error = dist - self.follow_distance
 
         # Angle from follower to target
         angle_to_target = math.atan2(dy, dx)
         angle_error = normalize_angle(angle_to_target - cur_yaw)
 
         # Linear velocity: PID on distance error, modulated by heading alignment
-        if distance_error > 0.02:
-            # Need to move toward the target
-            raw_linear = self.linear_pids[name].compute(distance_error, dt)
-            # Slow down when not facing the target
+        if dist > 0.03:
+            raw_linear = self.linear_pids[name].compute(dist, dt)
             alignment_factor = math.cos(min(abs(angle_error), math.pi / 2))
             linear = raw_linear * alignment_factor
             linear = max(0.0, min(linear, self.max_linear_vel))
-        elif distance_error < -0.05:
-            # Too close -- back up gently
-            linear = max(-0.05, distance_error * 0.3)
         else:
-            # Within tolerance
             linear = 0.0
 
         # Angular velocity: PID on heading error
         angular = self.angular_pids[name].compute(angle_error, dt)
 
         # If very close and nearly aligned, damp oscillations
-        if dist < self.follow_distance * 0.5 and abs(angle_error) < 0.1:
+        if dist < 0.08 and abs(angle_error) < 0.1:
             angular *= 0.3
 
         cmd.linear.x = linear
@@ -642,6 +712,16 @@ class FollowTheLeader:
     # -- main control loop --------------------------------------------------
 
     def _control_loop(self, event):
+        with self.command_lock:
+            if (
+                not self.is_active
+                or self.is_paused
+                or self.emergency_stop_active
+            ):
+                return
+            self._control_step(event)
+
+    def _control_step(self, event):
         """
         Timer callback executing at 20 Hz.
 
@@ -659,6 +739,26 @@ class FollowTheLeader:
             return
 
         dt = self.dt
+
+        leader_pose = self.poses.get(names[0])
+        if leader_pose is not None:
+            leader_yaw = self.yaws.get(names[0], 0.0)
+            needed_trace = max(0, len(names) - 1) * self.follow_distance
+            if not self.leader_trace.points:
+                self.leader_trace.seed_line(
+                    leader_pose.position.x,
+                    leader_pose.position.y,
+                    leader_yaw,
+                    needed_trace,
+                )
+            else:
+                self.leader_trace.append(
+                    leader_pose.position.x,
+                    leader_pose.position.y,
+                    leader_yaw,
+                )
+                self.leader_trace.ensure_distance(needed_trace)
+            self.leader_trace.trim(needed_trace + max(1.0, self.follow_distance * 2.0))
 
         # -- 1. Collect current positions for inter-robot avoidance ----------
         robot_positions = []
@@ -722,10 +822,12 @@ class FollowTheLeader:
     def _publish_status(self, entries):
         """Publish a JSON status message on ``/follow_leader/status``."""
         status = {
+            'task_id': self.current_task_id,
             'active': self.is_active,
+            'paused': self.is_paused,
             'leader_mode': self.leader_mode,
             'follow_distance': self.follow_distance,
-            'time_delay': self.time_delay,
+            'trace_length': round(self.leader_trace.span, 3),
             'path_t': round(self.path_t, 3),
             'robots': entries,
         }
@@ -831,7 +933,9 @@ class FollowTheLeader:
     def _stop_all(self):
         """Send zero-velocity to every robot."""
         stop = Twist()
-        for pub in self.cmd_pubs.values():
+        with self.lock:
+            pubs = list(self.cmd_pubs.values())
+        for pub in pubs:
             pub.publish(stop)
 
 
