@@ -249,6 +249,20 @@ El resultado fue 16 de 16 entradas correctas.
 
 **Diagnóstico y tratamiento.** El SDK 8.0.422 sí estaba instalado en `/tmp/robotswarm-dotnet-8.0.422`, pero el shell no interactivo de esa ejecución no heredó su directorio en `PATH`. Se repitieron las suites con la ruta absoluta del mismo SDK: backend aprobó 124/124, trabajador 99/99 y ROS 351/351. Este incidente pertenece al entorno local y no se atribuyó al código ni se corrigió alterando el proyecto.
 
+### I-022. La publicación necesitó utilizar el almacén de credenciales de Windows
+
+**Síntomas.** El `push` desde WSL respondió `could not read Username`; el conector de GitHub pudo leer el PR, pero recibió HTTP 403 al intentar crearlo. Git para Windows sí tenía una credencial válida, aunque su primera ejecución rechazó el directorio WSL por `dubious ownership`.
+
+**Tratamiento.** Se invocó Git para Windows con una excepción `safe.directory` limitada a esa orden. El PR se creó con GitHub CLI obteniendo la credencial del almacén existente y manteniéndola solo en una variable de proceso. No se escribió ni mostró el token. No se cambió la configuración global de Git.
+
+### I-023. La primera ejecución remota falló en un chequeo silencioso de FFmpeg
+
+**Síntoma.** En el PR 94, backend, pruebas y migración aprobaron, pero `Validate pinned MediaMTX configuration` terminó justo después de los cinco segundos de arranque del contenedor y antes de iniciar la publicación H.264.
+
+**Cómo se localizó.** El log completo de Actions confirmó MediaMTX 1.18.2 activo y no mostró ninguna conexión del publicador. Entre ese punto y la primera publicación, el único chequeo sin diagnóstico era `ffmpeg -encoders | grep libx264` bajo `set -o pipefail`; una salida temprana de `grep` puede convertir el `SIGPIPE` del productor en fallo de toda la tubería.
+
+**Solución aplicada.** La versión de MediaMTX se captura y compara explícitamente. La lista completa de encoders se guarda primero en un archivo temporal y después se inspecciona, evitando la tubería de salida temprana. Cada prerrequisito devuelve ahora un mensaje propio. La sonda exacta, extraída del YAML corregido, aprobó localmente con publicación/lectura RTSP, dos rechazos de autenticación y entrega LL-HLS completa.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección se actualiza durante el trabajo. Cada entrada debe incluir revisión, entorno, entrada de la prueba, resultado y referencia a su evidencia.
@@ -268,6 +282,7 @@ Esta sección se actualiza durante el trabajo. Cada entrada debe incluir revisi�
 | 2026-07-19 | Revisión de despliegues | Lock compartido, revalidación de `main` y rollback inmutable incorporados | Incidencias I-016 e I-017 |
 | 2026-07-19 | Suite local completa | Backend 124/124; trabajador 99/99; ROS 351/351; frontend 21/21, lint y build | [Resumen local previo al despliegue](assets/commissioning-2026-07/predeploy-validation-summary.txt) |
 | 2026-07-19 | Verificación del paquete de evidencia | 16/16 hashes correctos, sin ignorar archivos ausentes | Incidencia I-019 |
+| 2026-07-19 | PR 94, primera ejecución de CI | Fallo localizado antes de publicar H.264; chequeo de encoders corregido sin tubería temprana | Incidencia I-023 |
 
 ## 6. Resultados previos al despliegue
 

@@ -177,10 +177,25 @@ jobs:
             fi
           done
 
-          docker exec "$container" /mediamtx --version | grep -Fxq 'v1.18.2'
-          command -v ffmpeg >/dev/null
-          command -v ffprobe >/dev/null
-          ffmpeg -hide_banner -encoders 2>/dev/null | grep 'libx264' >/dev/null
+          media_version="$(docker exec "$container" /mediamtx --version)"
+          test "$media_version" = "v1.18.2" || {
+            echo "Unexpected MediaMTX version: $media_version" >&2
+            exit 1
+          }
+          command -v ffmpeg >/dev/null || {
+            echo "The CI runner does not provide FFmpeg." >&2
+            exit 1
+          }
+          command -v ffprobe >/dev/null || {
+            echo "The CI runner does not provide FFprobe." >&2
+            exit 1
+          }
+          encoders="$RUNNER_TEMP/robotswarm-ffmpeg-encoders.txt"
+          ffmpeg -hide_banner -encoders >"$encoders" 2>/dev/null
+          grep 'libx264' "$encoders" >/dev/null || {
+            echo "The CI runner FFmpeg build does not provide libx264." >&2
+            exit 1
+          }
 
           rtsp_port="$(docker port "$container" 8554/tcp | sed 's/.*://')"
           hls_port="$(docker port "$container" 8888/tcp | sed 's/.*://')"
