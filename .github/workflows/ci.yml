@@ -100,7 +100,8 @@ jobs:
           python3 -m venv /tmp/robotswarm-ros-ci
           /tmp/robotswarm-ros-ci/bin/pip install \
             --disable-pip-version-check \
-            numpy==1.26.4
+            numpy==1.26.4 \
+            pyyaml==6.0.1
 
       - name: Test swarm algorithms
         run: |
