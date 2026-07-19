@@ -51,7 +51,7 @@ loaded profile installed, because that second test exercises search,
 notification, rendezvous, role assignment and the GRF controller rather than
 fixed calibration commands.
 
-## Commissioning result
+## Historical commissioning observation (not a final gate)
 
 The loaded profile moved 0.0072 m with one Burger and 0.0336 m with the two
 payload roots alone. With two companions pushing through those roots, all four
@@ -59,3 +59,9 @@ robots stayed connected and moved the crate 1.1796 m: 164.8 times the
 single-robot result. The normal search/rendezvous transport matrix also passed
 with 1, 3, 4, and 10 robots, with every robot moving and joining the reported
 payload location before coordinated transport.
+
+This observation predates the current candidate and its raw output was not
+retained with a final commit SHA. It is useful for choosing representative
+parameters, but it is not evidence for the production acceptance gate. The
+loaded profile and the N=1/3/4 cases must be repeated on the deployed revision;
+the versioned N=10 evidence in the final commissioning report is a separate run.

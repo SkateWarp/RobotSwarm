@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "passed": true,
+  "scope": "local private GPU publisher smoke",
+  "public_browser_acceptance_included": false,
+  "network": {
+    "internal": true,
+    "unique_gateway": "172.23.0.1",
+    "gz_ip_matches_gateway": true,
+    "gazebo_ip_matches_gateway": true,
+    "publicized_address_matches_gateway": true
+  },
+  "window": {
+    "type": "NORMAL",
+    "viewable": true,
+    "x": 0,
+    "y": 0,
+    "width": 1280,
+    "height": 720,
+    "viewport_width": 990,
+    "viewport_height": 588
+  },
+  "renderer": {
+    "device": "D3D12 (NVIDIA GeForce RTX 3080)",
+    "average_fps": 46.124,
+    "post_render_rate_fps": 49.785,
+    "configured_render_rate_fps": 50.0,
+    "physics_real_time_factor": 2.975
+  },
+  "video": {
+    "codec": "h264",
+    "pixel_format": "yuv420p",
+    "width": 1280,
+    "height": 720,
+    "fps": 30
+  },
+  "scene": {
+    "robot_count": 10,
+    "robot_names": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "missing_asset_errors": 0
+  },
+  "input": {
+    "protocol_version": 2,
+    "event_count": 5,
+    "pointer_before": [640, 360],
+    "pointer_after": [1023, 144],
+    "final_button_mask": 0,
+    "button_and_key_releases_observed": true
+  },
+  "cleanup": {
+    "hard_kill_used": true,
+    "helper_processes_remaining": 0,
+    "x_locks_remaining": 0,
+    "runtime_directories_remaining": 0,
+    "containers_remaining": 0,
+    "networks_remaining": 0,
+    "relays_remaining": 0
+  },
+  "source_evidence_manifest_sha256": "b98074c6f23168fbd8f50d5dd089353d8988904a3946f5860d3ed9202a833b4a"
+}

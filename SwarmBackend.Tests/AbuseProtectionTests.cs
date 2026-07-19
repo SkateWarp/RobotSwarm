@@ -82,6 +82,34 @@ public sealed class AbuseProtectionTests
     }
 
     [Fact]
+    public async Task AccountListDistinguishesDisabledAccounts()
+    {
+        await using var dataContext = TestDataContext.Create();
+        dataContext.Accounts.AddRange(
+            new Account
+            {
+                FirstName = "Active",
+                LastName = "User",
+                Email = "active@example.test",
+                Enabled = true
+            },
+            new Account
+            {
+                FirstName = "Disabled",
+                LastName = "User",
+                Email = "disabled@example.test",
+                Enabled = false
+            });
+        await dataContext.SaveChangesAsync();
+
+        var service = new AccountService(dataContext, Configuration());
+        var accounts = (await service.GetAll(null, Role.Admin)).ToArray();
+
+        Assert.True(accounts.Single(account => account.Email == "active@example.test").Enabled);
+        Assert.False(accounts.Single(account => account.Email == "disabled@example.test").Enabled);
+    }
+
+    [Fact]
     public void RateLimitPartitionsUseTheClientAndAuthenticatedAccount()
     {
         var context = new DefaultHttpContext();

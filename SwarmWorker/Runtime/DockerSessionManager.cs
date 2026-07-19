@@ -11,6 +11,7 @@ public sealed record ManagedSessionInfo(
     string ContainerId,
     string ContainerName,
     string Image,
+    int ContainerPidsLimit,
     bool Running,
     string State,
     IReadOnlyDictionary<string, string> Labels);
@@ -37,6 +38,8 @@ public sealed class DockerSessionManager
         TimeSpan.FromMinutes(2);
     private static readonly TimeSpan NetworkCleanupTimeout =
         TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan GazeboFleetProbeTimeout =
+        TimeSpan.FromSeconds(20);
 
     private const string ReadRosterScript =
         "source /opt/ros/noetic/setup.bash"
@@ -89,6 +92,47 @@ public sealed class DockerSessionManager
         + " grep -Fq \" * ${node} (\" <<<\"$info\";"
         + " done"
         + " && printf ready";
+
+    private const string CheckGazeboFleetScript =
+        "source /opt/ros/noetic/setup.bash"
+        + " && source /catkin_ws/devel/setup.bash"
+        + " && exec python3 -c '"
+        + "import sys, time, rospy\n"
+        + "from gazebo_msgs.msg import ModelStates\n"
+        + "from rosgraph_msgs.msg import Clock\n"
+        + "rospy.init_node(\"swarm_worker_gazebo_probe\", "
+        + "anonymous=True, disable_signals=True)\n"
+        + "expected = set(sys.argv[1:])\n"
+        + "deadline = time.monotonic() + 10.0\n"
+        + "latest = set()\n"
+        + "while time.monotonic() < deadline and not rospy.is_shutdown():\n"
+        + "    try:\n"
+        + "        states = rospy.wait_for_message("
+        + "\"/gazebo/model_states\", ModelStates, timeout=1.0)\n"
+        + "    except rospy.ROSException:\n"
+        + "        continue\n"
+        + "    latest = set(states.name)\n"
+        + "    if expected.issubset(latest):\n"
+        + "        break\n"
+        + "else:\n"
+        + "    missing = sorted(expected.difference(latest))\n"
+        + "    raise RuntimeError(\"Gazebo did not publish the complete fleet: \" "
+        + "+ \",\".join(missing))\n"
+        + "first_clock = rospy.wait_for_message("
+        + "\"/clock\", Clock, timeout=3.0).clock.to_nsec()\n"
+        + "deadline = time.monotonic() + 3.0\n"
+        + "while time.monotonic() < deadline and not rospy.is_shutdown():\n"
+        + "    try:\n"
+        + "        clock = rospy.wait_for_message("
+        + "\"/clock\", Clock, timeout=1.0)\n"
+        + "    except rospy.ROSException:\n"
+        + "        continue\n"
+        + "    if clock.clock.to_nsec() > first_clock:\n"
+        + "        print(\"ready\")\n"
+        + "        break\n"
+        + "else:\n"
+        + "    raise RuntimeError(\"Gazebo clock did not advance\")\n"
+        + "' \"$@\"";
 
     private readonly IDockerCli _docker;
     private readonly IViewerPublisher _viewerPublisher;
@@ -272,6 +316,10 @@ public sealed class DockerSessionManager
             session.ContainerId,
             payload,
             cancellationToken);
+        await VerifyGazeboFleetAsync(
+            session.ContainerId,
+            robotIds,
+            cancellationToken);
 
         return new SessionOperationResult(
             sessionId,
@@ -291,6 +339,10 @@ public sealed class DockerSessionManager
         var robotIds = await ReplaceFleetAsync(
             session.ContainerId,
             payload,
+            cancellationToken);
+        await VerifyGazeboFleetAsync(
+            session.ContainerId,
+            robotIds,
             cancellationToken);
 
         return new SessionOperationResult(
@@ -822,6 +874,43 @@ public sealed class DockerSessionManager
         return FleetRosterParser.Parse(result.StandardOutput);
     }
 
+    internal async Task VerifyGazeboFleetAsync(
+        string containerId,
+        IReadOnlyList<string> expectedRobotIds,
+        CancellationToken cancellationToken)
+    {
+        var arguments = new List<string>
+        {
+            "exec",
+            containerId,
+            "/bin/bash",
+            "-lc",
+            CheckGazeboFleetScript,
+            "swarm-worker"
+        };
+        arguments.AddRange(expectedRobotIds);
+
+        var result = await _docker.RunAsync(
+            arguments,
+            cancellationToken,
+            GazeboFleetProbeTimeout);
+        var ready = result.StandardOutput
+            .Split(
+                '\n',
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(line => line.Equals("ready", StringComparison.Ordinal));
+        if (!result.IsSuccess)
+        {
+            throw new DockerCliException("verify Gazebo fleet liveness", result);
+        }
+
+        if (!ready)
+        {
+            throw new InvalidOperationException(
+                "Gazebo fleet probe exited without confirming liveness.");
+        }
+    }
+
     private async Task<ManagedSessionInfo> GetSingleRunningSessionAsync(
         Guid sessionId,
         CancellationToken cancellationToken)
@@ -928,6 +1017,7 @@ public sealed class DockerSessionManager
             root.GetProperty("Id").GetString() ?? containerId,
             (root.GetProperty("Name").GetString() ?? string.Empty).TrimStart('/'),
             root.GetProperty("Config").GetProperty("Image").GetString() ?? string.Empty,
+            root.GetProperty("HostConfig").GetProperty("PidsLimit").GetInt32(),
             state.GetProperty("Running").GetBoolean(),
             state.GetProperty("Status").GetString() ?? "unknown",
             labels);
@@ -938,6 +1028,11 @@ public sealed class DockerSessionManager
         string arenaVersion)
     {
         if (!session.Image.Equals(_options.SessionImage, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (session.ContainerPidsLimit != _options.ContainerPidsLimit)
         {
             return false;
         }

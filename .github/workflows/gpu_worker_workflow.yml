@@ -353,6 +353,8 @@ jobs:
         id: worker_publish
         shell: bash
         working-directory: _deploy/gpu-source
+        env:
+          ROS_IMAGE_ID: ${{ steps.ros_image.outputs.image_id }}
         run: |
           set -euo pipefail
 
@@ -370,8 +372,53 @@ jobs:
             deploy/gpu-worker/robotswarm-viewer-publisher \
             "$publish_dir/robotswarm-viewer-publisher"
 
+          # Host gzclient must resolve the same absolute TurtleBot mesh paths
+          # as gzserver. Package the immutable image's matching GUI plugin and
+          # visual assets once per release; leases never compile or copy from
+          # a running simulation container.
+          asset_container="$(docker create "$ROS_IMAGE_ID")"
+          cleanup_asset_container() {
+            if [[ -n "$asset_container" ]]; then
+              docker rm --force "$asset_container" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_asset_container EXIT
+          asset_root="$publish_dir/robotswarm-viewer-assets"
+          mkdir -p \
+            "$asset_root/ros-share/turtlebot3_description" \
+            "$asset_root/models"
+          docker cp \
+            "$asset_container:/catkin_ws/devel/lib/librobotswarm_gazebo_gui_probe.so" \
+            "$publish_dir/librobotswarm_gazebo_gui_probe.so"
+          docker cp \
+            "$asset_container:/opt/ros/noetic/share/turtlebot3_description/." \
+            "$asset_root/ros-share/turtlebot3_description"
+          docker cp \
+            "$asset_container:/opt/ros/noetic/share/turtlebot3_gazebo/models/." \
+            "$asset_root/models"
+          docker cp \
+            "$asset_container:/catkin_ws/src/robot_swarm_bridge/models/." \
+            "$asset_root/models"
+          docker rm "$asset_container" >/dev/null
+          asset_container=""
+          trap - EXIT
+          chmod 0755 "$publish_dir/librobotswarm_gazebo_gui_probe.so"
+          chmod -R u=rwX,go=rX "$asset_root"
+
           test -x "$publish_dir/SwarmWorker"
           test "$(stat -c '%a' "$publish_dir/robotswarm-viewer-publisher")" = "755"
+          test -f "$asset_root/ros-share/turtlebot3_description/meshes/bases/burger_base.stl"
+          test -d "$asset_root/models/turtlebot3_burger"
+          if ! plugin_dependencies="$(
+            ldd "$publish_dir/librobotswarm_gazebo_gui_probe.so" 2>&1
+          )"; then
+            echo "The packaged Gazebo GUI plugin could not be inspected with ldd." >&2
+            exit 1
+          fi
+          if grep -Fq 'not found' <<<"$plugin_dependencies"; then
+            echo "The packaged Gazebo GUI plugin has unresolved host dependencies." >&2
+            exit 1
+          fi
           echo "publish_dir=$publish_dir" >> "$GITHUB_OUTPUT"
 
       - name: Verify scheduling drain lease

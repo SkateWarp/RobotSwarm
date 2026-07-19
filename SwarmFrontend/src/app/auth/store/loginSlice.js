@@ -6,6 +6,8 @@ import { showMessage } from "../../store/fuse/messageSlice";
 export const submitLogin =
     ({ email, password }) =>
     async (dispatch) => {
+        dispatch(loginStarted());
+
         return jwtService
             .signInWithEmailAndPassword(email, password)
             .then((user) => {
@@ -42,27 +44,36 @@ export const submitLogin =
 
 const initialState = {
     success: false,
-    error: {
-        username: null,
-        password: null,
-    },
+    busy: false,
+    error: null,
 };
 
 const loginSlice = createSlice({
     name: "auth/login",
     initialState,
     reducers: {
+        loginStarted: (state) => {
+            state.busy = true;
+            state.success = false;
+            state.error = null;
+        },
         loginSuccess: (state, action) => {
+            state.busy = false;
             state.success = true;
+            state.error = null;
         },
         loginError: (state, action) => {
+            state.busy = false;
             state.success = false;
             state.error = action.payload;
+        },
+        clearLoginError: (state) => {
+            state.error = null;
         },
     },
     extraReducers: {},
 });
 
-export const { loginSuccess, loginError } = loginSlice.actions;
+export const { clearLoginError, loginError, loginStarted, loginSuccess } = loginSlice.actions;
 
 export default loginSlice.reducer;

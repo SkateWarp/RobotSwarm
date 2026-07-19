@@ -4,6 +4,13 @@ import { URL } from "app/constants/constants";
 import jwtService from "../../../../services/jwtService";
 import { registerError, registerSuccess } from "../../../../auth/store/registerSlice";
 import { showMessage } from "../../../../store/fuse/messageSlice";
+import {
+    createAdminAccount,
+    disableAdminAccount,
+    getAccountErrorMessage,
+    patchAdminAccount,
+} from "../accountApi";
+import { ACCOUNTS_PAGE_SIZE, normalizeAccount } from "../accountsViewModel";
 // import HEADERS from "../../../../constants/authorizationHeaders";
 
 export const getMachinesForNotificationsByAccountIdAndAlertType = (id, machineId) => {
@@ -39,15 +46,14 @@ export const createPermissionAccountRequest = (data) => {
 };
 
 export const submitAccount = (model) => async (dispatch) => {
-    return jwtService
-        .createAccount(model)
+    return createAdminAccount(model)
         .then((user) => {
             return dispatch(registerSuccess(user));
         })
         .catch((error) => {
             dispatch(
                 showMessage({
-                    message: error.message, // text or html
+                    message: getAccountErrorMessage(error), // text or html
                     autoHideDuration: 3000, // ms
                     anchorOrigin: {
                         vertical: "top", // top bottom
@@ -61,18 +67,17 @@ export const submitAccount = (model) => async (dispatch) => {
 };
 
 export const removeAccount = (model) => async (dispatch) => {
-    return jwtService
-        .deleteAccount(model.idForDelete)
+    const accountId = typeof model === "object" ? model.idForDelete : model;
+    return disableAdminAccount(accountId)
         .then(() => {
-            // dispatch(setUserData(user));
-            dispatch(getAccounts(model));
+            dispatch(getAccounts());
             return dispatch(registerSuccess());
         })
         .catch((error) => {
             //
             dispatch(
                 showMessage({
-                    message: error.message, // text or html
+                    message: getAccountErrorMessage(error), // text or html
                     autoHideDuration: 6000, // ms
                     anchorOrigin: {
                         vertical: "top", // top bottom
@@ -139,35 +144,40 @@ export const updateAccountPanelTemp = createAsyncThunk(
 
 export const addAccount = createAsyncThunk(
     "accountsApp/accounts/addAccount",
-    async (account, { dispatch }) => {
-        const response = await axios.post(`${URL}/Accounts`, account, {
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${jwtService.getAccessToken()}`,
-            },
-        });
-        const data = response;
-
-        dispatch(getAccounts());
-
-        return data;
+    async (account, { dispatch, rejectWithValue }) => {
+        try {
+            const data = await createAdminAccount(account);
+            await dispatch(getAccounts());
+            return data;
+        } catch (error) {
+            return rejectWithValue(getAccountErrorMessage(error));
+        }
     }
 );
 
 export const updateAccount = createAsyncThunk(
     "accountsApp/accounts/updateAccount",
-    async (account, { dispatch }) => {
-        const response = await axios.put(`${URL}/api/Accounts/${account.id}`, account, {
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${jwtService.getAccessToken()}`,
-            },
-        });
-        const data = await response.data;
+    async (account, { dispatch, rejectWithValue }) => {
+        try {
+            const data = await patchAdminAccount(account);
+            await dispatch(getAccounts());
+            return data;
+        } catch (error) {
+            return rejectWithValue(getAccountErrorMessage(error));
+        }
+    }
+);
 
-        dispatch(getAccounts());
-
-        return data;
+export const disableAccount = createAsyncThunk(
+    "accountsApp/accounts/disableAccount",
+    async (accountId, { dispatch, rejectWithValue }) => {
+        try {
+            await disableAdminAccount(accountId);
+            await dispatch(getAccounts());
+            return accountId;
+        } catch (error) {
+            return rejectWithValue(getAccountErrorMessage(error));
+        }
     }
 );
 
@@ -192,14 +202,16 @@ const accountsSlice = createSlice({
             data: null,
         },
         pagination: {
-            pageSize: 0,
-            pageNumber: 0,
+            pageSize: ACCOUNTS_PAGE_SIZE,
+            pageNumber: 1,
             totalPages: 0,
             totalRecords: 0,
             searchFilter: "",
             sortColumn: "",
             sortDesc: false,
         },
+        loading: false,
+        error: null,
     }),
     reducers: {
         setAccountsSearchText: {
@@ -251,20 +263,25 @@ const accountsSlice = createSlice({
         },
     },
     extraReducers: {
-        [updateAccount.fulfilled]: accountsAdapter.upsertOne,
-        [addAccount.fulfilled]: accountsAdapter.addOne,
+        [getAccounts.pending]: (state) => {
+            state.loading = true;
+            state.error = null;
+        },
         [getAccounts.fulfilled]: (state, action) => {
             const { data, routeParams } = action.payload;
+            state.loading = false;
+            state.error = null;
             // Handle simple array response (not paginated)
             if (Array.isArray(data)) {
-                accountsAdapter.setAll(state, data);
-                state.accounts = data;
+                const normalizedAccounts = data.map(normalizeAccount);
+                accountsAdapter.setAll(state, normalizedAccounts);
+                state.accounts = normalizedAccounts;
                 state.routeParams = routeParams;
                 state.pagination = {
                     pageNumber: 1,
-                    pageSize: data.length,
-                    totalPages: 1,
-                    totalRecords: data.length,
+                    pageSize: ACCOUNTS_PAGE_SIZE,
+                    totalPages: Math.max(1, Math.ceil(normalizedAccounts.length / ACCOUNTS_PAGE_SIZE)),
+                    totalRecords: normalizedAccounts.length,
                     searchFilter: "",
                     sortColumn: "",
                     sortDesc: false,
@@ -284,6 +301,10 @@ const accountsSlice = createSlice({
                     sortDesc: data.sortDesc,
                 };
             }
+        },
+        [getAccounts.rejected]: (state, action) => {
+            state.loading = false;
+            state.error = getAccountErrorMessage(action.error);
         },
         [getAccountsByCompany.fulfilled]: (state, action) => {
             const { data, routeParams } = action.payload;

@@ -20,5 +20,11 @@ a205996dbba564115dc972ed3936393e8b103fb3a7315ca77744ccd5794e44eb  ./figura-06-tr
 6e19caed411b1e8d4245a0b4f667bff7254525698bf883c12a956bea410cae00  ./figura-08-vnc-loopback-despues.png
 3b52f047d64e03dd4fc671f1c1cd6a92c9ddb2aa0408fbf20a44da3176bc3f7d  ./figura-09-busqueda-n10.png
 73a9a6b3a3b5ccbd6adbd7cb04f05dce7aad1cede91ab3d726db9cd0063d7acf  ./figura-10-convergencia-tras-aviso-n10.png
-b9d683e02ca6bd4aaa993ca11e5c28af7c666d124f3f527b6121646587539ae6  ./predeploy-validation-summary.txt
+7c0ef46e96499bb7fbaaa043a9c200fb3b4cf65f5a4cf1f267e82120bbc11982  ./predeploy-validation-summary.txt
+b98074c6f23168fbd8f50d5dd089353d8988904a3946f5860d3ed9202a833b4a  ./smoke-publicador-gpu-local-manifest.sha256
+0b5baba439f97871af79b721360c7ca33708200a53bdb3a44032cdc4437d4ad8  ./smoke-publicador-gpu-local.json
+9dd2e62ca63d28ba45b3e79d0402877894b1f902afcacf770d9d8c90ff8445be  ./sonda-render-gpu-local-n10.json
+1ae8ca310fd2461117abcfc5e7cd312152def61e3e7cb68131009b711afa7587  ./sonda-render-gpu-local-n10.png
+562d4c8aeefd8f1399f8394beee80127c481f50816617f5c1b67867741c7011c  ./transporte-n10-final-v6-manifest.sha256
+2d36c00a8a0a46946e13d928ed20cb715b1770288329346bc0f6cfb524b41f78  ./transporte-n10-final-v6.json
 7ceefa0859c81136d93bec289f699c90d15ee7fbdb5c918a05b488ed973d6b6e  ./vnc-bind-after.txt

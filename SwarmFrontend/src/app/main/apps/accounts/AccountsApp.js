@@ -13,6 +13,7 @@ import GeneralHeader from "../../../shared-components/GeneralHeader";
 import useGeneralAppStyle from "../../../shared-components/hooks/useGeneralAppStyle";
 import useActualCompanyId from "../../../shared-components/hooks/useActualCompanyId";
 import PanelTempAccountDialog from "./PanelTempAccountDialog";
+import GtsAccountDialog from "./GtsAccountDialog";
 
 function AccountsApp() {
     const Root = useGeneralAppStyle();
@@ -23,6 +24,7 @@ function AccountsApp() {
     const routeParams = useParams();
     const companyId = useActualCompanyId();
     const actualProjectName = useActualProjectName();
+    const isGts = actualProjectName === "GTS" || actualProjectName === "GTS-swedish";
 
     useDeepCompareEffect(() => {
         if (actualProjectName !== "panelTemp") {
@@ -31,6 +33,13 @@ function AccountsApp() {
             dispatch(getAccountsByCompany({ companyId }));
         }
     }, [routeParams, actualProjectName, companyId]);
+
+    let accountDialog = <AccountDialog />;
+    if (actualProjectName === "panelTemp") {
+        accountDialog = <PanelTempAccountDialog />;
+    } else if (isGts) {
+        accountDialog = <GtsAccountDialog />;
+    }
 
     return (
         <>
@@ -50,7 +59,7 @@ function AccountsApp() {
                 ref={pageLayout}
                 innerScroll
             />
-            {actualProjectName !== "panelTemp" ? <AccountDialog /> : <PanelTempAccountDialog />}
+            {accountDialog}
         </>
     );
 }

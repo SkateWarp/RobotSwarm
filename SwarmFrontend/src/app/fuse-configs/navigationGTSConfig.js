@@ -2,14 +2,6 @@ import authRoles from "../auth/authRoles";
 
 const navigationGTSConfig = [
     {
-        id: "dashboard",
-        title: "Dashboard",
-        type: "item",
-        icon: "adjust",
-        auth: authRoles.user,
-        url: "/apps/GTS/dashboard/booths/",
-    },
-    {
         id: "task",
         title: "Tareas",
         type: "item",
@@ -27,7 +19,7 @@ const navigationGTSConfig = [
     },
     {
         id: "realtime",
-        title: "Control en Tiempo Real",
+        title: "Control de simulación",
         type: "item",
         icon: "settings_remote",
         auth: authRoles.user,

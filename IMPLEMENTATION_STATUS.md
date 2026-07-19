@@ -156,10 +156,12 @@ final public rollout:
 - A separate distant-search run recorded motion from 10/10 robots, one finder
   notification, 10/10 acknowledgements, responses from the other 9 robots, and
   zero collision deltas.
-- Two local publisher pipelines have run concurrently with distinct displays,
-  stream paths, runtime directories, and cleanup. This proves host-side media
-  isolation, but it does **not** replace the pending public two-account browser
-  test through `rs.zerav.la` and `robot.zerav.la`.
+- The local host integration test has run two publisher pipelines concurrently
+  with distinct displays, stream paths, runtime directories, and cleanup. It
+  uses real Xvfb/XTest with controlled Docker and `gzclient` test doubles, so it
+  proves local orchestration isolation, not two simultaneous GPU media streams.
+  It does **not** replace the pending public two-account browser test through
+  `rs.zerav.la` and `robot.zerav.la`.
 - Production maintenance ports were checked after hardening: VNC and
   websockify listen on loopback. The viewer feature gates were intentionally
   left off during the pre-release baseline.

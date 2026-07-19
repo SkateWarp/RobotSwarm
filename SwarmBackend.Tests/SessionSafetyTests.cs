@@ -67,6 +67,87 @@ public sealed class SessionSafetyTests
                 cancellation.Token));
     }
 
+    [Fact]
+    public async Task ViewerLeaseCreationRetriesShortSerializationConflicts()
+    {
+        var attempts = 0;
+        var resets = 0;
+
+        var result = await SessionControlRoute.RetryViewerLeaseSerializationFailures(
+            () =>
+            {
+                attempts++;
+                return attempts < 3
+                    ? Task.FromException<IResult>(SerializationFailure())
+                    : Task.FromResult(Results.Ok() as IResult);
+            },
+            () => resets++,
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status200OK, await StatusCode(result));
+        Assert.Equal(3, attempts);
+        Assert.Equal(2, resets);
+    }
+
+    [Fact]
+    public async Task ViewerLeaseCreationReturnsConflictAfterRepeatedSerializationFailures()
+    {
+        var attempts = 0;
+
+        var result = await SessionControlRoute.RetryViewerLeaseSerializationFailures(
+            () =>
+            {
+                attempts++;
+                return Task.FromException<IResult>(SerializationFailure());
+            },
+            () => { },
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status409Conflict, await StatusCode(result));
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public async Task ViewerLeaseCreationHonoursCancellationAfterASerializationFailure()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            SessionControlRoute.RetryViewerLeaseSerializationFailures(
+                () => Task.FromException<IResult>(SerializationFailure()),
+                () => { },
+                cancellation.Token));
+    }
+
+    [Fact]
+    public void SerializationFailureIsFoundInsideDatabaseUpdateWrappers()
+    {
+        var wrapped = new InvalidOperationException(
+            "The transaction failed while saving the viewer lease.",
+            new DbUpdateException(
+                "The database update failed.",
+                SerializationFailure()));
+
+        Assert.True(SimulationSessionRoute.IsSerializationFailure(wrapped));
+    }
+
+    [Fact]
+    public void OtherDatabaseUpdateFailuresAreNotSerializationFailures()
+    {
+        var wrapped = new InvalidOperationException(
+            "The transaction failed while saving the viewer lease.",
+            new DbUpdateException(
+                "The database update failed.",
+                new PostgresException(
+                    "unique violation",
+                    "ERROR",
+                    "ERROR",
+                    PostgresErrorCodes.UniqueViolation)));
+
+        Assert.False(SimulationSessionRoute.IsSerializationFailure(wrapped));
+    }
+
     [Theory]
     [InlineData("999")]
     [InlineData("Queued")]

@@ -126,7 +126,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
+          sudo apt-get install --yes --no-install-recommends \
+            ffmpeg \
+            x11-utils \
+            xvfb
 
       - name: Validate pinned MediaMTX configuration
         shell: bash

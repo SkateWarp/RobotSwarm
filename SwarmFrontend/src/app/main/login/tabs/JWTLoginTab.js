@@ -1,16 +1,17 @@
 import { yupResolver } from "@hookform/resolvers/yup";
 import TextField from "@mui/material/TextField";
+import Alert from "@mui/material/Alert";
 import Button from "@mui/material/Button";
+import CircularProgress from "@mui/material/CircularProgress";
 import Icon from "@mui/material/Icon";
 import IconButton from "@mui/material/IconButton";
 import InputAdornment from "@mui/material/InputAdornment";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { useDispatch, useSelector } from "react-redux";
-import { submitLogin } from "app/auth/store/loginSlice";
+import { clearLoginError, submitLogin } from "app/auth/store/loginSlice";
 import * as yup from "yup";
 import _ from "@lodash";
-import history from "../../../../@history/@history";
 
 /**
  * Form Validation Schema
@@ -22,13 +23,26 @@ const schema = yup.object().shape({
         .required("El correo electrónico debe ser válido."),
     password: yup.string().required("Favor de introducir su contraseña."),
     // eslint-disable-next-line
-  //.min(6, 'El mínimo de caracteres debe ser 6'),
+    //.min(6, 'El mínimo de caracteres debe ser 6'),
 });
 
 const defaultValues = {
     email: "",
     password: "",
 };
+
+function getErrorMessage(error) {
+    if (!error) {
+        return "";
+    }
+
+    if (typeof error === "string") {
+        return error;
+    }
+
+    const validationMessage = Object.values(error.errors || {}).flat()[0];
+    return error.message || error.detail || validationMessage || "No fue posible iniciar sesión.";
+}
 
 function JWTLoginTab() {
     const dispatch = useDispatch();
@@ -42,21 +56,7 @@ function JWTLoginTab() {
     const { isValid, dirtyFields, errors } = formState;
 
     const [showPassword, setShowPassword] = useState(false);
-
-    useEffect(() => {
-        if (login.error && (login.error.email || login.error.password)) {
-            formRef.current.updateInputsWithError({
-                ...login.error,
-            });
-        }
-    }, [login.error]);
-
-    const goToRegisterPage = () => {
-
-        history.push({
-            pathname: '/register',
-        });
-    }
+    const loginError = getErrorMessage(login.error);
 
     function onSubmit(model) {
         dispatch(submitLogin(model));
@@ -64,19 +64,37 @@ function JWTLoginTab() {
 
     return (
         <div className="w-full">
-            <form className="flex flex-col justify-center w-full" onSubmit={handleSubmit(onSubmit)}>
+            <form
+                className="flex flex-col justify-center w-full"
+                onSubmit={handleSubmit(onSubmit)}
+                aria-busy={login.busy}
+                noValidate
+            >
+                {loginError ? (
+                    <Alert className="mb-16" severity="error" role="alert">
+                        {loginError}
+                    </Alert>
+                ) : null}
+
                 <Controller
                     name="email"
                     control={control}
                     render={({ field }) => (
                         <TextField
                             {...field}
+                            onChange={(event) => {
+                                if (login.error) {
+                                    dispatch(clearLoginError());
+                                }
+                                field.onChange(event);
+                            }}
                             className="mb-16"
-                            type="text"
+                            type="email"
                             error={!!errors.email}
                             helperText={errors?.email?.message}
                             label="Correo Electrónico"
-                            autoComplete="current-email"
+                            autoComplete="email"
+                            disabled={login.busy}
                             InputProps={{
                                 endAdornment: (
                                     <InputAdornment position="end">
@@ -97,6 +115,12 @@ function JWTLoginTab() {
                     render={({ field }) => (
                         <TextField
                             {...field}
+                            onChange={(event) => {
+                                if (login.error) {
+                                    dispatch(clearLoginError());
+                                }
+                                field.onChange(event);
+                            }}
                             className="mb-16"
                             label="Contraseña"
                             type="password"
@@ -104,13 +128,19 @@ function JWTLoginTab() {
                             helperText={errors?.password?.message}
                             variant="outlined"
                             autoComplete="current-password"
+                            disabled={login.busy}
                             InputProps={{
                                 className: "pr-2",
                                 type: showPassword ? "text" : "password",
                                 endAdornment: (
                                     <InputAdornment position="end">
                                         <IconButton
+                                            type="button"
                                             onClick={() => setShowPassword(!showPassword)}
+                                            aria-label={
+                                                showPassword ? "Ocultar contraseña" : "Mostrar contraseña"
+                                            }
+                                            edge="end"
                                             size="large"
                                         >
                                             <Icon className="text-20" color="action">
@@ -130,24 +160,19 @@ function JWTLoginTab() {
                     variant="contained"
                     color="primary"
                     className="w-full mx-auto mt-16 uppercase"
-                    aria-label="LOG IN"
-                    disabled={_.isEmpty(dirtyFields) || !isValid}
+                    aria-label="Iniciar sesión"
+                    disabled={login.busy || _.isEmpty(dirtyFields) || !isValid}
                     value="legacy"
                 >
-                    Iniciar Sesión
+                    {login.busy ? (
+                        <>
+                            <CircularProgress className="mr-8" color="inherit" size={18} />
+                            Ingresando…
+                        </>
+                    ) : (
+                        "Iniciar sesión"
+                    )}
                 </Button>
-
-                <Button
-                    variant="contained"
-                    onClick={goToRegisterPage}
-                    color="primary"
-                    className="w-full mx-auto mt-16 uppercase"
-                    aria-label="Registro"
-                    value="legacy"
-                >
-                    Registrar
-                </Button>
-
             </form>
         </div>
     );

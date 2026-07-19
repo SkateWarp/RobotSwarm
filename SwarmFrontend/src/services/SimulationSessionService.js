@@ -131,6 +131,13 @@ const SimulationSessionService = {
         return response.data;
     },
 
+    async getViewerLeaseStatus(sessionId, leaseId) {
+        const response = await axios.get(`${API_URL}/api/sessions/${sessionId}/viewer-lease/${leaseId}`, {
+            headers: authHeaders(),
+        });
+        return response.data;
+    },
+
     createRealtimeConnection() {
         return new HubConnectionBuilder()
             .withUrl(`${API_URL}/hubs/session`, {

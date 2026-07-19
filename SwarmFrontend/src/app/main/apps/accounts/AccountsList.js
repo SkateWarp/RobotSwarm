@@ -1,222 +1,262 @@
-/* eslint-disable react-hooks/exhaustive-deps */
 import { motion } from "framer-motion";
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { useParams } from "react-router-dom";
-import { Icon, IconButton, Typography } from "@mui/material";
+import {
+    Alert,
+    Button,
+    Chip,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogContentText,
+    DialogTitle,
+    Icon,
+    IconButton,
+    MenuItem,
+    Paper,
+    TextField,
+    Tooltip,
+    Typography,
+} from "@mui/material";
 import AccountsTable from "./AccountsTable";
-import { getAccounts, openEditAccountDialog, removeAccount, selectAccounts } from "./store/accountsSlice";
-import settingsConfig from "../../../fuse-configs/settingsConfig";
-import ChargingProgressBar from "../../../shared-components/ChargingProgressBar";
-import DeleteRowElementDialog from "../../../shared-components/DeleteRowElementDialog";
+import { disableAccount, getAccounts, openEditAccountDialog, selectAccounts } from "./store/accountsSlice";
+import { filterAccounts, isCurrentAccount } from "./accountsViewModel";
+import { showMessage } from "../../../store/fuse/messageSlice";
+
+const roleLabels = {
+    Admin: "Administrador",
+    User: "Usuario",
+};
 
 function AccountsList() {
-    const routeParams = useParams();
     const dispatch = useDispatch();
     const accounts = useSelector(selectAccounts);
-    const searchText = useSelector(({ accountsApp }) => accountsApp.accounts.searchText);
-    const paginationData = useSelector(({ accountsApp }) => accountsApp.accounts.pagination);
+    const currentUser = useSelector(({ auth }) => auth.user);
+    const { error, loading, searchText } = useSelector(({ accountsApp }) => accountsApp.accounts);
+    const [roleFilter, setRoleFilter] = useState("all");
+    const [statusFilter, setStatusFilter] = useState("active");
+    const [accountToDisable, setAccountToDisable] = useState(null);
+    const [disabling, setDisabling] = useState(false);
 
-    const [previousSearch, setPreviousSearch] = useState("");
-    const [idForDelete, setIdForDelete] = useState(null);
-    const [statusFilter, setStatusFilter] = useState(false);
-    const [filteredData, setFilteredData] = useState(null);
-    const [open, setOpen] = useState(false);
-
-    const handleClickOpen = () => {
-        setOpen(true);
-    };
-
-    const deleteRowData = () => {
-        dispatch(removeAccount({ idForDelete, ...routeParams, searchFilter: searchText, pageNumber: 1 }));
-    };
+    const filteredAccounts = useMemo(
+        () =>
+            filterAccounts(accounts, {
+                role: roleFilter,
+                status: statusFilter,
+                searchText,
+            }),
+        [accounts, roleFilter, searchText, statusFilter]
+    );
 
     const columns = useMemo(
         () => [
             {
                 Header: "Nombre",
-                accessor: "firstName",
+                id: "fullName",
+                accessor: (account) => `${account.firstName} ${account.lastName}`.trim(),
                 sortable: true,
             },
             {
-                Header: "Apellido",
-                accessor: "lastName",
+                Header: "Correo electrónico",
+                accessor: "email",
                 sortable: true,
             },
             {
                 Header: "Rol",
                 accessor: "role",
-                Cell: ({ row }) => {
-                    if (settingsConfig.layout.project === "fraga") {
-                        if (row.original.role === "User") {
-                            return <div>Usuario</div>;
-                        }
-                        if (row.original.role === "Maintenance") {
-                            return <div>Mantenimiento</div>;
-                        }
-                        if (row.original.role === "Reception") {
-                            return <div>Recepción</div>;
-                        }
-                        if (row.original.role === "Supervisor") {
-                            return <div>Supervisor</div>;
-                        }
-                        return <div>{row.original.role}</div>;
-                    }
-                    if (
-                        settingsConfig.layout.project === "baldom" ||
-                        settingsConfig.layout.project === "task" ||
-                        settingsConfig.layout.project === "panelTemp"
-                    ) {
-                        if (row.original.role === "User") {
-                            return <div>Usuario</div>;
-                        }
-                        if (row.original.role === "Maintenance") {
-                            return <div>Mantenimiento</div>;
-                        }
-                        if (row.original.role === "WasteOperator") {
-                            return <div>Operador de Desperdicios</div>;
-                        }
-                        if (row.original.role === "CleanOperator") {
-                            return <div>Operador de Limpieza</div>;
-                        }
-                        return <div>{row.original.role}</div>;
-                    }
-                    // GTS and other projects - only Admin and User roles
-                    if (row.original.role === "User") {
-                        return <div>Usuario</div>;
-                    }
-                    if (row.original.role === "Admin") {
-                        return <div>Administrador</div>;
-                    }
-                    return <div>{row.original.role}</div>;
-                },
+                Cell: ({ value }) => roleLabels[value] || value,
                 sortable: true,
             },
             {
-                Header: "Correo Electrónico",
-                accessor: "email",
-                sortable: true,
-            },
-            {
-                id: "action",
-                Header: "Eliminar",
-                className: "justify-center",
-                width: 128,
-                sortable: false,
-                Cell: ({ row }) => (
-                    <div className="flex items-center">
-                        <IconButton
-                            onClick={(ev) => {
-                                ev.stopPropagation();
-                                handleClickOpen();
-                                setIdForDelete(row.original.id);
-                            }}
-                        >
-                            <Icon>delete</Icon>
-                        </IconButton>
-                    </div>
+                Header: "Estado",
+                accessor: "enabled",
+                Cell: ({ value }) => (
+                    <Chip
+                        color={value ? "success" : "default"}
+                        label={value ? "Activa" : "Inactiva"}
+                        size="small"
+                        variant={value ? "filled" : "outlined"}
+                    />
                 ),
+                sortable: true,
+            },
+            {
+                id: "actions",
+                Header: "Acciones",
+                className: "justify-center",
+                width: 96,
+                sortable: false,
+                Cell: ({ row }) => {
+                    const account = row.original;
+                    const belongsToCurrentUser = isCurrentAccount(account, currentUser);
+                    const disabled = belongsToCurrentUser || !account.enabled;
+                    let title = "Desactivar cuenta";
+                    if (belongsToCurrentUser) {
+                        title = "No puede desactivar la cuenta con la que inició sesión.";
+                    } else if (!account.enabled) {
+                        title = "La cuenta ya está inactiva.";
+                    }
+
+                    return (
+                        <Tooltip title={title}>
+                            <span>
+                                <IconButton
+                                    aria-label={`Desactivar la cuenta de ${account.firstName} ${account.lastName}`}
+                                    disabled={disabled}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        setAccountToDisable(account);
+                                    }}
+                                    size="large"
+                                >
+                                    <Icon>person_off</Icon>
+                                </IconButton>
+                            </span>
+                        </Tooltip>
+                    );
+                },
             },
         ],
-        []
+        [currentUser]
     );
 
-    const handleSort = useCallback(
-        (sort) => {
-            if (sort.length > 0) {
-                dispatch(
-                    getAccounts({
-                        ...routeParams,
-                        searchFilter: searchText,
-                        pageNumber: 1,
-                        pageSize: paginationData.pageSize,
-                        sortColumn: sort[0].id,
-                        sortDesc: sort[0].desc,
-                    })
-                );
-            }
-        },
-        [accounts]
-    );
-
-    useEffect(() => {
-        if (accounts) {
-            if (previousSearch !== searchText && (searchText.length >= 3 || searchText === "")) {
-                dispatch(
-                    getAccounts({
-                        ...routeParams,
-                        searchFilter: searchText,
-                        pageNumber: 1,
-                        pageSize: paginationData.pageSize,
-                        sortColumn: paginationData.sortColumn,
-                        sortDesc: paginationData.sortDesc,
-                    })
-                );
-                setPreviousSearch(searchText);
-            }
-
-            // Filter accounts based on route param for GTS project
-            let filtered = accounts;
-            if (settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish") {
-                if (routeParams.param === "users") {
-                    // Show only regular users (not admins)
-                    filtered = accounts.filter((account) => account.role === "User");
-                }
-                // "all" or any other param shows all accounts (no filter)
-            }
-
-            setFilteredData(filtered);
-
-            if (filtered.length) {
-                setStatusFilter(true);
-            } else if (filteredData !== null) {
-                setStatusFilter(true);
-            } else {
-                setStatusFilter(false);
-            }
+    const closeDisableDialog = () => {
+        if (!disabling) {
+            setAccountToDisable(null);
         }
-    }, [accounts, searchText, routeParams, previousSearch]);
+    };
 
-    if (statusFilter && !filteredData.length) {
+    const confirmDisable = async () => {
+        if (!accountToDisable || isCurrentAccount(accountToDisable, currentUser)) {
+            return;
+        }
+
+        setDisabling(true);
+        try {
+            await dispatch(disableAccount(accountToDisable.id)).unwrap();
+            dispatch(showMessage({ message: "Cuenta desactivada.", variant: "success" }));
+            setAccountToDisable(null);
+        } catch (requestError) {
+            dispatch(
+                showMessage({
+                    message:
+                        typeof requestError === "string"
+                            ? requestError
+                            : "No fue posible desactivar la cuenta.",
+                    variant: "error",
+                })
+            );
+        } finally {
+            setDisabling(false);
+        }
+    };
+
+    if (loading && accounts.length === 0) {
         return (
-            <div className="flex flex-1 items-center justify-center h-full">
-                <Typography color="textSecondary" variant="h5">
-                    No existen cuentas!
-                </Typography>
+            <div className="flex flex-1 items-center justify-center h-full" role="status">
+                <Typography color="textSecondary">Cargando cuentas…</Typography>
             </div>
         );
     }
-    if (!statusFilter) {
-        return <ChargingProgressBar />;
-    }
 
     return (
-        <>
-            <motion.div
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1, transition: { delay: 0.2 } }}
-                className="flex flex-auto w-full max-h-full"
+        <div className="flex flex-col flex-auto w-full min-h-full p-8 sm:p-16 gap-12">
+            <Paper
+                className="flex flex-col sm:flex-row sm:items-center gap-12 p-12 sm:p-16"
+                variant="outlined"
             >
-                <AccountsTable
-                    onSort={handleSort}
-                    columns={columns}
-                    data={filteredData}
-                    pagination={paginationData}
-                    onRowClick={(ev, row) => {
-                        if (row) {
-                            dispatch(openEditAccountDialog(row.original));
-                        }
-                    }}
-                />
-            </motion.div>
+                <div className="flex flex-1 flex-col sm:flex-row gap-12">
+                    <TextField
+                        aria-label="Filtrar cuentas por estado"
+                        label="Estado"
+                        onChange={(event) => setStatusFilter(event.target.value)}
+                        select
+                        size="small"
+                        value={statusFilter}
+                    >
+                        <MenuItem value="active">Activas</MenuItem>
+                        <MenuItem value="inactive">Inactivas</MenuItem>
+                        <MenuItem value="all">Todas</MenuItem>
+                    </TextField>
+                    <TextField
+                        aria-label="Filtrar cuentas por rol"
+                        label="Rol"
+                        onChange={(event) => setRoleFilter(event.target.value)}
+                        select
+                        size="small"
+                        value={roleFilter}
+                    >
+                        <MenuItem value="all">Todos</MenuItem>
+                        <MenuItem value="User">Usuarios</MenuItem>
+                        <MenuItem value="Admin">Administradores</MenuItem>
+                    </TextField>
+                </div>
+                <Typography color="textSecondary" variant="body2" aria-live="polite">
+                    {filteredAccounts.length}{" "}
+                    {filteredAccounts.length === 1 ? "cuenta encontrada" : "cuentas encontradas"}
+                </Typography>
+            </Paper>
 
-            <DeleteRowElementDialog
-                message="este usuario"
-                setIsOpen={setOpen}
-                deleteData={deleteRowData}
-                isOpen={open}
-            />
-        </>
+            {error ? (
+                <Alert
+                    action={
+                        <Button color="inherit" onClick={() => dispatch(getAccounts())} size="small">
+                            Reintentar
+                        </Button>
+                    }
+                    severity="error"
+                >
+                    {error}
+                </Alert>
+            ) : null}
+
+            {filteredAccounts.length === 0 ? (
+                <div className="flex flex-1 flex-col items-center justify-center min-h-256 text-center p-24">
+                    <Icon className="text-48 mb-12" color="disabled">
+                        manage_accounts
+                    </Icon>
+                    <Typography variant="h6">No hay cuentas que coincidan</Typography>
+                    <Typography color="textSecondary" className="mt-4">
+                        Cambie los filtros o el texto de búsqueda para ampliar los resultados.
+                    </Typography>
+                </div>
+            ) : (
+                <motion.div
+                    initial={{ y: 12, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    className="flex flex-auto w-full min-h-0"
+                >
+                    <AccountsTable
+                        columns={columns}
+                        data={filteredAccounts}
+                        onRowClick={(event, row) => {
+                            if (row) {
+                                dispatch(openEditAccountDialog(row.original));
+                            }
+                        }}
+                    />
+                </motion.div>
+            )}
+
+            <Dialog open={!!accountToDisable} onClose={closeDisableDialog}>
+                <DialogTitle>Desactivar cuenta</DialogTitle>
+                <DialogContent>
+                    <DialogContentText>
+                        {accountToDisable
+                            ? `Se impedirá el acceso de ${accountToDisable.firstName} ${accountToDisable.lastName} y se cerrarán sus sesiones activas.`
+                            : ""}
+                    </DialogContentText>
+                </DialogContent>
+                <DialogActions>
+                    <Button disabled={disabling} onClick={closeDisableDialog}>
+                        Cancelar
+                    </Button>
+                    <Button color="error" disabled={disabling} onClick={confirmDisable} variant="contained">
+                        {disabling ? "Desactivando…" : "Desactivar"}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+        </div>
     );
 }
 

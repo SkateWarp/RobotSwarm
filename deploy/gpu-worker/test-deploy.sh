@@ -495,7 +495,10 @@ Worker__Name="viewer-gpu-worker"
 Worker__MaxConcurrentSessions="2"
 Worker__MaxRobotsPerSession="10"
 Worker__Viewer__Enabled="true"
-ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="tcp"
+ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"
+ROBOTSWARM_VIEWER_RENDER_RATE="50"
+ROBOTSWARM_VIEWER_MIN_RENDER_RATE="45"
+ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME="NVIDIA"
 EOF
 chmod 0600 "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
 
@@ -511,17 +514,26 @@ printf '%s\n' "$@" > "$FAKE_STATE/viewer-probe-arguments"
 printf '%s\n' "$ROBOTSWARM_VIEWER_ENCODER" > "$FAKE_STATE/viewer-probe-encoder"
 printf '%s\n' "$ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT" \
     > "$FAKE_STATE/viewer-probe-display-transport"
-printf '%s\n' "$ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST" \
-    > "$FAKE_STATE/viewer-probe-gpu-request"
+printf '%s\n' "$ROBOTSWARM_VIEWER_RENDER_RATE" \
+    > "$FAKE_STATE/viewer-probe-render-rate"
+printf '%s\n' "$ROBOTSWARM_VIEWER_MIN_RENDER_RATE" \
+    > "$FAKE_STATE/viewer-probe-min-render-rate"
+printf '%s\n' "$ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME" \
+    > "$FAKE_STATE/viewer-probe-adapter"
 touch "$FAKE_STATE/viewer-probed"
 if [[ "${FAKE_VIEWER_PROBE_FAIL:-0}" == "1" ]]; then
     exit 1
 fi
-printf '%s\n' '{"protocolVersion":1,"ready":true,"videoCodec":"H264","sources":["Scene"]}'
+printf '%s\n' '{"protocolVersion":2,"ready":true,"videoCodec":"H264","sources":["Scene"],"interactive":true}'
 EOF
 chmod 0755 \
     "$viewer_publish_dir/SwarmWorker" \
     "$viewer_publish_dir/robotswarm-viewer-publisher"
+mkdir -p \
+    "$viewer_publish_dir/robotswarm-viewer-assets/ros-share/turtlebot3_description/meshes" \
+    "$viewer_publish_dir/robotswarm-viewer-assets/models"
+printf 'fake plugin\n' > \
+    "$viewer_publish_dir/librobotswarm_gazebo_gui_probe.so"
 
 viewer_revision="8888888888888888888888888888888888888888"
 viewer_image="sha256:3434343434343434343434343434343434343434343434343434343434343434"
@@ -555,7 +567,7 @@ Worker__Viewer__PublishBaseUrl="rtsp://127.0.0.1:8554/robotswarm"
 EOF
 
 sed -i \
-    's/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="tcp"/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="udp"/' \
+    's/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="udp"/' \
     "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
 if HOME="$viewer_home" \
     PATH="$fake_bin:$PATH" \
@@ -575,10 +587,37 @@ then
     exit 1
 fi
 grep -Fq \
-    "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix or tcp" \
+    "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix" \
     "$viewer_config_log"
 sed -i \
-    's/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="udp"/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="tcp"/' \
+    's/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="udp"/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"/' \
+    "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
+
+sed -i \
+    's/ROBOTSWARM_VIEWER_MIN_RENDER_RATE="45"/ROBOTSWARM_VIEWER_MIN_RENDER_RATE="55"/' \
+    "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
+if HOME="$viewer_home" \
+    PATH="$fake_bin:$PATH" \
+    FAKE_STATE="$viewer_state" \
+    FAKE_IMAGE_ID="$viewer_image" \
+    FAKE_REVISION="$viewer_revision" \
+        "$project_root/deploy/gpu-worker/deploy.sh" \
+            --publish-dir "$viewer_publish_dir" \
+            --image-id "$viewer_image" \
+            --revision "$viewer_revision" \
+            --release-id "$viewer_release" \
+            --gpu-request device=1 \
+            --unit-file "$project_root/deploy/gpu-worker/robotswarm-gpu-worker.service" \
+            >"$viewer_config_log" 2>&1
+then
+    echo "Expected a minimum render rate above the cap to fail deployment." >&2
+    exit 1
+fi
+grep -Fq \
+    "ROBOTSWARM_VIEWER_MIN_RENDER_RATE must not exceed" \
+    "$viewer_config_log"
+sed -i \
+    's/ROBOTSWARM_VIEWER_MIN_RENDER_RATE="55"/ROBOTSWARM_VIEWER_MIN_RENDER_RATE="45"/' \
     "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
 
 HOME="$viewer_home" \
@@ -599,43 +638,57 @@ viewer_environment="$viewer_current/gpu-worker-release.env"
 viewer_unit="$viewer_home/.config/systemd/user/robotswarm-gpu-worker.service"
 test -f "$viewer_state/viewer-probed"
 grep -Fxq 'auto' "$viewer_state/viewer-probe-encoder"
-grep -Fxq 'tcp' "$viewer_state/viewer-probe-display-transport"
-grep -Fxq 'device=1' "$viewer_state/viewer-probe-gpu-request"
+grep -Fxq 'unix' "$viewer_state/viewer-probe-display-transport"
+grep -Fxq '50' "$viewer_state/viewer-probe-render-rate"
+grep -Fxq '45' "$viewer_state/viewer-probe-min-render-rate"
+grep -Fxq 'NVIDIA' "$viewer_state/viewer-probe-adapter"
 grep -Fxq -- '--protocol-version' "$viewer_state/viewer-probe-arguments"
 grep -Fxq -- 'rtsp://127.0.0.1:8554/robotswarm' \
     "$viewer_state/viewer-probe-arguments"
 grep -Fxq 'PrivateTmp=true' "$viewer_unit"
 ! grep -Fxq 'PrivateTmp=false' "$viewer_unit"
+grep -Fxq 'KillMode=control-group' "$viewer_unit"
 ! grep -Fq 'Worker__Viewer__Enabled=' "$viewer_environment"
 grep -Fxq 'ROBOTSWARM_VIEWER_ENCODER="auto"' "$viewer_environment"
-grep -Fxq 'ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="tcp"' \
+grep -Fxq 'ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"' \
     "$viewer_environment"
-grep -Fxq 'ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST="device=1"' \
+grep -Fxq 'ROBOTSWARM_VIEWER_RENDER_RATE="50"' \
+    "$viewer_environment"
+grep -Fxq 'ROBOTSWARM_VIEWER_MIN_RENDER_RATE="45"' \
+    "$viewer_environment"
+grep -Fxq 'ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME="NVIDIA"' \
     "$viewer_environment"
 
 sed -i \
+    's/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="tcp"/' \
+    "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
+tcp_revision="8989898989898989898989898989898989898989"
+tcp_image="sha256:4545454545454545454545454545454545454545454545454545454545454545"
+tcp_release="${tcp_revision}-8-2"
+viewer_target_before_tcp="$(readlink "$viewer_current")"
+if HOME="$viewer_home" \
+    PATH="$fake_bin:$PATH" \
+    FAKE_STATE="$viewer_state" \
+    FAKE_IMAGE_ID="$tcp_image" \
+    FAKE_REVISION="$tcp_revision" \
+        "$project_root/deploy/gpu-worker/deploy.sh" \
+            --publish-dir "$viewer_publish_dir" \
+            --image-id "$tcp_image" \
+            --revision "$tcp_revision" \
+            --release-id "$tcp_release" \
+            --gpu-request device=1 \
+            --unit-file "$project_root/deploy/gpu-worker/robotswarm-gpu-worker.service" \
+            >"$viewer_config_log" 2>&1
+then
+    echo "Expected network-exposed X11 TCP transport to fail deployment." >&2
+    exit 1
+fi
+grep -Fq "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix" \
+    "$viewer_config_log"
+test "$(readlink "$viewer_current")" = "$viewer_target_before_tcp"
+sed -i \
     's/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="tcp"/ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"/' \
     "$viewer_home/.config/robotswarm/gpu-worker-identity.env"
-unix_revision="8989898989898989898989898989898989898989"
-unix_image="sha256:4545454545454545454545454545454545454545454545454545454545454545"
-unix_release="${unix_revision}-8-2"
-HOME="$viewer_home" \
-PATH="$fake_bin:$PATH" \
-FAKE_STATE="$viewer_state" \
-FAKE_IMAGE_ID="$unix_image" \
-FAKE_REVISION="$unix_revision" \
-    "$project_root/deploy/gpu-worker/deploy.sh" \
-        --publish-dir "$viewer_publish_dir" \
-        --image-id "$unix_image" \
-        --revision "$unix_revision" \
-        --release-id "$unix_release" \
-        --gpu-request device=1 \
-        --unit-file "$project_root/deploy/gpu-worker/robotswarm-gpu-worker.service"
-
-grep -Fxq 'unix' "$viewer_state/viewer-probe-display-transport"
-grep -Fxq 'PrivateTmp=false' "$viewer_unit"
-grep -Fxq 'ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"' \
-    "$viewer_environment"
 
 failed_probe_revision="9999999999999999999999999999999999999999"
 failed_probe_image="sha256:5656565656565656565656565656565656565656565656565656565656565656"

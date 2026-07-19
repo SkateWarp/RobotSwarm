@@ -150,25 +150,28 @@ until the shipped helper and full media path pass the host smoke test.
 The worker probes the helper with:
 
 ```text
-<publisher> probe --protocol-version 1
+<publisher> probe --protocol-version 2
 ```
 
 The probe must exit successfully and print one JSON object like:
 
 ```json
-{"protocolVersion":1,"ready":true,"videoCodec":"H264","sources":["Scene"]}
+{"protocolVersion":2,"ready":true,"videoCodec":"H264","sources":["Scene"],"interactive":true}
 ```
 
 Do not report `RobotCamera` until the TurtleBot model has a tested camera
 sensor/topic. For a viewer command the worker launches the helper with
-separate, non-shell arguments containing the session/container identity,
-lease ID and expiry, canonical source/path, and configured RTSP base URL. The
+separate, non-shell arguments containing the enrolled worker ID, the
+session/container identity, lease ID and expiry, canonical source/path, and
+configured RTSP base URL. The
 probe receives no backend or media credential. Each `SetViewerSource` command
 instead carries its own short-lived, publish-only token. The worker validates
-that token, writes one bounded line to the publishing helper's redirected
-standard input, then flushes and closes the pipe. The probe receives closed,
-empty input. Neither the long-lived worker credential nor the publish token is
-placed in an environment, process arguments, or logs. The helper's loopback
+that token and writes it as the first bounded line of the publishing helper's
+redirected standard input. Protocol 2 keeps that private pipe open for
+validated JSONL mouse and keyboard events associated with the same active
+session and lease; a replacement or stop closes it with the helper. The probe
+receives closed, empty input. Neither the long-lived worker credential nor the
+publish token is placed in an environment, process arguments, or logs. The helper's loopback
 RTSP proxy path-checks FFmpeg requests and injects MediaMTX's `token` query
 upstream in memory.
 
@@ -195,6 +198,52 @@ children left behind by a hard-killed helper cannot collide with its
 replacement. A private per-lease lock serializes ownership, and only a
 same-owner mode-0700 stale runtime directory is eligible for reclamation.
 
+`gzclient` runs directly on the WSL host; the helper never creates, stops, or
+removes a viewer sidecar. Xvfb, FFmpeg, and the outer `bwrap` monitor remain in
+the helper's process group. Bubblewrap's `--new-session` places its inner
+monitor and the real gzclient in a separate session, while
+`--die-with-parent` guarantees that hard-killing the outer monitor also kills
+that inner tree. The helper read-only inspects
+the assigned worker-managed container and its sole internal network, binds
+both ownership labels to the worker/session IDs supplied by the worker,
+verifies the exact private IPv4 attachment from both container and network
+metadata, verifies that the unique IPAM gateway is locally assigned, sets
+`GAZEBO_MASTER_URI` to the container address on port 11345, and exports both
+`GZ_IP` and Gazebo Classic's effective `GAZEBO_IP` as that host gateway. A
+lease-private
+MIT-cookie-protected Xvfb display keeps input and pixels isolated. Production
+uses Xorg's Linux abstract Unix endpoint with `DISPLAY=:N`, explicitly starts
+Xvfb with `-nolisten tcp`, and verifies the authenticated display is usable
+without occupying port `6000+N`. WSLg's read-only `/tmp/.X11-unix` mount can
+therefore emit a harmless filesystem-socket warning; the abstract endpoint
+remains usable even with systemd `PrivateTmp=true`. The Gazebo window must be
+the one stable, viewable, non-transient NORMAL direct child of the X root;
+selection-owner, nested Qt, and SPLASH windows are ignored. libX11 moves it to `0,0`,
+resizes it to the complete capture surface, focuses it, and verifies the
+resulting geometry before FFmpeg starts. Validated browser events are then
+injected only into this private display through XTest.
+
+The immutable ROS image and host `gzclient` must both use Gazebo Classic 11.
+The release packages `librobotswarm_gazebo_gui_probe.so`, TurtleBot description
+meshes, Gazebo models, and RobotSwarm models from that exact image. An
+unprivileged `bwrap` mount namespace overlays the packaged ROS share at
+`/opt/ros/noetic/share` for `gzclient` only. This is required because gzserver
+publishes absolute TurtleBot mesh paths; `GAZEBO_MODEL_PATH` alone cannot make
+those visuals appear, and the worker must not require root or modify host
+`/opt`. The GUI plugin applies `ROBOTSWARM_VIEWER_RENDER_RATE` to both the
+active user camera and Gazebo's GUI render event. The helper does not emit
+`READY` until that exact gzclient process reports a hardware D3D renderer and
+both measured rates meet `ROBOTSWARM_VIEWER_MIN_RENDER_RATE` (50 FPS cap and
+45 FPS minimum by default).
+
+The `bwrap` boundary isolates files, mounts, PIDs, IPC, and the child session;
+it deliberately uses `--share-net` so host gzclient can reach the validated
+Docker-bridge address. It is not a network-egress sandbox: gzclient inherits
+the worker user's host network access. Production therefore trusts the
+versioned host Gazebo 11 binary, packaged plugin, and immutable session image;
+the exact-IP checks constrain the configured ROS/Gazebo master but do not
+firewall a compromised client.
+
 Required settings after the production media path is approved:
 
 ```bash
@@ -202,12 +251,16 @@ export Worker__Viewer__Enabled="true"
 # The GPU deployment supplies an absolute, versioned PublisherExecutable path.
 export Worker__Viewer__PublishBaseUrl="rtsp://10.0.0.126:8554"
 export Worker__Viewer__StopTimeoutSeconds="5"
+export ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"
+export ROBOTSWARM_VIEWER_RENDER_RATE="50"
+export ROBOTSWARM_VIEWER_MIN_RENDER_RATE="45"
+export ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME="NVIDIA"
 ```
 
 The production workflow ships the helper with mode `0755`, and the deployment
 script writes its absolute, versioned path into every release. The stable
-identity file owns the enable switch. When that switch is `true`, deployment
-requires the RTSP endpoint and a successful H.264 helper probe. The Unix
-display transport receives the reviewed `PrivateTmp=false` unit needed for its
-socket mount; authenticated TCP mode and disabled workers retain
-`PrivateTmp=true`.
+identity file owns the enable switch and the local render settings. When that
+switch is `true`, deployment requires the RTSP endpoint, packaged GUI/assets,
+and a successful host helper probe. `PrivateTmp=true` remains enabled because
+no Docker sidecar needs access to the X endpoint. The helper accepts Unix
+display transport only and never opens an X11 network listener.

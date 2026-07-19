@@ -5265,6 +5265,28 @@ class CollaborativeTransport:
             self._store_push_arbitration(arbitration)
         return arbitration
 
+    def _transport_all_pusher_proof_speed(self):
+        """Return the forward speed that proves a useful fleet command."""
+        reference_speed = getattr(
+            self, 'transport_push_reference_speed', None
+        )
+        try:
+            reference_speed = float(reference_speed)
+        except (TypeError, ValueError, OverflowError):
+            reference_speed = None
+
+        if (
+            reference_speed is None
+            or not math.isfinite(reference_speed)
+            or reference_speed <= 0.0
+        ):
+            return 0.015
+
+        # A loaded chain deliberately slows near the target.  Keep the
+        # complete-fleet proof meaningful at that calm pace instead of
+        # demanding nearly the whole reference from every wheel.
+        return max(0.003, min(0.015, 0.50 * reference_speed))
+
     def _publish_grf_commands(
         self, namespaces, commands, positions, yaws,
         object_pos, object_yaw, expected_epoch
@@ -5636,7 +5658,14 @@ class CollaborativeTransport:
                 for namespace, command in planned_commands.items()
                 if namespace in targets
             }
-            minimum_speed = 0.015
+            reference_speed = getattr(
+                self, 'transport_push_reference_speed', None
+            )
+            try:
+                reference_speed = float(reference_speed)
+            except (TypeError, ValueError, OverflowError):
+                reference_speed = None
+            minimum_speed = self._transport_all_pusher_proof_speed()
             current_pushers = {
                 namespace
                 for namespace, command in planned_commands.items()
@@ -5690,9 +5719,6 @@ class CollaborativeTransport:
                 self.transport_all_pushers_since = None
             self.transport_all_pushers_confirmed = all_pushers_confirmed
 
-            reference_speed = getattr(
-                self, 'transport_push_reference_speed', None
-            )
             tracking_ready = full_chain_connected
             if reference_speed is not None and tracking_ready:
                 tracking_speed = max(
@@ -7469,7 +7495,8 @@ class CollaborativeTransport:
         )
 
     def _start_rendezvous_recovery(
-        self, namespace, position, target, positions
+        self, namespace, position, target, positions,
+        travel_direction=None,
     ):
         """Start or join a stable right-of-way decision for one blocker."""
         get_time = getattr(rospy, 'get_time', lambda: 0.0)
@@ -7485,11 +7512,38 @@ class CollaborativeTransport:
         ):
             return False
         cooldowns.pop(namespace, None)
-        candidates = [
-            (float(np.linalg.norm(position - other_position)), other_namespace)
-            for other_namespace, other_position in positions.items()
-            if other_namespace != namespace
-        ]
+        route_direction = None
+        if travel_direction is not None:
+            route_direction = np.asarray(travel_direction, dtype=float)
+            if (
+                route_direction.shape != (2,)
+                or not np.all(np.isfinite(route_direction))
+            ):
+                return False
+            direction_norm = float(np.linalg.norm(route_direction))
+            if direction_norm <= 1e-9:
+                return False
+            route_direction = route_direction / direction_norm
+
+        corridor_width = getattr(
+            self, 'transport_route_robot_clearance', 0.32
+        )
+        candidates = []
+        for other_namespace, other_position in positions.items():
+            if other_namespace == namespace:
+                continue
+            offset = np.asarray(other_position, dtype=float) - position
+            if offset.shape != (2,) or not np.all(np.isfinite(offset)):
+                continue
+            if route_direction is not None:
+                forward_offset = float(np.dot(offset, route_direction))
+                lateral_offset = abs(float(
+                    route_direction[0] * offset[1]
+                    - route_direction[1] * offset[0]
+                ))
+                if forward_offset <= 1e-6 or lateral_offset > corridor_width:
+                    continue
+            candidates.append((float(np.linalg.norm(offset)), other_namespace))
         if not candidates:
             return False
         distance, obstacle_namespace = min(candidates)
@@ -7672,23 +7726,33 @@ class CollaborativeTransport:
             'soft_steering': not chain_motion,
             'object_yaw': object_yaw,
         }
-        requested_linear = abs(float(command.linear.x))
+        requested_signed_linear = float(command.linear.x)
+        requested_linear = abs(requested_signed_linear)
+        requested_direction = np.array([
+            math.cos(yaws[namespace]), math.sin(yaws[namespace])
+        ])
+        if requested_signed_linear < 0.0:
+            requested_direction *= -1.0
         command = self._apply_transport_avoidance(
             namespace,
             command,
             object_pos,
             **avoidance_options
         )
-        avoidance_stopped = (
-            abs(float(command.linear.x)) < 1e-6
-            and abs(float(command.angular.z)) < 1e-6
-        )
+        # Avoidance may keep a Burger turning while it refuses the requested
+        # translation.  That is still a blocked rendezvous route; waiting for
+        # angular.z to become zero leaves two facing robots spinning forever.
+        translation_stopped = abs(float(command.linear.x)) < 1e-4
         if (
             not chain_motion
             and requested_linear >= 0.01
-            and avoidance_stopped
+            and translation_stopped
             and self._start_rendezvous_recovery(
-                namespace, positions[namespace], target, positions
+                namespace,
+                positions[namespace],
+                target,
+                positions,
+                travel_direction=requested_direction,
             )
         ):
             recovery_command = self._rendezvous_recovery_command(
@@ -9511,6 +9575,12 @@ class CollaborativeTransport:
             'current_useful_pusher_count': len(getattr(
                 self, 'transport_current_useful_pushers', set()
             )),
+            'current_useful_pusher_ids': sort_robot_ids(getattr(
+                self, 'transport_current_useful_pushers', set()
+            )),
+            'all_pusher_proof_minimum_speed': round(
+                self._transport_all_pusher_proof_speed(), 4
+            ),
             'all_pushers_confirmed': bool(getattr(
                 self, 'transport_all_pushers_confirmed', False
             )),

@@ -23,6 +23,7 @@
 #include <gazebo/common/Events.hh>
 #include <gazebo/gazebo.hh>
 #include <gazebo/gui/GuiIface.hh>
+#include <gazebo/gui/GuiEvents.hh>
 #include <gazebo/msgs/world_stats.pb.h>
 #include <gazebo/rendering/Camera.hh>
 #include <gazebo/rendering/UserCamera.hh>
@@ -35,7 +36,8 @@ class RobotSwarmGuiProbe : public SystemPlugin
 {
   public: RobotSwarmGuiProbe()
       : warmupSeconds(ReadPositiveNumber("ROBOTSWARM_GUI_PROBE_WARMUP", 2.0)),
-        sampleSeconds(ReadPositiveNumber("ROBOTSWARM_GUI_PROBE_SECONDS", 5.0))
+        sampleSeconds(ReadPositiveNumber("ROBOTSWARM_GUI_PROBE_SECONDS", 5.0)),
+        renderRate(ReadPositiveNumber("ROBOTSWARM_GUI_RENDER_RATE", 0.0))
   {
     const char *requestedPath = std::getenv("ROBOTSWARM_GUI_PROBE_REPORT");
     this->reportPath = requestedPath && *requestedPath
@@ -59,6 +61,11 @@ class RobotSwarmGuiProbe : public SystemPlugin
     gzmsg << "RobotSwarm GUI probe will write " << this->reportPath
           << " after " << this->warmupSeconds << " s warmup and "
           << this->sampleSeconds << " s measurement.\n";
+    if (this->renderRate > 0.0)
+    {
+      gzmsg << "RobotSwarm GUI probe will limit the user camera to "
+            << this->renderRate << " FPS.\n";
+    }
   }
 
   private: static double ReadPositiveNumber(
@@ -228,6 +235,13 @@ class RobotSwarmGuiProbe : public SystemPlugin
       return;
     }
 
+    if (!this->renderRateApplied && this->renderRate > 0.0)
+    {
+      this->camera->SetRenderRate(this->renderRate);
+      gui::Events::setRenderRate(this->renderRate);
+      this->renderRateApplied = true;
+    }
+
     this->EnsureWorldStatsSubscriber();
     this->ReadRendererIdentity();
     const auto now = Clock::now();
@@ -312,7 +326,13 @@ class RobotSwarmGuiProbe : public SystemPlugin
            << ", \"sample_seconds\": " << _elapsed
            << ", \"samples\": " << this->cameraFpsSamples
            << ", \"average_fps\": " << measuredFps
-           << ", \"post_render_rate_fps\": " << postRenderRate << "},\n"
+           << ", \"post_render_rate_fps\": " << postRenderRate
+           << ", \"configured_render_rate_fps\": ";
+    if (this->renderRate > 0.0)
+      report << this->renderRate;
+    else
+      report << "null";
+    report << "},\n"
            << "  \"physics_measurement\": {\"source\": "
            << JsonString("gazebo.msgs.WorldStatistics delta(sim_time)/delta(real_time)")
            << ", \"topic\": " << JsonString(this->worldStatsTopic)
@@ -356,6 +376,7 @@ class RobotSwarmGuiProbe : public SystemPlugin
 
   private: const double warmupSeconds;
   private: const double sampleSeconds;
+  private: const double renderRate;
   private: std::string reportPath;
   private: rendering::UserCameraPtr camera;
   private: event::ConnectionPtr postRenderConnection;
@@ -363,6 +384,7 @@ class RobotSwarmGuiProbe : public SystemPlugin
   private: transport::SubscriberPtr worldStatsSubscriber;
   private: std::string worldStatsTopic;
   private: bool cameraSeen = false;
+  private: bool renderRateApplied = false;
   private: bool sampling = false;
   private: Clock::time_point cameraSeenAt;
   private: Clock::time_point sampleStartedAt;

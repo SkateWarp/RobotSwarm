@@ -19,12 +19,15 @@ import BoothDashboardAppConfigGeeTS from "../main/apps/GeeTS/Dashboard/BoothDash
 import LeafSortingAppConfig from "../main/apps/GeeTS/LeafSorting/LeafSortingAppConfig";
 import RobotDetailAppConfig from "../main/apps/GeeTS/RobotDetail/RobotDetailAppConfig";
 
+const isGtsProject =
+    settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish";
+const legacyRecoveryRoutes = isGtsProject ? [] : [ResetPasswordPageConfig, ForgotPasswordPageConfig];
+
 const routeConfigs = [
     LoginConfig,
     MailConfirmPageConfig,
-    ResetPasswordPageConfig,
     AccountsAppConfig,
-    ForgotPasswordPageConfig,
+    ...legacyRecoveryRoutes,
 
     // Tasks
     TaskDashboardAppConfig,
@@ -41,11 +44,19 @@ const routeConfigs = [
 
 const getInitialDashboard = () => {
     if (settingsConfig.layout.project === "task") {
-        return { path: "/", exact: true, element: <Navigate to="apps/dashboard/tasks" /> };
+        return {
+            path: "/",
+            exact: true,
+            element: <Navigate to="apps/dashboard/tasks" />,
+        };
     }
 
-    if (settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish") {
-        return { path: "/", exact: true, element: <Navigate to="/apps/GTS/dashboard/booths" /> };
+    if (isGtsProject) {
+        return {
+            path: "/",
+            exact: true,
+            element: <Navigate to="/apps/GTS/realtime" replace />,
+        };
     }
 
     throw Error("Proyecto mal configurado en routesConfig");

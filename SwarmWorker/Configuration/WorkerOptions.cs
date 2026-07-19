@@ -37,7 +37,9 @@ public sealed class WorkerOptions
     public double ContainerCpuLimit { get; set; } = 12.0;
     public string ContainerMemory { get; set; } = "3g";
     public string ContainerMemorySwap { get; set; } = "3g";
-    public int ContainerPidsLimit { get; set; } = 512;
+    // Docker counts threads against this limit. Gazebo and a ten-robot fleet
+    // need more room than the old 512-task ceiling allowed.
+    public int ContainerPidsLimit { get; set; } = 1024;
     public string ContainerShmSize { get; set; } = "512m";
     public string ContainerUser { get; set; } = "1000:1000";
     public bool EnableGpu { get; set; } = true;
@@ -343,7 +345,7 @@ public sealed class ViewerPublisherOptions
     public string PublisherExecutable { get; set; } = string.Empty;
     public string PublishBaseUrl { get; set; } = string.Empty;
     public int ProbeTimeoutSeconds { get; set; } = 5;
-    public int StartupTimeoutSeconds { get; set; } = 15;
+    public int StartupTimeoutSeconds { get; set; } = 35;
     public int StopTimeoutSeconds { get; set; } = 5;
     public int MaximumLeaseMinutes { get; set; } = 30;
 }

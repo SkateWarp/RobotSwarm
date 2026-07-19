@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Publish one private Gazebo scene display to the session RTSP path.
 
-This process is intentionally a small supervisor.  It owns the X server, a
-short-lived gzclient sidecar, and FFmpeg, so the worker can stop the complete
-pipeline by stopping this one process.
+This process is intentionally a small supervisor.  It owns a lease-private X
+server, a host ``gzclient`` and FFmpeg, so the worker can stop the complete
+pipeline by stopping this one process group.  The simulation container stays
+untouched: only its validated private Gazebo endpoint is consumed.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime as dt
+import errno
 import fcntl
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -33,21 +38,25 @@ from typing import BinaryIO, Sequence
 from urllib.parse import quote, urlsplit, urlunsplit
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 SESSION_ID_LABEL = "io.robotswarm.session-id"
 WORKER_ID_LABEL = "io.robotswarm.worker-id"
 MANAGED_LABEL = "io.robotswarm.managed"
-VIEWER_LABEL = "io.robotswarm.viewer"
-VIEWER_LEASE_LABEL = "io.robotswarm.viewer-lease"
 CONTAINER_ID_RE = re.compile(r"^[a-f0-9]{64}$")
-GPU_REQUEST_RE = re.compile(
-    r"^(?:all|device=(?:[0-9]+|GPU-[A-Fa-f0-9-]+)"
-    r"(?:,(?:[0-9]+|GPU-[A-Fa-f0-9-]+))*)$"
-)
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
+GAZEBO_MASTER_PORT = 11345
+ROS_MASTER_PORT = 11311
+GUI_PLUGIN_NAME = "librobotswarm_gazebo_gui_probe.so"
+ASSET_DIRECTORY_NAME = "robotswarm-viewer-assets"
+X11_SOCKET_DIRECTORY = Path("/tmp/.X11-unix")
+X11_LOCK_DIRECTORY = Path("/tmp")
 
 
 class PublisherError(RuntimeError):
+    pass
+
+
+class AmbiguousGazeboWindows(PublisherError):
     pass
 
 
@@ -73,6 +82,15 @@ def env_float(name: str, default: float, minimum: float, maximum: float) -> floa
     return value
 
 
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "true" if default else "false").lower()
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    raise PublisherError(f"{name} must be true or false")
+
+
 def resolve_executable(name: str, default: str) -> str:
     configured = os.environ.get(name, default)
     if not configured or any(character.isspace() for character in configured):
@@ -86,9 +104,17 @@ def resolve_executable(name: str, default: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     docker: str
+    gzclient: str
+    sandbox: str
+    ldd: str
+    true_executable: str
     display_server: str
     ffmpeg: str
     xwininfo: str
+    xprop: str
+    gui_plugin: Path
+    ros_share_dir: Path
+    model_paths: tuple[Path, ...]
     display_transport: str
     runtime_dir: Path
     x_socket_dir: Path
@@ -97,10 +123,16 @@ class Settings:
     width: int
     height: int
     frame_rate: int
+    render_rate: float
+    minimum_render_rate: float
+    render_warmup_seconds: float
+    render_sample_seconds: float
     bit_rate: str
-    gpu_request: str
+    fill_display: bool
+    gpu_adapter_name: str | None
     startup_timeout: float
     settle_seconds: float
+    traffic_timeout: float
     window_pattern: re.Pattern[str]
 
     @classmethod
@@ -128,17 +160,9 @@ class Settings:
         display_transport = os.environ.get(
             "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT", "unix"
         )
-        if display_transport not in {"unix", "tcp"}:
+        if display_transport != "unix":
             raise PublisherError(
-                "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix or tcp"
-            )
-
-        gpu_request = os.environ.get(
-            "ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST", "device=0"
-        )
-        if gpu_request != "none" and not GPU_REQUEST_RE.fullmatch(gpu_request):
-            raise PublisherError(
-                "ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST has an invalid Docker GPU request"
+                "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix"
             )
 
         pattern_text = os.environ.get(
@@ -155,7 +179,9 @@ class Settings:
             os.environ.get("ROBOTSWARM_VIEWER_RUNTIME_DIR", runtime_default)
         )
         x_socket_dir = Path(
-            os.environ.get("ROBOTSWARM_VIEWER_X_SOCKET_DIR", "/tmp/.X11-unix")
+            os.environ.get(
+                "ROBOTSWARM_VIEWER_X_SOCKET_DIR", str(X11_SOCKET_DIRECTORY)
+            )
         )
         if (
             not runtime_dir.is_absolute()
@@ -168,18 +194,91 @@ class Settings:
             raise PublisherError(
                 "viewer runtime and X socket paths must be safe absolute paths"
             )
+        if display_transport == "unix" and x_socket_dir != X11_SOCKET_DIRECTORY:
+            raise PublisherError(
+                "Unix X11 transport requires the canonical /tmp/.X11-unix endpoint"
+            )
 
         bit_rate = os.environ.get("ROBOTSWARM_VIEWER_BIT_RATE", "4M")
         if not re.fullmatch(r"[1-9][0-9]*(?:[KMG])?", bit_rate):
             raise PublisherError("ROBOTSWARM_VIEWER_BIT_RATE is invalid")
 
+        helper_dir = Path(__file__).resolve().parent
+        gui_plugin = Path(
+            os.environ.get(
+                "ROBOTSWARM_VIEWER_GUI_PLUGIN",
+                str(helper_dir / GUI_PLUGIN_NAME),
+            )
+        )
+        asset_root = Path(
+            os.environ.get(
+                "ROBOTSWARM_VIEWER_ASSET_ROOT",
+                str(helper_dir / ASSET_DIRECTORY_NAME),
+            )
+        )
+        if not gui_plugin.is_absolute() or not asset_root.is_absolute():
+            raise PublisherError("viewer plugin and asset root must be absolute paths")
+        gui_plugin = gui_plugin.resolve()
+        asset_root = asset_root.resolve()
+
+        bundled_models = asset_root / "models"
+        configured_model_paths = os.environ.get(
+            "ROBOTSWARM_VIEWER_GAZEBO_MODEL_PATH", ""
+        )
+        model_paths = [bundled_models]
+        for raw_path in configured_model_paths.split(os.pathsep):
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if not path.is_absolute() or "\n" in raw_path:
+                raise PublisherError(
+                    "ROBOTSWARM_VIEWER_GAZEBO_MODEL_PATH must contain absolute paths"
+                )
+            model_paths.append(path.resolve())
+        system_models = Path("/usr/share/gazebo-11/models")
+        if system_models.is_dir():
+            model_paths.append(system_models)
+        model_paths = list(dict.fromkeys(model_paths))
+
+        frame_rate = env_int("ROBOTSWARM_VIEWER_FRAME_RATE", 30, 5, 60)
+        adapter = os.environ.get(
+            "ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME", "NVIDIA"
+        ).strip()
+        if adapter and (
+            len(adapter) > 64
+            or re.fullmatch(r"[A-Za-z0-9 ._+()-]+", adapter) is None
+        ):
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME contains unsupported characters"
+            )
+        render_rate = env_float(
+            "ROBOTSWARM_VIEWER_RENDER_RATE", 50.0, 5.0, 120.0
+        )
+        minimum_render_rate = env_float(
+            "ROBOTSWARM_VIEWER_MIN_RENDER_RATE", 45.0, 5.0, 120.0
+        )
+        if minimum_render_rate > render_rate:
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_MIN_RENDER_RATE must not exceed RENDER_RATE"
+            )
+
         return cls(
             docker=resolve_executable("ROBOTSWARM_VIEWER_DOCKER", "docker"),
+            gzclient=resolve_executable("ROBOTSWARM_VIEWER_GZCLIENT", "gzclient"),
+            sandbox=resolve_executable("ROBOTSWARM_VIEWER_SANDBOX", "bwrap"),
+            ldd=resolve_executable("ROBOTSWARM_VIEWER_LDD", "ldd"),
+            true_executable=resolve_executable(
+                "ROBOTSWARM_VIEWER_TRUE", "true"
+            ),
             display_server=resolve_executable(
                 "ROBOTSWARM_VIEWER_DISPLAY_SERVER", display_default
             ),
             ffmpeg=resolve_executable("ROBOTSWARM_VIEWER_FFMPEG", "ffmpeg"),
             xwininfo=resolve_executable("ROBOTSWARM_VIEWER_XWININFO", "xwininfo"),
+            xprop=resolve_executable("ROBOTSWARM_VIEWER_XPROP", "xprop"),
+            gui_plugin=gui_plugin,
+            ros_share_dir=asset_root / "ros-share",
+            model_paths=tuple(model_paths),
             display_transport=display_transport,
             runtime_dir=runtime_dir,
             x_socket_dir=x_socket_dir,
@@ -187,14 +286,26 @@ class Settings:
             display_max=display_max,
             width=env_int("ROBOTSWARM_VIEWER_WIDTH", 1280, 320, 3840),
             height=env_int("ROBOTSWARM_VIEWER_HEIGHT", 720, 240, 2160),
-            frame_rate=env_int("ROBOTSWARM_VIEWER_FRAME_RATE", 30, 5, 60),
+            frame_rate=frame_rate,
+            render_rate=render_rate,
+            minimum_render_rate=minimum_render_rate,
+            render_warmup_seconds=env_float(
+                "ROBOTSWARM_VIEWER_RENDER_WARMUP_SECONDS", 2.0, 0.5, 30.0
+            ),
+            render_sample_seconds=env_float(
+                "ROBOTSWARM_VIEWER_RENDER_SAMPLE_SECONDS", 5.0, 1.0, 60.0
+            ),
             bit_rate=bit_rate,
-            gpu_request=gpu_request,
+            fill_display=env_bool("ROBOTSWARM_VIEWER_FILL_DISPLAY", True),
+            gpu_adapter_name=adapter or None,
             startup_timeout=env_float(
-                "ROBOTSWARM_VIEWER_STARTUP_TIMEOUT", 12.0, 2.0, 60.0
+                "ROBOTSWARM_VIEWER_STARTUP_TIMEOUT", 30.0, 5.0, 90.0
             ),
             settle_seconds=env_float(
                 "ROBOTSWARM_VIEWER_SETTLE_SECONDS", 2.0, 0.1, 10.0
+            ),
+            traffic_timeout=env_float(
+                "ROBOTSWARM_VIEWER_TRAFFIC_TIMEOUT", 5.0, 1.0, 60.0
             ),
             window_pattern=window_pattern,
         )
@@ -203,6 +314,7 @@ class Settings:
 @dataclass(frozen=True)
 class PublishRequest:
     session_id: uuid.UUID
+    worker_id: uuid.UUID
     lease_id: uuid.UUID
     expires_at: dt.datetime
     container_id: str
@@ -269,18 +381,33 @@ def validate_base_url(value: str) -> str:
 
 
 def parse_utc_timestamp(value: str) -> dt.datetime:
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    match = re.fullmatch(
+        r"(?P<seconds>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+        r"(?:\.(?P<fraction>\d{1,9}))?"
+        r"(?P<zone>Z|[+-]\d{2}:\d{2})",
+        value,
+    )
+    if match is None:
+        raise PublisherError("--expires-at must be an ISO-8601 timestamp")
+
+    fraction = match.group("fraction")
+    fraction_text = ""
+    if fraction is not None:
+        # Python 3.8 accepts microseconds while .NET's round-trip format emits
+        # seven fractional digits. The final tick is below Python's precision.
+        fraction_text = "." + fraction[:6].ljust(6, "0")
+    zone = "+00:00" if match.group("zone") == "Z" else match.group("zone")
+    normalized = f"{match.group('seconds')}{fraction_text}{zone}"
     try:
         parsed = dt.datetime.fromisoformat(normalized)
     except ValueError as exc:
         raise PublisherError("--expires-at must be an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None:
-        raise PublisherError("--expires-at must include a UTC offset")
     return parsed.astimezone(dt.timezone.utc)
 
 
 def parse_publish_request(arguments: argparse.Namespace) -> PublishRequest:
     session_id = validate_uuid(arguments.session_id, "--session-id")
+    worker_id = validate_uuid(arguments.worker_id, "--worker-id")
     lease_id = validate_uuid(arguments.lease_id, "--lease-id")
     expires_at = parse_utc_timestamp(arguments.expires_at)
     if expires_at <= dt.datetime.now(dt.timezone.utc):
@@ -306,6 +433,7 @@ def parse_publish_request(arguments: argparse.Namespace) -> PublishRequest:
 
     return PublishRequest(
         session_id=session_id,
+        worker_id=worker_id,
         lease_id=lease_id,
         expires_at=expires_at,
         container_id=arguments.container_id,
@@ -316,11 +444,15 @@ def parse_publish_request(arguments: argparse.Namespace) -> PublishRequest:
     )
 
 
-def read_publish_token() -> str:
-    payload = sys.stdin.buffer.read(130)
-    extra = sys.stdin.buffer.read(1)
-    if extra or not payload.endswith(b"\n") or payload.count(b"\n") != 1:
-        raise PublisherError("publish token input must contain exactly one line")
+def read_publish_token(stream: BinaryIO | None = None) -> str:
+    source = stream or sys.stdin.buffer
+    payload = source.readline(131)
+    if (
+        not payload.endswith(b"\n")
+        or payload.count(b"\n") != 1
+        or len(payload) > 130
+    ):
+        raise PublisherError("publish token input must begin with one valid line")
     if payload.endswith(b"\r\n"):
         encoded_token = payload[:-2]
     else:
@@ -444,9 +576,120 @@ def available_encoder(settings: Settings) -> str:
     raise PublisherError("configured FFmpeg has no supported H.264 encoder")
 
 
+def base_gzclient_sandbox_command(settings: Settings) -> list[str]:
+    """Build a host-runtime view without user homes or the Docker socket."""
+    return [
+        settings.sandbox,
+        "--die-with-parent",
+        "--unshare-all",
+        "--share-net",
+        "--new-session",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/sbin",
+        "/sbin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--dev-bind-try",
+        "/dev/dxg",
+        "/dev/dxg",
+        "--dev-bind-try",
+        "/dev/dri",
+        "/dev/dri",
+        "--ro-bind",
+        "/sys",
+        "/sys",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        "/run",
+        "--dir",
+        "/var",
+        "--dir",
+        "/var/cache",
+        "--ro-bind-try",
+        "/var/cache/fontconfig",
+        "/var/cache/fontconfig",
+        "--dir",
+        "/opt",
+        "--dir",
+        "/opt/ros",
+        "--dir",
+        "/opt/ros/noetic",
+        "--dir",
+        "/opt/ros/noetic/share",
+        "--ro-bind",
+        str(settings.ros_share_dir),
+        "/opt/ros/noetic/share",
+    ]
+
+
+def validate_viewer_artifacts(settings: Settings) -> None:
+    required_paths = (
+        (settings.gui_plugin, stat.S_ISREG, "Gazebo GUI plugin"),
+        (settings.ros_share_dir, stat.S_ISDIR, "ROS asset bundle"),
+        (settings.ros_share_dir / "turtlebot3_description" / "meshes",
+         stat.S_ISDIR, "TurtleBot mesh bundle"),
+        (settings.model_paths[0], stat.S_ISDIR, "Gazebo model bundle"),
+    )
+    for path, expected_type, description in required_paths:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise PublisherError(f"required {description} is missing") from exc
+        if (
+            not expected_type(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise PublisherError(
+                f"required {description} is not a safe owned artifact"
+            )
+
+    dependencies = run_command(
+        [settings.ldd, str(settings.gui_plugin)], check=False
+    )
+    dependency_output = dependencies.stdout + dependencies.stderr
+    if dependencies.returncode != 0 or "not found" in dependency_output:
+        raise PublisherError("Gazebo GUI plugin has unresolved host dependencies")
+
+    # The server publishes absolute package mesh paths.  Verify that the
+    # unprivileged mount namespace can overlay the release-owned ROS share
+    # without changing /opt on the worker host.
+    run_command(
+        base_gzclient_sandbox_command(settings) + [settings.true_executable]
+    )
+
+
 def verify_dependencies(settings: Settings) -> str:
     run_command([settings.docker, "version", "--format", "{{.Server.Version}}"])
+    # Gazebo Classic 11.15.1 emits its valid version banner but exits 255 for
+    # `gzclient --version` on the supported WSL host package.  Bind the check
+    # to the emitted major version instead of that non-standard exit status.
+    version = run_command([settings.gzclient, "--version"], check=False)
+    version_text = version.stdout + version.stderr
+    if re.search(r"\bversion\s+11(?:\.|\b)", version_text, re.IGNORECASE) is None:
+        raise PublisherError("host gzclient must be Gazebo Classic 11")
     run_command([settings.xwininfo, "-version"])
+    run_command([settings.xprop, "-version"])
+    load_x_test_libraries()
+    validate_viewer_artifacts(settings)
     return available_encoder(settings)
 
 
@@ -465,21 +708,6 @@ class DisplayLease:
 
     @property
     def host_name(self) -> str:
-        if self.settings.display_transport == "tcp":
-            return f"127.0.0.1:{self.number}"
-        return self.name
-
-    @property
-    def tcp_port(self) -> int:
-        if self.number is None:
-            raise PublisherError("private display has not been allocated")
-        return 6000 + self.number
-
-    def sidecar_name(self, gateway: str | None) -> str:
-        if self.settings.display_transport == "tcp":
-            if gateway is None:
-                raise PublisherError("session network gateway is unavailable")
-            return f"{gateway}:{self.number}"
         return self.name
 
     @property
@@ -493,8 +721,6 @@ class DisplayLease:
         return self.session_dir / "Xauthority"
 
     def allocate(self) -> None:
-        if self.settings.display_transport == "unix":
-            self.settings.x_socket_dir.mkdir(mode=0o1777, parents=True, exist_ok=True)
         for number in range(self.settings.display_min, self.settings.display_max + 1):
             lock_path = self.settings.runtime_dir / f"display-{number}.lock"
             lock_file = lock_path.open("a+b")
@@ -514,20 +740,125 @@ class DisplayLease:
         raise PublisherError("no private X display is available")
 
     def _display_endpoint_is_busy(self, number: int) -> bool:
-        if self.settings.display_transport == "unix":
-            return (self.settings.x_socket_dir / f"X{number}").exists()
-        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Xorg's local transport creates both a filesystem socket (when WSLg
+        # permits it) and a Linux abstract socket with the same path.  Checking
+        # only /tmp/.X11-unix would miss an already-running Xvfb on WSL, where
+        # that filesystem mount is read-only but the abstract endpoint works.
+        socket_path = self.settings.x_socket_dir / f"X{number}"
         try:
-            test_socket.bind(("127.0.0.1", 6000 + number))
+            socket_path.lstat()
+            unix_busy = True
+        except FileNotFoundError:
+            unix_busy = False
+
+        abstract_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        abstract_socket.settimeout(0.05)
+        try:
+            abstract_socket.connect("\0" + str(socket_path))
+            unix_busy = True
+        except OSError as exc:
+            if exc.errno not in {errno.ENOENT, errno.ECONNREFUSED}:
+                unix_busy = True
+        finally:
+            abstract_socket.close()
+
+        if unix_busy:
+            return True
+
+        # Reserve no display number whose conventional TCP port is already in
+        # use, even for local transport.  This makes the post-start assertion
+        # that the private display exposed no TCP endpoint fail closed without
+        # blaming an unrelated listener.
+        if self._tcp_endpoint_is_busy(number):
+            return True
+        return self._x_lock_is_busy(number)
+
+    @staticmethod
+    def _x_lock_is_busy(number: int) -> bool:
+        """Reject live/ambiguous X locks and reclaim only an owned dead PID."""
+        lock_path = X11_LOCK_DIRECTORY / f".X{number}-lock"
+        flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(lock_path, flags)
+        except FileNotFoundError:
+            return False
         except OSError:
             return True
+
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_size <= 0
+                or metadata.st_size > 32
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                return True
+            payload = os.read(descriptor, 33)
+            if len(payload) > 32:
+                return True
         finally:
-            test_socket.close()
+            os.close(descriptor)
+
+        text = payload.strip()
+        if re.fullmatch(rb"[1-9][0-9]*", text) is None:
+            return True
+        process_id = int(text)
+        try:
+            os.kill(process_id, 0)
+            return True
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError):
+            return True
+
+        # Recheck identity immediately before unlinking so a replaced lock is
+        # never removed.  The helper's systemd PrivateTmp also keeps this path
+        # out of other users' /tmp namespaces.
+        try:
+            current = lock_path.lstat()
+        except OSError:
+            return True
+        if current.st_dev != metadata.st_dev or current.st_ino != metadata.st_ino:
+            return True
+        try:
+            lock_path.unlink()
+        except OSError:
+            return True
+        return False
+
+    @staticmethod
+    def _tcp_endpoint_is_busy(number: int) -> bool:
+        port = 6000 + number
+        candidates = (
+            (socket.AF_INET, ("0.0.0.0", port)),
+            (socket.AF_INET6, ("::", port)),
+        )
+        for family, address in candidates:
+            test_socket = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                if family == socket.AF_INET6:
+                    test_socket.setsockopt(
+                        socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1
+                    )
+                test_socket.bind(address)
+            except OSError as exc:
+                if exc.errno in {
+                    errno.EAFNOSUPPORT,
+                    errno.EADDRNOTAVAIL,
+                    errno.EPROTONOSUPPORT,
+                }:
+                    continue
+                return True
+            finally:
+                test_socket.close()
         return False
 
     def _write_xauthority(self, display_number: int) -> None:
-        # FamilyWild lets the same cookie work in the gzclient sidecar, whose
-        # hostname is intentionally different from the worker host.
+        # FamilyWild lets local Xlib authenticate both :N and 127.0.0.1:N.
         cookie = secrets.token_bytes(16)
         fields = (b"", str(display_number).encode("ascii"), b"MIT-MAGIC-COOKIE-1", cookie)
         payload = struct.pack(">H", 0xFFFF)
@@ -569,6 +900,41 @@ def tail_log(path: Path, token: str | None) -> str:
         return "no diagnostic output was available"
 
 
+def read_owned_bounded_log(path: Path, maximum_bytes: int) -> str:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PublisherError("gzclient log could not be inspected") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_size > maximum_bytes
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise PublisherError("gzclient log is not a safe bounded file")
+        chunks = []
+        remaining = maximum_bytes + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as exc:
+        raise PublisherError("gzclient log could not be read") from exc
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    if len(payload) > maximum_bytes:
+        raise PublisherError("gzclient log exceeded its startup bound")
+    return payload.decode("utf-8", "replace")
+
+
 def terminate_process(process: subprocess.Popen[bytes] | None, interrupt: bool = False) -> None:
     if process is None or process.poll() is not None:
         return
@@ -581,6 +947,21 @@ def terminate_process(process: subprocess.Popen[bytes] | None, interrupt: bool =
             process.wait(timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+def verify_owned_process_group(
+    process: subprocess.Popen[bytes], description: str
+) -> None:
+    try:
+        child_group = os.getpgid(process.pid)
+    except (OSError, ProcessLookupError) as exc:
+        terminate_process(process)
+        raise PublisherError(f"{description} exited before process ownership check") from exc
+    if child_group != os.getpgrp():
+        terminate_process(process)
+        raise PublisherError(
+            f"{description} escaped the viewer publisher process group"
+        )
 
 
 def isolate_process_group() -> None:
@@ -630,10 +1011,20 @@ class RtspPublishProxy:
 
     MAXIMUM_HEADER_BYTES = 64 * 1024
     MAXIMUM_BODY_BYTES = 2 * 1024 * 1024
+    MINIMUM_VIDEO_PACKETS = 3
+    REQUIRED_METHODS = frozenset({"ANNOUNCE", "SETUP", "RECORD"})
 
-    def __init__(self, request: PublishRequest, token: str):
+    def __init__(
+        self,
+        request: PublishRequest,
+        token: str,
+        readiness_window: float,
+        traffic_timeout: float,
+    ):
         self.request = request
         self.token = token
+        self.readiness_window = readiness_window
+        self.traffic_timeout = traffic_timeout
         self._base = urlsplit(request.publish_base_url)
         encoded_path = "/".join(
             quote(part, safe="") for part in request.stream_path.split("/")
@@ -646,10 +1037,18 @@ class RtspPublishProxy:
         self._upstream: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
-        self._ready = threading.Event()
         self._error: str | None = None
         self._port: int | None = None
         self._socket_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._pending_requests: dict[str, str] = {}
+        self._accepted_methods: set[str] = set()
+        self._record_accepted_at: float | None = None
+        self._rtp_channel: int | None = None
+        self._first_video_at: float | None = None
+        self._last_video_at: float | None = None
+        self._last_video_sequence: int | None = None
+        self._video_packets = 0
 
     @property
     def local_url(self) -> str:
@@ -659,7 +1058,17 @@ class RtspPublishProxy:
 
     @property
     def ready(self) -> bool:
-        return self._ready.is_set()
+        now = time.monotonic()
+        with self._state_lock:
+            return (
+                self.REQUIRED_METHODS.issubset(self._accepted_methods)
+                and self._video_packets >= self.MINIMUM_VIDEO_PACKETS
+                and self._first_video_at is not None
+                and self._last_video_at is not None
+                and self._last_video_at - self._first_video_at
+                >= self.readiness_window
+                and now - self._last_video_at <= self.traffic_timeout
+            )
 
     def start(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -677,8 +1086,21 @@ class RtspPublishProxy:
         self._thread.start()
 
     def raise_if_failed(self) -> None:
-        if self._error is not None:
-            raise PublisherError(f"RTSP credential proxy stopped: {self._error}")
+        now = time.monotonic()
+        with self._state_lock:
+            error = self._error
+            activity_started_at = self._record_accepted_at
+            last_video_at = self._last_video_at
+            if (
+                error is None
+                and activity_started_at is not None
+                and now - (last_video_at or activity_started_at)
+                > self.traffic_timeout
+            ):
+                error = "RTP video traffic stalled"
+                self._error = error
+        if error is not None:
+            raise PublisherError(f"RTSP credential proxy stopped: {error}")
         if (
             self._thread is not None
             and not self._thread.is_alive()
@@ -715,11 +1137,11 @@ class RtspPublishProxy:
             self._close_socket(upstream)
             self._close_socket(client)
             responses.join(timeout=1)
-            if not self._stopping.is_set() and self._error is None:
-                self._error = "publisher connection closed"
+            if not self._stopping.is_set():
+                self._set_error("publisher connection closed")
         except (OSError, PublisherError, ssl.SSLError) as exc:
             if not self._stopping.is_set():
-                self._error = sanitize(str(exc), self.token)
+                self._set_error(sanitize(str(exc), self.token))
         finally:
             with self._socket_lock:
                 sockets = (self._listener, self._client, self._upstream)
@@ -766,9 +1188,11 @@ class RtspPublishProxy:
                 return
             if packet.startswith(b"$"):
                 upstream.sendall(packet)
+                self._record_video_packet(packet)
                 continue
-            upstream.sendall(self._authorize_request(packet))
-            self._ready.set()
+            authorized, method, sequence = self._authorize_request(packet)
+            self._remember_request(sequence, method)
+            upstream.sendall(authorized)
 
     def _read_client_packet(
         self, client: socket.socket, buffer: bytearray
@@ -795,7 +1219,9 @@ class RtspPublishProxy:
                 raise PublisherError("FFmpeg closed a partial RTSP request")
 
         header_length = header_end + 4
-        content_length = self._content_length(bytes(buffer[:header_end]))
+        content_length = self._content_length(
+            bytes(buffer[:header_end]), "FFmpeg"
+        )
         if content_length > self.MAXIMUM_BODY_BYTES:
             raise PublisherError("FFmpeg sent an oversized RTSP body")
         message_length = header_length + content_length
@@ -817,20 +1243,24 @@ class RtspPublishProxy:
         return True
 
     @staticmethod
-    def _content_length(header: bytes) -> int:
+    def _content_length(header: bytes, sender: str) -> int:
         for line in header.split(b"\r\n")[1:]:
             name, separator, value = line.partition(b":")
             if separator and name.strip().lower() == b"content-length":
                 try:
                     length = int(value.strip())
                 except ValueError as exc:
-                    raise PublisherError("FFmpeg sent an invalid Content-Length") from exc
+                    raise PublisherError(
+                        f"{sender} sent an invalid Content-Length"
+                    ) from exc
                 if length < 0:
-                    raise PublisherError("FFmpeg sent an invalid Content-Length")
+                    raise PublisherError(
+                        f"{sender} sent an invalid Content-Length"
+                    )
                 return length
         return 0
 
-    def _authorize_request(self, request: bytes) -> bytes:
+    def _authorize_request(self, request: bytes) -> tuple[bytes, str, str]:
         header, body = request.split(b"\r\n\r\n", 1)
         lines = header.split(b"\r\n")
         try:
@@ -840,6 +1270,15 @@ class RtspPublishProxy:
         match = re.fullmatch(r"([A-Z_]+) (\S+) RTSP/1\.0", request_line)
         if match is None:
             raise PublisherError("FFmpeg sent an invalid RTSP request line")
+
+        sequences = []
+        for line in lines[1:]:
+            name, separator, value = line.partition(b":")
+            if separator and name.strip().lower() == b"cseq":
+                sequences.append(value.strip())
+        if len(sequences) != 1 or re.fullmatch(rb"[0-9]+", sequences[0]) is None:
+            raise PublisherError("FFmpeg sent an invalid RTSP CSeq header")
+        sequence = sequences[0].decode("ascii")
 
         target = urlsplit(match.group(2))
         try:
@@ -873,26 +1312,184 @@ class RtspPublishProxy:
         lines[0] = (
             f"{match.group(1)} {authorized_target} RTSP/1.0".encode("ascii")
         )
-        return b"\r\n".join(lines) + b"\r\n\r\n" + body
+        return (
+            b"\r\n".join(lines) + b"\r\n\r\n" + body,
+            match.group(1),
+            sequence,
+        )
+
+    def _remember_request(self, sequence: str, method: str) -> None:
+        with self._state_lock:
+            if sequence in self._pending_requests:
+                raise PublisherError("FFmpeg reused a pending RTSP CSeq")
+            self._pending_requests[sequence] = method
+
+    def _record_video_packet(self, packet: bytes) -> None:
+        if len(packet) < 16:
+            return
+        channel = packet[1]
+        payload = packet[4:]
+        if payload[0] >> 6 != 2:
+            return
+        sequence = int.from_bytes(payload[2:4], "big")
+        now = time.monotonic()
+        with self._state_lock:
+            if self._rtp_channel is None or channel != self._rtp_channel:
+                return
+            if self._last_video_sequence == sequence:
+                return
+            self._last_video_sequence = sequence
+            self._video_packets += 1
+            if self._first_video_at is None:
+                self._first_video_at = now
+            self._last_video_at = now
 
     def _relay_responses(
         self, upstream: socket.socket, client: socket.socket
     ) -> None:
+        buffer = bytearray()
         try:
             while not self._stopping.is_set():
-                chunk = upstream.recv(65536)
-                if not chunk:
+                packet = self._read_upstream_packet(upstream, buffer)
+                if packet is None:
                     if not self._stopping.is_set():
-                        self._error = "upstream media server closed the connection"
+                        self._set_error("upstream media server closed the connection")
                     self._close_socket(client)
                     self._close_socket(upstream)
                     return
-                client.sendall(chunk)
-        except OSError as exc:
+                client.sendall(packet)
+                if not packet.startswith(b"$"):
+                    self._record_response(packet)
+        except (OSError, PublisherError) as exc:
             if not self._stopping.is_set():
-                self._error = sanitize(str(exc), self.token)
+                self._set_error(sanitize(str(exc), self.token))
             self._close_socket(client)
             self._close_socket(upstream)
+
+    def _read_upstream_packet(
+        self, upstream: socket.socket, buffer: bytearray
+    ) -> bytes | None:
+        if not self._fill_buffer(upstream, buffer, 1):
+            return None
+        if buffer[0] == ord("$"):
+            if not self._fill_buffer(upstream, buffer, 4):
+                raise PublisherError("media server closed a partial RTP frame")
+            length = int.from_bytes(buffer[2:4], "big")
+            if not self._fill_buffer(upstream, buffer, 4 + length):
+                raise PublisherError("media server closed a partial RTP frame")
+            packet = bytes(buffer[: 4 + length])
+            del buffer[: 4 + length]
+            return packet
+
+        while True:
+            header_end = buffer.find(b"\r\n\r\n")
+            if header_end >= 0:
+                break
+            if len(buffer) >= self.MAXIMUM_HEADER_BYTES:
+                raise PublisherError("media server sent an oversized RTSP header")
+            if not self._fill_buffer(upstream, buffer, len(buffer) + 1):
+                raise PublisherError("media server closed a partial RTSP response")
+
+        header_length = header_end + 4
+        content_length = self._content_length(
+            bytes(buffer[:header_end]), "media server"
+        )
+        if content_length > self.MAXIMUM_BODY_BYTES:
+            raise PublisherError("media server sent an oversized RTSP body")
+        message_length = header_length + content_length
+        if not self._fill_buffer(upstream, buffer, message_length):
+            raise PublisherError("media server closed a partial RTSP body")
+        packet = bytes(buffer[:message_length])
+        del buffer[:message_length]
+        return packet
+
+    def _record_response(self, response: bytes) -> None:
+        header = response.split(b"\r\n\r\n", 1)[0]
+        lines = header.split(b"\r\n")
+        try:
+            status_line = lines[0].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise PublisherError("media server sent a non-ASCII RTSP status") from exc
+        match = re.fullmatch(r"RTSP/1\.0 ([0-9]{3})(?: .*)?", status_line)
+        if match is None:
+            raise PublisherError("media server sent an invalid RTSP status")
+        status = int(match.group(1))
+
+        sequence_values = self._header_values(lines[1:], b"cseq")
+        if (
+            len(sequence_values) != 1
+            or re.fullmatch(rb"[0-9]+", sequence_values[0]) is None
+        ):
+            raise PublisherError("media server sent an invalid RTSP CSeq header")
+        sequence = sequence_values[0].decode("ascii")
+
+        with self._state_lock:
+            method = self._pending_requests.get(sequence)
+            if method is None:
+                raise PublisherError("media server replied with an unknown RTSP CSeq")
+            if 100 <= status < 200:
+                return
+            del self._pending_requests[sequence]
+
+        if status < 200 or status >= 300:
+            if method in self.REQUIRED_METHODS:
+                raise PublisherError(
+                    f"upstream media server rejected {method} ({status})"
+                )
+            return
+
+        rtp_channel = None
+        if method == "SETUP":
+            rtp_channel = self._parse_rtp_channel(lines[1:])
+
+        now = time.monotonic()
+        with self._state_lock:
+            if method in self.REQUIRED_METHODS:
+                self._accepted_methods.add(method)
+            if rtp_channel is not None:
+                self._rtp_channel = rtp_channel
+            if method == "RECORD":
+                self._record_accepted_at = now
+
+    @staticmethod
+    def _header_values(lines: Sequence[bytes], wanted_name: bytes) -> list[bytes]:
+        values = []
+        for line in lines:
+            name, separator, value = line.partition(b":")
+            if separator and name.strip().lower() == wanted_name:
+                values.append(value.strip())
+        return values
+
+    def _parse_rtp_channel(self, lines: Sequence[bytes]) -> int:
+        values = self._header_values(lines, b"transport")
+        if len(values) != 1:
+            raise PublisherError(
+                "media server did not confirm one RTSP transport"
+            )
+        transport = values[0]
+        if re.search(rb"(?:^|,)\s*RTP/AVP/TCP(?:;|$)", transport, re.IGNORECASE) is None:
+            raise PublisherError(
+                "media server did not confirm RTP-over-TCP transport"
+            )
+        match = re.search(
+            rb"(?:^|;)\s*interleaved=([0-9]+)-([0-9]+)(?:;|$)",
+            transport,
+            re.IGNORECASE,
+        )
+        if match is None:
+            raise PublisherError(
+                "media server did not confirm interleaved RTP transport"
+            )
+        rtp_channel = int(match.group(1))
+        rtcp_channel = int(match.group(2))
+        if rtp_channel > 254 or rtcp_channel != rtp_channel + 1:
+            raise PublisherError("media server returned invalid RTP channels")
+        return rtp_channel
+
+    def _set_error(self, message: str) -> None:
+        with self._state_lock:
+            if self._error is None:
+                self._error = message
 
     @staticmethod
     def _close_socket(connection: socket.socket | None) -> None:
@@ -906,6 +1503,776 @@ class RtspPublishProxy:
             connection.close()
         except OSError:
             pass
+
+
+def load_x_test_libraries() -> tuple[ctypes.CDLL, ctypes.CDLL]:
+    try:
+        x11 = ctypes.CDLL("libX11.so.6")
+        xtst = ctypes.CDLL("libXtst.so.6")
+        for name in (
+            "XInitThreads",
+            "XOpenDisplay",
+            "XCloseDisplay",
+            "XFlush",
+            "XSync",
+            "XSetErrorHandler",
+            "XMoveResizeWindow",
+            "XRaiseWindow",
+            "XSetInputFocus",
+            "XStringToKeysym",
+            "XKeysymToKeycode",
+        ):
+            getattr(x11, name)
+        for name in (
+            "XTestFakeMotionEvent",
+            "XTestFakeButtonEvent",
+            "XTestFakeKeyEvent",
+        ):
+            getattr(xtst, name)
+        return x11, xtst
+    except (AttributeError, OSError) as exc:
+        raise PublisherError(
+            "interactive viewer requires the X11 and XTest runtime libraries"
+        ) from exc
+
+
+_xauthority_environment_lock = threading.Lock()
+_x11_error_handler_lock = threading.Lock()
+
+
+def open_private_x_display(
+    x11: ctypes.CDLL, display_name: str, xauthority_path: Path
+) -> int:
+    # XOpenDisplay has no per-call authority argument.  Serialize the tiny
+    # process-environment handoff so concurrent lease publishers cannot open
+    # one another's display with the wrong cookie.
+    with _xauthority_environment_lock:
+        previous_authority = os.environ.get("XAUTHORITY")
+        os.environ["XAUTHORITY"] = str(xauthority_path)
+        try:
+            display = x11.XOpenDisplay(display_name.encode("ascii"))
+        finally:
+            if previous_authority is None:
+                os.environ.pop("XAUTHORITY", None)
+            else:
+                os.environ["XAUTHORITY"] = previous_authority
+    if not display:
+        raise PublisherError("interactive viewer could not open its private display")
+    return int(display)
+
+
+def configure_x11_functions(x11: ctypes.CDLL) -> None:
+    x11.XInitThreads.argtypes = []
+    x11.XInitThreads.restype = ctypes.c_int
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.restype = ctypes.c_int
+    x11.XFlush.argtypes = [ctypes.c_void_p]
+    x11.XFlush.restype = ctypes.c_int
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.XSync.restype = ctypes.c_int
+    x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+    x11.XSetErrorHandler.restype = ctypes.c_void_p
+    x11.XMoveResizeWindow.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_uint,
+    ]
+    x11.XMoveResizeWindow.restype = ctypes.c_int
+    x11.XRaiseWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x11.XRaiseWindow.restype = ctypes.c_int
+    x11.XSetInputFocus.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_ulong,
+    ]
+    x11.XSetInputFocus.restype = ctypes.c_int
+    x11.XStringToKeysym.argtypes = [ctypes.c_char_p]
+    x11.XStringToKeysym.restype = ctypes.c_ulong
+    x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x11.XKeysymToKeycode.restype = ctypes.c_ubyte
+
+
+def move_resize_x_window(
+    x11: object,
+    display: ctypes.c_void_p,
+    window_id: int,
+    width: int,
+    height: int,
+) -> None:
+    if x11.XMoveResizeWindow(display, window_id, 0, 0, width, height) == 0:
+        raise PublisherError("X11 rejected the Gazebo fullscreen geometry")
+    x11.XRaiseWindow(display, window_id)
+    # RevertToParent keeps focus inside this otherwise window-manager-free
+    # private display if Qt recreates a child viewport.
+    x11.XSetInputFocus(display, window_id, 2, 0)
+    x11.XFlush(display)
+
+
+def fill_private_display(
+    display_name: str,
+    xauthority_path: Path,
+    window_id: int,
+    width: int,
+    height: int,
+) -> None:
+    x11, _ = load_x_test_libraries()
+    configure_x11_functions(x11)
+    x11.XInitThreads()
+    display_value = open_private_x_display(x11, display_name, xauthority_path)
+    display = ctypes.c_void_p(display_value)
+    x_errors: list[bool] = []
+    error_handler_type = ctypes.CFUNCTYPE(
+        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
+    )
+
+    @error_handler_type
+    def record_x_error(_display: ctypes.c_void_p, _event: ctypes.c_void_p) -> int:
+        x_errors.append(True)
+        return 0
+
+    try:
+        # Xlib's default error handler terminates the process for asynchronous
+        # errors such as focusing a window that was unmapped during startup.
+        # Install a bounded handler around this one synchronized operation so
+        # cleanup remains in Python even if the window races with Qt.
+        with _x11_error_handler_lock:
+            previous_handler = x11.XSetErrorHandler(
+                ctypes.cast(record_x_error, ctypes.c_void_p)
+            )
+            try:
+                move_resize_x_window(x11, display, window_id, width, height)
+                x11.XSync(display, 0)
+            finally:
+                # Drain any outstanding request before restoring the process-
+                # global handler.
+                x11.XSync(display, 0)
+                x11.XSetErrorHandler(previous_handler)
+        if x_errors:
+            raise PublisherError("X11 rejected the Gazebo fullscreen operation")
+    finally:
+        x11.XCloseDisplay(display)
+
+
+def gazebo_window_candidates(
+    tree_output: str, pattern: re.Pattern[str]
+) -> set[int]:
+    window_lines = []
+    for line in tree_output.splitlines():
+        match = re.match(r"^(\s*)(0x[0-9A-Fa-f]+)\s+", line)
+        if match is not None:
+            window_lines.append((len(match.group(1)), line))
+    if not window_lines:
+        return set()
+
+    # xwininfo indents every generation in the tree.  Only the least-indented
+    # entries are direct children of the root; nested Qt widgets inherit the
+    # same WM_CLASS and must never be considered top-level Gazebo windows.
+    root_child_indent = min(indent for indent, _line in window_lines)
+    candidates = set()
+    for indent, line in window_lines:
+        if indent != root_child_indent:
+            continue
+        # Match a real Gazebo top-level window, not Qt helper windows such as
+        # `Qt Selection Owner for gazebo`, whose title happens to contain the
+        # configured pattern but whose WM_CLASS is empty.
+        match = re.match(
+            r'^\s*(0x[0-9A-Fa-f]+)\s+"([^"]*)":\s+'
+            r'\("([^"]*)"\s+"([^"]*)"\)\s+',
+            line,
+        )
+        if match is None:
+            continue
+        title, instance_name, class_name = match.group(2), match.group(3), match.group(4)
+        if (
+            pattern.search(title) is not None
+            and instance_name.casefold() in {"gazebo", "gzclient"}
+            and class_name.casefold() == "gazebo"
+        ):
+            candidates.add(int(match.group(1), 16))
+    return candidates
+
+
+def select_gazebo_window_id(
+    tree_output: str, pattern: re.Pattern[str]
+) -> int | None:
+    candidates = gazebo_window_candidates(tree_output, pattern)
+    if len(candidates) > 1:
+        raise AmbiguousGazeboWindows(
+            "private display contains multiple matching Gazebo windows"
+        )
+    return candidates.pop() if candidates else None
+
+
+def window_is_normal_nontransient(properties: str) -> bool:
+    window_type = re.search(
+        r"^_NET_WM_WINDOW_TYPE\(ATOM\)\s*=\s*(.+)$",
+        properties,
+        re.MULTILINE,
+    )
+    if window_type is None:
+        return False
+    types = window_type.group(1)
+    if "_NET_WM_WINDOW_TYPE_NORMAL" not in types:
+        return False
+    if any(
+        excluded in types
+        for excluded in (
+            "_NET_WM_WINDOW_TYPE_SPLASH",
+            "_NET_WM_WINDOW_TYPE_DIALOG",
+            "_NET_WM_WINDOW_TYPE_UTILITY",
+        )
+    ):
+        return False
+    return re.search(
+        r"^WM_TRANSIENT_FOR\(WINDOW\):\s*window id #",
+        properties,
+        re.MULTILINE,
+    ) is None
+
+
+def window_is_viewable(output: str) -> bool:
+    return re.search(
+        r"^\s*Map State:\s*IsViewable\s*$", output, re.MULTILINE
+    ) is not None
+
+
+def summarize_x_window_tree(output: str) -> str:
+    windows = []
+    for line in output.splitlines():
+        if re.match(r"^\s*0x[0-9A-Fa-f]+\s+", line):
+            windows.append(" ".join(line.split()))
+    return " | ".join(windows)[-800:] or "no windows"
+
+
+def window_fills_display(output: str, width: int, height: int) -> bool:
+    fields = {
+        name: re.search(pattern, output, re.MULTILINE)
+        for name, pattern in {
+            "width": r"^\s*Width:\s*(\d+)\s*$",
+            "height": r"^\s*Height:\s*(\d+)\s*$",
+            "left": r"^\s*Absolute upper-left X:\s*(-?\d+)\s*$",
+            "top": r"^\s*Absolute upper-left Y:\s*(-?\d+)\s*$",
+        }.items()
+    }
+    return (
+        all(value is not None for value in fields.values())
+        and int(fields["width"].group(1)) == width
+        and int(fields["height"].group(1)) == height
+        and int(fields["left"].group(1)) == 0
+        and int(fields["top"].group(1)) == 0
+    )
+
+
+def read_render_report(path: Path) -> dict[str, object] | None:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PublisherError("GPU render report could not be inspected") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_size <= 0
+            or metadata.st_size > 64 * 1024
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise PublisherError("GPU render report is not a safe bounded file")
+        chunks = []
+        remaining = 64 * 1024 + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as exc:
+        raise PublisherError("GPU render report could not be read") from exc
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    if len(payload) > 64 * 1024 or len(payload) != metadata.st_size:
+        raise PublisherError("GPU render report is not a stable bounded file")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PublisherError("GPU render report is malformed") from exc
+    if not isinstance(document, dict):
+        raise PublisherError("GPU render report is malformed")
+    return document
+
+
+def _finite_report_number(value: object, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise PublisherError(f"GPU render report {name} is invalid")
+    return float(value)
+
+
+def validate_render_report_document(
+    document: dict[str, object],
+    *,
+    expected_namespace_pids: set[int],
+    expected_executable: str,
+    expected_adapter: str | None,
+    expected_display: str,
+    expected_width: int,
+    expected_height: int,
+    configured_render_rate: float,
+    minimum_render_rate: float,
+) -> None:
+    try:
+        process = document["process"]
+        display = document["display"]
+        camera = document["camera"]
+        renderer = document["renderer"]
+        measurement = document["render_measurement"]
+        if (
+            document.get("schema_version") != 1
+            or not isinstance(process, dict)
+            or not isinstance(display, dict)
+            or not isinstance(camera, dict)
+            or not isinstance(renderer, dict)
+            or not isinstance(measurement, dict)
+        ):
+            raise KeyError
+        report_pid = process["pid"]
+        report_executable = process["executable"]
+    except (KeyError, TypeError) as exc:
+        raise PublisherError("GPU render report schema is invalid") from exc
+
+    if (
+        isinstance(report_pid, bool)
+        or not isinstance(report_pid, int)
+        or report_pid not in expected_namespace_pids
+    ):
+        raise PublisherError("GPU render report belongs to another process")
+    if (
+        not isinstance(report_executable, str)
+        or Path(report_executable).resolve() != Path(expected_executable).resolve()
+    ):
+        raise PublisherError("GPU render report executable does not match gzclient")
+
+    if display.get("x11") != expected_display:
+        raise PublisherError("GPU render report belongs to another X display")
+    viewport_width = camera.get("viewport_width")
+    viewport_height = camera.get("viewport_height")
+    if (
+        isinstance(viewport_width, bool)
+        or not isinstance(viewport_width, int)
+        or isinstance(viewport_height, bool)
+        or not isinstance(viewport_height, int)
+        or viewport_width > expected_width
+        or viewport_height > expected_height
+        or viewport_width < math.floor(expected_width * 0.70)
+        or viewport_height < math.floor(expected_height * 0.70)
+    ):
+        raise PublisherError("Gazebo camera viewport does not fill the viewer window")
+
+    renderer_text = " ".join(
+        str(renderer.get(name, ""))
+        for name in ("api", "device", "vendor", "gl_vendor", "gl_renderer")
+    )
+    normalized_renderer = renderer_text.lower()
+    if any(
+        marker in normalized_renderer
+        for marker in (
+            "llvmpipe",
+            "softpipe",
+            "swrast",
+            "lavapipe",
+            "software rasterizer",
+            "microsoft basic render driver",
+            "gdi generic",
+        )
+    ):
+        raise PublisherError("gzclient selected a software renderer")
+    effective_renderer = " ".join(
+        str(renderer.get(name, "")) for name in ("device", "gl_renderer")
+    ).lower()
+    if "d3d12" not in effective_renderer:
+        raise PublisherError("gzclient did not select the required D3D12 renderer")
+    if (
+        expected_adapter is not None
+        and expected_adapter.lower() not in effective_renderer
+    ):
+        raise PublisherError("gzclient did not select the configured GPU adapter")
+
+    configured = _finite_report_number(
+        measurement.get("configured_render_rate_fps"), "configured render rate"
+    )
+    average = _finite_report_number(measurement.get("average_fps"), "average FPS")
+    post_render = _finite_report_number(
+        measurement.get("post_render_rate_fps"), "post-render FPS"
+    )
+    if not math.isclose(configured, configured_render_rate, abs_tol=0.25):
+        raise PublisherError("Gazebo render cap does not match viewer configuration")
+    if average < minimum_render_rate or post_render < minimum_render_rate:
+        raise PublisherError("Gazebo GPU render rate is below the required minimum")
+    maximum_rate = configured_render_rate * 1.10
+    if average > maximum_rate or post_render > maximum_rate:
+        raise PublisherError("Gazebo render rate exceeded the configured cap")
+
+
+class ViewerInputController:
+    """Inject a bounded set of browser input events into one private X display."""
+
+    MAXIMUM_LINE_BYTES = 1024
+    MAXIMUM_WHEEL_STEPS = 5
+    POINTER_TYPES = frozenset(
+        {"pointerMove", "pointerDown", "pointerUp", "wheel"}
+    )
+    KEY_TYPES = frozenset({"keyDown", "keyUp"})
+    BUTTONS = {0: 1, 1: 2, 2: 3}
+    KEY_SYMBOLS = {
+        "Backspace": "BackSpace",
+        "Tab": "Tab",
+        "Enter": "Return",
+        "Escape": "Escape",
+        "Space": "space",
+        "PageUp": "Page_Up",
+        "PageDown": "Page_Down",
+        "End": "End",
+        "Home": "Home",
+        "ArrowLeft": "Left",
+        "ArrowUp": "Up",
+        "ArrowRight": "Right",
+        "ArrowDown": "Down",
+        "Insert": "Insert",
+        "Delete": "Delete",
+        "ShiftLeft": "Shift_L",
+        "ShiftRight": "Shift_R",
+        "ControlLeft": "Control_L",
+        "ControlRight": "Control_R",
+        "AltLeft": "Alt_L",
+        "AltRight": "Alt_R",
+        "Minus": "minus",
+        "Equal": "equal",
+        "BracketLeft": "bracketleft",
+        "BracketRight": "bracketright",
+        "Backslash": "backslash",
+        "Semicolon": "semicolon",
+        "Quote": "apostrophe",
+        "Backquote": "grave",
+        "Comma": "comma",
+        "Period": "period",
+        "Slash": "slash",
+    }
+
+    def __init__(
+        self,
+        display_name: str,
+        xauthority_path: Path,
+        width: int,
+        height: int,
+    ):
+        self.display_name = display_name
+        self.xauthority_path = xauthority_path
+        self.width = width
+        self.height = height
+        self._thread: threading.Thread | None = None
+        self._stopping = threading.Event()
+        self._error: str | None = None
+        self._error_lock = threading.Lock()
+        self._input_lock = threading.Lock()
+        self._display: int | None = None
+        self._pressed_buttons: set[int] = set()
+        self._pressed_keys: set[int] = set()
+
+        self._x11, self._xtst = load_x_test_libraries()
+
+        configure_x11_functions(self._x11)
+        self._xtst.XTestFakeMotionEvent.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        self._xtst.XTestFakeMotionEvent.restype = ctypes.c_int
+        self._xtst.XTestFakeButtonEvent.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        self._xtst.XTestFakeButtonEvent.restype = ctypes.c_int
+        self._xtst.XTestFakeKeyEvent.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        self._xtst.XTestFakeKeyEvent.restype = ctypes.c_int
+
+    def start(self, stream: BinaryIO) -> None:
+        if self._thread is not None:
+            raise PublisherError("interactive viewer input was already started")
+        self._x11.XInitThreads()
+        self._display = open_private_x_display(
+            self._x11, self.display_name, self.xauthority_path
+        )
+        self._thread = threading.Thread(
+            target=self._read_events,
+            args=(stream,),
+            name="viewer-input",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def raise_if_failed(self) -> None:
+        with self._error_lock:
+            error = self._error
+        if error:
+            raise PublisherError(f"interactive viewer input stopped: {error}")
+
+    def stop(self) -> None:
+        self._stopping.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        with self._input_lock:
+            display = self._display_pointer()
+            if display is None:
+                return
+            try:
+                self._release_all_locked(require_success=False)
+            finally:
+                self._x11.XCloseDisplay(display)
+                self._display = None
+
+    def _read_events(self, stream: BinaryIO) -> None:
+        try:
+            try:
+                descriptor = stream.fileno()
+            except (AttributeError, OSError):
+                self._read_buffered_events(stream)
+            else:
+                self._read_descriptor_events(descriptor)
+        except (OSError, PublisherError, TypeError, ValueError) as exc:
+            if not self._stopping.is_set():
+                with self._error_lock:
+                    self._error = sanitize(str(exc), None)
+
+    def _read_buffered_events(self, stream: BinaryIO) -> None:
+        while not self._stopping.is_set():
+            line = stream.readline(self.MAXIMUM_LINE_BYTES + 2)
+            if not line:
+                raise PublisherError("viewer input pipe closed")
+            self._consume_event_line(line)
+
+    def _read_descriptor_events(self, descriptor: int) -> None:
+        buffered = bytearray()
+        while not self._stopping.is_set():
+            readable, _, _ = select.select([descriptor], [], [], 0.25)
+            if self._stopping.is_set():
+                return
+            if not readable:
+                continue
+            chunk = os.read(descriptor, 4096)
+            if not chunk:
+                raise PublisherError("viewer input pipe closed")
+            buffered.extend(chunk)
+            while True:
+                boundary = buffered.find(b"\n")
+                if boundary < 0:
+                    break
+                line = bytes(buffered[: boundary + 1])
+                del buffered[: boundary + 1]
+                self._consume_event_line(line)
+            if len(buffered) > self.MAXIMUM_LINE_BYTES:
+                raise PublisherError("viewer input line is too long")
+
+    def _consume_event_line(self, line: bytes) -> None:
+        if self._stopping.is_set():
+            return
+        if len(line) > self.MAXIMUM_LINE_BYTES + 1 or not line.endswith(b"\n"):
+            raise PublisherError("viewer input line is too long")
+        try:
+            payload = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PublisherError("viewer input is not valid JSON") from exc
+        self._apply(payload)
+
+    def _apply(self, payload: object) -> None:
+        with self._input_lock:
+            self._apply_locked(payload)
+
+    def _apply_locked(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            raise PublisherError("viewer input must be a JSON object")
+        event_type = payload.get("type")
+        if event_type == "releaseAll":
+            if set(payload) != {"type"}:
+                raise PublisherError("viewer release input has unsupported fields")
+            self._release_all_locked(require_success=True)
+            return
+        if event_type in self.POINTER_TYPES:
+            allowed = {"type", "x", "y"}
+            if event_type in {"pointerDown", "pointerUp"}:
+                allowed.add("button")
+            if event_type == "wheel":
+                allowed.update({"deltaX", "deltaY"})
+            if set(payload) - allowed:
+                raise PublisherError("viewer pointer input has unsupported fields")
+            x = self._coordinate(payload.get("x"), "x")
+            y = self._coordinate(payload.get("y"), "y")
+            self._move_pointer(x, y)
+            if event_type in {"pointerDown", "pointerUp"}:
+                self._button(
+                    payload.get("button"),
+                    pressed=event_type == "pointerDown",
+                )
+            elif event_type == "wheel":
+                self._wheel(payload.get("deltaX"), payload.get("deltaY"))
+        elif event_type in self.KEY_TYPES:
+            if set(payload) != {"type", "code"}:
+                raise PublisherError("viewer key input has unsupported fields")
+            self._key(payload.get("code"), pressed=event_type == "keyDown")
+        else:
+            raise PublisherError("viewer input type is unsupported")
+        display = self._require_display()
+        self._x11.XFlush(display)
+
+    def _release_all_locked(self, require_success: bool) -> None:
+        display = self._require_display()
+        rejected_keys: set[int] = set()
+        rejected_buttons: set[int] = set()
+        for keycode in tuple(self._pressed_keys):
+            if self._xtst.XTestFakeKeyEvent(display, keycode, 0, 0) == 0:
+                rejected_keys.add(keycode)
+        for button in tuple(self._pressed_buttons):
+            if self._xtst.XTestFakeButtonEvent(display, button, 0, 0) == 0:
+                rejected_buttons.add(button)
+        if require_success:
+            self._pressed_keys = rejected_keys
+            self._pressed_buttons = rejected_buttons
+        else:
+            self._pressed_keys.clear()
+            self._pressed_buttons.clear()
+        self._x11.XFlush(display)
+        if rejected_keys or rejected_buttons:
+            if not require_success:
+                return
+            raise PublisherError("XTest rejected viewer input release")
+
+    @staticmethod
+    def _coordinate(value: object, name: str) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            or value > 1
+        ):
+            raise PublisherError(f"viewer pointer {name} must be between zero and one")
+        return float(value)
+
+    def _move_pointer(self, x: float, y: float) -> None:
+        display = self._require_display()
+        pixel_x = round(x * (self.width - 1))
+        pixel_y = round(y * (self.height - 1))
+        if self._xtst.XTestFakeMotionEvent(display, 0, pixel_x, pixel_y, 0) == 0:
+            raise PublisherError("XTest rejected viewer pointer motion")
+
+    def _button(self, value: object, pressed: bool) -> None:
+        if isinstance(value, bool) or value not in self.BUTTONS:
+            raise PublisherError("viewer pointer button is unsupported")
+        button = self.BUTTONS[int(value)]
+        display = self._require_display()
+        if self._xtst.XTestFakeButtonEvent(display, button, int(pressed), 0) == 0:
+            raise PublisherError("XTest rejected viewer button input")
+        if pressed:
+            self._pressed_buttons.add(button)
+        else:
+            self._pressed_buttons.discard(button)
+
+    def _wheel(self, delta_x_value: object, delta_y_value: object) -> None:
+        delta_x = self._finite_delta(delta_x_value, "deltaX")
+        delta_y = self._finite_delta(delta_y_value, "deltaY")
+        if delta_x == 0 and delta_y == 0:
+            return
+        if delta_y:
+            self._pulse_button(5 if delta_y > 0 else 4, delta_y)
+        if delta_x:
+            self._pulse_button(7 if delta_x > 0 else 6, delta_x)
+
+    @staticmethod
+    def _finite_delta(value: object, name: str) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or abs(value) > 1000
+        ):
+            raise PublisherError(f"viewer wheel {name} is invalid")
+        return float(value)
+
+    def _pulse_button(self, button: int, delta: float) -> None:
+        display = self._require_display()
+        steps = min(
+            self.MAXIMUM_WHEEL_STEPS,
+            max(1, int(round(abs(delta) / 100))),
+        )
+        for _ in range(steps):
+            if (
+                self._xtst.XTestFakeButtonEvent(display, button, 1, 0) == 0
+                or self._xtst.XTestFakeButtonEvent(display, button, 0, 0) == 0
+            ):
+                raise PublisherError("XTest rejected viewer wheel input")
+
+    def _key(self, code_value: object, pressed: bool) -> None:
+        if not isinstance(code_value, str):
+            raise PublisherError("viewer key code is invalid")
+        symbol = self._key_symbol(code_value)
+        if symbol is None:
+            raise PublisherError("viewer key code is unsupported")
+        display = self._require_display()
+        keysym = self._x11.XStringToKeysym(symbol.encode("ascii"))
+        keycode = int(self._x11.XKeysymToKeycode(display, keysym)) if keysym else 0
+        if keycode == 0:
+            raise PublisherError("viewer key code is unavailable on this display")
+        if self._xtst.XTestFakeKeyEvent(display, keycode, int(pressed), 0) == 0:
+            raise PublisherError("XTest rejected viewer keyboard input")
+        if pressed:
+            self._pressed_keys.add(keycode)
+        else:
+            self._pressed_keys.discard(keycode)
+
+    @classmethod
+    def _key_symbol(cls, code: str) -> str | None:
+        if re.fullmatch(r"Key[A-Z]", code):
+            return code[-1].lower()
+        if re.fullmatch(r"Digit[0-9]", code):
+            return code[-1]
+        if re.fullmatch(r"F(?:[1-9]|1[0-2])", code):
+            return code
+        return cls.KEY_SYMBOLS.get(code)
+
+    def _display_pointer(self) -> ctypes.c_void_p | None:
+        if self._display is None:
+            return None
+        return ctypes.c_void_p(self._display)
+
+    def _require_display(self) -> ctypes.c_void_p:
+        display = self._display_pointer()
+        if display is None:
+            raise PublisherError("interactive viewer display is closed")
+        return display
 
 
 class ScenePipeline:
@@ -935,7 +2302,7 @@ class ScenePipeline:
         self.gzclient_process: subprocess.Popen[bytes] | None = None
         self.ffmpeg_process: subprocess.Popen[bytes] | None = None
         self.rtsp_proxy: RtspPublishProxy | None = None
-        self.sidecar_name = f"robotswarm-viewer-{request.lease_id.hex}"
+        self.gazebo_window_id: int | None = None
         self.logs: list[BinaryIO] = []
 
     def _prepare_session_directory(self) -> None:
@@ -954,6 +2321,14 @@ class ScenePipeline:
                 )
             shutil.rmtree(self.session_dir)
         self.session_dir.mkdir(mode=0o700)
+        (self.session_dir / "home").mkdir(mode=0o700)
+        for index, _ in enumerate(self.settings.model_paths):
+            (self.session_dir / f"model-{index}").mkdir(mode=0o700)
+        plugin_mount = self.session_dir / "plugin.so"
+        descriptor = os.open(
+            plugin_mount, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        os.close(descriptor)
 
     def _release_lease_lock(self) -> None:
         if self.lease_lock is None:
@@ -966,13 +2341,22 @@ class ScenePipeline:
         startup_deadline = time.monotonic() + self.settings.startup_timeout
         self.display.allocate()
         self._start_display(startup_deadline)
-        image, network_id, worker_id = self._inspect_session_container()
-        gateway = None
-        if self.settings.display_transport == "tcp":
-            gateway = self._inspect_session_network_gateway(network_id, worker_id)
-        self._remove_matching_stale_sidecar()
-        self._start_gzclient(image, gateway)
-        self._wait_for_gazebo_window(startup_deadline)
+        network_id, worker_id, container_ip = self._inspect_session_container()
+        host_gateway = self._validate_session_network(
+            network_id, worker_id, container_ip
+        )
+        self._wait_for_gazebo_master(container_ip, startup_deadline)
+        self._start_gzclient(container_ip, host_gateway)
+        self.gazebo_window_id = self._wait_for_gazebo_window(startup_deadline)
+        if self.settings.fill_display:
+            fill_private_display(
+                self.display.host_name,
+                self.display.xauthority_path,
+                self.gazebo_window_id,
+                self.settings.width,
+                self.settings.height,
+            )
+            self._wait_for_gazebo_geometry(startup_deadline)
         self._start_ffmpeg()
         self._wait_until_stable(startup_deadline)
 
@@ -986,10 +2370,11 @@ class ScenePipeline:
             "0",
             f"{self.settings.width}x{self.settings.height}x24",
         ]
-        if self.settings.display_transport == "tcp":
-            command.extend(["-nolisten", "unix", "-listen", "tcp"])
-        else:
-            command.extend(["-nolisten", "tcp"])
+        # WSLg's /tmp/.X11-unix is a read-only nested mount, including under
+        # systemd PrivateTmp.  Xorg's "local" transport still publishes its
+        # Linux abstract Unix endpoint, which Xlib uses for DISPLAY=:N without
+        # opening port 6000+N.  Network X11 is intentionally unsupported.
+        command.extend(["-nolisten", "tcp", "-listen", "local"])
         command.extend(
             ["-auth", str(self.display.xauthority_path), "-noreset"]
         )
@@ -1000,6 +2385,7 @@ class ScenePipeline:
             stderr=log,
             env=safe_environment(),
         )
+        verify_owned_process_group(self.display_process, "private display")
         while time.monotonic() < startup_deadline:
             if stop_requested:
                 raise PublisherError("viewer startup was interrupted")
@@ -1008,26 +2394,29 @@ class ScenePipeline:
                     "private display failed to start: "
                     + tail_log(self.session_dir / "display.log", self.token)
                 )
-            if self.settings.display_transport == "tcp":
-                try:
-                    with socket.create_connection(
-                        ("127.0.0.1", self.display.tcp_port),
-                        timeout=0.1,
-                    ):
-                        return
-                except OSError:
-                    pass
-            else:
-                try:
-                    mode = self.display.socket_path.stat().st_mode
-                    if stat.S_ISSOCK(mode):
-                        return
-                except FileNotFoundError:
-                    pass
+            if self._private_x_display_is_ready():
+                if self.display._tcp_endpoint_is_busy(self.display.number):
+                    raise PublisherError(
+                        "private Unix display unexpectedly exposed X11 TCP"
+                    )
+                return
             time.sleep(0.1)
         raise PublisherError("private display did not create its X endpoint")
 
-    def _inspect_session_container(self) -> tuple[str, str, uuid.UUID]:
+    def _private_x_display_is_ready(self) -> bool:
+        x11, _ = load_x_test_libraries()
+        configure_x11_functions(x11)
+        x11.XInitThreads()
+        try:
+            display_value = open_private_x_display(
+                x11, self.display.host_name, self.display.xauthority_path
+            )
+        except PublisherError:
+            return False
+        x11.XCloseDisplay(ctypes.c_void_p(display_value))
+        return True
+
+    def _inspect_session_container(self) -> tuple[str, uuid.UUID, str]:
         result = run_command(
             [
                 self.settings.docker,
@@ -1059,7 +2448,10 @@ class ScenePipeline:
             worker_id = uuid.UUID(labels.get(WORKER_ID_LABEL, ""))
         except ValueError as exc:
             raise PublisherError("session container worker label is invalid") from exc
-        if str(worker_id) != labels.get(WORKER_ID_LABEL):
+        if (
+            str(worker_id) != labels.get(WORKER_ID_LABEL)
+            or worker_id != self.request.worker_id
+        ):
             raise PublisherError("session container worker label is invalid")
         if not isinstance(image, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
             raise PublisherError("session container image is not immutable")
@@ -1068,15 +2460,33 @@ class ScenePipeline:
             raise PublisherError(
                 "session container is not attached to its one private network"
             )
-        network_id = networks[expected_network_name].get("NetworkID")
+        network_attachment = networks[expected_network_name]
+        if not isinstance(network_attachment, dict):
+            raise PublisherError("session container network attachment is invalid")
+        network_id = network_attachment.get("NetworkID")
         if not isinstance(network_id, str) or not re.fullmatch(
             r"[a-f0-9]{64}", network_id
         ):
             raise PublisherError("session container network ID is invalid")
-        return image, network_id, worker_id
+        try:
+            container_ip = ipaddress.ip_address(
+                network_attachment.get("IPAddress", "")
+            )
+        except ValueError as exc:
+            raise PublisherError("session container has no exact IPv4 address") from exc
+        if (
+            container_ip.version != 4
+            or not container_ip.is_private
+            or container_ip.is_loopback
+            or container_ip.is_link_local
+            or container_ip.is_multicast
+            or container_ip.is_unspecified
+        ):
+            raise PublisherError("session container IPv4 address is not private")
+        return network_id, worker_id, str(container_ip)
 
-    def _inspect_session_network_gateway(
-        self, network_id: str, worker_id: uuid.UUID
+    def _validate_session_network(
+        self, network_id: str, worker_id: uuid.UUID, container_ip_text: str
     ) -> str:
         result = run_command(
             [self.settings.docker, "network", "inspect", network_id]
@@ -1085,6 +2495,7 @@ class ScenePipeline:
             details = json.loads(result.stdout)[0]
             labels = details["Labels"] or {}
             configurations = details["IPAM"]["Config"]
+            containers = details["Containers"]
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
             raise PublisherError("Docker returned invalid session network metadata") from exc
 
@@ -1098,10 +2509,10 @@ class ScenePipeline:
             or labels.get(WORKER_ID_LABEL) != str(worker_id)
         ):
             raise PublisherError("session network ownership labels are invalid")
-        if not isinstance(configurations, list):
-            raise PublisherError("session network has no usable IPv4 gateway")
+        if not isinstance(configurations, list) or not isinstance(containers, dict):
+            raise PublisherError("session network has no usable private IPv4 metadata")
 
-        gateways = []
+        networks = []
         for configuration in configurations:
             if not isinstance(configuration, dict):
                 continue
@@ -1116,117 +2527,147 @@ class ScenePipeline:
                 gateway.version == 4
                 and subnet.version == 4
                 and gateway in subnet
+                and gateway.is_private
                 and not gateway.is_unspecified
                 and not gateway.is_loopback
                 and not gateway.is_multicast
             ):
-                gateways.append(str(gateway))
-        if len(gateways) != 1:
-            raise PublisherError("session network has no unique IPv4 gateway")
-        return gateways[0]
+                networks.append((subnet, gateway))
+        if len(networks) != 1:
+            raise PublisherError("session network has no unique private IPv4 subnet")
 
-    def _remove_matching_stale_sidecar(self) -> None:
-        result = run_command(
-            [self.settings.docker, "inspect", "--type", "container", self.sidecar_name],
-            check=False,
-        )
-        if result.returncode != 0:
-            return
+        container_ip = ipaddress.ip_address(container_ip_text)
+        subnet, gateway = networks[0]
+        if container_ip not in subnet or container_ip == gateway:
+            raise PublisherError("session container IPv4 address is outside its network")
+        if set(containers) != {self.request.container_id}:
+            raise PublisherError("session private network has an unexpected attachment")
+        attachment = containers[self.request.container_id]
+        if not isinstance(attachment, dict):
+            raise PublisherError("session network endpoint metadata is invalid")
         try:
-            details = json.loads(result.stdout)[0]
-            labels = details["Config"]["Labels"] or {}
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
-            raise PublisherError("existing viewer sidecar metadata is invalid") from exc
-        if (
-            labels.get(VIEWER_LABEL) != "true"
-            or labels.get(VIEWER_LEASE_LABEL) != str(self.request.lease_id)
-            or labels.get(SESSION_ID_LABEL) != str(self.request.session_id)
-        ):
-            raise PublisherError("viewer sidecar name is already owned by another process")
-        run_command(
-            [self.settings.docker, "rm", "--force", self.sidecar_name], timeout=15.0
-        )
+            endpoint = ipaddress.ip_interface(attachment.get("IPv4Address", ""))
+        except ValueError as exc:
+            raise PublisherError("session network endpoint address is invalid") from exc
+        if endpoint.version != 4 or endpoint.ip != container_ip or endpoint.network != subnet:
+            raise PublisherError("session network endpoint does not match container inspect")
 
-    def _start_gzclient(self, image: str, gateway: str | None) -> None:
+        # Gazebo Transport advertises a callback address to gzserver.  The
+        # bridge gateway is the only host address reachable from this
+        # container's --internal network, so require Docker's asserted gateway
+        # to be genuinely assigned on the host before exporting it as GZ_IP.
+        gateway_text = str(gateway)
+        gateway_probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            gateway_probe.bind((gateway_text, 0))
+        except OSError as exc:
+            raise PublisherError(
+                "session network gateway is not assigned on the worker host"
+            ) from exc
+        finally:
+            gateway_probe.close()
+        return gateway_text
+
+    def _wait_for_gazebo_master(
+        self, container_ip: str, startup_deadline: float
+    ) -> None:
+        while time.monotonic() < startup_deadline:
+            if stop_requested:
+                raise PublisherError("viewer startup was interrupted")
+            try:
+                with socket.create_connection(
+                    (container_ip, GAZEBO_MASTER_PORT), timeout=0.25
+                ):
+                    return
+            except OSError:
+                time.sleep(0.1)
+        raise PublisherError("session Gazebo master is unreachable on its private IP")
+
+    def _start_gzclient(self, container_ip: str, host_gateway: str) -> None:
         log = open_log(self.session_dir, "gzclient.log")
         self.logs.append(log)
-        command = [
-            self.settings.docker,
-            "run",
-            "--rm",
-            "--name",
-            self.sidecar_name,
-            "--label",
-            f"{VIEWER_LABEL}=true",
-            "--label",
-            f"{VIEWER_LEASE_LABEL}={self.request.lease_id}",
-            "--label",
-            f"{SESSION_ID_LABEL}={self.request.session_id}",
-            "--network",
-            f"container:{self.request.container_id}",
-            "--init",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--pids-limit",
-            "256",
-            "--memory",
-            "2g",
-            "--shm-size",
-            "256m",
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
-            "--tmpfs",
-            "/run:rw,nosuid,nodev,size=32m,mode=0755",
+        command = base_gzclient_sandbox_command(self.settings) + [
+            "--dir",
+            "/viewer",
+            "--bind",
+            str(self.session_dir),
+            "/viewer",
+            "--ro-bind",
+            str(self.settings.gui_plugin),
+            "/viewer/plugin.so",
         ]
-        if self.settings.display_transport == "unix":
-            command.extend(
-                [
-                    "--mount",
-                    f"type=bind,src={self.settings.x_socket_dir},dst=/tmp/.X11-unix,readonly",
-                ]
-            )
+        sandbox_model_paths = []
+        for index, model_path in enumerate(self.settings.model_paths):
+            destination = f"/viewer/model-{index}"
+            command.extend(["--ro-bind", str(model_path), destination])
+            sandbox_model_paths.append(destination)
         command.extend(
             [
-                "--mount",
-                f"type=bind,src={self.display.xauthority_path},dst=/run/viewer.Xauthority,readonly",
-                "--user",
-                f"{os.getuid()}:{os.getgid()}",
-                "--env",
-                f"DISPLAY={self.display.sidecar_name(gateway)}",
-                "--env",
-                "XAUTHORITY=/run/viewer.Xauthority",
-                "--env",
-                "HOME=/tmp",
-                "--env",
-                "ROS_HOME=/tmp/ros",
-                "--env",
-                "ROS_MASTER_URI=http://127.0.0.1:11311",
-                "--env",
-                "GAZEBO_MASTER_URI=http://127.0.0.1:11345",
-                "--env",
-                "QT_X11_NO_MITSHM=1",
-                "--env",
-                "NVIDIA_DRIVER_CAPABILITIES=graphics,utility",
+                "--",
+                self.settings.gzclient,
+                "--verbose",
+                "-g",
+                "/viewer/plugin.so",
             ]
         )
-        if self.settings.gpu_request != "none":
-            command.extend(["--gpus", self.settings.gpu_request])
-        command.extend([image, "gzclient", "--verbose"])
+        environment = safe_environment()
+        environment.update(
+            {
+                "DISPLAY": self.display.host_name,
+                "XAUTHORITY": "/viewer/Xauthority",
+                # WSL commonly inherits TEMP/TMP paths below /mnt/c.  That
+                # host tree is intentionally absent from this namespace;
+                # keep all Gazebo temporary state in bwrap's private tmpfs.
+                "TMPDIR": "/tmp",
+                "TMP": "/tmp",
+                "TEMP": "/tmp",
+                "HOME": "/viewer/home",
+                "ROS_HOME": "/viewer/home/.ros",
+                "ROS_MASTER_URI": f"http://{container_ip}:{ROS_MASTER_PORT}",
+                "GAZEBO_MASTER_URI": (
+                    f"http://{container_ip}:{GAZEBO_MASTER_PORT}"
+                ),
+                # GZ_IP is the worker contract name; Gazebo Classic 11 itself
+                # consumes GAZEBO_IP.  Keep them identical so the transport
+                # advertises the validated bridge gateway back to gzserver.
+                "GZ_IP": host_gateway,
+                "GAZEBO_IP": host_gateway,
+                "GAZEBO_MODEL_PATH": os.pathsep.join(sandbox_model_paths),
+                "GAZEBO_MODEL_DATABASE_URI": "",
+                "QT_X11_NO_MITSHM": "1",
+                "ROBOTSWARM_GUI_RENDER_RATE": str(self.settings.render_rate),
+                "ROBOTSWARM_GUI_PROBE_REPORT": str(
+                    "/viewer/render-report.json"
+                ),
+                "ROBOTSWARM_GUI_PROBE_WARMUP": str(
+                    self.settings.render_warmup_seconds
+                ),
+                "ROBOTSWARM_GUI_PROBE_SECONDS": str(
+                    self.settings.render_sample_seconds
+                ),
+            }
+        )
+        if self.settings.gpu_adapter_name is not None:
+            environment["MESA_D3D12_DEFAULT_ADAPTER_NAME"] = (
+                self.settings.gpu_adapter_name
+            )
         self.gzclient_process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=log,
-            env=safe_environment(),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=environment,
         )
+        verify_owned_process_group(self.gzclient_process, "host gzclient")
 
-    def _wait_for_gazebo_window(self, startup_deadline: float) -> None:
+    def _wait_for_gazebo_window(self, startup_deadline: float) -> int:
         environment = safe_environment()
         environment["DISPLAY"] = self.display.host_name
         environment["XAUTHORITY"] = str(self.display.xauthority_path)
+        stable_window_id: int | None = None
+        stable_samples = 0
+        last_tree = ""
+        saw_ambiguous_windows = False
         while time.monotonic() < startup_deadline:
             if stop_requested:
                 raise PublisherError("viewer startup was interrupted")
@@ -1255,15 +2696,145 @@ class ScenePipeline:
             except (OSError, subprocess.TimeoutExpired):
                 time.sleep(0.25)
                 continue
-            if result.returncode == 0 and self.settings.window_pattern.search(result.stdout):
-                return
+            if result.returncode == 0:
+                last_tree = result.stdout
+                candidates = gazebo_window_candidates(
+                    result.stdout, self.settings.window_pattern
+                )
+                main_windows = []
+                for candidate in candidates:
+                    try:
+                        properties = subprocess.run(
+                            [
+                                self.settings.xprop,
+                                "-id",
+                                hex(candidate),
+                                "-display",
+                                self.display.host_name,
+                                "_NET_WM_WINDOW_TYPE",
+                                "WM_TRANSIENT_FOR",
+                            ],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                            text=True,
+                            timeout=3,
+                            env=environment,
+                            check=False,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        properties = None
+                    if (
+                        properties is not None
+                        and properties.returncode == 0
+                        and window_is_normal_nontransient(properties.stdout)
+                    ):
+                        main_windows.append(candidate)
+
+                if len(main_windows) > 1:
+                    saw_ambiguous_windows = True
+                    stable_window_id = None
+                    stable_samples = 0
+                    time.sleep(0.25)
+                    continue
+                window_id = main_windows[0] if main_windows else None
+                if window_id is not None:
+                    try:
+                        details = subprocess.run(
+                            [
+                                self.settings.xwininfo,
+                                "-id",
+                                hex(window_id),
+                                "-display",
+                                self.display.host_name,
+                            ],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                            text=True,
+                            timeout=3,
+                            env=environment,
+                            check=False,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        details = None
+                    if (
+                        details is not None
+                        and details.returncode == 0
+                        and window_is_viewable(details.stdout)
+                    ):
+                        if stable_window_id == window_id:
+                            stable_samples += 1
+                        else:
+                            stable_window_id = window_id
+                            stable_samples = 1
+                        # Require repeated observations so a transient splash
+                        # or a just-unmapped Qt window cannot be moved/focused.
+                        if stable_samples >= 3:
+                            return window_id
+                    else:
+                        stable_window_id = None
+                        stable_samples = 0
+                else:
+                    stable_window_id = None
+                    stable_samples = 0
             time.sleep(0.25)
+        if saw_ambiguous_windows:
+            raise PublisherError(
+                "private display did not converge to one stable viewable Gazebo "
+                "main window; last X11 tree: "
+                + summarize_x_window_tree(last_tree)
+            )
         raise PublisherError("gzclient did not create a Gazebo window")
+
+    def _wait_for_gazebo_geometry(self, startup_deadline: float) -> None:
+        if self.gazebo_window_id is None:
+            raise PublisherError("Gazebo window identity is unavailable")
+        environment = safe_environment()
+        environment["DISPLAY"] = self.display.host_name
+        environment["XAUTHORITY"] = str(self.display.xauthority_path)
+        while time.monotonic() < startup_deadline:
+            if stop_requested:
+                raise PublisherError("viewer startup was interrupted")
+            try:
+                result = subprocess.run(
+                    [
+                        self.settings.xwininfo,
+                        "-id",
+                        hex(self.gazebo_window_id),
+                        "-display",
+                        self.display.host_name,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=3,
+                    env=environment,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                time.sleep(0.1)
+                continue
+            if (
+                result.returncode == 0
+                and window_fills_display(
+                    result.stdout, self.settings.width, self.settings.height
+                )
+            ):
+                return
+            time.sleep(0.1)
+        raise PublisherError("Gazebo window did not fill its private display")
 
     def _start_ffmpeg(self) -> None:
         log = open_log(self.session_dir, "ffmpeg.log")
         self.logs.append(log)
-        self.rtsp_proxy = RtspPublishProxy(self.request, self.token)
+        self.rtsp_proxy = RtspPublishProxy(
+            self.request,
+            self.token,
+            self.settings.settle_seconds,
+            self.settings.traffic_timeout,
+        )
         self.rtsp_proxy.start()
         key_interval = self.settings.frame_rate * 2
         command = [
@@ -1336,18 +2907,100 @@ class ScenePipeline:
             stderr=log,
             env=environment,
         )
+        verify_owned_process_group(self.ffmpeg_process, "FFmpeg publisher")
 
     def _wait_until_stable(self, startup_deadline: float) -> None:
-        stable_at = time.monotonic() + self.settings.settle_seconds
-        while time.monotonic() < stable_at:
+        render_ready = False
+        while time.monotonic() < startup_deadline:
             if stop_requested:
                 raise PublisherError("viewer startup was interrupted")
-            if time.monotonic() >= startup_deadline:
-                raise PublisherError("viewer startup exceeded its time budget")
             self.raise_if_child_exited()
+            if not render_ready:
+                render_ready = self._render_report_ready()
+            if (
+                render_ready
+                and self.rtsp_proxy is not None
+                and self.rtsp_proxy.ready
+            ):
+                self._reject_missing_visual_assets()
+                return
             time.sleep(0.1)
-        if self.rtsp_proxy is None or not self.rtsp_proxy.ready:
-            raise PublisherError("FFmpeg did not connect to the RTSP credential proxy")
+        raise PublisherError(
+            "viewer did not establish verified GPU rendering and sustained RTSP traffic"
+        )
+
+    def _render_report_ready(self) -> bool:
+        report = read_render_report(self.session_dir / "render-report.json")
+        if report is None:
+            return False
+        validate_render_report_document(
+            report,
+            expected_namespace_pids=self._gzclient_namespace_pids(),
+            expected_executable=self.settings.gzclient,
+            expected_adapter=self.settings.gpu_adapter_name,
+            expected_display=self.display.host_name,
+            expected_width=self.settings.width,
+            expected_height=self.settings.height,
+            configured_render_rate=self.settings.render_rate,
+            minimum_render_rate=self.settings.minimum_render_rate,
+        )
+        return True
+
+    def _gzclient_namespace_pids(self) -> set[int]:
+        if self.gzclient_process is None or self.gzclient_process.poll() is not None:
+            raise PublisherError("host gzclient is not running")
+        target = str(Path(self.settings.gzclient).resolve())
+        pending = [self.gzclient_process.pid]
+        visited = set()
+        matches = set()
+        while pending:
+            process_id = pending.pop()
+            if process_id in visited:
+                continue
+            visited.add(process_id)
+            try:
+                executable = str(Path(f"/proc/{process_id}/exe").resolve())
+                children_text = Path(
+                    f"/proc/{process_id}/task/{process_id}/children"
+                ).read_text(encoding="ascii")
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            if executable == target:
+                try:
+                    status = Path(f"/proc/{process_id}/status").read_text(
+                        encoding="ascii"
+                    )
+                except OSError:
+                    status = ""
+                namespace_ids = re.search(
+                    r"^NSpid:\s+([0-9\s]+)$", status, re.MULTILINE
+                )
+                matches.add(process_id)
+                if namespace_ids is not None:
+                    matches.add(int(namespace_ids.group(1).split()[-1]))
+            pending.extend(
+                int(value) for value in children_text.split() if value.isdigit()
+            )
+        if not matches:
+            raise PublisherError("could not bind GPU render report to host gzclient")
+        return matches
+
+    def _reject_missing_visual_assets(self) -> None:
+        diagnostic = read_owned_bounded_log(
+            self.session_dir / "gzclient.log", 8 * 1024 * 1024
+        ).lower()
+        mesh_path = "/opt/ros/noetic/share/turtlebot3_description/"
+        missing_markers = (
+            "does not exist",
+            "unable to load",
+            "unable to find",
+            "cannot find",
+            "could not find",
+        )
+        if mesh_path in diagnostic and any(
+            marker in diagnostic for marker in missing_markers
+        ):
+            raise PublisherError("gzclient could not load packaged TurtleBot visuals")
 
     def raise_if_child_exited(self) -> None:
         if self.rtsp_proxy is not None:
@@ -1368,13 +3021,7 @@ class ScenePipeline:
         terminate_process(self.ffmpeg_process, interrupt=True)
         if self.rtsp_proxy is not None:
             self.rtsp_proxy.stop()
-        self._run_cleanup_command(
-            [self.settings.docker, "stop", "--time", "5", self.sidecar_name]
-        )
         terminate_process(self.gzclient_process)
-        self._run_cleanup_command(
-            [self.settings.docker, "rm", "--force", self.sidecar_name]
-        )
         terminate_process(self.display_process)
         for log in self.logs:
             try:
@@ -1384,14 +3031,6 @@ class ScenePipeline:
         self.display.release()
         shutil.rmtree(self.session_dir, ignore_errors=True)
         self._release_lease_lock()
-
-    def _run_cleanup_command(self, command: Sequence[str]) -> None:
-        try:
-            run_command(command, timeout=10.0, check=False)
-        except PublisherError:
-            # Cleanup is best effort.  X server loss makes gzclient exit, and
-            # Docker --rm removes the sidecar after that exit as a second path.
-            pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1405,6 +3044,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish = commands.add_parser("publish")
     publish.add_argument("--protocol-version", required=True, type=int)
     publish.add_argument("--session-id", required=True)
+    publish.add_argument("--worker-id", required=True)
     publish.add_argument("--lease-id", required=True)
     publish.add_argument("--expires-at", required=True)
     publish.add_argument("--container-id", required=True)
@@ -1439,6 +3079,7 @@ def run_probe(arguments: argparse.Namespace) -> int:
                 "ready": True,
                 "videoCodec": "H264",
                 "sources": ["Scene"],
+                "interactive": True,
             },
             separators=(",", ":"),
         ),
@@ -1459,21 +3100,33 @@ def run_publish(arguments: argparse.Namespace) -> int:
     settings = Settings.load()
     encoder = verify_dependencies(settings)
     pipeline = ScenePipeline(settings, request, token, encoder)
+    input_controller: ViewerInputController | None = None
     try:
         pipeline.start()
+        input_controller = ViewerInputController(
+            pipeline.display.host_name,
+            pipeline.display.xauthority_path,
+            settings.width,
+            settings.height,
+        )
+        input_controller.start(sys.stdin.buffer)
         print("READY", flush=True)
         while not stop_requested:
             if dt.datetime.now(dt.timezone.utc) >= request.expires_at:
                 break
             pipeline.raise_if_child_exited()
+            input_controller.raise_if_failed()
             time.sleep(0.25)
     finally:
+        if input_controller is not None:
+            input_controller.stop()
         pipeline.stop()
     return 0
 
 
 def main() -> int:
     try:
+        os.umask(0o077)
         isolate_process_group()
         signal.signal(signal.SIGINT, request_stop)
         signal.signal(signal.SIGTERM, request_stop)

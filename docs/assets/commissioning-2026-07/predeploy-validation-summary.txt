@@ -1,37 +1,90 @@
-RobotSwarm - resumen de validación local previa al despliegue
-Fecha: 2026-07-19 (AST)
-Base: 3fcc80abb2736f850a32cd2d897b438b1e44108e
-Rama de trabajo: agent/complete-production-commissioning
+RobotSwarm - resumen de validación local del candidato
+Fecha: 2026-07-19 (hora de Bolivia, UTC-04:00)
+Base: d33eed4351a0f407527536c2a62165cd3cfc13b5
+Rama de trabajo: agent/final-commissioning-report
+Estado: el primer candidato publicado fue f3929bb8da7601264be51b84bf706babe86b7940
+en el PR #99. CI #31 fue rechazado por la dependencia ambiental descrita abajo;
+23b280ecd434647ccff2f179432d5650761a1f5f la corrigió y aprobó CI #32. El
+historial limpio posterior al falso positivo de GitGuardian necesita CI propio.
 
 Backend
-  dotnet test SwarmBackend.Tests/SwarmBackend.Tests.csproj --configuration Release
-  Resultado: 124 aprobadas, 0 fallidas.
+  /tmp/robotswarm-dotnet-8.0.422/dotnet test \
+    SwarmBackend.Tests/SwarmBackend.Tests.csproj -c Release
+  Resultado: 179 aprobadas, 0 fallidas, 0 omitidas.
+  Regresiones focalizadas de control del visor: 42/42.
+  Advertencias heredadas: cuatro (Npgsql global obsoleto y nullability en
+  WebsocketRoute/SensorReadingService); no proceden del cambio.
+  Migración EF idempotente: script no vacío generado correctamente.
 
 Trabajador GPU
-  dotnet test SwarmWorker.Tests/SwarmWorker.Tests.csproj --configuration Release
-  Resultado: 99 aprobadas, 0 fallidas.
+  /tmp/robotswarm-dotnet-8.0.422/dotnet test \
+    SwarmWorker.Tests/SwarmWorker.Tests.csproj -c Release
+  Resultado: 119 aprobadas, 0 fallidas, 0 omitidas.
+  Regresiones focalizadas de entrada, desconexión y reaping: 21/21.
 
 ROS
-  python -m unittest discover -s swarm_ws/src/robot_swarm_bridge/test -p "test_*.py" -v
-  Resultado más reciente: 351 aprobadas, 0 fallidas, 32.384 s.
-  Entorno local: Python 3.8.10, NumPy 1.24.4 y PyYAML 5.3.1.
+  PYTHONPATH=swarm_ws/src/robot_swarm_bridge/src:\
+swarm_ws/src/robot_swarm_bridge/scripts \
+    python3 -m unittest discover -s swarm_ws/src/robot_swarm_bridge/test \
+      -p "test_*.py" -v
+  Resultado: 362 aprobadas, 0 fallidas, 31.983 s.
+  Prueba física final N=10: DONE; búsqueda 10/10, aviso 1+9, empuje útil
+  10/10, RTF 2.9672, render 49.960 FPS y cero contactos inesperados.
 
 Frontend
-  npm ci (Node 18, instalación limpia desde package-lock.json)
-  npm test -- --watchAll=false
-  npm run lint -- --quiet <archivos del control de sesiones>
-  npm run build
-  Resultado: 4 suites y 21 pruebas aprobadas; lint y build aprobados.
+  PATH=/tmp/robotswarm-node-20.19.1/bin:/usr/local/bin:/usr/bin:/bin \
+    CI=true npm test -- --watchAll=false --runInBand
+  Resultado: 10 suites y 79 pruebas aprobadas; 0 fallidas.
+  HlsViewer focalizado: 32/32.
+  ESLint --quiet sobre los 27 archivos JavaScript modificados: aprobado.
+  Build de producción: compilado correctamente.
+  El lint de todo src conserva 211 errores heredados fuera del alcance; no se
+  presenta como una regresión de este candidato.
+
+Repetición del entorno
+  El primer intento seleccionó npm de Windows sobre una ruta UNC y omitió el
+  PYTHONPATH del paquete ROS. Se rechazó como prueba ambiental y se repitió con
+  Node 20.19.1 Linux y las dos rutas Python exactas de CI; frontend y ROS
+  aprobaron. Un build posterior encontró la carpeta ignorada build/ con dueño
+  root; al usar un BUILD_PATH temporal limpio compiló correctamente. El formato
+  .NET global conserva deuda heredada, pero los seis
+  archivos C# de la corrección final pasan la verificación focalizada.
+
+Publicador y despliegue GPU
+  - py_compile del publicador: aprobado;
+  - test-viewer-publisher.sh: aprobado;
+  - test-deploy.sh: despliegue atómico, bloqueo, rollback y KillMode aprobados;
+  - smoke físico: D3D12/RTX 3080, render 49.785 FPS, RTF 2.975, H.264
+    1280x720@30, entrada XTest y limpieza completa.
 
 Infraestructura y comprobaciones estáticas
-  - sonda MediaMTX v1.18.2 con HTTP auth, H.264/RTSP y LL-HLS: aprobada;
-  - script idempotente de migración EF: generado correctamente;
-  - Docker Compose 5.1.4: configuración válida;
-  - workflows YAML sin claves duplicadas y bloques Bash válidos;
-  - scripts Python compilables y scripts Bash con sintaxis válida;
-  - git diff --check: aprobado;
-  - búsqueda de credenciales y rutas locales en archivos modificados: sin hallazgos.
+  - Docker Compose v2.6.0: configuración de producción válida;
+  - cuatro archivos YAML: claves únicas mediante loader estricto;
+  - Actionlint: estructura válida, excluyendo avisos esperados por etiquetas
+    self-hosted y sin integrar ShellCheck;
+  - guards de serialización, main HEAD, rollback y liberación de drain: presentes;
+  - sintaxis Bash y Python: válida;
+  - búsqueda de credenciales, claves privadas y rutas personales en todos los
+    archivos modificados o nuevos: sin hallazgos;
+  - git diff --check: aprobado.
 
-Este archivo es un resumen curado de la bitácora local, no la salida cruda de
-la consola. La ejecución de GitHub Actions sobre el SHA publicado es la fuente
-autoritativa para aceptar el release.
+Primera ejecución de GitHub Actions
+  La ejecución #31 sobre f3929bb aprobó compilación y pruebas de backend,
+  migraciones, Compose, MediaMTX, las 119 pruebas del worker, las 362 pruebas
+  ROS y todo el job frontend. La integración del publicador terminó antes de
+  sus aserciones porque el runner no contenía xdpyinfo (exit 127). Se canceló
+  el build restante de la imagen ROS para ahorrar minutos. La corrección
+  declaró x11-utils y xvfb; CI #32 aprobó después los tres jobs, incluido el
+  helper del publicador y la imagen ROS.
+
+Check externo de secretos
+  GitGuardian señaló un identificador que incluía Password como Generic
+  Password. La línea era una lista de componentes React, sin valor sensible.
+  Se renombró como legacyRecoveryRoutes y se preparó un historial limpio de la
+  rama, de modo que el texto falso positivo no permanezca en los commits que
+  se integrarán.
+
+Este archivo resume resultados locales reproducibles. Una ejecución
+aprobatoria de GitHub Actions y las aceptaciones visibles de dos usuarios serán
+la fuente autoritativa para el SHA publicado; las Figuras 11-18 no se completan
+antes de esa etapa.

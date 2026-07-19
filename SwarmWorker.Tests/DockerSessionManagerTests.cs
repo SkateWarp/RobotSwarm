@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SwarmWorker.Configuration;
+using SwarmWorker.Contracts;
 using SwarmWorker.Infrastructure;
 using SwarmWorker.Runtime;
 
@@ -9,6 +10,92 @@ namespace SwarmWorker.Tests;
 
 public sealed class DockerSessionManagerTests
 {
+    [Fact]
+    public async Task ProvisionRejectsACompleteRosterWhenGazeboStoppedAfterSpawn()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var robotIds = FleetRosterParser.GenerateRobotIds(10);
+        var roster = $"data: {JsonSerializer.Serialize(string.Join(',', robotIds))}\n";
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(0, roster, string.Empty),
+            new DockerCommandResult(0, "ready", string.Empty),
+            new DockerCommandResult(0, roster, string.Empty),
+            new DockerCommandResult(1, string.Empty, "Gazebo clock did not advance"));
+        var manager = CreateManager(docker, workerId);
+        var payload = new FleetCommandPayload(
+            10,
+            "arena-v1",
+            "grid",
+            robotIds);
+
+        var error = await Assert.ThrowsAsync<DockerCliException>(
+            () => manager.ProvisionAsync(
+                sessionId,
+                payload,
+                CancellationToken.None));
+
+        Assert.Equal("verify Gazebo fleet liveness", error.Operation);
+        var probe = docker.Calls[^1];
+        Assert.Contains("/gazebo/model_states", probe[4]);
+        Assert.Contains("/clock", probe[4]);
+        Assert.Equal(robotIds, probe.Skip(6));
+    }
+
+    [Fact]
+    public async Task ProvisionDoesNotReuseAContainerWithTheObsoletePidsLimit()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId, pidsLimit: 512),
+                string.Empty));
+        var manager = CreateManager(docker, workerId);
+        var payload = new FleetCommandPayload(
+            1,
+            "arena-v1",
+            "grid",
+            new[] { "tb3_0" });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => manager.ProvisionAsync(
+                sessionId,
+                payload,
+                CancellationToken.None));
+
+        Assert.Contains("does not match", error.Message);
+        Assert.DoesNotContain(
+            docker.Calls,
+            arguments => arguments.Count > 0 && arguments[0] == "exec");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not ready\n")]
+    public async Task GazeboFleetProbeRequiresAnExplicitReadyResult(string output)
+    {
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, output, string.Empty));
+        var manager = CreateManager(docker, Guid.NewGuid());
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => manager.VerifyGazeboFleetAsync(
+                "container-1",
+                new[] { "tb3_0" },
+                CancellationToken.None));
+
+        Assert.Contains("without confirming liveness", error.Message);
+        Assert.Equal(TimeSpan.FromSeconds(20), docker.Timeouts.Single());
+    }
+
     [Fact]
     public async Task PublishesControlHeartbeatThroughTheFixedRosTopic()
     {
@@ -33,6 +120,7 @@ public sealed class DockerSessionManagerTests
             "container-1",
             SessionResourceNames.Container(sessionId),
             "robotswarm/ros-noetic:test",
+            1024,
             true,
             "running",
             new Dictionary<string, string>
@@ -93,6 +181,7 @@ public sealed class DockerSessionManagerTests
             "container-1",
             SessionResourceNames.Container(sessionId),
             "robotswarm/ros-noetic:test",
+            1024,
             true,
             "running",
             new Dictionary<string, string>
@@ -166,6 +255,7 @@ public sealed class DockerSessionManagerTests
             "container-1",
             SessionResourceNames.Container(sessionId),
             "robotswarm/ros-noetic:test",
+            1024,
             true,
             "running",
             new Dictionary<string, string>
@@ -675,7 +765,8 @@ public sealed class DockerSessionManagerTests
         Guid workerId,
         Guid sessionId,
         string containerId = "container-1",
-        bool running = true)
+        bool running = true,
+        int pidsLimit = 1024)
     {
         return JsonSerializer.Serialize(new[]
         {
@@ -690,8 +781,15 @@ public sealed class DockerSessionManagerTests
                     {
                         [SessionLabels.Managed] = "true",
                         [SessionLabels.WorkerId] = workerId.ToString("D"),
-                        [SessionLabels.SessionId] = sessionId.ToString("D")
+                        [SessionLabels.SessionId] = sessionId.ToString("D"),
+                        [SessionLabels.ArenaVersion] = "arena-v1",
+                        [SessionLabels.ImageVersion] = string.Empty,
+                        [SessionLabels.MaxRobots] = "10"
                     }
+                },
+                HostConfig = new
+                {
+                    PidsLimit = pidsLimit
                 },
                 State = new
                 {
@@ -805,5 +903,17 @@ public sealed class DockerSessionManagerTests
 
             return Task.CompletedTask;
         }
+
+        public Task SendInputAsync(
+            ViewerInputEnvelope request,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseInputAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseAllInputsAsync(CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 }
