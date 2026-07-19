@@ -68,6 +68,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     private readonly SemaphoreSlim _probeGate = new(1, 1);
     private readonly SemaphoreSlim _processGate = new(1, 1);
     private readonly Dictionary<Guid, ActivePublisher> _active = new();
+    private int _disposeStarted;
     private ViewerPublisherAvailability _availability =
         ViewerPublisherAvailability.Unavailable("Viewer publishing has not been probed.");
 
@@ -212,6 +213,11 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposeStarted, 1) != 0)
+        {
+            return;
+        }
+
         await _processGate.WaitAsync();
         try
         {

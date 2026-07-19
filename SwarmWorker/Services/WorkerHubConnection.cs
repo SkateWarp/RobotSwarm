@@ -48,6 +48,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly SemaphoreSlim _commandSignal = new(0, 1);
     private readonly ILogger<WorkerHubConnection> _logger;
+    private int _disposeStarted;
     private long _connectionVersion;
     private long _lastSuccessfulContactTicks = DateTime.UtcNow.Ticks;
 
@@ -245,6 +246,11 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposeStarted, 1) != 0)
+        {
+            return;
+        }
+
         try
         {
             if (_connection.State != HubConnectionState.Disconnected)

@@ -63,6 +63,23 @@ jobs:
               raise SystemExit(
                   "Backend deployment must not infer a multi-commit push from HEAD^."
               )
+          gpu_worker = workflows[1].read_text(encoding="utf-8")
+          resume_guard = (
+              "if: $" + "{{ always() && steps.drain.outcome == 'success' }}"
+          )
+          if resume_guard not in gpu_worker:
+              raise SystemExit(
+                  "GPU deployment must release its scheduling drain after every "
+                  "worker deployment outcome."
+              )
+          if "Worker did not recover a fresh heartbeat" not in gpu_worker:
+              raise SystemExit(
+                  "GPU deployment must retain its drain after an incomplete rollback."
+              )
+          if "Rollback did not restore the exact worker release" not in gpu_worker:
+              raise SystemExit(
+                  "GPU deployment must verify the restored release before scheduling."
+              )
           compose = Path("docker-compose.prod.yml").read_text(encoding="utf-8")
           if "bluenviron/mediamtx@sha256:" not in compose:
               raise SystemExit("Production MediaMTX must use an immutable digest.")

@@ -13,6 +13,15 @@ public sealed class ViewerPublisherTests
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     [Fact]
+    public async Task DisposeCanBeCalledMoreThanOnce()
+    {
+        var publisher = Publisher(new ViewerPublisherOptions());
+
+        await publisher.DisposeAsync();
+        await publisher.DisposeAsync();
+    }
+
+    [Fact]
     public async Task DisabledPublisherRemainsUnavailable()
     {
         await using var publisher = Publisher(new ViewerPublisherOptions
