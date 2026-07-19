@@ -1,0 +1,37 @@
+RobotSwarm - resumen de validación local previa al despliegue
+Fecha: 2026-07-19 (AST)
+Base: 3fcc80abb2736f850a32cd2d897b438b1e44108e
+Rama de trabajo: agent/complete-production-commissioning
+
+Backend
+  dotnet test SwarmBackend.Tests/SwarmBackend.Tests.csproj --configuration Release
+  Resultado: 124 aprobadas, 0 fallidas.
+
+Trabajador GPU
+  dotnet test SwarmWorker.Tests/SwarmWorker.Tests.csproj --configuration Release
+  Resultado: 99 aprobadas, 0 fallidas.
+
+ROS
+  python -m unittest discover -s swarm_ws/src/robot_swarm_bridge/test -p "test_*.py" -v
+  Resultado más reciente: 351 aprobadas, 0 fallidas, 32.384 s.
+  Entorno local: Python 3.8.10, NumPy 1.24.4 y PyYAML 5.3.1.
+
+Frontend
+  npm ci (Node 18, instalación limpia desde package-lock.json)
+  npm test -- --watchAll=false
+  npm run lint -- --quiet <archivos del control de sesiones>
+  npm run build
+  Resultado: 4 suites y 21 pruebas aprobadas; lint y build aprobados.
+
+Infraestructura y comprobaciones estáticas
+  - sonda MediaMTX v1.18.2 con HTTP auth, H.264/RTSP y LL-HLS: aprobada;
+  - script idempotente de migración EF: generado correctamente;
+  - Docker Compose 5.1.4: configuración válida;
+  - workflows YAML sin claves duplicadas y bloques Bash válidos;
+  - scripts Python compilables y scripts Bash con sintaxis válida;
+  - git diff --check: aprobado;
+  - búsqueda de credenciales y rutas locales en archivos modificados: sin hallazgos.
+
+Este archivo es un resumen curado de la bitácora local, no la salida cruda de
+la consola. La ejecución de GitHub Actions sobre el SHA publicado es la fuente
+autoritativa para aceptar el release.

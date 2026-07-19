@@ -110,6 +110,7 @@ public static class ComputeWorkerRoute
         worker.CredentialHash = credentialHash;
         worker.CredentialCreatedAt = now;
         worker.CredentialRevokedAt = null;
+        WorkerDrainLease.Clear(worker);
         worker.State = ComputeWorkerState.Offline;
         worker.UpdatedAt = now;
         await dataContext.SaveChangesAsync(cancellationToken);
@@ -134,6 +135,7 @@ public static class ComputeWorkerRoute
 
         var now = DateTime.UtcNow;
         worker.CredentialRevokedAt = now;
+        WorkerDrainLease.Clear(worker);
         worker.State = ComputeWorkerState.Offline;
         worker.UpdatedAt = now;
         await dataContext.SaveChangesAsync(cancellationToken);
@@ -184,6 +186,12 @@ public static class ComputeWorkerRoute
             worker.UpdatedAt,
             worker.LastHeartbeatAt,
             worker.CredentialCreatedAt,
-            worker.CredentialRevokedAt);
+            worker.CredentialRevokedAt,
+            worker.ReportedActiveSessionCount,
+            worker.ActiveSessionsReportedAt,
+            worker.DrainLeaseId,
+            worker.DrainTargetRevision,
+            worker.DrainRequestedAt,
+            worker.DrainLeaseExpiresAt);
     }
 }

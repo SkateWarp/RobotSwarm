@@ -90,6 +90,9 @@ namespace SwarmBackend.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<DateTime?>("ActiveSessionsReportedAt")
+                        .HasColumnType("timestamp without time zone");
+
                     b.Property<JsonDocument>("Capabilities")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -107,6 +110,20 @@ namespace SwarmBackend.Migrations
                     b.Property<DateTime?>("CredentialRevokedAt")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<DateTime?>("DrainLeaseExpiresAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<Guid?>("DrainLeaseId")
+                        .IsConcurrencyToken()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("DrainRequestedAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("DrainTargetRevision")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
                     b.Property<string>("ImageVersion")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
@@ -122,6 +139,9 @@ namespace SwarmBackend.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<int?>("ReportedActiveSessionCount")
+                        .HasColumnType("integer");
+
                     b.Property<int>("State")
                         .HasColumnType("integer");
 
@@ -129,6 +149,9 @@ namespace SwarmBackend.Migrations
                         .HasColumnType("timestamp without time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("DrainLeaseId")
+                        .IsUnique();
 
                     b.HasIndex("Name")
                         .IsUnique();
@@ -482,6 +505,19 @@ namespace SwarmBackend.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
+                    b.Property<DateTime?>("LastProgressAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("LastReportAt")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("OutcomeReason")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<int>("OutcomeState")
+                        .HasColumnType("integer");
+
                     b.Property<JsonDocument>("Parameters")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -499,6 +535,7 @@ namespace SwarmBackend.Migrations
                         .HasColumnType("timestamp without time zone");
 
                     b.Property<int>("State")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<int>("Type")
@@ -510,6 +547,8 @@ namespace SwarmBackend.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("SimulationSessionId", "CreatedAt");
+
+                    b.HasIndex("State", "LastProgressAt");
 
                     b.ToTable("TaskRuns", t =>
                         {
@@ -686,6 +725,7 @@ namespace SwarmBackend.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<int>("State")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<Guid?>("TaskRunId")

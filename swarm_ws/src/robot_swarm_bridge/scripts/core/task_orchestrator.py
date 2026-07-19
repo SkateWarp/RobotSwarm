@@ -875,9 +875,41 @@ class TaskOrchestrator:
         ):
             searching_count = None
 
+        all_pushers_confirmed = status.get('all_pushers_confirmed')
+        if not isinstance(all_pushers_confirmed, bool):
+            all_pushers_confirmed = None
+
+        contributor_count = status.get('useful_contributor_count')
+        if (
+            isinstance(contributor_count, bool)
+            or not isinstance(contributor_count, int)
+            or contributor_count < 0
+        ):
+            contributor_count = None
+
+        contributor_ids = status.get('useful_contributor_ids')
+        if (
+            not isinstance(contributor_ids, list)
+            or not all(
+                isinstance(robot_id, str) and robot_id
+                for robot_id in contributor_ids
+            )
+            or len(set(contributor_ids)) != len(contributor_ids)
+            or contributor_count != len(contributor_ids)
+        ):
+            contributor_ids = None
+        else:
+            contributor_ids = sorted(
+                contributor_ids,
+                key=robot_id_sort_key,
+            )
+
         result = {
             'phase': phase,
             'searching_robot_count': searching_count,
+            'all_pushers_confirmed': all_pushers_confirmed,
+            'useful_contributor_count': contributor_count,
+            'useful_contributor_ids': contributor_ids,
             'discovery': self._transport_discovery(
                 status.get('discovery'), expected_task_id
             ),

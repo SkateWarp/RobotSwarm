@@ -1,4 +1,14 @@
 # Frontend API Documentation
+
+> **Historical protocol draft (2026-01-05).** The direct
+> `ws://localhost:8080/swarm` interface described below is not the public
+> production contract. The React application authenticates with the .NET API,
+> which enforces session ownership and sends durable commands to the GPU worker;
+> ROS remains private inside each session container. See the current
+> [implementation status](IMPLEMENTATION_STATUS.md) and
+> [control plan](docs/swarm-control-plan.md). Keep this file only as background
+> for the original command vocabulary.
+
 **WebSocket Control Interface for Multi-Robot Swarm System**
 
 ## Connection

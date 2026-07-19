@@ -25,6 +25,7 @@ public sealed class WorkerOptions
     public int RosReadyTimeoutSeconds { get; set; } = 180;
     public int FleetUpdateTimeoutSeconds { get; set; } = 120;
     public int EmergencyStopTimeoutSeconds { get; set; } = 10;
+    public int TaskCancellationTimeoutSeconds { get; set; } = 10;
     public int BackendDisconnectEmergencyStopSeconds { get; set; } = 30;
     public int ControlHeartbeatIntervalSeconds { get; set; } = 2;
     public int ControlHeartbeatBackendLeaseSeconds { get; set; } = 15;
@@ -164,6 +165,12 @@ public sealed class WorkerOptionsValidator : IValidateOptions<WorkerOptions>
             2,
             60,
             "Worker:EmergencyStopTimeoutSeconds");
+        ValidateRange(
+            errors,
+            options.TaskCancellationTimeoutSeconds,
+            2,
+            60,
+            "Worker:TaskCancellationTimeoutSeconds");
         ValidateRange(
             errors,
             options.BackendDisconnectEmergencyStopSeconds,

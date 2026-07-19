@@ -16,6 +16,7 @@ namespace SwarmBackend.Services;
 public class WorkerHub(
     DataContext dataContext,
     IHubContext<SessionHub> sessionHubContext,
+    IConfiguration configuration,
     ILogger<WorkerHub> logger) : Hub
 {
     private static readonly ConcurrentDictionary<Guid, string> ActiveConnections = new();
@@ -23,6 +24,7 @@ public class WorkerHub(
     internal static readonly TimeSpan TerminalCleanupBaseDelay =
         TerminalCleanupPolicy.BaseRetryDelay;
     private const int MaximumFailSafeTransactionAttempts = 3;
+    private const int MaximumCommandTransitionAttempts = 3;
 
     public static void InvalidateConnection(Guid workerId)
     {
@@ -61,15 +63,33 @@ public class WorkerHub(
 
     public async Task<WorkerRegistrationResponse> Register(WorkerRegistrationRequest request)
     {
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
+        {
+            try
+            {
+                return await RegisterCore(request);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                logger.LogDebug(
+                    "Worker registration met a concurrent drain transition (attempt {Attempt}).",
+                    attempt);
+            }
+        }
+
+        throw new HubException(
+            "The worker drain state changed repeatedly during registration. Retry registration.");
+    }
+
+    private async Task<WorkerRegistrationResponse> RegisterCore(
+        WorkerRegistrationRequest request)
+    {
         var worker = await GetWorker();
         ApplyWorkerMetadata(worker, request.ImageVersion, request.Capabilities);
 
         var now = DateTime.UtcNow;
-        if (worker.State != ComputeWorkerState.Draining)
-        {
-            worker.State = ComputeWorkerState.Online;
-        }
-
+        WorkerDrainLease.ApplyHeartbeatState(worker, now);
         worker.LastHeartbeatAt = now;
         worker.UpdatedAt = now;
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
@@ -81,16 +101,43 @@ public class WorkerHub(
 
     public async Task<WorkerRegistrationResponse> Heartbeat(WorkerHeartbeatRequest request)
     {
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
+        {
+            try
+            {
+                return await HeartbeatCore(request);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                logger.LogDebug(
+                    "Worker heartbeat met a concurrent drain transition (attempt {Attempt}).",
+                    attempt);
+            }
+        }
+
+        throw new HubException(
+            "The worker drain state changed repeatedly during heartbeat. Retry the heartbeat.");
+    }
+
+    private async Task<WorkerRegistrationResponse> HeartbeatCore(
+        WorkerHeartbeatRequest request)
+    {
         var worker = await GetWorker();
         ApplyWorkerMetadata(worker, request.ImageVersion, request.Capabilities);
 
         var now = DateTime.UtcNow;
-        if (worker.State != ComputeWorkerState.Draining)
+        WorkerDrainLease.ApplyHeartbeatState(worker, now);
+        worker.LastHeartbeatAt = now;
+        if (request.ActiveSessionIds != null)
         {
-            worker.State = ComputeWorkerState.Online;
+            worker.ReportedActiveSessionCount = request.ActiveSessionIds
+                .Take(1000)
+                .Distinct()
+                .Count();
+            worker.ActiveSessionsReportedAt = now;
         }
 
-        worker.LastHeartbeatAt = now;
         worker.UpdatedAt = now;
         var reconciliation = await ReconcileTerminalSessions(
             worker.Id,
@@ -137,64 +184,134 @@ public class WorkerHub(
         var workerId = (await GetWorker()).Id;
         maxCount = Math.Clamp(maxCount, 1, 100);
 
-        var commands = await dataContext.WorkerCommands
-            .Where(command => command.ComputeWorkerId == workerId
-                && (command.State == WorkerCommandState.Pending
-                    || command.State == WorkerCommandState.Dispatched
-                    || command.State == WorkerCommandState.Acknowledged
-                    || command.State == WorkerCommandState.Running))
-            .OrderBy(command => command.CreatedAt)
-            .ThenBy(command => command.Sequence)
-            .Take(maxCount)
-            .ToListAsync(Context.ConnectionAborted);
-
-        var now = DateTime.UtcNow;
-        foreach (var command in commands.Where(command => command.State == WorkerCommandState.Pending))
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
         {
-            command.State = WorkerCommandState.Dispatched;
-            command.DispatchedAt = now;
-            command.UpdatedAt = now;
+            try
+            {
+                var commands = await dataContext.WorkerCommands
+                    .Where(command => command.ComputeWorkerId == workerId
+                        && (command.State == WorkerCommandState.Pending
+                            || command.State == WorkerCommandState.Dispatched
+                            || command.State == WorkerCommandState.Acknowledged
+                            || command.State == WorkerCommandState.Running))
+                    .OrderBy(command => command.CreatedAt)
+                    .ThenBy(command => command.Sequence)
+                    .Take(maxCount)
+                    .ToListAsync(Context.ConnectionAborted);
+
+                var now = DateTime.UtcNow;
+                foreach (var command in commands.Where(command =>
+                             command.State == WorkerCommandState.Pending))
+                {
+                    command.State = WorkerCommandState.Dispatched;
+                    command.DispatchedAt = now;
+                    command.UpdatedAt = now;
+                }
+
+                if (dataContext.ChangeTracker.HasChanges())
+                {
+                    await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+                }
+
+                return commands.Select(ToEnvelope).ToList();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                if (attempt == MaximumCommandTransitionAttempts)
+                {
+                    break;
+                }
+
+                logger.LogDebug(
+                    "Command pull met a concurrent cancellation; retrying attempt {Attempt}.",
+                    attempt + 1);
+            }
         }
 
-        if (dataContext.ChangeTracker.HasChanges())
-        {
-            await dataContext.SaveChangesAsync(Context.ConnectionAborted);
-        }
-
-        return commands.Select(ToEnvelope).ToList();
+        throw new HubException(
+            "Pending commands changed repeatedly while they were being claimed. Retry the pull.");
     }
 
     public async Task AcknowledgeCommand(Guid commandId)
     {
-        var command = await GetOwnedCommand(commandId);
-        if (IsTerminal(command.State)
-            || command.State is WorkerCommandState.Acknowledged or WorkerCommandState.Running)
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
         {
-            return;
+            try
+            {
+                var command = await GetOwnedCommand(commandId);
+                if (IsTerminal(command.State))
+                {
+                    throw new HubException(
+                        "The command was cancelled before acknowledgement.");
+                }
+
+                if (command.State is WorkerCommandState.Acknowledged
+                    or WorkerCommandState.Running)
+                {
+                    return;
+                }
+
+                var now = DateTime.UtcNow;
+                command.State = WorkerCommandState.Acknowledged;
+                command.AcknowledgedAt = now;
+                command.UpdatedAt = now;
+                await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+                await PublishCommandUpdate(command);
+                return;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                logger.LogDebug(
+                    "Command {CommandId} changed while it was being acknowledged (attempt {Attempt}).",
+                    commandId,
+                    attempt);
+            }
         }
 
-        var now = DateTime.UtcNow;
-        command.State = WorkerCommandState.Acknowledged;
-        command.AcknowledgedAt = now;
-        command.UpdatedAt = now;
-        await dataContext.SaveChangesAsync(Context.ConnectionAborted);
-        await PublishCommandUpdate(command);
+        throw new HubException(
+            "The command changed repeatedly before acknowledgement.");
     }
 
     public async Task MarkCommandRunning(Guid commandId)
     {
-        var command = await GetOwnedCommand(commandId);
-        if (IsTerminal(command.State) || command.State == WorkerCommandState.Running)
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
         {
-            return;
+            try
+            {
+                var command = await GetOwnedCommand(commandId);
+                if (IsTerminal(command.State))
+                {
+                    throw new HubException(
+                        "The command was cancelled before execution.");
+                }
+
+                if (command.State == WorkerCommandState.Running)
+                {
+                    return;
+                }
+
+                var now = DateTime.UtcNow;
+                command.State = WorkerCommandState.Running;
+                command.AcknowledgedAt ??= now;
+                command.UpdatedAt = now;
+                await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+                await PublishCommandUpdate(command);
+                return;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                logger.LogDebug(
+                    "Command {CommandId} changed while it was being started (attempt {Attempt}).",
+                    commandId,
+                    attempt);
+            }
         }
 
-        var now = DateTime.UtcNow;
-        command.State = WorkerCommandState.Running;
-        command.AcknowledgedAt ??= now;
-        command.UpdatedAt = now;
-        await dataContext.SaveChangesAsync(Context.ConnectionAborted);
-        await PublishCommandUpdate(command);
+        throw new HubException(
+            "The command changed repeatedly before execution.");
     }
 
     public async Task CompleteCommand(WorkerCommandCompletionRequest request)
@@ -259,6 +376,25 @@ public class WorkerHub(
                 updatedSession.Revision++;
             }
         }
+        else if (command.Type == WorkerCommandType.CancelTask)
+        {
+            if (!request.Result.HasValue
+                || !TryValidateTaskCancellationCompletion(
+                    command,
+                    request.Result.Value))
+            {
+                throw new HubException(
+                    "Task cancellation completion did not include correlated ROS stop confirmation.");
+            }
+
+            updatedSession = await dataContext.SimulationSessions
+                .Include(session => session.ComputeWorker)
+                .Include(session => session.TaskRuns)
+                .Include(session => session.Commands)
+                .SingleAsync(
+                    session => session.Id == command.SimulationSessionId,
+                    Context.ConnectionAborted);
+        }
         else if (command.Type == WorkerCommandType.SetViewerSource)
         {
             var validationError = "Viewer command completion did not include a result.";
@@ -282,6 +418,16 @@ public class WorkerHub(
         command.CompletedAt = now;
         command.UpdatedAt = now;
 
+        if (command.Type == WorkerCommandType.CancelTask
+            && updatedSession != null
+            && !ReleaseSessionAfterConfirmedCancellation(
+                updatedSession,
+                command.TaskRunId,
+                now))
+        {
+            updatedSession = null;
+        }
+
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
         await transaction.CommitAsync(Context.ConnectionAborted);
         await PublishCommandUpdate(command);
@@ -297,6 +443,29 @@ public class WorkerHub(
     }
 
     public async Task FailCommand(WorkerCommandFailureRequest request)
+    {
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
+        {
+            try
+            {
+                await FailCommandCore(request);
+                return;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                logger.LogDebug(
+                    "Command {CommandId} changed while its failure was being recorded (attempt {Attempt}).",
+                    request.CommandId,
+                    attempt);
+            }
+        }
+
+        throw new HubException(
+            "The command changed repeatedly while its failure was being recorded. Retry the report.");
+    }
+
+    private async Task FailCommandCore(WorkerCommandFailureRequest request)
     {
         var workerId = (await GetWorker()).Id;
         var command = await dataContext.WorkerCommands
@@ -330,12 +499,20 @@ public class WorkerHub(
             if (command.Type == WorkerCommandType.StartTask)
             {
                 task.State = TaskRunState.Failed;
+                task.OutcomeState = TaskOutcomeState.Failed;
+                task.OutcomeReason = error;
                 task.CompletedAt = now;
                 sessionChanged = AlignSessionStateWithTask(task, now);
             }
 
             task.Error = error;
             task.UpdatedAt = now;
+        }
+        else if (task != null
+                 && command.Type == WorkerCommandType.CancelTask
+                 && FailSessionAfterCancellationFailure(task, error, now))
+        {
+            sessionChanged = true;
         }
 
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
@@ -543,11 +720,35 @@ public class WorkerHub(
 
     public async Task<TaskRunEventResponse> ReportTaskEvent(TaskEventReport report)
     {
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
+        {
+            try
+            {
+                return await ReportTaskEventCore(report);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                dataContext.ChangeTracker.Clear();
+                logger.LogDebug(
+                    "Task {TaskRunId} changed while a worker report was being applied (attempt {Attempt}).",
+                    report.TaskRunId,
+                    attempt);
+            }
+        }
+
+        throw new HubException(
+            "The task changed repeatedly while its report was being applied. Retry the report.");
+    }
+
+    private async Task<TaskRunEventResponse> ReportTaskEventCore(TaskEventReport report)
+    {
         var workerId = (await GetWorker()).Id;
         var task = await dataContext.TaskRuns
             .Include(candidate => candidate.Commands)
             .Include(candidate => candidate.SimulationSession)
             .ThenInclude(session => session.ComputeWorker)
+            .Include(candidate => candidate.SimulationSession)
+            .ThenInclude(session => session.Robots)
             .SingleOrDefaultAsync(
                 candidate => candidate.Id == report.TaskRunId
                     && candidate.SimulationSessionId == report.SessionId
@@ -564,6 +765,30 @@ public class WorkerHub(
             throw new HubException("Unsupported task run state.");
         }
 
+        if (report.Progress.HasValue && !double.IsFinite(report.Progress.Value))
+        {
+            throw new HubException("Task progress must be finite.");
+        }
+
+        var effectiveReport = report;
+        if (nextState == TaskRunState.Completed
+            && !TaskAcceptancePolicy.TryAccept(
+                task,
+                report.Progress,
+                report.Result,
+                configuration.GetValue(
+                    "Tasks:RequireCollaborativeTransportEvidence",
+                    false),
+                out var acceptanceFailure))
+        {
+            nextState = TaskRunState.Failed;
+            effectiveReport = report with
+            {
+                State = TaskRunState.Failed.ToString(),
+                Error = acceptanceFailure
+            };
+        }
+
         if (!CanApplyTaskTransition(task, nextState))
         {
             logger.LogWarning(
@@ -574,30 +799,35 @@ public class WorkerHub(
             return ToTaskResponse(task);
         }
 
-        if (report.Progress.HasValue && !double.IsFinite(report.Progress.Value))
-        {
-            throw new HubException("Task progress must be finite.");
-        }
-
-        if (IsDuplicateTaskReport(task, nextState, report))
+        if (IsDuplicateTaskReport(task, nextState, effectiveReport))
         {
             return ToTaskResponse(task);
         }
 
         var now = DateTime.UtcNow;
+        var previousState = task.State;
+        var previousProgress = task.Progress;
         task.State = nextState;
-        task.Progress = report.Progress.HasValue
-            ? Math.Max(task.Progress, Math.Clamp(report.Progress.Value, 0, 1))
+        task.Progress = effectiveReport.Progress.HasValue
+            ? Math.Max(task.Progress, Math.Clamp(effectiveReport.Progress.Value, 0, 1))
             : task.Progress;
         task.Error = nextState == TaskRunState.Failed
-            ? Truncate(report.Error ?? "Worker reported a task failure.", 4000)
+            ? Truncate(effectiveReport.Error ?? "Worker reported a task failure.", 4000)
             : null;
-        if (report.Result.HasValue)
+        if (effectiveReport.Result.HasValue)
         {
-            task.Result = ControlPlaneJson.ToDocument(report.Result);
+            task.Result = ControlPlaneJson.ToDocument(effectiveReport.Result);
         }
 
         task.UpdatedAt = now;
+        task.LastReportAt = now;
+        if (task.Progress > previousProgress
+            || (nextState is TaskRunState.Accepted or TaskRunState.Running
+                && previousState != nextState))
+        {
+            task.LastProgressAt = now;
+        }
+
         if (nextState == TaskRunState.Running)
         {
             task.StartedAt ??= now;
@@ -611,6 +841,17 @@ public class WorkerHub(
                 task.Progress = 1;
             }
         }
+
+        task.OutcomeState = nextState switch
+        {
+            TaskRunState.Completed => TaskOutcomeState.Succeeded,
+            TaskRunState.Failed => TaskOutcomeState.Failed,
+            TaskRunState.Cancelled => TaskOutcomeState.Cancelled,
+            _ => TaskOutcomeState.Pending
+        };
+        task.OutcomeReason = nextState == TaskRunState.Failed
+            ? task.Error
+            : null;
 
         var sessionChanged = AlignSessionStateWithTask(task, now);
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
@@ -927,6 +1168,54 @@ public class WorkerHub(
         return true;
     }
 
+    internal static bool ReleaseSessionAfterConfirmedCancellation(
+        SimulationSession session,
+        Guid? taskRunId,
+        DateTime now)
+    {
+        if (!taskRunId.HasValue
+            || session.State is not (SimulationSessionState.Active
+                or SimulationSessionState.Paused)
+            || session.TaskRuns.Any(task => task.State < TaskRunState.Completed)
+            || !session.TaskRuns.Any(task =>
+                task.Id == taskRunId.Value
+                && task.State >= TaskRunState.Completed)
+            || session.Commands.Any(command =>
+                command.Type == WorkerCommandType.CancelTask
+                && command.TaskRunId == taskRunId
+                && IsInFlight(command.State)))
+        {
+            return false;
+        }
+
+        session.State = SimulationSessionState.Ready;
+        session.UpdatedAt = now;
+        session.Revision++;
+        return true;
+    }
+
+    internal static bool FailSessionAfterCancellationFailure(
+        TaskRun task,
+        string error,
+        DateTime now)
+    {
+        var session = task.SimulationSession;
+        if (task.State < TaskRunState.Completed
+            || session.State >= SimulationSessionState.Stopping)
+        {
+            return false;
+        }
+
+        session.State = SimulationSessionState.Failed;
+        session.FailureReason = Truncate(
+            $"The worker could not stop a timed-out task: {error}",
+            2000);
+        session.StoppedAt ??= now;
+        session.UpdatedAt = now;
+        session.Revision++;
+        return true;
+    }
+
     private static bool CanApplySessionTransition(
         SimulationSessionState current,
         SimulationSessionState next)
@@ -1158,17 +1447,17 @@ public class WorkerHub(
             };
     }
 
-    private static bool CanApplyTaskTransition(TaskRun task, TaskRunState next)
+    internal static bool CanApplyTaskTransition(TaskRun task, TaskRunState next)
     {
         var current = task.State;
-        if (current == next)
-        {
-            return true;
-        }
-
         if (current >= TaskRunState.Completed)
         {
             return false;
+        }
+
+        if (current == next)
+        {
+            return true;
         }
 
         if (task.SimulationSession.State >= SimulationSessionState.Stopping
@@ -1219,9 +1508,13 @@ public class WorkerHub(
         foreach (var task in tasks)
         {
             task.State = failed ? TaskRunState.Failed : TaskRunState.Cancelled;
+            task.OutcomeState = failed
+                ? TaskOutcomeState.Failed
+                : TaskOutcomeState.Cancelled;
             task.Error = failed
                 ? failureReason ?? "The simulation session stopped unexpectedly."
                 : null;
+            task.OutcomeReason = task.Error;
             task.CompletedAt = now;
             task.UpdatedAt = now;
         }
@@ -1267,6 +1560,23 @@ public class WorkerHub(
 
         value = default;
         return false;
+    }
+
+    internal static bool TryValidateTaskCancellationCompletion(
+        WorkerCommand command,
+        JsonElement result)
+    {
+        return command.Type == WorkerCommandType.CancelTask
+            && command.TaskRunId.HasValue
+            && TryGetProperty(
+                result,
+                "taskCancellationConfirmed",
+                out var confirmed)
+            && confirmed.ValueKind == JsonValueKind.True
+            && TryGetProperty(result, "taskRunId", out var taskRunId)
+            && taskRunId.ValueKind == JsonValueKind.String
+            && Guid.TryParse(taskRunId.GetString(), out var reportedTaskRunId)
+            && reportedTaskRunId == command.TaskRunId.Value;
     }
 
     private static void ApplyWorkerMetadata(
@@ -1384,7 +1694,11 @@ public class WorkerHub(
             task.Progress,
             ControlPlaneJson.ToNullableElement(task.Result),
             task.Error,
+            task.OutcomeState.ToString(),
+            task.OutcomeReason,
             task.UpdatedAt,
+            task.LastReportAt,
+            task.LastProgressAt,
             task.StartedAt,
             task.CompletedAt);
     }

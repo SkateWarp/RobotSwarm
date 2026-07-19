@@ -55,6 +55,21 @@ public static class ViewerAuthRoute
         DataContext dataContext,
         CancellationToken cancellationToken)
     {
+        return await IsReadAuthorized(
+            token,
+            streamAddress,
+            dataContext,
+            cancellationToken)
+                ? Results.Ok()
+                : Results.Unauthorized();
+    }
+
+    internal static async Task<bool> IsReadAuthorized(
+        string token,
+        ViewerStreamAddress streamAddress,
+        DataContext dataContext,
+        CancellationToken cancellationToken)
+    {
         var tokenHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
         var now = DateTime.UtcNow;
         var lease = await dataContext.ViewerLeases
@@ -69,14 +84,7 @@ public static class ViewerAuthRoute
                     && candidate.ExpiresAt > now,
                 cancellationToken);
 
-        if (lease == null)
-        {
-            return Results.Unauthorized();
-        }
-
-        return streamAddress.Matches(lease)
-            ? Results.Ok()
-            : Results.Unauthorized();
+        return lease != null && streamAddress.Matches(lease);
     }
 
     private static async Task<IResult> AuthorizePublish(

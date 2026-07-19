@@ -1,4 +1,12 @@
 # Implementation Summary
+
+> **Archived foundation summary (2026-01-05).** This file predates the
+> implemented task controllers, production control plane, GPU worker, and
+> private viewer. Statements below that describe missing controllers, direct
+> browser WebSockets, or support for 20+ robots are not current acceptance
+> claims. Use [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
+> [docs/swarm-control-plan.md](docs/swarm-control-plan.md) instead.
+
 **Multi-Robot Swarm System - Complete Foundation Built**
 
 ---

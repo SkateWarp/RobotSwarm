@@ -1,4 +1,13 @@
 # Backend Integration Guide
+
+> **Historical integration proposal (2026-01-05).** Do not expose the direct
+> ROS WebSocket option described below. The implemented production path is the
+> authenticated .NET session API → durable GPU-worker command → private ROS
+> orchestrator. The current contract and security boundary are documented in
+> [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
+> [docs/swarm-control-plan.md](docs/swarm-control-plan.md). The code examples
+> below are retained only as design history.
+
 **Connecting .NET Backend to ROS Robot Swarm**
 
 ## Architecture Overview

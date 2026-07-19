@@ -95,6 +95,9 @@ public sealed class AbuseProtectionTests
             AbuseProtection.AuthenticationPartitionKey(context));
         Assert.Equal(
             "ip:192.0.2.25",
+            AbuseProtection.ViewerHlsPartitionKey(context));
+        Assert.Equal(
+            "ip:192.0.2.25",
             AbuseProtection.SessionCreationPartitionKey(context));
 
         context.User = new ClaimsPrincipal(new ClaimsIdentity(

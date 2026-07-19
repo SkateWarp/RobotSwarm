@@ -106,16 +106,14 @@ public sealed record ViewerStreamAddress(
         string? publicBaseUrl,
         ViewerStreamAddress address)
     {
-        if (string.IsNullOrWhiteSpace(publicBaseUrl)
-            || !Uri.TryCreate(publicBaseUrl, UriKind.Absolute, out var baseUri)
-            || baseUri.Scheme is not ("http" or "https")
-            || !string.IsNullOrEmpty(baseUri.Query)
-            || !string.IsNullOrEmpty(baseUri.Fragment))
-        {
-            return null;
-        }
+        return BuildPublicUrl(publicBaseUrl, address, "whep");
+    }
 
-        return $"{publicBaseUrl.TrimEnd('/')}/{address.StreamPath}/whep";
+    public static string? BuildHlsUrl(
+        string? publicBaseUrl,
+        ViewerStreamAddress address)
+    {
+        return BuildPublicUrl(publicBaseUrl, address, "index.m3u8");
     }
 
     private static bool IsValidRobotRuntimeId(string? value)
@@ -128,5 +126,24 @@ public sealed record ViewerStreamAddress(
         return value.All(character =>
             char.IsAsciiLetterOrDigit(character)
             || character is '-' or '_');
+    }
+
+    private static string? BuildPublicUrl(
+        string? publicBaseUrl,
+        ViewerStreamAddress address,
+        string resource)
+    {
+        if (string.IsNullOrWhiteSpace(publicBaseUrl)
+            || !Uri.TryCreate(publicBaseUrl, UriKind.Absolute, out var baseUri)
+            || baseUri.Scheme is not ("http" or "https")
+            || string.IsNullOrWhiteSpace(baseUri.Host)
+            || !string.IsNullOrEmpty(baseUri.UserInfo)
+            || !string.IsNullOrEmpty(baseUri.Query)
+            || !string.IsNullOrEmpty(baseUri.Fragment))
+        {
+            return null;
+        }
+
+        return $"{publicBaseUrl.TrimEnd('/')}/{address.StreamPath}/{resource}";
     }
 }

@@ -71,6 +71,19 @@ public class SimulationSessionScheduler(
 
         var now = DateTime.UtcNow;
         var staleBefore = now - WorkerStaleAfter;
+        var expiredDrainLeases = await dataContext.ComputeWorkers
+            .Where(worker => worker.DrainLeaseId.HasValue
+                && worker.DrainLeaseExpiresAt <= now)
+            .ToListAsync(cancellationToken);
+        foreach (var worker in expiredDrainLeases)
+        {
+            WorkerDrainLease.Clear(worker);
+            worker.State = worker.LastHeartbeatAt >= staleBefore
+                ? ComputeWorkerState.Online
+                : ComputeWorkerState.Offline;
+            worker.UpdatedAt = now;
+        }
+
         var staleWorkers = await dataContext.ComputeWorkers
             .Where(worker => worker.State == ComputeWorkerState.Online
                 && (!worker.LastHeartbeatAt.HasValue || worker.LastHeartbeatAt < staleBefore))
@@ -149,13 +162,10 @@ public class SimulationSessionScheduler(
             expiredSessions.Add(new ExpiredSession(session, stopCommand));
         }
 
-        var availableWorkers = await dataContext.ComputeWorkers
-            .Where(worker => worker.State == ComputeWorkerState.Online
-                && worker.LastHeartbeatAt.HasValue
-                && worker.LastHeartbeatAt >= staleBefore
-                && worker.CredentialHash != null
-                && worker.CredentialCreatedAt.HasValue
-                && !worker.CredentialRevokedAt.HasValue)
+        var availableWorkers = await AvailableWorkerQuery(
+                dataContext,
+                now,
+                staleBefore)
             .OrderBy(worker => worker.Name)
             .ThenBy(worker => worker.Id)
             .ToListAsync(cancellationToken);
@@ -196,6 +206,7 @@ public class SimulationSessionScheduler(
         {
             var worker = availableWorkers
                 .Where(candidate => capacities.GetValueOrDefault(candidate.Id) > 0)
+                .Where(candidate => !WorkerDrainLease.IsActive(candidate, now))
                 .Where(candidate =>
                     WorkerCapabilities.GetMaxRobotsPerSession(candidate)
                     >= session.DesiredRobotCount)
@@ -318,6 +329,22 @@ public class SimulationSessionScheduler(
         }
     }
 
+    internal static IQueryable<ComputeWorker> AvailableWorkerQuery(
+        DataContext dataContext,
+        DateTime now,
+        DateTime staleBefore)
+    {
+        return dataContext.ComputeWorkers.Where(worker =>
+            worker.State == ComputeWorkerState.Online
+            && (!worker.DrainLeaseId.HasValue
+                || worker.DrainLeaseExpiresAt <= now)
+            && worker.LastHeartbeatAt.HasValue
+            && worker.LastHeartbeatAt >= staleBefore
+            && worker.CredentialHash != null
+            && worker.CredentialCreatedAt.HasValue
+            && !worker.CredentialRevokedAt.HasValue);
+    }
+
     internal static void ExpireQueuedSession(
         SimulationSession session,
         DateTime now)
@@ -348,6 +375,8 @@ public class SimulationSessionScheduler(
         {
             task.State = TaskRunState.Failed;
             task.Error = reason;
+            task.OutcomeState = TaskOutcomeState.Failed;
+            task.OutcomeReason = reason;
             task.CompletedAt = now;
             task.UpdatedAt = now;
         }
@@ -399,6 +428,8 @@ public class SimulationSessionScheduler(
         {
             task.State = TaskRunState.Failed;
             task.Error = failureReason;
+            task.OutcomeState = TaskOutcomeState.Failed;
+            task.OutcomeReason = failureReason;
             task.CompletedAt = now;
             task.UpdatedAt = now;
         }

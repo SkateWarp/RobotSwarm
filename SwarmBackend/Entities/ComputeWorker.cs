@@ -16,6 +16,12 @@ public class ComputeWorker
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastHeartbeatAt { get; set; }
+    public int? ReportedActiveSessionCount { get; set; }
+    public DateTime? ActiveSessionsReportedAt { get; set; }
+    public Guid? DrainLeaseId { get; set; }
+    public string? DrainTargetRevision { get; set; }
+    public DateTime? DrainRequestedAt { get; set; }
+    public DateTime? DrainLeaseExpiresAt { get; set; }
 
     public ICollection<SimulationSession> Sessions { get; set; } = new List<SimulationSession>();
     public ICollection<WorkerCommand> Commands { get; set; } = new List<WorkerCommand>();

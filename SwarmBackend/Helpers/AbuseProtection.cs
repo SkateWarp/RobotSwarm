@@ -9,6 +9,7 @@ public static class AbuseProtection
     public const string AuthenticationPolicy = "account-authentication";
     public const string RegistrationPolicy = "account-registration";
     public const string SessionCreationPolicy = "session-creation";
+    public const string ViewerHlsPolicy = "viewer-hls";
 
     private const int DefaultAuthenticationLimit = 10;
     private const int DefaultAuthenticationWindowSeconds = 60;
@@ -16,6 +17,8 @@ public static class AbuseProtection
     private const int DefaultRegistrationWindowMinutes = 60;
     private const int DefaultSessionCreationLimit = 6;
     private const int DefaultSessionCreationWindowSeconds = 60;
+    private const int DefaultViewerHlsTokenLimit = 120;
+    private const int DefaultViewerHlsTokensPerSecond = 60;
 
     public static IServiceCollection AddAbuseProtection(
         this IServiceCollection services,
@@ -57,6 +60,18 @@ public static class AbuseProtection
             DefaultSessionCreationWindowSeconds,
             10,
             3_600));
+        var viewerHlsTokenLimit = ReadBoundedInt(
+            configuration,
+            "RateLimits:ViewerHls:TokenLimit",
+            DefaultViewerHlsTokenLimit,
+            30,
+            1_000);
+        var viewerHlsTokensPerSecond = ReadBoundedInt(
+            configuration,
+            "RateLimits:ViewerHls:TokensPerSecond",
+            DefaultViewerHlsTokensPerSecond,
+            10,
+            500);
 
         return services.AddRateLimiter(options =>
         {
@@ -76,6 +91,11 @@ public static class AbuseProtection
                     SessionCreationPartitionKey(context),
                     sessionCreationLimit,
                     sessionCreationWindow));
+            options.AddPolicy(ViewerHlsPolicy, context =>
+                TokenBucket(
+                    ViewerHlsPartitionKey(context),
+                    viewerHlsTokenLimit,
+                    viewerHlsTokensPerSecond));
         });
     }
 
@@ -85,6 +105,11 @@ public static class AbuseProtection
     }
 
     internal static string AuthenticationPartitionKey(HttpContext context)
+    {
+        return $"ip:{RegistrationPartitionKey(context)}";
+    }
+
+    internal static string ViewerHlsPartitionKey(HttpContext context)
     {
         return $"ip:{RegistrationPartitionKey(context)}";
     }
@@ -132,6 +157,23 @@ public static class AbuseProtection
                 PermitLimit = permitLimit,
                 QueueLimit = 0,
                 Window = window
+            });
+    }
+
+    private static RateLimitPartition<string> TokenBucket(
+        string partitionKey,
+        int tokenLimit,
+        int tokensPerSecond)
+    {
+        return RateLimitPartition.GetTokenBucketLimiter(
+            partitionKey,
+            _ => new TokenBucketRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                QueueLimit = 0,
+                ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+                TokenLimit = tokenLimit,
+                TokensPerPeriod = tokensPerSecond
             });
     }
 }

@@ -17,7 +17,19 @@ rtsp: true
 rtspTransports: [tcp]
 rtspAddress: :8554
 rtmp: false
-hls: false
+hls: true
+hlsAddress: :8888
+hlsAllowOrigins: ['https://rs.zerav.la']
+hlsAlwaysRemux: false
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 8M
+hlsMuxerCloseAfter: 20s
+# Set at runtime through MTX_HLSCDNSECRET. Requests with this credential are
+# already authorized by the backend and do not use MediaMTX browser cookies.
+hlsCDNSecret: ""
 srt: false
 
 webrtc: true
@@ -30,7 +42,9 @@ webrtcICEServers2: []
 pathDefaults:
   source: publisher
   overridePublisher: false
-  maxReaders: 1
+  # LL-HLS uses one muxer reader and one CDN session reader. The third slot
+  # allows a brief WHEP fallback overlap while the HLS muxer closes.
+  maxReaders: 3
 
 paths:
   all_others:

@@ -1,0 +1,59 @@
+{
+  "approach_observation_seconds": 1.024,
+  "approach_status_samples": 16,
+  "collision_count_delta": 0,
+  "failures": [],
+  "finder": "tb3_1",
+  "moving_sample_ratios": {
+    "tb3_0": 1.0,
+    "tb3_1": 1.0,
+    "tb3_2": 1.0,
+    "tb3_3": 1.0,
+    "tb3_4": 1.0,
+    "tb3_5": 1.0,
+    "tb3_6": 1.0,
+    "tb3_7": 1.0,
+    "tb3_8": 1.0,
+    "tb3_9": 1.0
+  },
+  "notice_count": 1,
+  "notice_received_count": 10,
+  "notified_robots": [
+    "tb3_0",
+    "tb3_2",
+    "tb3_3",
+    "tb3_4",
+    "tb3_5",
+    "tb3_6",
+    "tb3_7",
+    "tb3_8",
+    "tb3_9"
+  ],
+  "passed": true,
+  "responders": {
+    "tb3_0": true,
+    "tb3_2": true,
+    "tb3_3": true,
+    "tb3_4": true,
+    "tb3_5": true,
+    "tb3_6": true,
+    "tb3_7": true,
+    "tb3_8": true,
+    "tb3_9": true
+  },
+  "robot_count": 10,
+  "search_path_length_m": {
+    "tb3_0": 9.9764,
+    "tb3_1": 9.4274,
+    "tb3_2": 9.0325,
+    "tb3_3": 7.8687,
+    "tb3_4": 6.7981,
+    "tb3_5": 9.2031,
+    "tb3_6": 7.2888,
+    "tb3_7": 7.9035,
+    "tb3_8": 10.1385,
+    "tb3_9": 9.5264
+  },
+  "search_samples": 905,
+  "task_id": "search-visible-n10-feasible-080816"
+}

@@ -1,0 +1,1521 @@
+{
+  "acceptance_thresholds": {
+    "follow_lap_timeout_wall_s": null,
+    "linear_acceleration_measurement_window_s": 0.06,
+    "maximum_follow_adjacent_spacing_error_m": 0.25,
+    "maximum_formation_target_error_m": 0.12,
+    "maximum_linear_acceleration_mps2": 1.0,
+    "maximum_linear_speed_mps": 0.35,
+    "minimum_boundary_clearance_m": 0.1,
+    "minimum_follow_completed_laps": null,
+    "minimum_follow_robot_travel_m": 0.25,
+    "minimum_real_time_factor": 2.7,
+    "minimum_robot_center_distance_m": 0.24,
+    "minimum_static_obstacle_clearance_m": 0.13
+  },
+  "behavior": "transport",
+  "behavior_status": {
+    "assembly_routes": {},
+    "batch_publish_span_s": 0.0,
+    "control_commands": {
+      "tb3_0": {
+        "angular": -0.0012036152363607234,
+        "linear": 0.017994747022933914
+      },
+      "tb3_1": {
+        "angular": -0.001982937073172716,
+        "linear": 0.017994747022933914
+      },
+      "tb3_2": {
+        "angular": -0.0019351577194415869,
+        "linear": 0.017994747022933914
+      },
+      "tb3_3": {
+        "angular": -0.0019489875629206729,
+        "linear": 0.017994747022933914
+      },
+      "tb3_4": {
+        "angular": -0.010996392281633315,
+        "linear": 0.017994747022933914
+      },
+      "tb3_5": {
+        "angular": -0.008456025647148351,
+        "linear": 0.017994747022933914
+      },
+      "tb3_6": {
+        "angular": -0.0019066358535264243,
+        "linear": 0.017994747022933914
+      },
+      "tb3_7": {
+        "angular": 0.014370747019987612,
+        "linear": 0.017994747022933914
+      },
+      "tb3_8": {
+        "angular": -0.010864166751565311,
+        "linear": 0.017994747022933914
+      },
+      "tb3_9": {
+        "angular": -0.03694520084566759,
+        "linear": 0.017994747022933914
+      }
+    },
+    "control_sequence": 175,
+    "control_sim_time": 605.172,
+    "discovery": {
+      "announced": true,
+      "distance": 0.7,
+      "event": "payload_found",
+      "event_id": "accept-transport_grf_n10-eb960a75:payload-found",
+      "finder": "tb3_1",
+      "notified_robots": [
+        "tb3_0",
+        "tb3_2",
+        "tb3_3",
+        "tb3_4",
+        "tb3_5",
+        "tb3_6",
+        "tb3_7",
+        "tb3_8",
+        "tb3_9"
+      ],
+      "object_position": {
+        "x": -0.8,
+        "y": -1.6
+      },
+      "sim_time": 171.708,
+      "task_id": "accept-transport_grf_n10-eb960a75"
+    },
+    "distance_to_target": 0.478,
+    "engagement_complete": true,
+    "grf_mcmc_iterations": 12,
+    "paused": false,
+    "phase": "DONE",
+    "planner": "grf",
+    "push_arbitration": {
+      "coordinated_linear": {
+        "tb3_0": 0.017994747022933914,
+        "tb3_1": 0.017994747022933914,
+        "tb3_2": 0.017994747022933914,
+        "tb3_3": 0.017994747022933914,
+        "tb3_4": 0.017994747022933914,
+        "tb3_5": 0.017994747022933914,
+        "tb3_6": 0.017994747022933914,
+        "tb3_7": 0.017994747022933914,
+        "tb3_8": 0.017994747022933914,
+        "tb3_9": 0.017994747022933914
+      },
+      "hard_stop_sources": [],
+      "links": {
+        "tb3_2": {
+          "error": 2.611556142792515e-05,
+          "gap": 0.1400261155614279,
+          "state": "nominal"
+        },
+        "tb3_3": {
+          "error": -3.4434067753968955e-05,
+          "gap": 0.13996556593224602,
+          "state": "nominal"
+        },
+        "tb3_4": {
+          "error": 0.0003336912570084394,
+          "gap": 0.14033369125700842,
+          "state": "nominal"
+        },
+        "tb3_5": {
+          "error": -0.0002870558029486048,
+          "gap": 0.13971294419705138,
+          "state": "nominal"
+        },
+        "tb3_6": {
+          "error": -3.987789581638701e-05,
+          "gap": 0.1399601221041836,
+          "state": "nominal"
+        },
+        "tb3_7": {
+          "error": 0.00033909376695787086,
+          "gap": 0.14033909376695786,
+          "state": "nominal"
+        },
+        "tb3_8": {
+          "error": -0.00023994201421850825,
+          "gap": 0.13976005798578148,
+          "state": "nominal"
+        },
+        "tb3_9": {
+          "error": 0.0014366223370093634,
+          "gap": 0.14143662233700935,
+          "state": "nominal"
+        }
+      },
+      "raw_linear": {
+        "tb3_0": 0.018,
+        "tb3_1": 0.018,
+        "tb3_2": 0.018,
+        "tb3_3": 0.017999981791923136,
+        "tb3_4": 0.017998498615242768,
+        "tb3_5": 0.018,
+        "tb3_6": 0.018,
+        "tb3_7": 0.017996610360304203,
+        "tb3_8": 0.017994747022933914,
+        "tb3_9": 0.018
+      }
+    },
+    "push_reference_speed": 0.018,
+    "robot_assignments": {
+      "tb3_0": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": false,
+        "chain_depth": 0,
+        "chain_index": 1,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": null,
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "payload_push",
+        "staged": true,
+        "staging_target": {
+          "x": -0.98,
+          "y": -1.107
+        },
+        "x": -0.978,
+        "y": -2.283,
+        "yaw": -1.572
+      },
+      "tb3_1": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": false,
+        "chain_depth": 0,
+        "chain_index": 0,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": true,
+        "notice_received": true,
+        "parent_namespace": null,
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "payload_push",
+        "staged": true,
+        "staging_target": {
+          "x": -0.62,
+          "y": -1.107
+        },
+        "x": -0.615,
+        "y": -2.284,
+        "yaw": -1.576
+      },
+      "tb3_2": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 2,
+        "chain_index": 0,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_3",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -0.28,
+          "y": -0.347
+        },
+        "x": -0.615,
+        "y": -2.004,
+        "yaw": -1.576
+      },
+      "tb3_3": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 1,
+        "chain_index": 0,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_1",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -0.28,
+          "y": -0.727
+        },
+        "x": -0.614,
+        "y": -2.144,
+        "yaw": -1.576
+      },
+      "tb3_4": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 2,
+        "chain_index": 1,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_5",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -1.32,
+          "y": -0.347
+        },
+        "x": -0.981,
+        "y": -2.003,
+        "yaw": -1.572
+      },
+      "tb3_5": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 1,
+        "chain_index": 1,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_0",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -1.32,
+          "y": -0.727
+        },
+        "x": -0.982,
+        "y": -2.143,
+        "yaw": -1.572
+      },
+      "tb3_6": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 3,
+        "chain_index": 0,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_2",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -0.28,
+          "y": 0.033
+        },
+        "x": -0.616,
+        "y": -1.864,
+        "yaw": -1.576
+      },
+      "tb3_7": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 4,
+        "chain_index": 0,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_6",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -0.28,
+          "y": 0.413
+        },
+        "x": -0.616,
+        "y": -1.723,
+        "yaw": -1.574
+      },
+      "tb3_8": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 3,
+        "chain_index": 1,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_4",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -1.32,
+          "y": 0.033
+        },
+        "x": -0.978,
+        "y": -1.863,
+        "yaw": -1.572
+      },
+      "tb3_9": {
+        "activity": "delivery_complete",
+        "aligned_engaged": true,
+        "assembly_released": true,
+        "chain_depth": 4,
+        "chain_index": 1,
+        "command": {
+          "angular": 0.0,
+          "linear": 0.0
+        },
+        "engaged": true,
+        "finder": false,
+        "notice_received": true,
+        "parent_namespace": "tb3_8",
+        "physical_engaged": true,
+        "pre_staged": true,
+        "rendezvous_ready": true,
+        "role": "companion_push",
+        "staged": true,
+        "staging_target": {
+          "x": -1.32,
+          "y": 0.413
+        },
+        "x": -0.979,
+        "y": -1.722,
+        "yaw": -1.558
+      }
+    },
+    "route_complete": true,
+    "route_kind": "rendezvous",
+    "route_robot": "tb3_5",
+    "synchronized_push_started": true,
+    "task_id": "accept-transport_grf_n10-eb960a75"
+  },
+  "collision_count_delta": 0,
+  "collision_episode_attribution": {
+    "aggregate_collision_count_delta": 0,
+    "aggregate_count_matched": true,
+    "attribution_corroborated": true,
+    "correlated_status_samples": 4345,
+    "episode_count_by_robot": {},
+    "missing_robot_ids": [],
+    "observed_episode_count": 0,
+    "reason": "complete-roster rising edges matched the authoritative aggregate episode delta",
+    "robots_with_observed_episodes": [],
+    "source": "/swarm/status robots[].collision rising edges",
+    "unattributed_episode_count": 0
+  },
+  "contact_episode_classification": {
+    "classification": "none",
+    "classification_basis": "aggregate_ground_truth_and_declared_transport_contacts",
+    "classification_is_inferred": true,
+    "classified_expected_contact_count_delta": 0,
+    "classified_unexpected_contact_count_delta": 0,
+    "clearance_limits_m": {
+      "minimum_boundary_clearance_m": 0.1,
+      "minimum_declared_chain_center_distance_m": 0.12,
+      "minimum_static_obstacle_clearance_m": 0.13,
+      "minimum_unexpected_robot_center_distance_m": 0.24
+    },
+    "clearance_measurements_m": {
+      "minimum_boundary_clearance_m": 2.7155,
+      "minimum_declared_chain_center_distance_m": 0.14,
+      "minimum_static_obstacle_clearance_m": 0.3119,
+      "minimum_unexpected_robot_center_distance_m": 0.28
+    },
+    "counter_metric": "per_robot_geometric_contact_episodes",
+    "crossed_clearance_limits": [],
+    "expected_contact_robots": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "hard_failure": false,
+    "missing_clearance_measurements": [],
+    "missing_expected_contact_robots": [],
+    "raw_collision_count_delta": 0,
+    "reasons": [
+      "the raw contact counter did not increase"
+    ],
+    "unexpected_robot_pair_measurement_required": true
+  },
+  "expected_contact_count_delta": 0,
+  "failures": [],
+  "metrics": {
+    "correlated_behavior_samples": 18001,
+    "follow_chain": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "follow_final_adjacent_spacing_error_summary_m": {
+      "max": null,
+      "mean": null,
+      "p95": null,
+      "samples": 0
+    },
+    "follow_final_adjacent_spacing_m": {
+      "tb3_0->tb3_1": 0.363,
+      "tb3_1->tb3_2": 0.2803,
+      "tb3_2->tb3_3": 0.14,
+      "tb3_3->tb3_4": 0.393,
+      "tb3_4->tb3_5": 0.14,
+      "tb3_5->tb3_6": 0.461,
+      "tb3_6->tb3_7": 0.1402,
+      "tb3_7->tb3_8": 0.3882,
+      "tb3_8->tb3_9": 0.141
+    },
+    "follow_target_spacing_m": null,
+    "formation_final_target_error_m": {},
+    "formation_final_target_error_summary_m": {
+      "max": null,
+      "mean": null,
+      "p95": null,
+      "samples": 0
+    },
+    "formation_missing_final_targets": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "instantaneous_linear_acceleration_mps2": {
+      "max": 0.9872,
+      "mean": 0.0409,
+      "p95": 0.1645,
+      "samples": 180270
+    },
+    "linear_acceleration_mps2": {
+      "max": 0.7068,
+      "mean": 0.0212,
+      "p95": 0.0882,
+      "samples": 180250
+    },
+    "linear_speed_mps": {
+      "max": 0.165,
+      "mean": 0.0082,
+      "p95": 0.0202,
+      "samples": 180280
+    },
+    "maximum_instantaneous_acceleration_event": {
+      "dt_s": 0.024,
+      "phase": "PUSH",
+      "previous_velocity_mps": [
+        0.0009,
+        -0.0121
+      ],
+      "robot": "tb3_4",
+      "sim_time_s": 552.192,
+      "value_mps2": 0.9872,
+      "velocity_mps": [
+        0.0021,
+        0.0115
+      ]
+    },
+    "maximum_linear_acceleration_event": {
+      "phase": "APPROACH",
+      "previous_velocity_mps": [
+        0.0023,
+        -0.0329
+      ],
+      "robot": "tb3_0",
+      "sim_time_s": 252.624,
+      "value_mps2": 0.7068,
+      "velocity_mps": [
+        -0.0012,
+        0.0179
+      ],
+      "window_s": 0.072
+    },
+    "minimum_boundary_clearance_m": 2.7155,
+    "minimum_declared_chain_center_distance_m": 0.14,
+    "minimum_declared_chain_center_event": {
+      "distance_m": 0.14,
+      "pair": [
+        "tb3_1",
+        "tb3_3"
+      ],
+      "phase": "PUSH",
+      "sim_time_s": 579.612
+    },
+    "minimum_declared_chain_center_pair": [
+      "tb3_1",
+      "tb3_3"
+    ],
+    "minimum_robot_center_distance_m": 0.14,
+    "minimum_robot_center_pair": [
+      "tb3_1",
+      "tb3_3"
+    ],
+    "minimum_static_obstacle_clearance_m": 0.3119,
+    "minimum_static_obstacle_pair": [
+      "tb3_3",
+      "wall_3"
+    ],
+    "minimum_unexpected_robot_center_distance_m": 0.28,
+    "minimum_unexpected_robot_center_event": {
+      "distance_m": 0.28,
+      "pair": [
+        "tb3_1",
+        "tb3_2"
+      ],
+      "phase": "PUSH",
+      "sim_time_s": 579.612
+    },
+    "minimum_unexpected_robot_center_pair": [
+      "tb3_1",
+      "tb3_2"
+    ],
+    "model_samples": 18028,
+    "object_best_goal_distance_m": 0.4776,
+    "object_displacement_m": 0.9224,
+    "object_final_goal_distance_m": 0.4776,
+    "object_final_xy": [
+      -0.7982,
+      -2.5224
+    ],
+    "object_final_yaw_rad": -0.001,
+    "object_goal_progress_efficiency": 0.9997,
+    "object_goal_progress_m": 0.9224,
+    "object_initial_goal_distance_m": 1.4,
+    "object_initial_xy": [
+      -0.8,
+      -1.6
+    ],
+    "object_initial_yaw_rad": -0.0,
+    "object_path_length_m": 0.9226,
+    "real_time_factor": 2.9505,
+    "robot_displacement_m": {
+      "tb3_0": 1.6087,
+      "tb3_1": 1.3966,
+      "tb3_2": 1.3735,
+      "tb3_3": 2.2015,
+      "tb3_4": 2.257,
+      "tb3_5": 2.2514,
+      "tb3_6": 2.1274,
+      "tb3_7": 2.5748,
+      "tb3_8": 3.0755,
+      "tb3_9": 2.8287
+    },
+    "robot_travel_m": {
+      "tb3_0": 3.0151,
+      "tb3_1": 2.9981,
+      "tb3_2": 3.2792,
+      "tb3_3": 4.0733,
+      "tb3_4": 2.9383,
+      "tb3_5": 3.9576,
+      "tb3_6": 3.1485,
+      "tb3_7": 4.3816,
+      "tb3_8": 3.8012,
+      "tb3_9": 3.6312
+    },
+    "simulated_duration_s": 434.46,
+    "transport_active_push_latched": true,
+    "transport_all_nominal_pace_fraction": 0.1657,
+    "transport_all_nominal_pace_samples": 29,
+    "transport_all_nominal_pace_warning": true,
+    "transport_all_reference_pace_fraction": 0.1657,
+    "transport_all_reference_pace_samples": 29,
+    "transport_all_useful_batch_fraction": 0.64,
+    "transport_all_useful_fraction": 0.5883,
+    "transport_all_useful_samples": 112,
+    "transport_discovery_response": {
+      "announced_sim_time_s": 171.708,
+      "event_id": "accept-transport_grf_n10-eb960a75:payload-found",
+      "finder": "tb3_1",
+      "minimum_payload_root_path_length_m": 0.03,
+      "minimum_rendezvous_path_length_m": 0.1,
+      "missing_notice_recipients": [],
+      "missing_status_acknowledgements": [],
+      "motion_detection_distance_m": 0.01,
+      "moving_speed_threshold_mps": 0.02,
+      "notice_observed": true,
+      "notice_recipients": [
+        "tb3_0",
+        "tb3_1",
+        "tb3_2",
+        "tb3_3",
+        "tb3_4",
+        "tb3_5",
+        "tb3_6",
+        "tb3_7",
+        "tb3_8",
+        "tb3_9"
+      ],
+      "notified_robots": [
+        "tb3_0",
+        "tb3_2",
+        "tb3_3",
+        "tb3_4",
+        "tb3_5",
+        "tb3_6",
+        "tb3_7",
+        "tb3_8",
+        "tb3_9"
+      ],
+      "notified_robots_below_required_travel": [],
+      "observed_sim_time_s": 171.72,
+      "peak_simultaneous_mover_fraction": 1.0,
+      "peak_simultaneous_mover_names": [
+        "tb3_0",
+        "tb3_1",
+        "tb3_2",
+        "tb3_3",
+        "tb3_4",
+        "tb3_5",
+        "tb3_6",
+        "tb3_7",
+        "tb3_8",
+        "tb3_9"
+      ],
+      "peak_simultaneous_movers": 10,
+      "rendezvous_motion_samples": 10943,
+      "robots": {
+        "tb3_0": {
+          "discovery_to_motion_latency_s": 0.516,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 0.8493,
+          "pre_push_path_length_m": 1.8467,
+          "required_pre_push_path_length_m": 0.03,
+          "role": "payload_push",
+          "status_acknowledged": true
+        },
+        "tb3_1": {
+          "discovery_to_motion_latency_s": 1.524,
+          "finder": true,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": false,
+          "pre_push_displacement_m": 0.2785,
+          "pre_push_path_length_m": 1.8206,
+          "required_pre_push_path_length_m": 0.03,
+          "role": "payload_push",
+          "status_acknowledged": true
+        },
+        "tb3_2": {
+          "discovery_to_motion_latency_s": 1.596,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 0.8211,
+          "pre_push_path_length_m": 2.0969,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_3": {
+          "discovery_to_motion_latency_s": 1.62,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.8172,
+          "pre_push_path_length_m": 2.8949,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_4": {
+          "discovery_to_motion_latency_s": 1.188,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.2378,
+          "pre_push_path_length_m": 1.7595,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_5": {
+          "discovery_to_motion_latency_s": 1.692,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.0876,
+          "pre_push_path_length_m": 2.7801,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_6": {
+          "discovery_to_motion_latency_s": 1.716,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.1348,
+          "pre_push_path_length_m": 1.9666,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_7": {
+          "discovery_to_motion_latency_s": 1.62,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.9301,
+          "pre_push_path_length_m": 3.1964,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_8": {
+          "discovery_to_motion_latency_s": 1.572,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.9677,
+          "pre_push_path_length_m": 2.6189,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        },
+        "tb3_9": {
+          "discovery_to_motion_latency_s": 1.716,
+          "finder": false,
+          "met_pre_push_path_requirement": true,
+          "motion_detected": true,
+          "notice_recipient": true,
+          "notified": true,
+          "pre_push_displacement_m": 1.6528,
+          "pre_push_path_length_m": 2.4445,
+          "required_pre_push_path_length_m": 0.1,
+          "role": "companion_push",
+          "status_acknowledged": true
+        }
+      },
+      "robots_below_required_travel": [],
+      "robots_not_observed_moving_during_search": [
+        "tb3_0",
+        "tb3_1",
+        "tb3_2",
+        "tb3_3",
+        "tb3_4",
+        "tb3_5",
+        "tb3_6",
+        "tb3_7",
+        "tb3_8",
+        "tb3_9"
+      ],
+      "robots_observed_moving_during_search": [],
+      "search_motion_samples": 0,
+      "search_motion_window_supported": false,
+      "simultaneous_motion_window_supported": true,
+      "status_acknowledged_robots": [
+        "tb3_0",
+        "tb3_1",
+        "tb3_2",
+        "tb3_3",
+        "tb3_4",
+        "tb3_5",
+        "tb3_6",
+        "tb3_7",
+        "tb3_8",
+        "tb3_9"
+      ],
+      "status_acknowledgement_available": true
+    },
+    "transport_distinct_control_batches": 175,
+    "transport_duplicate_control_status_samples": 3982,
+    "transport_first_connection_loss": null,
+    "transport_grf_samples": 175,
+    "transport_last_control_sequence": 175,
+    "transport_last_control_sim_time_s": 605.172,
+    "transport_maximum_continuous_all_nominal_pace_s": 0.6,
+    "transport_maximum_continuous_all_nominal_pace_samples": 2,
+    "transport_maximum_continuous_all_useful_s": 4.2,
+    "transport_maximum_continuous_all_useful_samples": 8,
+    "transport_nominal_pace_warning_robots": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "transport_participation": {
+      "tb3_0": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0163,
+          "mean": 0.0069,
+          "p95": 0.0143,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 0.0,
+        "companion_contact_samples": 0,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.6498,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [],
+        "declared_samples": 175,
+        "direct_contact_fraction": 1.0,
+        "direct_contact_samples": 175,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 7.272,
+        "maximum_continuous_useful_pushing_samples": 14,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.7143,
+        "push_intent_samples": 125,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "payload_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0217,
+          "mean": 0.0093,
+          "p95": 0.0191,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.7143,
+        "useful_pushing_fraction": 0.7047,
+        "useful_pushing_samples": 125
+      },
+      "tb3_1": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0163,
+          "mean": 0.0069,
+          "p95": 0.0143,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 0.0,
+        "companion_contact_samples": 0,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.6498,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [],
+        "declared_samples": 175,
+        "direct_contact_fraction": 1.0,
+        "direct_contact_samples": 175,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 7.272,
+        "maximum_continuous_useful_pushing_samples": 14,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.7143,
+        "push_intent_samples": 125,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "payload_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0217,
+          "mean": 0.0093,
+          "p95": 0.0191,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.7143,
+        "useful_pushing_fraction": 0.7047,
+        "useful_pushing_samples": 125
+      },
+      "tb3_2": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0137,
+          "mean": 0.0066,
+          "p95": 0.0127,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.711,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_3"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 8.016,
+        "maximum_continuous_useful_pushing_samples": 15,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.7886,
+        "push_intent_samples": 138,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0183,
+          "mean": 0.0091,
+          "p95": 0.0169,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.7886,
+        "useful_pushing_fraction": 0.7712,
+        "useful_pushing_samples": 138
+      },
+      "tb3_3": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0139,
+          "mean": 0.0067,
+          "p95": 0.0125,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.7002,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_1"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 8.016,
+        "maximum_continuous_useful_pushing_samples": 15,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.7771,
+        "push_intent_samples": 136,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0185,
+          "mean": 0.0092,
+          "p95": 0.0167,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.7771,
+        "useful_pushing_fraction": 0.7595,
+        "useful_pushing_samples": 136
+      },
+      "tb3_4": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0144,
+          "mean": 0.0066,
+          "p95": 0.0126,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.7079,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_5"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 8.016,
+        "maximum_continuous_useful_pushing_samples": 15,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.7829,
+        "push_intent_samples": 137,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0191,
+          "mean": 0.0092,
+          "p95": 0.0169,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.7829,
+        "useful_pushing_fraction": 0.7678,
+        "useful_pushing_samples": 137
+      },
+      "tb3_5": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0142,
+          "mean": 0.0066,
+          "p95": 0.0128,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.7006,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_0"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 8.016,
+        "maximum_continuous_useful_pushing_samples": 15,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.7829,
+        "push_intent_samples": 137,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.019,
+          "mean": 0.0092,
+          "p95": 0.017,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.7829,
+        "useful_pushing_fraction": 0.7599,
+        "useful_pushing_samples": 137
+      },
+      "tb3_6": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0142,
+          "mean": 0.0066,
+          "p95": 0.0128,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.7398,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_2"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 8.016,
+        "maximum_continuous_useful_pushing_samples": 15,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.8057,
+        "push_intent_samples": 141,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0189,
+          "mean": 0.0092,
+          "p95": 0.017,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.8057,
+        "useful_pushing_fraction": 0.8024,
+        "useful_pushing_samples": 141
+      },
+      "tb3_7": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0138,
+          "mean": 0.0064,
+          "p95": 0.0122,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.0192,
+          "mean": 0.0098,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.7667,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_6"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 1.14,
+        "maximum_continuous_nominal_pace_samples": 3,
+        "maximum_continuous_useful_pushing_s": 20.256,
+        "maximum_continuous_useful_pushing_samples": 35,
+        "nominal_pace_intent_samples": 33,
+        "nominal_pace_pushing_fraction": 0.1886,
+        "nominal_pace_pushing_samples": 33,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.8229,
+        "push_intent_samples": 144,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1886,
+        "reference_pace_intent_samples": 33,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0184,
+          "mean": 0.0088,
+          "p95": 0.0163,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.8229,
+        "useful_pushing_fraction": 0.8316,
+        "useful_pushing_samples": 144
+      },
+      "tb3_8": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0138,
+          "mean": 0.0065,
+          "p95": 0.013,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.018,
+          "mean": 0.0095,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.7482,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_4"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 0.6,
+        "maximum_continuous_nominal_pace_samples": 2,
+        "maximum_continuous_useful_pushing_s": 10.596,
+        "maximum_continuous_useful_pushing_samples": 19,
+        "nominal_pace_intent_samples": 29,
+        "nominal_pace_pushing_fraction": 0.1657,
+        "nominal_pace_pushing_samples": 29,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.8114,
+        "push_intent_samples": 142,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.1657,
+        "reference_pace_intent_samples": 29,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0184,
+          "mean": 0.009,
+          "p95": 0.0173,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.8114,
+        "useful_pushing_fraction": 0.8115,
+        "useful_pushing_samples": 142
+      },
+      "tb3_9": {
+        "adaptive_contribution_threshold_mps": {
+          "max": 0.0136,
+          "mean": 0.0065,
+          "p95": 0.0122,
+          "samples": 175
+        },
+        "command_goal_speed_mps": {
+          "max": 0.022,
+          "mean": 0.0113,
+          "p95": 0.018,
+          "samples": 175
+        },
+        "companion_contact_fraction": 1.0,
+        "companion_contact_samples": 175,
+        "connected_fraction": 1.0,
+        "connected_samples": 175,
+        "contributed_positive_goal_progress_m": 0.8208,
+        "declared_fraction": 1.0,
+        "declared_parent_namespaces": [
+          "tb3_8"
+        ],
+        "declared_samples": 175,
+        "direct_contact_fraction": 0.0,
+        "direct_contact_samples": 0,
+        "maximum_continuous_nominal_pace_s": 1.704,
+        "maximum_continuous_nominal_pace_samples": 4,
+        "maximum_continuous_useful_pushing_s": 22.932,
+        "maximum_continuous_useful_pushing_samples": 40,
+        "nominal_pace_intent_samples": 39,
+        "nominal_pace_pushing_fraction": 0.2229,
+        "nominal_pace_pushing_samples": 39,
+        "nominal_pace_warning": true,
+        "push_intent_fraction": 0.9314,
+        "push_intent_samples": 163,
+        "push_phase_samples": 175,
+        "reference_pace_intent_fraction": 0.2229,
+        "reference_pace_intent_samples": 39,
+        "role": "companion_push",
+        "role_reference_goal_speed_mps": {
+          "max": 0.0182,
+          "mean": 0.0089,
+          "p95": 0.0163,
+          "samples": 175
+        },
+        "useful_pushing_batch_fraction": 0.9314,
+        "useful_pushing_fraction": 0.8903,
+        "useful_pushing_samples": 163
+      }
+    },
+    "transport_positive_control_goal_progress_m": 0.922,
+    "transport_pre_active_object_displacement_m": 0.0,
+    "transport_push_goal_progress_efficiency": 0.9997,
+    "transport_push_goal_progress_m": 0.922,
+    "transport_push_object_final_xy": [
+      -0.7982,
+      -2.522
+    ],
+    "transport_push_object_initial_xy": [
+      -0.8,
+      -1.6
+    ],
+    "transport_push_object_path_length_m": 0.9222,
+    "transport_push_phase_samples": 175,
+    "transport_reference_pace_samples": 175,
+    "wall_duration_s": 147.2481
+  },
+  "passed": true,
+  "pre_spawn_cleanup": {
+    "departed_robot_ids": [],
+    "fleet_roster_empty": true,
+    "gazebo_departed_models_remaining": [],
+    "harness_cmd_vel_subscribers_remaining": [],
+    "harness_cmd_velocity_entries_remaining": []
+  },
+  "robot_count": 10,
+  "scenario": "transport_grf_n10",
+  "spawn_pattern": "grid",
+  "task": {
+    "error": null,
+    "progress": 1.0,
+    "result": {
+      "transport": {
+        "discovery": {
+          "announced": true,
+          "distance": 0.7,
+          "event": "payload_found",
+          "event_id": "accept-transport_grf_n10-eb960a75:payload-found",
+          "finder": "tb3_1",
+          "notified_robots": [
+            "tb3_0",
+            "tb3_2",
+            "tb3_3",
+            "tb3_4",
+            "tb3_5",
+            "tb3_6",
+            "tb3_7",
+            "tb3_8",
+            "tb3_9"
+          ],
+          "object_position": {
+            "x": -0.8,
+            "y": -1.6
+          },
+          "sim_time": 171.708,
+          "task_id": "accept-transport_grf_n10-eb960a75"
+        },
+        "phase": "DONE",
+        "searching_robot_count": 0
+      }
+    },
+    "status": "completed",
+    "task_id": "accept-transport_grf_n10-eb960a75",
+    "task_type": "transport"
+  },
+  "task_id": "accept-transport_grf_n10-eb960a75",
+  "task_outcome": "completed",
+  "transport_acceptance_thresholds": {
+    "cmd_vel_max_wall_age_s": 0.75,
+    "cmd_vel_min_forward_speed_mps": 0.015,
+    "cmd_vel_min_goal_alignment_cosine": 0.5,
+    "companion_center_distance_m": 0.16,
+    "contribution_definition": "connected role-directed control tracking the payload or parent goal velocity",
+    "contribution_goal_velocity_noise_floor_mps": 0.003,
+    "contribution_goal_velocity_tolerance_mps": 0.003,
+    "contribution_minimum_tracking_fraction": 0.75,
+    "contribution_policy": "hard_gate",
+    "direct_payload_surface_clearance_m": 0.075,
+    "maximum_control_sample_gap_s": 1.0,
+    "maximum_pre_active_payload_motion_m": 0.05,
+    "minimum_chain_center_distance_m": 0.12,
+    "minimum_continuous_useful_push_s": 0.75,
+    "minimum_continuous_useful_push_samples": 5,
+    "minimum_goal_progress_efficiency": 0.5,
+    "minimum_goal_progress_m": 0.55,
+    "minimum_grf_samples": 5,
+    "minimum_motion_window_samples_for_gate": 3,
+    "minimum_notified_robot_rendezvous_travel_m": 0.1,
+    "minimum_payload_root_rendezvous_travel_m": 0.03,
+    "minimum_rearward_goal_projection_m": 0.05,
+    "minimum_simultaneous_all_robot_push_fraction": 0.5,
+    "minimum_simultaneous_search_or_rendezvous_movers": 10,
+    "minimum_useful_push_fraction": 0.5,
+    "nominal_pace_min_forward_speed_mps": 0.015,
+    "nominal_pace_policy": "warning",
+    "published_reference_pace_policy": "warning",
+    "rendezvous_motion_detection_distance_m": 0.01,
+    "rendezvous_moving_speed_mps": 0.02,
+    "simultaneous_all_robot_push_fraction_basis": "distinct coherent control batches",
+    "simultaneous_positive_progress_policy": "warning"
+  },
+  "unexpected_contact_count_delta": 0,
+  "warnings": [
+    "connected contribution fell below the nominal 0.015 m/s pace for: tb3_0, tb3_1, tb3_2, tb3_3, tb3_4, tb3_5, tb3_6, tb3_7, tb3_8, tb3_9",
+    "the complete fleet did not sustain the nominal fixed pace in one simultaneous control window",
+    "the complete fleet tracked the published push reference for less than 50% of measured control batches"
+  ]
+}

@@ -76,9 +76,12 @@ public class DataContext : DbContext
             entity.Property(worker => worker.Name).HasMaxLength(100);
             entity.Property(worker => worker.ImageVersion).HasMaxLength(200);
             entity.Property(worker => worker.CredentialHash).HasMaxLength(64);
+            entity.Property(worker => worker.DrainTargetRevision).HasMaxLength(40);
+            entity.Property(worker => worker.DrainLeaseId).IsConcurrencyToken();
             entity.Property(worker => worker.Capabilities).HasColumnType("jsonb");
             entity.HasIndex(worker => worker.Name).IsUnique();
             entity.HasIndex(worker => new { worker.State, worker.LastHeartbeatAt });
+            entity.HasIndex(worker => worker.DrainLeaseId).IsUnique();
         });
 
         modelBuilder.Entity<SimulationSession>(entity =>
@@ -119,13 +122,16 @@ public class DataContext : DbContext
 
         modelBuilder.Entity<TaskRun>(entity =>
         {
+            entity.Property(task => task.State).IsConcurrencyToken();
             entity.Property(task => task.Parameters).HasColumnType("jsonb");
             entity.Property(task => task.Result).HasColumnType("jsonb");
             entity.Property(task => task.Error).HasMaxLength(4000);
+            entity.Property(task => task.OutcomeReason).HasMaxLength(4000);
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_TaskRuns_Progress_Range",
                 "\"Progress\" >= 0 AND \"Progress\" <= 1"));
             entity.HasIndex(task => new { task.SimulationSessionId, task.CreatedAt });
+            entity.HasIndex(task => new { task.State, task.LastProgressAt });
             entity.HasOne(task => task.SimulationSession)
                 .WithMany(session => session.TaskRuns)
                 .HasForeignKey(task => task.SimulationSessionId)
@@ -134,6 +140,7 @@ public class DataContext : DbContext
 
         modelBuilder.Entity<WorkerCommand>(entity =>
         {
+            entity.Property(command => command.State).IsConcurrencyToken();
             entity.Property(command => command.IdempotencyKey).HasMaxLength(200);
             entity.Property(command => command.Payload).HasColumnType("jsonb");
             entity.Property(command => command.Result).HasColumnType("jsonb");

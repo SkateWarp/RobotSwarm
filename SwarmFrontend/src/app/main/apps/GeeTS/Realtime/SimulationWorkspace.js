@@ -15,6 +15,7 @@ import {
     Typography,
 } from "@mui/material";
 import SimulationSessionService from "../../../../../services/SimulationSessionService";
+import HlsViewer from "./HlsViewer";
 import SwarmTaskPanel from "./SwarmTaskPanel";
 import WhepViewer from "./WhepViewer";
 
@@ -39,8 +40,8 @@ const requestMessage = (requestError, fallback) => {
 const viewerPlaceholder = (lease, session, cleanupPending) => {
     if (lease) {
         return {
-            title: "The viewer route is not commissioned yet",
-            body: "The lease is valid, but the public WebRTC route or GPU publisher still needs to be configured.",
+            title: "The private viewer is not available yet",
+            body: "The lease is valid, but this deployment has not enabled a video transport.",
         };
     }
     if (session) {
@@ -71,6 +72,7 @@ function SimulationWorkspace() {
     const [viewerSource, setViewerSource] = useState("Scene");
     const [viewerRobotId, setViewerRobotId] = useState("");
     const [viewerLease, setViewerLease] = useState(null);
+    const [hlsUnavailable, setHlsUnavailable] = useState(false);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
@@ -98,6 +100,7 @@ function SimulationWorkspace() {
         activeSession?.state === "Ready" && !tasks.some((task) => !TERMINAL_TASK_STATES.has(task.state))
     );
     const viewerPrompt = viewerPlaceholder(viewerLease, activeSession, Boolean(cleanupSession));
+    const useWhepFallback = useCallback(() => setHlsUnavailable(true), []);
 
     const refreshSessions = useCallback(async () => {
         try {
@@ -172,6 +175,10 @@ function SimulationWorkspace() {
             setViewerLease(null);
         }
     }, [canControl]);
+
+    useEffect(() => {
+        setHlsUnavailable(false);
+    }, [viewerLease?.token]);
 
     useEffect(() => {
         if (!activeSessionId) return undefined;
@@ -308,6 +315,7 @@ function SimulationWorkspace() {
                 viewerSource,
                 viewerSource === "RobotCamera" ? viewerRobotId : null
             );
+            setHlsUnavailable(false);
             setViewerLease(lease);
         } catch (requestError) {
             setError(requestMessage(requestError, "The private viewer could not be opened."));
@@ -315,6 +323,33 @@ function SimulationWorkspace() {
             setSubmitting(false);
         }
     };
+
+    let viewerContent = (
+        <Box sx={{ px: 4 }}>
+            <Typography variant="h6" sx={{ mb: 1 }}>
+                {viewerPrompt.title}
+            </Typography>
+            <Typography variant="body2">{viewerPrompt.body}</Typography>
+        </Box>
+    );
+    if (viewerLease?.hlsUrl && viewerLease.token && !hlsUnavailable) {
+        viewerContent = (
+            <HlsViewer
+                url={viewerLease.hlsUrl}
+                token={viewerLease.token}
+                expiresAt={viewerLease.expiresAt}
+                onUnavailable={viewerLease.signalingUrl ? useWhepFallback : undefined}
+            />
+        );
+    } else if (viewerLease?.signalingUrl && viewerLease.token) {
+        viewerContent = (
+            <WhepViewer
+                url={viewerLease.signalingUrl}
+                token={viewerLease.token}
+                expiresAt={viewerLease.expiresAt}
+            />
+        );
+    }
 
     if (loading) {
         return (
@@ -404,20 +439,7 @@ function SimulationWorkspace() {
                                 textAlign: "center",
                             }}
                         >
-                            {viewerLease?.signalingUrl && viewerLease.token ? (
-                                <WhepViewer
-                                    url={viewerLease.signalingUrl}
-                                    token={viewerLease.token}
-                                    expiresAt={viewerLease.expiresAt}
-                                />
-                            ) : (
-                                <Box sx={{ px: 4 }}>
-                                    <Typography variant="h6" sx={{ mb: 1 }}>
-                                        {viewerPrompt.title}
-                                    </Typography>
-                                    <Typography variant="body2">{viewerPrompt.body}</Typography>
-                                </Box>
-                            )}
+                            {viewerContent}
                         </Box>
                     </Paper>
                 </Grid>

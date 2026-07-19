@@ -54,6 +54,20 @@ public sealed class WorkerCapabilityBuilderTests
                 .GetString());
     }
 
+    [Fact]
+    public void AdvertisesTheCorrelatedTransportEvidenceContract()
+    {
+        var capabilities = WorkerCapabilityBuilder.Build(
+            Options(),
+            ViewerPublisherAvailability.Unavailable("not installed"));
+
+        Assert.Equal(
+            1,
+            capabilities.GetProperty("taskOutcomes")
+                .GetProperty("collaborativeTransportEvidenceVersion")
+                .GetInt32());
+    }
+
     private static WorkerOptions Options() =>
         new()
         {

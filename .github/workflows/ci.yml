@@ -15,6 +15,63 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Validate serialized production deployment and rollback guards
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          workflows = [
+              Path(".github/workflows/backend_workflow.yml"),
+              Path(".github/workflows/gpu_worker_workflow.yml"),
+          ]
+          for path in workflows:
+              text = path.read_text(encoding="utf-8")
+              if not re.search(
+                  r"(?m)^concurrency:\n  group: production-robotswarm\n"
+                  r"  cancel-in-progress: false$",
+                  text,
+              ):
+                  raise SystemExit(
+                      f"{path} does not use the shared production deployment lock."
+                  )
+
+          backend = workflows[0].read_text(encoding="utf-8")
+          required = (
+              "Snapshot current media configuration",
+              "robotswarm-production-rollback",
+              "Restoring the MediaMTX configuration",
+              "MEDIA_IMAGE=\"$(cat \"$rollback_dir/media-image\")\"",
+              "docker inspect media_prod --format '{{.Image}}'",
+              "bluenviron/mediamtx@sha256:",
+              'required_ipv4(sys.argv[4], "MEDIA_PUBLISH_IP")',
+              'docker port media_prod 8554/tcp',
+              "Require the CI revision to remain main HEAD",
+              "git ls-remote --exit-code origin refs/heads/main",
+              "Tasks__RequireCollaborativeTransportEvidence:",
+              "REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE || 'false'",
+          )
+          missing = [value for value in required if value not in backend]
+          if missing:
+              raise SystemExit(
+                  "Backend workflow is missing rollback guards: " + ", ".join(missing)
+              )
+          if "HEAD^" in backend or "Check backend deployment scope" in backend:
+              raise SystemExit(
+                  "Backend deployment must not infer a multi-commit push from HEAD^."
+              )
+          compose = Path("docker-compose.prod.yml").read_text(encoding="utf-8")
+          if "bluenviron/mediamtx@sha256:" not in compose:
+              raise SystemExit("Production MediaMTX must use an immutable digest.")
+          if "Tasks__RequireCollaborativeTransportEvidence=" not in compose:
+              raise SystemExit(
+                  "Production Compose does not pass the transport-evidence gate."
+              )
+          PY
+
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
@@ -42,6 +99,266 @@ jobs:
           AppSettings__Issuer: https://robot.zerav.la
           Cors__Origins__0: https://rs.zerav.la
           BACKEND_PUBLISH_IP: 10.0.0.126
+
+      - name: Install media probe tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
+      - name: Validate pinned MediaMTX configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="robotswarm-mediamtx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          auth_pid=""
+          publisher_pid=""
+          auth_log="$RUNNER_TEMP/robotswarm-mediamtx-auth.log"
+          auth_events="$RUNNER_TEMP/robotswarm-mediamtx-auth-events.jsonl"
+          publisher_log="$RUNNER_TEMP/robotswarm-mediamtx-publisher.log"
+          cdn_secret="ci-cdn-fixture-AlphaBetaGammaDeltaEpsilon-2026"
+          publish_token="ci-publish-token"
+          read_token="ci-read-token"
+          canonical_path="session/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          cleanup() {
+            outcome=$?
+            if test -n "$publisher_pid"
+            then
+              kill "$publisher_pid" >/dev/null 2>&1 || true
+              wait "$publisher_pid" >/dev/null 2>&1 || true
+            fi
+            if test -n "$auth_pid"
+            then
+              kill "$auth_pid" >/dev/null 2>&1 || true
+              wait "$auth_pid" >/dev/null 2>&1 || true
+            fi
+            if test "$outcome" -ne 0
+            then
+              docker logs "$container" --tail 100 2>&1 || true
+              tail -100 "$auth_log" 2>/dev/null || true
+              tail -100 "$auth_events" 2>/dev/null || true
+              tail -100 "$publisher_log" 2>/dev/null || true
+            fi
+            docker rm --force "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          : > "$auth_events"
+          MEDIAMTX_AUTH_EXPECTED_PATH="$canonical_path" \
+          MEDIAMTX_AUTH_PUBLISH_TOKEN="$publish_token" \
+          MEDIAMTX_AUTH_READ_TOKEN="$read_token" \
+          MEDIAMTX_AUTH_EVENTS="$auth_events" \
+            python3 deploy/ci/mediamtx-auth-fixture.py >"$auth_log" 2>&1 &
+          auth_pid=$!
+
+          for attempt in 1 2 3 4 5
+          do
+            if curl --fail --silent --connect-timeout 2 --max-time 3 \
+              http://127.0.0.1:44336/health >/dev/null
+            then
+              break
+            fi
+            kill -0 "$auth_pid"
+            sleep 1
+          done
+          curl --fail --silent --connect-timeout 2 --max-time 3 \
+            http://127.0.0.1:44336/health >/dev/null
+
+          docker run --detach --name "$container" \
+            --add-host backend:host-gateway \
+            --env "MTX_HLSCDNSECRET=$cdn_secret" \
+            --publish 127.0.0.1::8554 \
+            --publish 127.0.0.1::8888 \
+            --volume "$PWD/infra/mediamtx.yml:/mediamtx.yml:ro" \
+            bluenviron/mediamtx@sha256:f8628851106cc053f9175b248050bb5f362a6e65abd72297c167a1cb5a9a3be2 >/dev/null
+
+          for attempt in 1 2 3 4 5
+          do
+            sleep 1
+            state="$(docker inspect --format '{{.State.Status}}' "$container")"
+            if test "$state" != "running"
+            then
+              echo "MediaMTX stopped while loading the production configuration." >&2
+              exit 1
+            fi
+          done
+
+          media_version="$(docker exec "$container" /mediamtx --version)"
+          test "$media_version" = "v1.18.2" || {
+            echo "Unexpected MediaMTX version: $media_version" >&2
+            exit 1
+          }
+          command -v ffmpeg >/dev/null || {
+            echo "The CI runner does not provide FFmpeg." >&2
+            exit 1
+          }
+          command -v ffprobe >/dev/null || {
+            echo "The CI runner does not provide FFprobe." >&2
+            exit 1
+          }
+          encoders="$RUNNER_TEMP/robotswarm-ffmpeg-encoders.txt"
+          ffmpeg -hide_banner -encoders >"$encoders" 2>/dev/null
+          grep 'libx264' "$encoders" >/dev/null || {
+            echo "The CI runner FFmpeg build does not provide libx264." >&2
+            exit 1
+          }
+
+          rtsp_port="$(docker port "$container" 8554/tcp | sed 's/.*://')"
+          hls_port="$(docker port "$container" 8888/tcp | sed 's/.*://')"
+          test -n "$rtsp_port"
+          test -n "$hls_port"
+
+          ffmpeg -nostdin -hide_banner -loglevel warning \
+            -re -f lavfi -i testsrc2=size=320x180:rate=15 \
+            -c:v libx264 -preset ultrafast -tune zerolatency \
+            -g 30 -keyint_min 30 \
+            -f rtsp -rtsp_transport tcp \
+            "rtsp://127.0.0.1:$rtsp_port/$canonical_path?token=$publish_token" \
+            >"$publisher_log" 2>&1 &
+          publisher_pid=$!
+
+          codec=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10
+          do
+            codec="$(
+              timeout 10 ffprobe -v error -rtsp_transport tcp \
+                -select_streams v:0 \
+                -show_entries stream=codec_name \
+                -of default=noprint_wrappers=1:nokey=1 \
+                "rtsp://127.0.0.1:$rtsp_port/$canonical_path?token=$read_token" \
+                2>/dev/null || true
+            )"
+            if test "$codec" = "h264"
+            then
+              break
+            fi
+            kill -0 "$publisher_pid"
+            sleep 1
+          done
+          test "$codec" = "h264"
+
+          if timeout 8 ffprobe -v error -rtsp_transport tcp \
+            "rtsp://127.0.0.1:$rtsp_port/$canonical_path?token=$publish_token" \
+            >/dev/null 2>&1
+          then
+            echo "MediaMTX accepted the publish token for a read action." >&2
+            exit 1
+          fi
+
+          wrong_path="session/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/scene-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          if timeout 8 ffprobe -v error -rtsp_transport tcp \
+            "rtsp://127.0.0.1:$rtsp_port/$wrong_path?token=$read_token" \
+            >/dev/null 2>&1
+          then
+            echo "MediaMTX accepted a read lease for a different stream path." >&2
+            exit 1
+          fi
+
+          python3 - "$auth_events" "$canonical_path" <<'PY'
+          import json
+          import sys
+
+          events = [
+              json.loads(line)
+              for line in open(sys.argv[1], encoding="utf-8")
+              if line.strip()
+          ]
+          canonical_path = sys.argv[2]
+
+          expected = {
+              (True, "publish", canonical_path, "rtsp", "accepted"),
+              (True, "read", canonical_path, "rtsp", "accepted"),
+              (False, "read", canonical_path, "rtsp", "wrong token"),
+          }
+          actual = {
+              (
+                  event["accepted"],
+                  event["action"],
+                  event["path"],
+                  event["protocol"],
+                  event["reason"],
+              )
+              for event in events
+          }
+          missing = expected - actual
+          if missing:
+              raise SystemExit(f"Missing MediaMTX HTTP auth events: {sorted(missing)}")
+
+          if not any(
+              not event["accepted"]
+              and event["path"] != canonical_path
+              and event["reason"] == "non-canonical path"
+              for event in events
+          ):
+              raise SystemExit("The cross-path MediaMTX read was not rejected by HTTP auth.")
+
+          if any(event["accepted"] and event["path"] != canonical_path for event in events):
+              raise SystemExit("HTTP auth accepted a non-canonical stream path.")
+          PY
+
+          auth_events_before_hls="$(wc -l < "$auth_events")"
+
+          playlist="$RUNNER_TEMP/robotswarm-mediamtx-index.m3u8"
+          headers="$RUNNER_TEMP/robotswarm-mediamtx-headers.txt"
+          status=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+          do
+            status="$(curl --silent --show-error \
+              --connect-timeout 3 \
+              --max-time 15 \
+              --output "$playlist" \
+              --dump-header "$headers" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $cdn_secret" \
+              "http://127.0.0.1:$hls_port/$canonical_path/index.m3u8" || true)"
+            if test "$status" = "200"
+            then
+              break
+            fi
+            sleep 1
+          done
+
+          test "$status" = "200"
+          grep -q '#EXTM3U' "$playlist"
+          ! grep -qi '^location:' "$headers"
+          ! grep -qi '^set-cookie:' "$headers"
+
+          media_name="$(awk '!/^#/ && NF {print; exit}' "$playlist")"
+          [[ "$media_name" =~ ^[A-Za-z0-9_.-]+\.m3u8$ ]]
+          media_playlist="$RUNNER_TEMP/robotswarm-mediamtx-media.m3u8"
+          status="$(curl --silent --show-error \
+            --connect-timeout 3 \
+            --max-time 15 \
+            --output "$media_playlist" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $cdn_secret" \
+            "http://127.0.0.1:$hls_port/$canonical_path/$media_name")"
+          test "$status" = "200"
+          grep -q '#EXT-X-MAP' "$media_playlist"
+
+          init_name="$(
+            awk -F'URI="' '/^#EXT-X-MAP:/ {split($2, value, "\""); print value[1]; exit}' \
+              "$media_playlist"
+          )"
+          part_name="$(
+            awk -F'URI="' '/^#EXT-X-PART:/ {split($2, value, "\""); print value[1]; exit}' \
+              "$media_playlist"
+          )"
+          for asset_name in "$init_name" "$part_name"
+          do
+            [[ "$asset_name" =~ ^[A-Za-z0-9_.-]+\.mp4$ ]]
+            status="$(curl --silent --show-error \
+              --connect-timeout 3 \
+              --max-time 15 \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $cdn_secret" \
+              "http://127.0.0.1:$hls_port/$canonical_path/$asset_name")"
+            test "$status" = "200"
+          done
+          test "$(wc -l < "$auth_events")" = "$auth_events_before_hls"
+          docker logs "$container" --tail 20
 
       - name: Test GPU worker
         run: dotnet test SwarmWorker.Tests/SwarmWorker.Tests.csproj --configuration Release
@@ -75,6 +392,8 @@ jobs:
             src/app/fuse-configs/navigationGTSConfig.js \
             src/app/main/apps/GeeTS/Realtime/RealtimeConfigApp.js \
             src/app/main/apps/GeeTS/Realtime/RealtimeConfigAppConfig.js \
+            src/app/main/apps/GeeTS/Realtime/HlsViewer.js \
+            src/app/main/apps/GeeTS/Realtime/HlsViewer.test.js \
             src/app/main/apps/GeeTS/Realtime/VncViewer.js \
             src/app/main/apps/GeeTS/Realtime/SimulationWorkspace.js \
             src/app/main/apps/GeeTS/Realtime/SwarmTaskPanel.js \

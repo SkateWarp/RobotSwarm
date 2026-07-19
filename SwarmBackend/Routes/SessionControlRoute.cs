@@ -237,6 +237,7 @@ public static class SessionControlRoute
         HttpContext context,
         DataContext dataContext,
         WorkerCommandService commandService,
+        IConfiguration configuration,
         IHubContext<WorkerHub> workerHub,
         IHubContext<SessionHub> sessionHub,
         CancellationToken cancellationToken)
@@ -315,9 +316,33 @@ public static class SessionControlRoute
             return EmergencyTransitionConflict();
         }
 
+        if (await HasPendingTaskCancellation(dataContext, id, cancellationToken))
+        {
+            return Results.Conflict(new
+            {
+                message = "Wait for the previous task cancellation to finish before starting another task."
+            });
+        }
+
         if (!CanControl(session) || session.IsEmergencyStopped)
         {
             return Results.Conflict(new { message = "The session cannot start a task in the current state." });
+        }
+
+        var requiresTransportEvidence = configuration.GetValue(
+            "Tasks:RequireCollaborativeTransportEvidence",
+            false);
+        if (taskType == SwarmTaskRunType.CollaborativeTransport
+            && requiresTransportEvidence
+            && (session.ComputeWorker == null
+                || !WorkerCapabilities.SupportsCollaborativeTransportEvidence(
+                    session.ComputeWorker)))
+        {
+            return Results.Conflict(new
+            {
+                message =
+                    "The assigned worker has not advertised the required collaborative-transport evidence contract."
+            });
         }
 
         var hasActiveTask = await dataContext.TaskRuns.AnyAsync(
@@ -844,8 +869,15 @@ public static class SessionControlRoute
                     configuration["Viewer:PublicBaseUrl"],
                     streamAddress)
                 : null;
+            var hlsUrl = workerPublishingEnabled
+                && workerSupportsViewer
+                && configuration.GetValue<bool>("Viewer:HlsProxyEnabled")
+                    ? ViewerStreamAddress.BuildHlsUrl(
+                        configuration["Viewer:HlsPublicBaseUrl"],
+                        streamAddress)
+                    : null;
             WorkerCommand? command = null;
-            if (signalingUrl != null)
+            if (signalingUrl != null || hlsUrl != null)
             {
                 var (publishToken, publishTokenHash) = ViewerPublishToken.Generate();
                 viewerLease.PublishTokenHash = publishTokenHash;
@@ -886,6 +918,7 @@ public static class SessionControlRoute
                 expiresAt,
                 IsReady: false,
                 signalingUrl,
+                hlsUrl,
                 command == null ? null : WorkerCommandService.ToResponse(command));
             return Results.Created($"/api/sessions/{id}/viewer-lease", response);
         }
@@ -925,6 +958,21 @@ public static class SessionControlRoute
             command => command.SimulationSessionId == sessionId
                 && (command.Type == WorkerCommandType.EmergencyStop
                     || command.Type == WorkerCommandType.ResetEmergencyStop)
+                && (command.State == WorkerCommandState.Pending
+                    || command.State == WorkerCommandState.Dispatched
+                    || command.State == WorkerCommandState.Acknowledged
+                    || command.State == WorkerCommandState.Running),
+            cancellationToken);
+    }
+
+    internal static Task<bool> HasPendingTaskCancellation(
+        DataContext dataContext,
+        Guid sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        return dataContext.WorkerCommands.AnyAsync(
+            command => command.SimulationSessionId == sessionId
+                && command.Type == WorkerCommandType.CancelTask
                 && (command.State == WorkerCommandState.Pending
                     || command.State == WorkerCommandState.Dispatched
                     || command.State == WorkerCommandState.Acknowledged
@@ -1033,8 +1081,12 @@ public static class SessionControlRoute
             ControlPlaneJson.ToElement(task.Parameters),
             ControlPlaneJson.ToNullableElement(task.Result),
             task.Error,
+            task.OutcomeState.ToString(),
+            task.OutcomeReason,
             task.CreatedAt,
             task.UpdatedAt,
+            task.LastReportAt,
+            task.LastProgressAt,
             task.StartedAt,
             task.CompletedAt);
     }

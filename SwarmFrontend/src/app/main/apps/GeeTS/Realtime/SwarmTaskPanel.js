@@ -55,6 +55,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
     const canStart = canControl && !session.isEmergencyStopped && !activeTask;
     const latestProgress = Math.min(1, Math.max(0, Number(latestTask?.progress) || 0));
     const transportNotice = transportTaskNotice(latestTask);
+    const verifiedOutcome = latestTask?.outcomeState;
 
     const buildParameters = () => {
         if (taskType === "FollowLeader") {
@@ -125,6 +126,11 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                         </Typography>
                     </Box>
                     <LinearProgress variant="determinate" value={latestProgress * 100} />
+                    {verifiedOutcome && verifiedOutcome !== "Pending" && (
+                        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+                            Verified outcome: {verifiedOutcome}
+                        </Typography>
+                    )}
                     {latestTask.error && (
                         <Alert severity="error" sx={{ mt: 2 }}>
                             {latestTask.error}

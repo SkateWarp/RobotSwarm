@@ -52,7 +52,9 @@ builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
 builder.Services.AddScoped<IRobotGroupService, RobotGroupService>();
 builder.Services.AddScoped<WorkerCommandService>();
+builder.Services.AddViewerHlsProxy();
 builder.Services.AddHostedService<SimulationSessionScheduler>();
+builder.Services.AddHostedService<TaskOutcomeMonitor>();
 builder.Services.AddSignalR(hubOptions =>
 {
     hubOptions.EnableDetailedErrors = builder.Environment.IsDevelopment();
@@ -160,8 +162,11 @@ app.MapGroup("/api/sessions")
     .MapSessionControl();
 app.MapGroup("/api/workers")
     .MapComputeWorker();
+app.MapGroup("/api/worker-maintenance")
+    .MapWorkerMaintenance();
 app.MapGroup("/api/viewer")
-    .MapViewerAuth();
+    .MapViewerAuth()
+    .MapViewerHlsProxy();
 
 app.MapHub<SessionHub>("/hubs/session");
 app.MapHub<WorkerHub>("/hubs/worker");

@@ -98,46 +98,80 @@ optional. The optional GitHub environment variable
 ## What a deployment does
 
 `.github/workflows/gpu_worker_workflow.yml` is maintenance-only and must be
-started manually. Automatic worker rollout remains disabled because the
-backend does not yet have a worker-draining state. The operator supplies the
-full main-branch commit SHA, confirms that new scheduling is disabled, and
+started manually. The operator supplies the full main-branch commit SHA and
 confirms that any corresponding backend rollout is already compatible and
-healthy.
+healthy. The workflow itself acquires a worker-authenticated drain lease tied
+to that exact SHA; no checkbox is accepted as evidence that scheduling has
+stopped.
 
 The workflow:
 
 1. Uses the GitHub Actions API to require a successful `Check project` push
    run for that exact SHA on `main`, requires it to still be the current
    `main` head, and checks it out as the worker/ROS source.
-2. Separately checks out the deployment script, unit, and rollback tests from
+2. Requests a two-hour drain lease from the backend and waits up to fifteen
+   minutes for both the control-plane session count and the worker's
+   post-request Docker report to reach zero.
+3. Separately checks out the deployment script, unit, and rollback tests from
    the protected workflow SHA. A source selection cannot replace today's
    deployment safety harness with an older copy.
-3. Confirms the runner is WSL, Docker is available, the systemd user manager
+4. Confirms the runner is WSL, Docker is available, the systemd user manager
    is reachable, the local identity file exists, and no managed simulation
    container is running.
-4. Runs the .NET worker tests, viewer-helper tests, deployment rollback tests,
+5. Runs the .NET worker tests, viewer-helper tests, deployment rollback tests,
    and ROS algorithm tests again on the GPU host.
-5. Builds the ROS image from `swarm_ws/Dockerfile`, labels it with the full Git
+6. Builds the ROS image from `swarm_ws/Dockerfile`, labels it with the full Git
    revision, and records Docker's exact `sha256:...` image ID.
-6. Smoke-tests the ROS launch file and NVIDIA access inside that exact image.
-7. Publishes a self-contained Linux worker, packages the tested viewer helper
+7. Smoke-tests the ROS launch file and NVIDIA access inside that exact image.
+8. Publishes a self-contained Linux worker, packages the tested viewer helper
    with mode `0755`, and stages both in a versioned release under
    `~/.local/share/robotswarm-gpu-worker/releases/`.
-8. Atomically switches the `current` symlink, which selects both the worker
+9. Revalidates the lease, target SHA, remaining lifetime and both zero-session
+   reports immediately before changing the active release.
+10. Atomically switches the `current` symlink, which selects both the worker
    executable and its owner-only release environment, starts
    `robotswarm-gpu-worker.service`, and requires the current service PID to log
    the post-registration, first-heartbeat readiness marker with the expected
    image version.
+11. Releases the lease only after readiness succeeds, allowing the backend to
+    schedule new sessions again.
 
 Before switching releases, the deployment script checks again for running
 managed containers, stops the old worker, and checks a third time. A running
-session blocks deployment. The manual maintenance window is still required to
-close the race in which the backend could assign a new session before the old
-worker stops.
+session blocks deployment. The backend keeps the worker in `Draining` for the
+entire interval, which closes the previous race in which a new session could
+be assigned between a local check and stopping the old process.
 
 When the selected SHA changes backend/worker contracts, deploy and verify the
-backend for the same SHA first. A protocol-version compatibility handshake and
-backend-visible drain mode remain future work.
+backend for the same SHA first. The drain route must therefore exist before a
+worker workflow that depends on it is dispatched. A broader protocol-version
+compatibility handshake remains future work.
+
+### Activating full-fleet transport evidence
+
+The transport-result contract uses a deliberate two-stage rollout. Keep the
+protected production variable
+`REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE=false` while the new backend is being
+deployed in front of the previous ROS image. In this compatibility stage, a
+completed transport is still judged by the earlier progress contract, so the
+backend-first deployment cannot turn a valid in-flight result into a failure.
+
+The new worker advertises
+`taskOutcomes.collaborativeTransportEvidenceVersion=1`. Its ROS result includes
+the finder, the exact notified companion set, and the exact useful-contributor
+IDs. After the GPU workflow has drained the old worker, activated the same
+current `main` SHA, and reported readiness, set the protected variable to
+`true` and rerun the backend deployment for that same SHA. The backend then
+refuses to start a transport on a worker without evidence version 1 and accepts
+completion only when all reported identities match the session's stored robot
+roster. Leave the variable true after commissioning; a worker rollback that
+lacks the capability must block new transport tasks instead of silently
+weakening acceptance.
+
+Before changing the variable, verify that no session remains active. The GPU
+drain lease and the shared `production-robotswarm` workflow lock provide this
+maintenance boundary. Record the worker registration capability, deployment
+SHA, and one accepted full-fleet result in the commissioning evidence.
 
 The release environment records the absolute Docker executable found by the
 runner and the absolute path to that release's viewer helper. This avoids
@@ -194,27 +228,39 @@ a failed activation. There is no supported command for manually activating an
 arbitrary older release. Avoid changing only the `current` symlink: the binary,
 environment, locally retained image, and systemd state must remain consistent.
 
-## Remaining graphics work
+## Viewer commissioning boundary
 
-The workflow proves that Docker can expose the NVIDIA GPU and that the ROS
-image builds and parses the swarm launch file. It does not yet prove a
-production Gazebo rendering/encoding path. EGL or VirtualGL, the encoder,
-MediaMTX publishing, TURN reachability, and per-session viewer isolation still
-need an end-to-end benchmark before visual sessions are enabled for users.
+The workflow proves that Docker can expose the NVIDIA GPU, the ROS image builds,
+and the packaged viewer helper can initialize its configured X and H.264
+dependencies. Separate host-side commissioning has also run two live publisher
+pipelines concurrently with different private displays, `gzclient` sidecars,
+stream paths, runtime directories, and cleanup. That is useful evidence, but it
+does not by itself prove the final public browser route.
 
-Every versioned GPU-worker release now includes the tested, Scene-only
-protocol-1 helper and configures its absolute executable path. Shipping it does
-not make the production media path ready or enable it by default. Keep
-`Worker__Viewer__Enabled=false` and backend
-`Viewer__WorkerPublishingEnabled=false` until the host provides all of these:
+Every versioned GPU-worker release includes the Scene-only protocol-1 helper and
+records its absolute executable path. Shipping it does not enable media by
+default. Keep `Worker__Viewer__Enabled=false`, backend
+`Viewer__WorkerPublishingEnabled=false`, and backend
+`Viewer__HlsProxyEnabled=false` until all of these pass on the release revision:
 
-- a private display per session with a visible Gazebo client;
-- a pinned FFmpeg/GStreamer build with an initialized H.264 encoder and a
-  measured simultaneous-session CPU/GPU cost;
-- a passing helper smoke test against the real private display, pinned image,
-  encoder, and MediaMTX ingest path;
-- an end-to-end WHEP/ICE test from outside the LAN, including TURN if direct
-  UDP cannot reach the host.
+- a private display and visible Gazebo client for each simultaneous session;
+- the helper probe against the pinned image, selected encoder, and authenticated
+  MediaMTX RTSP ingest path;
+- two public, independently authenticated browser sessions through the backend
+  low-latency HLS proxy, including cross-user denial, lease expiry, and
+  independent stop/cleanup; and
+- measured FPS, physics real-time factor, and simultaneous-session CPU/GPU
+  cost on the production worker.
+
+The primary browser route is authenticated low-latency HLS through
+`robot.zerav.la`; it does not require a public WHEP hostname, ICE port, or TURN.
+WHEP remains optional. If it is enabled later, its public connectivity and TURN
+fallback require a separate acceptance test.
+
+The backend and MediaMTX share one protected `MEDIA_HLS_CDN_SECRET` only on
+their private Compose hop. It is not a viewer lease or a publish token. The
+backend deployment refuses to enable HLS if this 43-128 character base64url
+secret is absent or malformed.
 
 The helper prefers `h264_nvenc` but accepts its tested `libx264` fallback when
 the host FFmpeg cannot initialize NVENC. Record the encoder selected by the

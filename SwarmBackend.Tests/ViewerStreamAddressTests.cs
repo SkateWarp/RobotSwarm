@@ -106,4 +106,42 @@ public sealed class ViewerStreamAddressTests
             $"https://stream.example.test/{address.StreamPath}/whep",
             url);
     }
+
+    [Fact]
+    public void BuildsHlsUrlThroughTheBackendProxyPath()
+    {
+        var sessionId = Guid.NewGuid();
+        Assert.True(ViewerStreamAddress.TryCreate(
+            sessionId,
+            ViewerSourceType.Scene,
+            robotRuntimeId: null,
+            out var address));
+
+        var url = ViewerStreamAddress.BuildHlsUrl(
+            "https://robot.example.test/api/viewer/hls/",
+            address);
+
+        Assert.Equal(
+            $"https://robot.example.test/api/viewer/hls/" +
+            $"{address.StreamPath}/index.m3u8",
+            url);
+    }
+
+    [Theory]
+    [InlineData("ftp://stream.example.test")]
+    [InlineData("https://user@stream.example.test")]
+    [InlineData("https://stream.example.test?token=secret")]
+    [InlineData("https://stream.example.test/#viewer")]
+    public void RejectsUnsafePublicViewerBaseUrls(string publicBaseUrl)
+    {
+        var sessionId = Guid.NewGuid();
+        Assert.True(ViewerStreamAddress.TryCreate(
+            sessionId,
+            ViewerSourceType.Scene,
+            robotRuntimeId: null,
+            out var address));
+
+        Assert.Null(ViewerStreamAddress.BuildWhepUrl(publicBaseUrl, address));
+        Assert.Null(ViewerStreamAddress.BuildHlsUrl(publicBaseUrl, address));
+    }
 }
