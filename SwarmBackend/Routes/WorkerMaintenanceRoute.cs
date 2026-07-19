@@ -169,12 +169,24 @@ public static partial class WorkerMaintenanceRoute
             worker.State.ToString(),
             worker.DrainLeaseId!.Value,
             worker.DrainTargetRevision!,
-            worker.DrainRequestedAt!.Value,
-            worker.DrainLeaseExpiresAt!.Value,
+            AsUtc(worker.DrainRequestedAt!.Value),
+            AsUtc(worker.DrainLeaseExpiresAt!.Value),
             trackedSessionCount,
             worker.ReportedActiveSessionCount,
-            worker.ActiveSessionsReportedAt,
+            worker.ActiveSessionsReportedAt.HasValue
+                ? AsUtc(worker.ActiveSessionsReportedAt.Value)
+                : null,
             isDrained);
+    }
+
+    private static DateTime AsUtc(DateTime value)
+    {
+        return value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
+        };
     }
 
     private static async Task<ComputeWorker?> FindOwnedLease(
