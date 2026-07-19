@@ -394,6 +394,12 @@ jobs:
 
           status = json.loads(os.environ["RESPONSE"])
           expires = datetime.fromisoformat(status["expiresAt"].replace("Z", "+00:00"))
+          if expires.tzinfo is None:
+              # PostgreSQL's timestamp-without-time-zone values are UTC, but an
+              # older backend can serialize them without the explicit suffix.
+              expires = expires.replace(tzinfo=timezone.utc)
+          else:
+              expires = expires.astimezone(timezone.utc)
           if status["targetRevision"] != os.environ["DEPLOY_SHA"]:
               raise SystemExit("Drain lease targets a different revision.")
           if not status["isDrained"]:

@@ -68,6 +68,26 @@ public sealed class DrainAndOutcomeTests
     }
 
     [Fact]
+    public async Task DrainStatusMarksDatabaseTimestampsAsUtc()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var expiresAt = DateTime.SpecifyKind(
+            DateTime.UtcNow.AddMinutes(30),
+            DateTimeKind.Unspecified);
+        var worker = DrainingWorker(expiresAt);
+        worker.ReportedActiveSessionCount = 0;
+        worker.ActiveSessionsReportedAt = worker.DrainRequestedAt;
+        dataContext.Add(worker);
+        await dataContext.SaveChangesAsync();
+
+        var status = await WorkerMaintenanceRoute.BuildStatus(dataContext, worker);
+
+        Assert.Equal(DateTimeKind.Utc, status.RequestedAt.Kind);
+        Assert.Equal(DateTimeKind.Utc, status.ExpiresAt.Kind);
+        Assert.Equal(DateTimeKind.Utc, status.ActiveSessionsReportedAt?.Kind);
+    }
+
+    [Fact]
     public async Task StaleHeartbeatCannotOverwriteANewDrainLease()
     {
         var databaseName = Guid.NewGuid().ToString("N");
