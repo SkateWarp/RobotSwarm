@@ -630,15 +630,6 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         }
 
         var exitCode = TryGetExitCode(publisher.Process);
-        var diagnostic = Sanitize(
-            await ReadErrorAfterExit(publisher.ErrorOutput),
-            publisher.Request.Command.PublishToken);
-        _logger.LogWarning(
-            "Viewer publisher for session {SessionId} exited unexpectedly with code {ExitCode}: {Diagnostic}",
-            publisher.Request.SessionId,
-            exitCode,
-            diagnostic);
-
         bool processGroupReaped;
         try
         {
@@ -650,6 +641,19 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         {
             return;
         }
+
+        // A surviving child can keep the redirected error pipe open after its
+        // parent exits. Reap the group before reading diagnostics so recovery
+        // is not delayed by an orphan that we are about to stop anyway.
+        var diagnostic = Sanitize(
+            await ReadErrorAfterExit(publisher.ErrorOutput),
+            publisher.Request.Command.PublishToken);
+        _logger.LogWarning(
+            "Viewer publisher for session {SessionId} exited unexpectedly with code {ExitCode}: {Diagnostic}",
+            publisher.Request.SessionId,
+            exitCode,
+            diagnostic);
+
         if (!processGroupReaped)
         {
             await RetireExitedPublisherAsync(publisher);
