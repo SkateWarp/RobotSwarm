@@ -12,7 +12,6 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Npgsql;
 using BC = BCrypt.Net.BCrypt;
@@ -231,13 +230,21 @@ public class AccountService : IAccountService
         using var rng = RandomNumberGenerator.Create();
         rng.GetBytes(randomNumber);
         var token = Convert.ToBase64String(randomNumber);
-        var jwtSettings = configuration.GetSection("AppSettings");
+        var refreshTokenLifetime = configuration.GetValue<double?>(
+            "AppSettings:RefreshTokenExpiresInDays") ?? 7;
+        if (double.IsNaN(refreshTokenLifetime)
+            || double.IsInfinity(refreshTokenLifetime)
+            || refreshTokenLifetime <= 0)
+        {
+            throw new InvalidOperationException(
+                "AppSettings:RefreshTokenExpiresInDays must be greater than zero.");
+        }
 
         return new RefreshToken
         {
             CreatedByIp = ipAddress ?? string.Empty,
             Created = DateTime.Now,
-            Expires = DateTime.Now.AddMinutes(Convert.ToDouble(jwtSettings["ExpiresIn"])),
+            Expires = DateTime.Now.AddDays(refreshTokenLifetime),
             Token = token,
         };
     }
@@ -420,7 +427,8 @@ public class AccountService : IAccountService
             .Include(session => session.Commands)
             .Where(session => session.AccountId == accountId
                 && (session.State < SimulationSessionState.Stopped
-                    || session.State == SimulationSessionState.Failed))
+                    || session.State == SimulationSessionState.Failed
+                    || session.State == SimulationSessionState.Expired))
             .ToListAsync();
         foreach (var session in sessions)
         {
@@ -434,6 +442,7 @@ public class AccountService : IAccountService
                 continue;
             }
 
+            var resourceKnownPresent = session.State < SimulationSessionState.Stopped;
             if (session.State < SimulationSessionState.Stopped
                 && session.State != SimulationSessionState.Stopping)
             {
@@ -442,33 +451,17 @@ public class AccountService : IAccountService
                 session.Revision++;
             }
 
-            var stopAlreadyQueued = session.Commands.Any(command =>
-                command.Type == WorkerCommandType.StopSession
-                && command.State is WorkerCommandState.Pending
-                    or WorkerCommandState.Dispatched
-                    or WorkerCommandState.Acknowledged
-                    or WorkerCommandState.Running);
-            if (stopAlreadyQueued)
+            var cleanupCommand = TerminalCleanupPolicy.TryQueue(
+                session,
+                now,
+                "sys:account-disabled",
+                resourceKnownPresent);
+            if (cleanupCommand == null)
             {
                 continue;
             }
 
-            var attempt = session.Commands.Count(command =>
-                command.Type == WorkerCommandType.StopSession) + 1;
-            var sequence = session.Commands.Count == 0
-                ? 1
-                : session.Commands.Max(command => command.Sequence) + 1;
-            session.Commands.Add(new WorkerCommand
-            {
-                ComputeWorkerId = session.ComputeWorkerId,
-                Type = WorkerCommandType.StopSession,
-                State = WorkerCommandState.Pending,
-                IdempotencyKey = $"sys:account-disabled:{session.Id:N}:{attempt}",
-                Sequence = sequence,
-                Payload = JsonDocument.Parse("{}"),
-                CreatedAt = now,
-                UpdatedAt = now
-            });
+            _dataContext.WorkerCommands.Add(cleanupCommand);
         }
 
         await _dataContext.SaveChangesAsync();

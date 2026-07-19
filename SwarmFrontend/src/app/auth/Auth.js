@@ -20,26 +20,16 @@ class Auth extends Component {
 
     jwtCheck = () =>
         new Promise((resolve) => {
-            jwtService.on("onAutoLogin", () => {
+            jwtService.on("onAutoLogin", (user) => {
                 // this.props.showMessage({ message: 'Login autorizado.' });
 
                 /**
                  * Sign in and retrieve user data from Api
                  */
-                jwtService
-                    .signInWithToken()
-                    .then((user) => {
-                        this.props.setUserData(user);
+                this.props.setUserData(user);
+                resolve();
 
-                        resolve();
-
-                        // this.props.showMessage({ message: 'Login autorizado.' });
-                    })
-                    .catch((error) => {
-                        this.props.showMessage({ message: error.message });
-
-                        resolve();
-                    });
+                // this.props.showMessage({ message: 'Login autorizado.' });
             });
 
             jwtService.on("onAutoLogout", (message) => {

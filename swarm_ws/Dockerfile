@@ -8,11 +8,13 @@ ENV ROS_PACKAGE=robot_swarm_bridge
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
+    libgl-dev \
     python3-pip \
     python3-catkin-tools \
     ros-noetic-actionlib \
     ros-noetic-actionlib-msgs \
     ros-noetic-tf \
+    ros-noetic-gazebo-dev \
     ros-noetic-gazebo-ros \
     ros-noetic-gazebo-ros-pkgs \
     ros-noetic-robot-state-publisher \

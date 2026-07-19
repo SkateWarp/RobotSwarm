@@ -110,7 +110,7 @@ public sealed class TaskStatusPoller : BackgroundService
             var status = await _sessions.ReadTaskStatusAsync(
                 matches[0],
                 cancellationToken);
-            if (status is null || status.TaskRunId != trackedTask.TaskRunId)
+            if (status is null)
             {
                 return;
             }
@@ -130,15 +130,15 @@ public sealed class TaskStatusPoller : BackgroundService
             }
             catch (HubException exception)
             {
-                _tracker.RemoveSession(trackedTask.SessionId, trackedTask.TaskRunId);
+                _tracker.TryRecordRejected(trackedTask, report);
                 _logger.LogWarning(
                     exception,
-                    "Backend rejected ROS status for task {TaskRunId}; polling for it has stopped.",
-                    trackedTask.TaskRunId);
+                    "Backend rejected ROS status for task {TaskRunId}; the worker will retry it with bounded backoff.",
+                    report.TaskRunId);
                 return;
             }
 
-            _tracker.Record(report);
+            _tracker.TryRecord(trackedTask, report);
             _logger.LogDebug(
                 "Reported ROS task {TaskRunId} state {State} at progress {Progress}.",
                 report.TaskRunId,
@@ -179,7 +179,7 @@ public sealed class TaskStatusPoller : BackgroundService
                 status.TaskRunId,
                 status.State,
                 status.Progress,
-                null,
+                status.Result,
                 status.State == "Failed" ? status.Error : null);
             try
             {
@@ -188,14 +188,13 @@ public sealed class TaskStatusPoller : BackgroundService
             catch (HubException)
             {
                 // The backend may have already closed this task while the
-                // worker was offline. It is safe to leave it untracked.
+                // worker was offline. Retry a few times in case the rejection
+                // was transient, then retain a watermark to prevent spam.
+                _tracker.TryRecordDiscoveredRejected(report);
                 return;
             }
 
-            if (!IsTerminal(status.State))
-            {
-                _tracker.Record(report);
-            }
+            _tracker.TryRecordDiscovered(report);
 
             _logger.LogInformation(
                 IsTerminal(status.State)

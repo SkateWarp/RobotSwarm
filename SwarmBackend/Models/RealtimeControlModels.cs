@@ -31,6 +31,7 @@ public record WorkerRegistrationRequest(
 public record WorkerHeartbeatRequest(
     string? ImageVersion,
     JsonElement? Capabilities,
+    // Wire name retained for compatibility; updated workers report every managed container.
     IReadOnlyList<Guid>? ActiveSessionIds);
 
 public record WorkerRegistrationResponse(

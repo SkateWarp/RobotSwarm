@@ -9,7 +9,31 @@ using SwarmWorker.Contracts;
 
 namespace SwarmWorker.Services;
 
-public sealed class WorkerHubConnection : IAsyncDisposable
+public interface IWorkerCommandHub
+{
+    bool IsConnected { get; }
+    DateTime LastSuccessfulContactUtc { get; }
+
+    Task AcknowledgeCommandAsync(Guid commandId, CancellationToken cancellationToken);
+    Task MarkCommandRunningAsync(Guid commandId, CancellationToken cancellationToken);
+    Task CompleteCommandAsync(
+        WorkerCommandCompletionRequest request,
+        CancellationToken cancellationToken);
+    Task FailCommandAsync(
+        WorkerCommandFailureRequest request,
+        CancellationToken cancellationToken);
+    Task ReportEmergencyStopAsync(
+        WorkerEmergencyStopReport report,
+        CancellationToken cancellationToken);
+    Task ReportSessionEventAsync(
+        SessionEventReport report,
+        CancellationToken cancellationToken);
+    Task ReportTaskEventAsync(
+        TaskEventReport report,
+        CancellationToken cancellationToken);
+}
+
+public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
 {
     private static readonly TimeSpan[] ReconnectDelays =
     {

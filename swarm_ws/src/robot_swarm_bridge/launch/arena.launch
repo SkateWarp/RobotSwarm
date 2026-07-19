@@ -5,9 +5,9 @@
   <arg name="arena_width" default="10.0"/>
   <arg name="arena_height" default="10.0"/>
   
-  <!-- Launch Gazebo with an empty world -->
+  <!-- Launch Gazebo with the project's 3x real-time world -->
   <include file="$(find gazebo_ros)/launch/empty_world.launch">
-    <arg name="world_name" value="$(find gazebo_ros)/worlds/empty.world"/>
+    <arg name="world_name" value="$(find robot_swarm_bridge)/worlds/empty_arena.world"/>
     <arg name="gui" value="$(arg use_gui)"/>
   </include>
   

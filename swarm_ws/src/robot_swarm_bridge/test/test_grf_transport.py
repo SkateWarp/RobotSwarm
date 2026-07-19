@@ -26,7 +26,10 @@ from robot_swarm_bridge.algorithms import (  # noqa: E402
 from robot_swarm_bridge.algorithms.grf_adapter import (  # noqa: E402
     build_transport_snapshot,
     centered_object_contour,
+    contact_center_distance,
     mcmc_iterations_for_fleet,
+    occupied_lidar_sectors,
+    oriented_box_contour,
 )
 
 
@@ -136,11 +139,82 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((Vec2(0.5, 0.5),), snapshot.obstacle_points)
         self.assertEqual(contour, snapshot.object_contour)
 
+    def test_oriented_box_contour_samples_rotated_perimeter_and_corners(self):
+        center = Vec2(1.0, -2.0)
+        half_width = 0.15
+        half_height = 0.20
+        yaw = math.pi / 2.0
+        contour = oriented_box_contour(
+            center,
+            half_width,
+            half_height,
+            yaw,
+            sample_count=16,
+        )
+
+        self.assertEqual(16, len(contour.points))
+        cosine = math.cos(yaw)
+        sine = math.sin(yaw)
+        local_points = []
+        for point in contour.points:
+            offset = point - center
+            local = Vec2(
+                offset.x * cosine + offset.y * sine,
+                -offset.x * sine + offset.y * cosine,
+            )
+            local_points.append(local)
+            self.assertLessEqual(abs(local.x), half_width + 1.0e-12)
+            self.assertLessEqual(abs(local.y), half_height + 1.0e-12)
+            self.assertTrue(
+                abs(abs(local.x) - half_width) <= 1.0e-12
+                or abs(abs(local.y) - half_height) <= 1.0e-12
+            )
+
+        self.assertAlmostEqual(-half_width, min(p.x for p in local_points))
+        self.assertAlmostEqual(half_width, max(p.x for p in local_points))
+        self.assertAlmostEqual(-half_height, min(p.y for p in local_points))
+        self.assertAlmostEqual(half_height, max(p.y for p in local_points))
+        self.assertAlmostEqual(center.x, contour.center().x)
+        self.assertAlmostEqual(center.y, contour.center().y)
+
+    def test_box_snapshot_requires_both_half_extents(self):
+        with self.assertRaisesRegex(ValueError, 'both half extents'):
+            build_transport_snapshot(
+                robots=(),
+                object_center=Vec2(),
+                target=Vec2(1.0, 0.0),
+                object_half_width=0.2,
+            )
+
     def test_large_fleet_uses_the_lower_proposal_count_at_threshold(self):
         self.assertEqual(60, mcmc_iterations_for_fleet(19, 60, 20, 24))
         self.assertEqual(24, mcmc_iterations_for_fleet(20, 60, 20, 24))
         self.assertEqual(24, mcmc_iterations_for_fleet(100, 60, 20, 24))
         self.assertEqual(60, mcmc_iterations_for_fleet(20, 60, 20, 80))
+
+    def test_contact_readiness_uses_footprints_not_sensor_range(self):
+        ready_distance = contact_center_distance(0.20, 0.11, 0.08)
+        self.assertAlmostEqual(0.39, ready_distance)
+        self.assertLess(ready_distance, GRFConfig().sensing_radius)
+
+    def test_object_sectors_are_masked_only_in_the_contact_corridor(self):
+        near = occupied_lidar_sectors(
+            robot_position=Vec2(),
+            robot_heading=0.0,
+            object_center=Vec2(0.5, 0.0),
+            object_radius=0.25,
+            maximum_distance=0.75,
+        )
+        far = occupied_lidar_sectors(
+            robot_position=Vec2(),
+            robot_heading=0.0,
+            object_center=Vec2(0.8, 0.0),
+            object_radius=0.25,
+            maximum_distance=0.75,
+        )
+        self.assertIn(0, near)
+        self.assertNotIn(4, near)
+        self.assertEqual((), far)
 
 
 class ObjectInteractionTests(unittest.TestCase):
@@ -155,6 +229,35 @@ class ObjectInteractionTests(unittest.TestCase):
         self.assertFalse(
             target_is_occluded(Vec2(1.0, 0.0), self.target, self.contour)
         )
+
+    def test_square_snapshot_preserves_push_side_mode_selection(self):
+        robot = RobotSnapshot(
+            'contact',
+            Vec2(-0.2404067827, 0.0875009130),
+            heading=-0.34906585,
+        )
+        box_snapshot = build_transport_snapshot(
+            robots=(robot,),
+            object_center=Vec2(),
+            target=Vec2(3.0, 3.0),
+            contour_samples=16,
+            object_half_width=0.2,
+            object_half_height=0.2,
+        )
+        circle_snapshot = build_transport_snapshot(
+            robots=(robot,),
+            object_center=Vec2(),
+            target=Vec2(3.0, 3.0),
+            object_radius=0.2,
+            contour_samples=16,
+        )
+        kernel = GibbsRandomFieldTransport(GRFConfig(sensing_radius=3.0))
+
+        box = kernel.evaluate_velocity(box_snapshot, 'contact', Vec2())
+        circle = kernel.evaluate_velocity(circle_snapshot, 'contact', Vec2())
+
+        self.assertEqual(InteractionMode.PUSH, box.interaction_mode)
+        self.assertEqual(InteractionMode.ORBIT, circle.interaction_mode)
 
     def test_orbiting_prefers_local_contour_tangent(self):
         zero = disabled_potential()
@@ -223,6 +326,44 @@ class ObjectInteractionTests(unittest.TestCase):
             toward_goal.object_energy, away_from_goal.object_energy
         )
 
+    def test_default_tuning_prefers_orbiting_over_radial_attraction(self):
+        robot = RobotSnapshot('side', Vec2(0.0, 1.0))
+        snapshot = TransportSnapshot(
+            robots=(robot,),
+            object_contour=self.contour,
+            target=Vec2(-2.0, 0.0),
+        )
+        kernel = GibbsRandomFieldTransport(GRFConfig(sensing_radius=3.0))
+        idle = kernel.evaluate_velocity(snapshot, 'side', Vec2())
+        preferred = kernel.evaluate_velocity(
+            snapshot,
+            'side',
+            idle.preferred_direction * kernel.config.max_speed,
+        )
+        radial = kernel.evaluate_velocity(
+            snapshot, 'side', Vec2(0.0, -kernel.config.max_speed)
+        )
+        self.assertEqual(InteractionMode.ORBIT, preferred.interaction_mode)
+        self.assertLess(preferred.object_energy, radial.object_energy)
+
+    def test_contour_resolution_does_not_multiply_object_energy(self):
+        robot = RobotSnapshot('side', Vec2(0.0, 1.0))
+        kernel = GibbsRandomFieldTransport(GRFConfig(sensing_radius=3.0))
+        energies = []
+        for sample_count in (8, 16, 64):
+            snapshot = build_transport_snapshot(
+                robots=(robot,),
+                object_center=Vec2(),
+                target=Vec2(-2.0, 0.0),
+                object_radius=0.2,
+                contour_samples=sample_count,
+            )
+            result = kernel.evaluate_velocity(
+                snapshot, 'side', Vec2(kernel.config.max_speed, 0.0)
+            )
+            energies.append(result.object_energy)
+        self.assertLess(max(energies) - min(energies), 0.15)
+
 
 class SamplerTests(unittest.TestCase):
     def setUp(self):
@@ -267,6 +408,40 @@ class SamplerTests(unittest.TestCase):
         self.assertEqual(('tb3_2',), first.command_for('tb3_10').neighbor_ids)
         self.assertEqual((), first.command_for('tb3_far').neighbor_ids)
 
+    def test_one_robot_box_sampler_makes_goal_directed_push_progress(self):
+        robot = RobotSnapshot('solo', Vec2(-0.243, 0.0), Vec2())
+        snapshot = build_transport_snapshot(
+            robots=(robot,),
+            object_center=Vec2(),
+            target=Vec2(3.0, 0.0),
+            contour_samples=16,
+            object_half_width=0.2,
+            object_half_height=0.2,
+        )
+        config = GRFConfig(
+            random_seed=0,
+            mcmc_iterations=60,
+            sensing_radius=2.0,
+            max_speed=0.15,
+        )
+        kernel = GibbsRandomFieldTransport(config)
+        goal_direction = snapshot.target.normalized()
+        progress = 0.0
+
+        for step_index in range(10):
+            command = kernel.compute(
+                snapshot, step_index=step_index
+            ).command_for('solo')
+            self.assertEqual(InteractionMode.PUSH, command.interaction_mode)
+            self.assertEqual((), command.neighbor_ids)
+            self.assertTrue(command.velocity.is_finite())
+            self.assertLessEqual(
+                command.velocity.norm(), config.max_speed + 1.0e-12
+            )
+            progress += command.velocity.dot(goal_direction)
+
+        self.assertGreater(progress, 0.5)
+
     def test_robot_input_order_does_not_change_results(self):
         reversed_snapshot = TransportSnapshot(
             robots=tuple(reversed(self.snapshot.robots)),
@@ -295,6 +470,77 @@ class SamplerTests(unittest.TestCase):
         self.assertEqual(InteractionMode.INVALID, invalid.interaction_mode)
         self.assertEqual(Vec2(), invalid.velocity)
         self.assertTrue(valid.velocity.is_finite())
+
+    def test_neighbor_energy_is_normalized_across_fleet_sizes(self):
+        kernel = GibbsRandomFieldTransport(self.config)
+        robot = RobotSnapshot('subject', Vec2(-1.0, 0.0))
+
+        def evaluation_with_neighbors(count):
+            neighbors = tuple(
+                RobotSnapshot(
+                    'neighbor_{}'.format(index),
+                    Vec2(-0.5, 0.0),
+                    Vec2(0.05, 0.0),
+                )
+                for index in range(count)
+            )
+            snapshot = TransportSnapshot(
+                robots=(robot,) + neighbors,
+                object_contour=square_contour(),
+                target=Vec2(2.0, 0.0),
+            )
+            graph = {'subject': neighbors}
+            return kernel.evaluate_velocity(
+                snapshot,
+                'subject',
+                Vec2(0.1, 0.0),
+                neighbor_graph=graph,
+            ).neighbor_energy
+
+        self.assertAlmostEqual(
+            evaluation_with_neighbors(1),
+            evaluation_with_neighbors(9),
+            places=12,
+        )
+
+    def test_opposing_neighbor_velocities_do_not_cancel_consensus_cost(self):
+        # Isolate velocity consensus from the position potential: neighbors
+        # moving in opposite directions predict different positions, but the
+        # two squared velocity mismatches should still carry the same cost.
+        kernel = GibbsRandomFieldTransport(GRFConfig(
+            random_seed=73,
+            mcmc_iterations=24,
+            sensing_radius=2.0,
+            max_speed=0.15,
+            robot_potential=disabled_potential(),
+        ))
+        subject = RobotSnapshot('subject', Vec2(-1.0, 0.0))
+
+        def evaluate(velocities):
+            neighbors = tuple(
+                RobotSnapshot(
+                    'neighbor_{}'.format(index),
+                    Vec2(-0.5, 0.0),
+                    velocity,
+                )
+                for index, velocity in enumerate(velocities)
+            )
+            snapshot = TransportSnapshot(
+                robots=(subject,) + neighbors,
+                object_contour=square_contour(),
+                target=Vec2(2.0, 0.0),
+            )
+            return kernel.evaluate_velocity(
+                snapshot,
+                'subject',
+                Vec2(),
+                neighbor_graph={'subject': neighbors},
+            ).neighbor_energy
+
+        aligned = evaluate((Vec2(0.15, 0.0), Vec2(0.15, 0.0)))
+        opposed = evaluate((Vec2(0.15, 0.0), Vec2(-0.15, 0.0)))
+
+        self.assertAlmostEqual(aligned, opposed, places=12)
 
 
 if __name__ == '__main__':

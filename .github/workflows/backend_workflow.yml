@@ -69,7 +69,7 @@ jobs:
       AppSettings__Secret: ${{ secrets.APPSETTINGS_SECRET }}
       AppSettings__Issuer: https://robot.zerav.la
       Cors__Origins__0: https://rs.zerav.la
-      LegacyControl__Enabled: "true"
+      LegacyControl__Enabled: "false"
       BACKEND_PUBLISH_IP: ${{ vars.BACKEND_PUBLISH_IP }}
       Viewer__PublicBaseUrl: ${{ vars.VIEWER_PUBLIC_BASE_URL }}
       Viewer__WorkerPublishingEnabled: "false"

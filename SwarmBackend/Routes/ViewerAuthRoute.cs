@@ -15,13 +15,14 @@ public static class ViewerAuthRoute
         return group;
     }
 
-    private static async Task<IResult> Authorize(
+    internal static async Task<IResult> Authorize(
         ViewerAuthRequest request,
         DataContext dataContext,
+        IConfiguration configuration,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Token)
-            || !TryParsePath(request.Path, out var sessionId, out var stream))
+            || !ViewerStreamAddress.TryParse(request.Path, out var streamAddress))
         {
             return Results.Unauthorized();
         }
@@ -30,8 +31,7 @@ public static class ViewerAuthRoute
         {
             return await AuthorizeRead(
                 request.Token,
-                sessionId,
-                stream,
+                streamAddress,
                 dataContext,
                 cancellationToken);
         }
@@ -40,8 +40,9 @@ public static class ViewerAuthRoute
         {
             return await AuthorizePublish(
                 request.Token,
-                sessionId,
+                streamAddress,
                 dataContext,
+                configuration,
                 cancellationToken);
         }
 
@@ -50,8 +51,7 @@ public static class ViewerAuthRoute
 
     private static async Task<IResult> AuthorizeRead(
         string token,
-        Guid sessionId,
-        string stream,
+        ViewerStreamAddress streamAddress,
         DataContext dataContext,
         CancellationToken cancellationToken)
     {
@@ -61,7 +61,8 @@ public static class ViewerAuthRoute
             .AsNoTracking()
             .SingleOrDefaultAsync(
                 candidate => candidate.TokenHash == tokenHash
-                    && candidate.SimulationSessionId == sessionId
+                    && candidate.SimulationSessionId == streamAddress.SessionId
+                    && candidate.AccountId == candidate.SimulationSession.AccountId
                     && candidate.Account.Enabled
                     && candidate.SimulationSession.State < SimulationSessionState.Stopped
                     && !candidate.RevokedAt.HasValue
@@ -73,56 +74,42 @@ public static class ViewerAuthRoute
             return Results.Unauthorized();
         }
 
-        var streamMatches = lease.Source == ViewerSourceType.Scene
-            ? string.Equals(stream, "scene", StringComparison.Ordinal)
-            : string.Equals(stream, lease.RobotRuntimeId, StringComparison.Ordinal);
-        return streamMatches ? Results.Ok() : Results.Unauthorized();
+        return streamAddress.Matches(lease)
+            ? Results.Ok()
+            : Results.Unauthorized();
     }
 
     private static async Task<IResult> AuthorizePublish(
         string token,
-        Guid sessionId,
+        ViewerStreamAddress streamAddress,
         DataContext dataContext,
+        IConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        if (!WorkerCredential.TryParse(token, out var workerId, out var secret))
+        if (!configuration.GetValue<bool>("Viewer:WorkerPublishingEnabled"))
         {
             return Results.Unauthorized();
         }
 
-        var worker = await dataContext.ComputeWorkers
-            .AsNoTracking()
-            .SingleOrDefaultAsync(candidate => candidate.Id == workerId, cancellationToken);
-        if (worker?.CredentialHash == null
-            || worker.CredentialRevokedAt.HasValue
-            || !WorkerCredential.Verify(secret, worker.CredentialHash))
+        if (!ViewerPublishToken.TryHash(token, out var tokenHash))
         {
             return Results.Unauthorized();
         }
 
-        var ownsSession = await dataContext.SimulationSessions
+        var now = DateTime.UtcNow;
+        var lease = await dataContext.ViewerLeases
             .AsNoTracking()
-            .AnyAsync(
-                session => session.Id == sessionId
-                    && session.ComputeWorkerId == workerId
-                    && session.State < SimulationSessionState.Stopped,
+            .SingleOrDefaultAsync(
+                candidate => candidate.PublishTokenHash == tokenHash
+                    && candidate.SimulationSessionId == streamAddress.SessionId
+                    && candidate.AccountId == candidate.SimulationSession.AccountId
+                    && candidate.Account.Enabled
+                    && candidate.SimulationSession.State < SimulationSessionState.Stopped
+                    && !candidate.RevokedAt.HasValue
+                    && candidate.ExpiresAt > now,
                 cancellationToken);
-        return ownsSession ? Results.Ok() : Results.Unauthorized();
-    }
-
-    private static bool TryParsePath(string? path, out Guid sessionId, out string stream)
-    {
-        sessionId = Guid.Empty;
-        stream = string.Empty;
-        var parts = path?.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts is not { Length: >= 3 }
-            || !string.Equals(parts[0], "session", StringComparison.Ordinal)
-            || !Guid.TryParseExact(parts[1], "N", out sessionId))
-        {
-            return false;
-        }
-
-        stream = parts[2];
-        return !string.IsNullOrWhiteSpace(stream);
+        return lease != null && streamAddress.Matches(lease)
+            ? Results.Ok()
+            : Results.Unauthorized();
     }
 }

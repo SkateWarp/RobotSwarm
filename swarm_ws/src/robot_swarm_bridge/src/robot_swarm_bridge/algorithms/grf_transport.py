@@ -236,9 +236,11 @@ class GRFConfig:
     random_seed: int = 0
     minimum_distance: float = 1.0e-4
     energy_limit: float = 1.0e6
-    orbit_alignment_weight: float = 6.0
-    push_alignment_weight: float = 8.0
-    velocity_consensus_weight: float = 0.5
+    object_potential_weight: float = 0.02
+    neighbor_potential_weight: float = 0.02
+    orbit_alignment_weight: float = 60.0
+    push_alignment_weight: float = 80.0
+    velocity_consensus_weight: float = 12.0
     cruise_speed_weight: float = 0.2
     obstacle_potential: PotentialParameters = field(
         default_factory=_obstacle_defaults
@@ -274,6 +276,8 @@ class GRFConfig:
         if not 0.0 <= self.burn_in_fraction < 1.0:
             raise ValueError('burn_in_fraction must be in [0, 1)')
         for name, value in {
+            'object_potential_weight': self.object_potential_weight,
+            'neighbor_potential_weight': self.neighbor_potential_weight,
             'orbit_alignment_weight': self.orbit_alignment_weight,
             'push_alignment_weight': self.push_alignment_weight,
             'velocity_consensus_weight': self.velocity_consensus_weight,
@@ -382,6 +386,19 @@ def _energy_sum(values: Iterable[float], limit: float) -> float:
     for value in values:
         total = _clip_energy(total + _clip_energy(value, limit), limit)
     return total
+
+
+def _energy_mean(values: Iterable[float], limit: float) -> float:
+    """Average an interaction family without depending on sample count."""
+
+    total = 0.0
+    count = 0
+    for value in values:
+        total += _clip_energy(value, limit)
+        count += 1
+    if count == 0:
+        return 0.0
+    return _clip_energy(total / count, limit)
 
 
 def coulomb_buckingham(
@@ -981,7 +998,9 @@ class GibbsRandomFieldTransport:
         ):
             return 0.0, InteractionMode.NO_OBJECT, Vec2()
 
-        potential_energy = _energy_sum(
+        # A contour is one geometric body, not one body per sample.  Averaging
+        # keeps the energy stable when its resolution changes.
+        potential_energy = self.config.object_potential_weight * _energy_mean(
             (
                 _coulomb_buckingham_unchecked(
                     (predicted_position - point).norm(),
@@ -1020,7 +1039,7 @@ class GibbsRandomFieldTransport:
         neighbors: Sequence[_NeighborState],
     ) -> float:
         potential_values = []
-        relative_velocity_sum = Vec2()
+        relative_velocity_squares = []
         valid_neighbor_count = 0
 
         for neighbor in neighbors:
@@ -1034,23 +1053,25 @@ class GibbsRandomFieldTransport:
                     self.config.energy_limit,
                 )
             )
-            relative_velocity_sum = (
-                relative_velocity_sum
-                + neighbor.velocity
-                - proposed_velocity
+            relative_velocity_squares.append(
+                (neighbor.velocity - proposed_velocity).norm_squared()
             )
             valid_neighbor_count += 1
 
-        potential_energy = _energy_sum(
-            potential_values, self.config.energy_limit
+        potential_energy = (
+            self.config.neighbor_potential_weight
+            * _energy_mean(potential_values, self.config.energy_limit)
         )
         if valid_neighbor_count == 0:
             return potential_energy
+        mean_squared_mismatch = (
+            sum(relative_velocity_squares) / valid_neighbor_count
+        )
         consensus_energy = (
             self.config.velocity_consensus_weight
             * 0.5
             * self.config.robot_mass
-            * relative_velocity_sum.norm_squared()
+            * mean_squared_mismatch
         )
         return _energy_sum(
             (potential_energy, consensus_energy),

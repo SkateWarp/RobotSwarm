@@ -28,6 +28,8 @@ public sealed class DockerArgumentBuilderTests
         Assert.Contains("--pids-limit", arguments);
         Assert.Contains("--memory", arguments);
         Assert.Contains("--cpus", arguments);
+        var cpuFlag = Array.IndexOf(arguments.ToArray(), "--cpus");
+        Assert.Equal("12", arguments[cpuFlag + 1]);
         Assert.Contains("--gpus", arguments);
         Assert.DoesNotContain("--privileged", arguments);
         Assert.DoesNotContain("--network=host", arguments);
@@ -35,6 +37,35 @@ public sealed class DockerArgumentBuilderTests
         Assert.DoesNotContain("-p", arguments);
         Assert.Contains(SessionResourceNames.Network(sessionId), arguments);
         Assert.Contains("start_legacy_bridge:=false", arguments);
+        Assert.Contains("gui:=false", arguments);
+        Assert.DoesNotContain(
+            arguments,
+            argument => argument.StartsWith("DISPLAY=", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            arguments,
+            argument => argument.Contains("/tmp/.X11-unix", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ViewerPublishingKeepsTheRosServerHeadless()
+    {
+        var options = ValidOptions();
+        options.Viewer.Enabled = true;
+        var specification = new SessionContainerSpec(
+            options.WorkerId,
+            Guid.NewGuid(),
+            "arena-v1",
+            options.SessionImage,
+            "test",
+            options.MaxRobotsPerSession);
+
+        var arguments = DockerArgumentBuilder.BuildCreateContainer(specification, options);
+
+        Assert.Contains("gui:=false", arguments);
+        Assert.Contains("NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video", arguments);
+        Assert.DoesNotContain(
+            arguments,
+            argument => argument.StartsWith("DISPLAY=", StringComparison.Ordinal));
     }
 
     [Fact]

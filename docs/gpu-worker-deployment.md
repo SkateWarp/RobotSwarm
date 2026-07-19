@@ -115,12 +115,13 @@ The workflow:
 3. Confirms the runner is WSL, Docker is available, the systemd user manager
    is reachable, the local identity file exists, and no managed simulation
    container is running.
-4. Runs the .NET worker tests, deployment rollback tests, and ROS algorithm
-   tests again on the GPU host.
+4. Runs the .NET worker tests, viewer-helper tests, deployment rollback tests,
+   and ROS algorithm tests again on the GPU host.
 5. Builds the ROS image from `swarm_ws/Dockerfile`, labels it with the full Git
    revision, and records Docker's exact `sha256:...` image ID.
 6. Smoke-tests the ROS launch file and NVIDIA access inside that exact image.
-7. Publishes a self-contained Linux worker and stages a versioned release under
+7. Publishes a self-contained Linux worker, packages the tested viewer helper
+   with mode `0755`, and stages both in a versioned release under
    `~/.local/share/robotswarm-gpu-worker/releases/`.
 8. Atomically switches the `current` symlink, which selects both the worker
    executable and its owner-only release environment, starts
@@ -138,9 +139,17 @@ When the selected SHA changes backend/worker contracts, deploy and verify the
 backend for the same SHA first. A protocol-version compatibility handshake and
 backend-visible drain mode remain future work.
 
-The release environment also records the absolute Docker executable found by
-the runner. This avoids relying on an interactive WSL shell's `PATH` when the
-same worker starts under systemd.
+The release environment records the absolute Docker executable found by the
+runner and the absolute path to that release's viewer helper. This avoids
+relying on an interactive WSL shell's `PATH` when the worker starts under
+systemd and keeps helper rollback coupled to worker rollback. Viewer enablement
+remains in the stable, owner-only identity file rather than release output.
+When enabled, deployment requires the configured RTSP endpoint and a passing
+H.264 helper probe before it changes the active release. Unix display mode
+changes only that installed unit to `PrivateTmp=false`; authenticated TCP mode
+and disabled deployments retain the checked-in `PrivateTmp=true` unit
+unchanged. The probe and active service receive the same display transport,
+encoder policy, and GPU request.
 
 If activation or readiness verification fails, the script restores the prior
 release symlink, release environment, unit file, enabled state, and running
@@ -192,6 +201,37 @@ image builds and parses the swarm launch file. It does not yet prove a
 production Gazebo rendering/encoding path. EGL or VirtualGL, the encoder,
 MediaMTX publishing, TURN reachability, and per-session viewer isolation still
 need an end-to-end benchmark before visual sessions are enabled for users.
+
+Every versioned GPU-worker release now includes the tested, Scene-only
+protocol-1 helper and configures its absolute executable path. Shipping it does
+not make the production media path ready or enable it by default. Keep
+`Worker__Viewer__Enabled=false` and backend
+`Viewer__WorkerPublishingEnabled=false` until the host provides all of these:
+
+- a private display per session with a visible Gazebo client;
+- a pinned FFmpeg/GStreamer build with an initialized H.264 encoder and a
+  measured simultaneous-session CPU/GPU cost;
+- a passing helper smoke test against the real private display, pinned image,
+  encoder, and MediaMTX ingest path;
+- an end-to-end WHEP/ICE test from outside the LAN, including TURN if direct
+  UDP cannot reach the host.
+
+The helper prefers `h264_nvenc` but accepts its tested `libx264` fallback when
+the host FFmpeg cannot initialize NVENC. Record the encoder selected by the
+probe and include its CPU cost in the simultaneous-session benchmark. Set
+`ROBOTSWARM_VIEWER_ENCODER` in the identity file to `auto` (the default),
+`h264_nvenc`, or `libx264`; deployment uses the same policy for its probe and
+the active worker release.
+
+WSLg hosts should set `ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT=tcp` in the identity
+file. Deployment validates and persists `unix` (the general default) or `tcp`;
+TCP keeps the service's private `/tmp`, while Unix mode exposes the X socket as
+documented in the publisher guide.
+
+The stock TurtleBot3 Burger model in this repository has no camera sensor, so
+the first honest helper capability is `Scene` only. Do not use the shared WSLg
+root display as a shortcut: it cannot isolate simultaneous users or reliably
+select the correct Gazebo window.
 
 ROS 1 Noetic
 [reached end of life on May 31, 2025](https://www.ros.org/blog/noetic-eol/).

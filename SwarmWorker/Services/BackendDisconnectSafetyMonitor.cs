@@ -11,23 +11,30 @@ namespace SwarmWorker.Services;
 public sealed class BackendDisconnectSafetyMonitor : BackgroundService
 {
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(2);
+    private const string ContainerNoLongerRunningReason =
+        "Backend contact was lost, so the worker applied its local safety stop. "
+        + "The latched session container is no longer running.";
 
     private readonly DockerSessionManager _sessions;
-    private readonly WorkerHubConnection _hub;
+    private readonly IWorkerCommandHub _hub;
+    private readonly BoundedCommandExecutor _commands;
     private readonly WorkerOptions _options;
     private readonly ILogger<BackendDisconnectSafetyMonitor> _logger;
+    private readonly Dictionary<Guid, string> _latchedContainers = new();
     private readonly Dictionary<Guid, string> _handledContainers = new();
     private readonly Dictionary<Guid, FailSafeOperationResult> _pendingReports = new();
     private bool _outageActive;
 
     public BackendDisconnectSafetyMonitor(
         DockerSessionManager sessions,
-        WorkerHubConnection hub,
+        IWorkerCommandHub hub,
+        BoundedCommandExecutor commands,
         IOptions<WorkerOptions> options,
         ILogger<BackendDisconnectSafetyMonitor> logger)
     {
         _sessions = sessions;
         _hub = hub;
+        _commands = commands;
         _options = options.Value;
         _logger = logger;
     }
@@ -39,30 +46,36 @@ public sealed class BackendDisconnectSafetyMonitor : BackgroundService
             try
             {
                 var disconnectedFor = DateTime.UtcNow - _hub.LastSuccessfulContactUtc;
-                if (disconnectedFor >= TimeSpan.FromSeconds(
-                        _options.BackendDisconnectEmergencyStopSeconds))
+                var disconnectThreshold = TimeSpan.FromSeconds(
+                    _options.BackendDisconnectEmergencyStopSeconds);
+                var contactUnavailable = disconnectedFor >= disconnectThreshold;
+                if (contactUnavailable && !_outageActive)
                 {
-                    if (!_outageActive)
-                    {
-                        _outageActive = true;
-                        _logger.LogCritical(
-                            "Backend contact has been unavailable for {Seconds:F0} seconds; applying the local session fail-safe.",
-                            disconnectedFor.TotalSeconds);
-                    }
-
-                    await ApplyFailSafeToNewSessions(stoppingToken);
+                    _outageActive = true;
+                    _logger.LogCritical(
+                        "Backend contact has been unavailable for {Seconds:F0} seconds; applying the local session fail-safe.",
+                        disconnectedFor.TotalSeconds);
                 }
-                else if (_pendingReports.Count > 0 && _hub.IsConnected)
+
+                if (_outageActive)
+                {
+                    await ApplyFailSafeToSessions(
+                        includeUnlatchedSessions: contactUnavailable,
+                        stoppingToken);
+                }
+
+                if (_pendingReports.Count > 0 && _hub.IsConnected)
                 {
                     await ReportPendingResults(stoppingToken);
                 }
 
                 if (_outageActive
+                    && !contactUnavailable
                     && _pendingReports.Count == 0
-                    && disconnectedFor < TimeSpan.FromSeconds(
-                        _options.BackendDisconnectEmergencyStopSeconds))
+                    && AllLatchedContainersHandled())
                 {
                     _outageActive = false;
+                    _latchedContainers.Clear();
                     _handledContainers.Clear();
                     _logger.LogInformation(
                         "Backend contact recovered after the local session fail-safe.");
@@ -83,12 +96,41 @@ public sealed class BackendDisconnectSafetyMonitor : BackgroundService
         }
     }
 
-    private async Task ApplyFailSafeToNewSessions(
+    private async Task ApplyFailSafeToSessions(
+        bool includeUnlatchedSessions,
         CancellationToken cancellationToken)
     {
         var runningSessions = await _sessions.GetManagedSessionsAsync(cancellationToken);
+        foreach (var latched in _latchedContainers.ToArray())
+        {
+            if (_handledContainers.TryGetValue(
+                    latched.Key,
+                    out var handledContainer)
+                && handledContainer == latched.Value)
+            {
+                continue;
+            }
+
+            var exactContainer = runningSessions.SingleOrDefault(session =>
+                session.SessionId == latched.Key
+                && session.ContainerId == latched.Value);
+            if (exactContainer is not null && exactContainer.Running)
+            {
+                continue;
+            }
+
+            _handledContainers[latched.Key] = latched.Value;
+            _pendingReports[latched.Key] = new FailSafeOperationResult(
+                latched.Key,
+                EmergencyStopConfirmed: false,
+                ContainerStopped: true,
+                ContainerNoLongerRunningReason);
+        }
+
         var candidates = runningSessions
             .Where(session => session.Running
+                && (includeUnlatchedSessions
+                    || _latchedContainers.ContainsKey(session.SessionId))
                 && (!_handledContainers.TryGetValue(
                         session.SessionId,
                         out var handledContainer)
@@ -97,6 +139,8 @@ public sealed class BackendDisconnectSafetyMonitor : BackgroundService
 
         foreach (var session in candidates)
         {
+            _latchedContainers[session.SessionId] = session.ContainerId;
+            _commands.RequestLocalEmergencyStop(session.SessionId);
             try
             {
                 var result = await _sessions.ApplyDisconnectFailSafeAsync(
@@ -116,6 +160,13 @@ public sealed class BackendDisconnectSafetyMonitor : BackgroundService
                     session.SessionId);
             }
         }
+    }
+
+    private bool AllLatchedContainersHandled()
+    {
+        return _latchedContainers.All(latched =>
+            _handledContainers.TryGetValue(latched.Key, out var handledContainer)
+            && handledContainer == latched.Value);
     }
 
     private async Task ReportPendingResults(CancellationToken cancellationToken)

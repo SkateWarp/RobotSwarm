@@ -6,6 +6,7 @@ public sealed record RosTaskStatus(
     Guid TaskRunId,
     string State,
     double? Progress,
+    JsonElement? Result,
     string? Error);
 
 public static class TaskStatusParser
@@ -74,7 +75,15 @@ public static class TaskStatusParser
                 ? rootError.GetString()
                 : null;
 
-        return new RosTaskStatus(taskRunId, state, progress, error);
+        JsonElement? result = null;
+        if (task.TryGetProperty("result", out var resultElement)
+            && resultElement.ValueKind is not JsonValueKind.Null
+            and not JsonValueKind.Undefined)
+        {
+            result = resultElement.Clone();
+        }
+
+        return new RosTaskStatus(taskRunId, state, progress, result, error);
     }
 
     private static string? MapState(string? state)

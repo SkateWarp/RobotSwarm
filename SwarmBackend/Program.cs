@@ -1,9 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.HttpOverrides;
 using SwarmBackend.Helpers;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Routes;
 using SwarmBackend.Services;
 using System.Text.Json;
+using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -38,6 +40,7 @@ AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddAuthorization();
+builder.Services.AddAbuseProtection(builder.Configuration);
 builder.Services.GetConfigureJwt(builder.Configuration);
 builder.Services.AddControllers();
 builder.Services.AddScoped<IAccountService, AccountService>();
@@ -73,6 +76,30 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddHealthChecks();
 
+var knownProxyAddresses = builder.Configuration
+    .GetSection("ReverseProxy:KnownProxies")
+    .GetChildren()
+    .Select(proxy => proxy.Value)
+    .Where(proxy => !string.IsNullOrWhiteSpace(proxy))
+    .Select(proxy => IPAddress.TryParse(proxy, out var address)
+        ? address
+        : throw new InvalidOperationException(
+            $"ReverseProxy:KnownProxies contains an invalid IP address: '{proxy}'."))
+    .ToArray();
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    foreach (var address in knownProxyAddresses)
+    {
+        if (!options.KnownProxies.Contains(address))
+        {
+            options.KnownProxies.Add(address);
+        }
+    }
+});
+
 if (builder.Environment.IsDevelopment())
 {
     builder.Services.AddEndpointsApiExplorer();
@@ -97,6 +124,7 @@ await using (var scope = app.Services.CreateAsyncScope())
         app.Logger);
 }
 
+app.UseForwardedHeaders();
 app.UseRouting();
 app.UseCors("Frontend");
 app.UseWebSockets(new WebSocketOptions
@@ -104,6 +132,7 @@ app.UseWebSockets(new WebSocketOptions
     KeepAliveInterval = TimeSpan.FromSeconds(120),
 });
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 
 if (app.Environment.IsDevelopment())

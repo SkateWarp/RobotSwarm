@@ -596,6 +596,10 @@ namespace SwarmBackend.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<string>("PublishTokenHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<DateTime?>("RevokedAt")
                         .HasColumnType("timestamp without time zone");
 
@@ -617,6 +621,9 @@ namespace SwarmBackend.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AccountId");
+
+                    b.HasIndex("PublishTokenHash")
+                        .IsUnique();
 
                     b.HasIndex("TokenHash")
                         .IsUnique();

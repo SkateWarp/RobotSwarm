@@ -30,7 +30,7 @@ const navigationGTSConfig = [
         title: "Control en Tiempo Real",
         type: "item",
         icon: "settings_remote",
-        auth: authRoles.admin,
+        auth: authRoles.user,
         url: "/apps/GTS/realtime",
     },
     {

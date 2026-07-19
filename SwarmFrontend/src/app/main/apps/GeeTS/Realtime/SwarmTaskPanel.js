@@ -14,6 +14,7 @@ import {
     TextField,
     Typography,
 } from "@mui/material";
+import transportTaskNotice from "./transportTaskStatus";
 
 const TASK_TYPES = [
     { value: "FollowLeader", label: "Follow the leader" },
@@ -22,12 +23,6 @@ const TASK_TYPES = [
 ];
 
 const TERMINAL_TASK_STATES = new Set(["Completed", "Cancelled", "Failed"]);
-const DEFAULT_WAYPOINTS = [
-    [-2, -2],
-    [2, -2],
-    [2, 2],
-    [-2, 2],
-];
 const SUPPORTED_LETTERS = "ABCDEFGHIJKLMNOPRSTUVWXYZ".split("");
 
 const clampNumber = (value, minimum, maximum, fallback) => {
@@ -50,17 +45,16 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
     const [pathRadius, setPathRadius] = useState(2);
     const [formationType, setFormationType] = useState("circle");
     const [formationLetter, setFormationLetter] = useState("A");
-    const [movementMode, setMovementMode] = useState("static");
     const [formationSpacing, setFormationSpacing] = useState(0.7);
     const [targetX, setTargetX] = useState(3);
     const [targetY, setTargetY] = useState(3);
-    const [transportPlanner, setTransportPlanner] = useState("grf");
 
     const activeTask = tasks.find((task) => !TERMINAL_TASK_STATES.has(task.state));
     const latestTask = activeTask || tasks[0];
     const canControl = ["Ready", "Active", "Paused"].includes(session.state);
     const canStart = canControl && !session.isEmergencyStopped && !activeTask;
     const latestProgress = Math.min(1, Math.max(0, Number(latestTask?.progress) || 0));
+    const transportNotice = transportTaskNotice(latestTask);
 
     const buildParameters = () => {
         if (taskType === "FollowLeader") {
@@ -70,7 +64,6 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                     leader_mode: leaderMode,
                     follow_distance: clampNumber(followDistance, 0.35, 2, 0.7),
                     radius: clampNumber(pathRadius, 0.5, 4, 2),
-                    ...(leaderMode === "waypoint" ? { waypoints: DEFAULT_WAYPOINTS } : {}),
                 },
             };
         }
@@ -79,10 +72,10 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
             const shape = formationType === "letter" ? formationLetter.toUpperCase() : formationType;
             return {
                 formation_type: shape,
-                movement_mode: movementMode,
+                movement_mode: "static",
                 config: {
                     formation_type: shape,
-                    movement_mode: movementMode,
+                    movement_mode: "static",
                     spacing: clampNumber(formationSpacing, 0.35, 2, 0.7),
                 },
             };
@@ -94,7 +87,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
             config: {
                 target_x: clampNumber(targetX, -4, 4, 3),
                 target_y: clampNumber(targetY, -4, 4, 3),
-                transport_planner: transportPlanner,
+                transport_planner: "grf",
             },
         };
     };
@@ -135,6 +128,11 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                     {latestTask.error && (
                         <Alert severity="error" sx={{ mt: 2 }}>
                             {latestTask.error}
+                        </Alert>
+                    )}
+                    {transportNotice && (
+                        <Alert severity={transportNotice.severity} sx={{ mt: 2 }}>
+                            {transportNotice.message}
                         </Alert>
                     )}
                 </Box>
@@ -210,8 +208,6 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                         <MenuItem value="circular">Circle</MenuItem>
                                         <MenuItem value="square">Square</MenuItem>
                                         <MenuItem value="figure8">Figure eight</MenuItem>
-                                        <MenuItem value="waypoint">Arena waypoints</MenuItem>
-                                        <MenuItem value="random">Random exploration</MenuItem>
                                     </Select>
                                 </FormControl>
                             </Grid>
@@ -261,8 +257,8 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                     </Select>
                                 </FormControl>
                             </Grid>
-                            <Grid item xs={12} sm={6}>
-                                {formationType === "letter" ? (
+                            {formationType === "letter" && (
+                                <Grid item xs={12} sm={6}>
                                     <FormControl fullWidth size="small">
                                         <InputLabel id="formation-letter-label">Letter</InputLabel>
                                         <Select
@@ -280,39 +276,11 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                             ))}
                                         </Select>
                                     </FormControl>
-                                ) : (
-                                    <FormControl fullWidth size="small">
-                                        <InputLabel id="movement-mode-label">Movement</InputLabel>
-                                        <Select
-                                            labelId="movement-mode-label"
-                                            value={movementMode}
-                                            label="Movement"
-                                            onChange={(event) => setMovementMode(event.target.value)}
-                                        >
-                                            <MenuItem value="static">Static</MenuItem>
-                                            <MenuItem value="moving">Moving</MenuItem>
-                                            <MenuItem value="adaptive">Adaptive</MenuItem>
-                                        </Select>
-                                    </FormControl>
-                                )}
-                            </Grid>
-                            {formationType === "letter" && (
-                                <Grid item xs={12} sm={6}>
-                                    <FormControl fullWidth size="small">
-                                        <InputLabel id="letter-movement-mode-label">Movement</InputLabel>
-                                        <Select
-                                            labelId="letter-movement-mode-label"
-                                            value={movementMode}
-                                            label="Movement"
-                                            onChange={(event) => setMovementMode(event.target.value)}
-                                        >
-                                            <MenuItem value="static">Static</MenuItem>
-                                            <MenuItem value="moving">Moving</MenuItem>
-                                            <MenuItem value="adaptive">Adaptive</MenuItem>
-                                        </Select>
-                                    </FormControl>
                                 </Grid>
                             )}
+                            <Grid item xs={12} sm={6}>
+                                <TextField fullWidth size="small" label="Movement" value="Static" disabled />
+                            </Grid>
                             <Grid item xs={12} sm={6}>
                                 <TextField
                                     fullWidth
@@ -352,18 +320,13 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                 />
                             </Grid>
                             <Grid item xs={12}>
-                                <FormControl fullWidth size="small">
-                                    <InputLabel id="transport-planner-label">Planner</InputLabel>
-                                    <Select
-                                        labelId="transport-planner-label"
-                                        value={transportPlanner}
-                                        label="Planner"
-                                        onChange={(event) => setTransportPlanner(event.target.value)}
-                                    >
-                                        <MenuItem value="grf">GRF</MenuItem>
-                                        <MenuItem value="legacy">Legacy fallback</MenuItem>
-                                    </Select>
-                                </FormControl>
+                                <TextField
+                                    fullWidth
+                                    size="small"
+                                    label="Planner"
+                                    value="Coordinated GRF"
+                                    disabled
+                                />
                             </Grid>
                         </Grid>
                     )}
