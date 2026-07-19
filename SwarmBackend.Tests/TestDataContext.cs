@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -14,10 +15,24 @@ internal sealed class TestDataContext : DataContext
     {
     }
 
-    public static TestDataContext Create()
+    public static TestDataContext Create(
+        string? databaseName = null,
+        InMemoryDatabaseRoot? databaseRoot = null)
     {
-        var options = new DbContextOptionsBuilder<DataContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+        var optionsBuilder = new DbContextOptionsBuilder<DataContext>();
+        if (databaseRoot == null)
+        {
+            optionsBuilder.UseInMemoryDatabase(
+                databaseName ?? Guid.NewGuid().ToString("N"));
+        }
+        else
+        {
+            optionsBuilder.UseInMemoryDatabase(
+                databaseName ?? Guid.NewGuid().ToString("N"),
+                databaseRoot);
+        }
+
+        var options = optionsBuilder
             .ConfigureWarnings(warnings => warnings.Ignore(
                 InMemoryEventId.TransactionIgnoredWarning))
             .Options;

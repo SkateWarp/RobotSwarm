@@ -6,56 +6,16 @@ on:
     branches: [main]
     types: [completed]
 
+permissions:
+  contents: read
+
 concurrency:
-  group: production-backend
+  group: production-robotswarm
   cancel-in-progress: false
 
 jobs:
-  scope:
-    runs-on: ubuntu-latest
-    outputs:
-      deploy: ${{ steps.changes.outputs.deploy }}
-    steps:
-      - name: Require successful CI
-        if: github.event.workflow_run.conclusion != 'success'
-        run: |
-          echo "The project checks did not pass; backend deployment is blocked." >&2
-          exit 1
-
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 2
-
-      - name: Check backend deployment scope
-        id: changes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if git rev-parse HEAD^ >/dev/null 2>&1
-          then
-            changed_files="$(git diff --name-only HEAD^ HEAD)"
-          else
-            changed_files="$(git ls-tree -r --name-only HEAD)"
-          fi
-
-          deploy=false
-          while IFS= read -r path
-          do
-            case "$path" in
-              SwarmBackend/*|infra/*|docker-compose.prod.yml|.dockerignore|.github/workflows/backend_workflow.yml)
-                deploy=true
-                break
-                ;;
-            esac
-          done <<< "$changed_files"
-
-          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
-
   deploy:
-    needs: scope
-    if: needs.scope.outputs.deploy == 'true'
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: [self-hosted, backend-prod]
     environment: production
     defaults:
@@ -65,20 +25,55 @@ jobs:
       DB_USER: ${{ secrets.DB_USER }}
       DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
       DB_NAME: ${{ secrets.DB_NAME }}
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
       BACKEND_IMAGE: swarmbackend:${{ github.event.workflow_run.head_sha }}
       AppSettings__Secret: ${{ secrets.APPSETTINGS_SECRET }}
       AppSettings__Issuer: https://robot.zerav.la
       Cors__Origins__0: https://rs.zerav.la
+      ReverseProxy__KnownProxies__0: ${{ vars.BACKEND_PROXY_IP }}
       LegacyControl__Enabled: "false"
+      Tasks__RequireCollaborativeTransportEvidence: ${{ vars.REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE || 'false' }}
       BACKEND_PUBLISH_IP: ${{ vars.BACKEND_PUBLISH_IP }}
       Viewer__PublicBaseUrl: ${{ vars.VIEWER_PUBLIC_BASE_URL }}
-      Viewer__WorkerPublishingEnabled: "false"
+      Viewer__WorkerPublishingEnabled: ${{ vars.VIEWER_WORKER_PUBLISHING_ENABLED || 'false' }}
+      Viewer__HlsProxyEnabled: ${{ vars.VIEWER_HLS_PROXY_ENABLED || 'false' }}
+      Viewer__HlsPublicBaseUrl: https://robot.zerav.la/api/viewer/hls
+      Viewer__HlsUpstreamTimeoutSeconds: "15"
+      MEDIA_HLS_CDN_SECRET: ${{ secrets.MEDIA_HLS_CDN_SECRET }}
+      MEDIA_IMAGE: bluenviron/mediamtx@sha256:f8628851106cc053f9175b248050bb5f362a6e65abd72297c167a1cb5a9a3be2
       BootstrapAdmin__Email: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
       BootstrapAdmin__Password: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
       MEDIA_PUBLISH_IP: ${{ vars.MEDIA_PUBLISH_IP }}
       MEDIA_WEBRTC_IP: ${{ vars.MEDIA_WEBRTC_IP }}
 
     steps:
+      - name: Snapshot current media configuration
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          rollback_dir="$RUNNER_TEMP/robotswarm-production-rollback"
+          mkdir -p "$rollback_dir"
+          if ! docker inspect media_prod >/dev/null 2>&1
+          then
+            echo "absent" > "$rollback_dir/media-state"
+            exit 0
+          fi
+
+          config_source="$(
+            docker inspect media_prod --format \
+              '{{range .Mounts}}{{if eq .Destination "/mediamtx.yml"}}{{.Source}}{{end}}{{end}}'
+          )"
+          test -n "$config_source"
+          test -r "$config_source"
+          cp -- "$config_source" "$rollback_dir/mediamtx.yml"
+          docker inspect media_prod --format '{{.Image}}' \
+            > "$rollback_dir/media-image"
+          grep -Eq '^sha256:[a-f0-9]{64}$' "$rollback_dir/media-image"
+          docker image inspect "$(cat "$rollback_dir/media-image")" >/dev/null
+          echo "present" > "$rollback_dir/media-state"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -91,12 +86,72 @@ jobs:
           test -n "$DB_NAME"
           test -n "$AppSettings__Secret"
           test -n "$BACKEND_PUBLISH_IP"
+          case "$Viewer__WorkerPublishingEnabled" in
+            true|false) ;;
+            *) echo "VIEWER_WORKER_PUBLISHING_ENABLED must be true or false." >&2; exit 1 ;;
+          esac
+          case "$Viewer__HlsProxyEnabled" in
+            true|false) ;;
+            *) echo "VIEWER_HLS_PROXY_ENABLED must be true or false." >&2; exit 1 ;;
+          esac
+          case "$Tasks__RequireCollaborativeTransportEvidence" in
+            true|false) ;;
+            *) echo "REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE must be true or false." >&2; exit 1 ;;
+          esac
+          python3 - \
+            "$ReverseProxy__KnownProxies__0" \
+            "$BACKEND_PUBLISH_IP" \
+            "$Viewer__WorkerPublishingEnabled" \
+            "$MEDIA_PUBLISH_IP" <<'PY'
+          import ipaddress
+          import sys
+
+          def required_ipv4(value, variable):
+              try:
+                  address = ipaddress.IPv4Address(value)
+              except ipaddress.AddressValueError as error:
+                  raise SystemExit(f"{variable} must contain one IPv4 address.") from error
+              if address.is_unspecified or address.is_multicast:
+                  raise SystemExit(f"{variable} must contain a usable unicast address.")
+              if address.is_loopback:
+                  raise SystemExit(f"{variable} must not be loopback in this LAN topology.")
+
+          required_ipv4(sys.argv[1], "BACKEND_PROXY_IP")
+          required_ipv4(sys.argv[2], "BACKEND_PUBLISH_IP")
+          if sys.argv[3] == "true":
+              required_ipv4(sys.argv[4], "MEDIA_PUBLISH_IP")
+          PY
+          if test "$Viewer__HlsProxyEnabled" = "true"
+          then
+            [[ "$MEDIA_HLS_CDN_SECRET" =~ ^[A-Za-z0-9_-]{43,128}$ ]] || {
+              echo "MEDIA_HLS_CDN_SECRET must be a 43-128 character base64url secret." >&2
+              exit 1
+            }
+          fi
+
+      - name: Require the CI revision to remain main HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$DEPLOY_SHA" =~ ^[a-f0-9]{40}$ ]]
+          main_head="$(
+            git ls-remote --exit-code origin refs/heads/main \
+              | awk 'NR == 1 { print $1 }'
+          )"
+          if test "$main_head" != "$DEPLOY_SHA"
+          then
+            echo "A newer main revision exists; this deployment is obsolete." >&2
+            exit 1
+          fi
 
       - name: Build Backend Docker image
         run: docker build -t "$BACKEND_IMAGE" -f SwarmBackend/Dockerfile .
 
       - name: Deploy with Docker Compose
         run: |
+          set -euo pipefail
+
           deploy_stack() {
             docker compose -f docker-compose.prod.yml \
               up -d --remove-orphans --wait --wait-timeout 180 \
@@ -109,14 +164,38 @@ jobs:
               return 1
             fi
 
+            if test "$Viewer__WorkerPublishingEnabled" = "true"
+            then
+              media_endpoint="$(docker port media_prod 8554/tcp)" || return
+              if test "$media_endpoint" != "$MEDIA_PUBLISH_IP:8554"
+              then
+                echo "MediaMTX RTSP published at $media_endpoint; expected $MEDIA_PUBLISH_IP:8554." >&2
+                return 1
+              fi
+            fi
+
             curl --fail --show-error --silent \
               --connect-timeout 5 --max-time 15 \
               "http://$BACKEND_PUBLISH_IP:44336/health" >/dev/null
           }
 
-          previous_image="$(docker inspect backend_prod --format '{{.Config.Image}}' 2>/dev/null || true)"
+          # The shared workflow lock serializes production jobs. Recheck here,
+          # after a potentially long image build and immediately before the
+          # first running production container can be changed.
+          main_head="$(
+            git ls-remote --exit-code origin refs/heads/main \
+              | awk 'NR == 1 { print $1 }'
+          )"
+          if test "$main_head" != "$DEPLOY_SHA"
+          then
+            echo "A newer main revision exists; production was left unchanged." >&2
+            exit 1
+          fi
+
+          previous_image="$(docker inspect backend_prod --format '{{.Image}}' 2>/dev/null || true)"
           previous_endpoint="$(docker port backend_prod 44336/tcp 2>/dev/null || true)"
           previous_publish_ip="${previous_endpoint%:44336}"
+          rollback_dir="$RUNNER_TEMP/robotswarm-production-rollback"
           compose_service="$(
             docker inspect backend_prod \
               --format '{{index .Config.Labels "com.docker.compose.service"}}' \
@@ -132,14 +211,43 @@ jobs:
 
           if ! deploy_stack
           then
+            rollback_failed=false
             docker compose -f docker-compose.prod.yml ps
             docker compose -f docker-compose.prod.yml logs --tail=200 backend media
             if test -n "$previous_image"
             then
               echo "Restoring the backend image that was active before this deployment."
-              BACKEND_IMAGE="$previous_image" \
-              BACKEND_PUBLISH_IP="${previous_publish_ip:-127.0.0.1}" \
-                docker compose -f docker-compose.prod.yml up -d --no-deps --wait --wait-timeout 180 backend
+              if ! BACKEND_IMAGE="$previous_image" \
+                BACKEND_PUBLISH_IP="${previous_publish_ip:-127.0.0.1}" \
+                  docker compose -f docker-compose.prod.yml \
+                    up -d --no-deps --wait --wait-timeout 180 backend
+              then
+                rollback_failed=true
+              fi
+            fi
+
+            media_state="$(cat "$rollback_dir/media-state")"
+            if test "$media_state" = "present"
+            then
+              echo "Restoring the MediaMTX configuration that was active before this deployment."
+              cp -- "$rollback_dir/mediamtx.yml" infra/mediamtx.yml
+              if ! MEDIA_IMAGE="$(cat "$rollback_dir/media-image")" \
+                docker compose -f docker-compose.prod.yml \
+                  up -d --no-deps --force-recreate --wait --wait-timeout 60 media
+              then
+                rollback_failed=true
+              fi
+            else
+              if ! docker compose -f docker-compose.prod.yml \
+                rm --stop --force media
+              then
+                rollback_failed=true
+              fi
+            fi
+
+            if test "$rollback_failed" = "true"
+            then
+              echo "Production rollback did not restore every component; manual intervention is required." >&2
             fi
             exit 1
           fi

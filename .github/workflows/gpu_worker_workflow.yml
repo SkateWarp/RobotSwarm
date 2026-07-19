@@ -7,11 +7,6 @@ on:
         description: Full main-branch SHA whose Check project run succeeded
         required: true
         type: string
-      confirm_drained:
-        description: I disabled new scheduling and confirmed there are no active GPU sessions
-        required: true
-        default: false
-        type: boolean
       confirm_backend_ready:
         description: The backend for this SHA is deployed, or this is a backward-compatible worker-only change
         required: true
@@ -23,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-gpu-worker
+  group: production-robotswarm
   cancel-in-progress: false
 
 jobs:
@@ -34,7 +29,6 @@ jobs:
     env:
       DEPLOY_SHA: ${{ inputs.commit_sha }}
       BACKEND_CONFIRMED: ${{ inputs.confirm_backend_ready }}
-      DRAIN_CONFIRMED: ${{ inputs.confirm_drained }}
       GPU_REQUEST: ${{ vars.GPU_WORKER_GPU_REQUEST || 'device=0' }}
       HARNESS_SHA: ${{ github.workflow_sha }}
       ROS_IMAGE_REPOSITORY: robotswarm/ros-noetic
@@ -51,7 +45,6 @@ jobs:
           [[ "$DEPLOY_SHA" =~ ^[a-f0-9]{40}$ ]]
           [[ "$HARNESS_SHA" =~ ^[a-f0-9]{40}$ ]]
           test "$BACKEND_CONFIRMED" = "true"
-          test "$DRAIN_CONFIRMED" = "true"
           test "$WORKFLOW_REF" = "refs/heads/main"
 
           python3 - <<'PY'
@@ -98,6 +91,110 @@ jobs:
                   "No successful Check project push run exists for this main SHA."
               )
           PY
+
+      - name: Acquire scheduling drain lease
+        id: drain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          identity_file="$HOME/.config/robotswarm/gpu-worker-identity.env"
+          test -r "$identity_file"
+          set -a
+          # The identity file is owner-only and maintained by the deployment host.
+          source "$identity_file"
+          set +a
+
+          backend_url="${Worker__BackendUrl%/}"
+          backend_url="${backend_url%/hubs/worker}"
+          credential="${Worker__WorkerId}.${Worker__WorkerSecret}"
+          response_file="$RUNNER_TEMP/robotswarm-drain-acquire.json"
+          request_file="$RUNNER_TEMP/robotswarm-drain-request.json"
+          DEPLOY_SHA="$DEPLOY_SHA" python3 - <<'PY' >"$request_file"
+          import json
+          import os
+
+          print(json.dumps({"targetRevision": os.environ["DEPLOY_SHA"]}))
+          PY
+
+          status="$({
+            curl --silent --show-error \
+              --connect-timeout 5 \
+              --max-time 20 \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $credential" \
+              --header 'Content-Type: application/json' \
+              --data-binary "@$request_file" \
+              "$backend_url/api/worker-maintenance/drain"
+          })"
+          unset credential Worker__WorkerSecret
+          test "$status" = "200"
+
+          read -r lease_id target_revision < <(
+            python3 - "$response_file" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              status = json.load(stream)
+          print(status["leaseId"], status["targetRevision"])
+          PY
+          )
+          test "$target_revision" = "$DEPLOY_SHA"
+          [[ "$lease_id" =~ ^[a-fA-F0-9-]{36}$ ]]
+          echo "lease_id=$lease_id" >> "$GITHUB_OUTPUT"
+          echo "backend_url=$backend_url" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for active sessions to drain
+        shell: bash
+        env:
+          DRAIN_LEASE_ID: ${{ steps.drain.outputs.lease_id }}
+          DRAIN_BACKEND_URL: ${{ steps.drain.outputs.backend_url }}
+        run: |
+          set -euo pipefail
+
+          identity_file="$HOME/.config/robotswarm/gpu-worker-identity.env"
+          deadline=$((SECONDS + 900))
+          while true; do
+            set -a
+            source "$identity_file"
+            set +a
+            credential="${Worker__WorkerId}.${Worker__WorkerSecret}"
+            status="$({
+              curl --silent --show-error --fail \
+                --connect-timeout 5 \
+                --max-time 20 \
+                --header "Authorization: Bearer $credential" \
+                "$DRAIN_BACKEND_URL/api/worker-maintenance/drain/$DRAIN_LEASE_ID"
+            })"
+            unset credential Worker__WorkerSecret
+
+            read -r is_drained tracked reported < <(
+              STATUS="$status" python3 - <<'PY'
+          import json
+          import os
+
+          status = json.loads(os.environ["STATUS"])
+          reported = status.get("reportedActiveSessionCount")
+          print(
+              str(status["isDrained"]).lower(),
+              status["trackedSessionCount"],
+              "unknown" if reported is None else reported,
+          )
+          PY
+            )
+            echo "Drain status: tracked=$tracked worker-reported=$reported"
+            if test "$is_drained" = "true"; then
+              break
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "The worker did not drain within 15 minutes." >&2
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Check out protected deployment harness
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -267,7 +364,68 @@ jobs:
           test "$(stat -c '%a' "$publish_dir/robotswarm-viewer-publisher")" = "755"
           echo "publish_dir=$publish_dir" >> "$GITHUB_OUTPUT"
 
+      - name: Verify scheduling drain lease
+        shell: bash
+        env:
+          DRAIN_LEASE_ID: ${{ steps.drain.outputs.lease_id }}
+          DRAIN_BACKEND_URL: ${{ steps.drain.outputs.backend_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          identity_file="$HOME/.config/robotswarm/gpu-worker-identity.env"
+          set -a
+          source "$identity_file"
+          set +a
+          credential="${Worker__WorkerId}.${Worker__WorkerSecret}"
+          response="$({
+            curl --silent --show-error --fail \
+              --connect-timeout 5 \
+              --max-time 20 \
+              --header "Authorization: Bearer $credential" \
+              "$DRAIN_BACKEND_URL/api/worker-maintenance/drain/$DRAIN_LEASE_ID"
+          })"
+          unset credential Worker__WorkerSecret
+
+          RESPONSE="$response" DEPLOY_SHA="$DEPLOY_SHA" python3 - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          import json
+          import os
+
+          status = json.loads(os.environ["RESPONSE"])
+          expires = datetime.fromisoformat(status["expiresAt"].replace("Z", "+00:00"))
+          if status["targetRevision"] != os.environ["DEPLOY_SHA"]:
+              raise SystemExit("Drain lease targets a different revision.")
+          if not status["isDrained"]:
+              raise SystemExit("Backend no longer reports the worker as drained.")
+          if expires <= datetime.now(timezone.utc) + timedelta(minutes=10):
+              raise SystemExit("Drain lease expires too soon for a safe deployment.")
+          PY
+
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/git/ref/heads/main",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              current_main = json.load(response)["object"]["sha"]
+
+          if current_main != os.environ["DEPLOY_SHA"]:
+              raise SystemExit(
+                  "Main advanced after validation; refusing to deploy a stale GPU revision."
+              )
+          PY
+
       - name: Deploy worker and verify readiness
+        id: worker_deploy
         shell: bash
         working-directory: _deploy/deploy-harness
         env:
@@ -283,3 +441,30 @@ jobs:
             --release-id "${DEPLOY_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --gpu-request "$GPU_REQUEST" \
             --unit-file deploy/gpu-worker/robotswarm-gpu-worker.service
+
+      - name: Resume scheduling
+        if: ${{ always() && steps.drain.outcome == 'success' && (steps.worker_deploy.outcome == 'success' || steps.worker_deploy.outcome == 'skipped') }}
+        shell: bash
+        env:
+          DRAIN_LEASE_ID: ${{ steps.drain.outputs.lease_id }}
+          DRAIN_BACKEND_URL: ${{ steps.drain.outputs.backend_url }}
+        run: |
+          set -euo pipefail
+
+          identity_file="$HOME/.config/robotswarm/gpu-worker-identity.env"
+          set -a
+          source "$identity_file"
+          set +a
+          credential="${Worker__WorkerId}.${Worker__WorkerSecret}"
+          status="$({
+            curl --silent --show-error \
+              --connect-timeout 5 \
+              --max-time 20 \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --request DELETE \
+              --header "Authorization: Bearer $credential" \
+              "$DRAIN_BACKEND_URL/api/worker-maintenance/drain/$DRAIN_LEASE_ID"
+          })"
+          unset credential Worker__WorkerSecret
+          test "$status" = "204"

@@ -9505,6 +9505,9 @@ class CollaborativeTransport:
             'useful_contributor_count': len(getattr(
                 self, 'transport_useful_contributors', set()
             )),
+            'useful_contributor_ids': sort_robot_ids(getattr(
+                self, 'transport_useful_contributors', set()
+            )),
             'current_useful_pusher_count': len(getattr(
                 self, 'transport_current_useful_pushers', set()
             )),

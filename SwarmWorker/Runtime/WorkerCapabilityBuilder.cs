@@ -49,6 +49,10 @@ public static class WorkerCapabilityBuilder
                 videoCodec = viewer.VideoCodec,
                 protocolVersion = viewer.IsAvailable ? 1 : (int?)null
             },
+            taskOutcomes = new
+            {
+                collaborativeTransportEvidenceVersion = 1
+            },
             isolation = new
             {
                 perSessionContainer = true,
@@ -62,7 +66,9 @@ public static class WorkerCapabilityBuilder
                 backendDisconnectStopSeconds =
                     options.BackendDisconnectEmergencyStopSeconds,
                 emergencyStopConfirmationSeconds =
-                    options.EmergencyStopTimeoutSeconds
+                    options.EmergencyStopTimeoutSeconds,
+                taskCancellationConfirmationSeconds =
+                    options.TaskCancellationTimeoutSeconds
             }
         });
     }

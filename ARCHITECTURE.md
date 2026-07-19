@@ -1,4 +1,14 @@
 # Multi-Robot Swarm System Architecture
+
+> **Historical design note (2026-01-05).** This file preserves the original
+> ROS-only proposal and is not the current production topology. In particular,
+> browsers do not connect directly to the task orchestrator, and the
+> commissioned per-session limit is 1–10 robots rather than the speculative
+> 20+ value below. Use the current
+> [implementation status](IMPLEMENTATION_STATUS.md) and
+> [control plan](docs/swarm-control-plan.md) for the React → .NET backend → GPU
+> worker → private ROS/Gazebo architecture.
+
 **Target Platform:** ROS Noetic + Gazebo + TurtleBot3
 **Language:** Python (with C++ optional modules)
 **Communication:** WebSocket (SignalR)

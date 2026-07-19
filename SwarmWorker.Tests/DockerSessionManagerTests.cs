@@ -119,6 +119,71 @@ public sealed class DockerSessionManagerTests
     }
 
     [Fact]
+    public async Task TaskCancellationWaitsForTheCorrelatedRosTerminalState()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var taskRunId = Guid.NewGuid();
+        var staleStatus = JsonSerializer.Serialize(new
+        {
+            task = new
+            {
+                task_id = Guid.NewGuid(),
+                status = "stopped",
+                progress = 0
+            }
+        });
+        var confirmedStatus = JsonSerializer.Serialize(new
+        {
+            task = new
+            {
+                task_id = taskRunId,
+                status = "stopped",
+                progress = 0
+            }
+        });
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(
+                0,
+                $"data: {JsonSerializer.Serialize(staleStatus)}\n",
+                string.Empty),
+            new DockerCommandResult(
+                0,
+                $"data: {JsonSerializer.Serialize(confirmedStatus)}\n",
+                string.Empty));
+        var manager = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            Options.Create(new WorkerOptions
+            {
+                WorkerId = workerId,
+                SessionImage = "robotswarm/ros-noetic:test",
+                TaskCancellationTimeoutSeconds = 2
+            }),
+            NullLogger<DockerSessionManager>.Instance);
+        var session = new ManagedSessionInfo(
+            sessionId,
+            "container-1",
+            SessionResourceNames.Container(sessionId),
+            "robotswarm/ros-noetic:test",
+            true,
+            "running",
+            new Dictionary<string, string>
+            {
+                [SessionLabels.WorkerId] = workerId.ToString("D")
+            });
+
+        await manager.WaitForTaskStoppedAsync(
+            session,
+            taskRunId,
+            CancellationToken.None);
+
+        Assert.Equal(2, docker.Calls.Count);
+        Assert.All(docker.Calls, arguments =>
+            Assert.Contains("rospy.wait_for_message", arguments[4]));
+    }
+
+    [Fact]
     public async Task ReconciliationIgnoresAnExplicitlyMissingContainer()
     {
         var workerId = Guid.NewGuid();

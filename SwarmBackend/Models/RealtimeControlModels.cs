@@ -18,7 +18,27 @@ public record ComputeWorkerResponse(
     DateTime UpdatedAt,
     DateTime? LastHeartbeatAt,
     DateTime? CredentialCreatedAt,
-    DateTime? CredentialRevokedAt);
+    DateTime? CredentialRevokedAt,
+    int? ReportedActiveSessionCount,
+    DateTime? ActiveSessionsReportedAt,
+    Guid? DrainLeaseId,
+    string? DrainTargetRevision,
+    DateTime? DrainRequestedAt,
+    DateTime? DrainLeaseExpiresAt);
+
+public record AcquireWorkerDrainRequest(string TargetRevision);
+
+public record WorkerDrainStatusResponse(
+    Guid WorkerId,
+    string State,
+    Guid LeaseId,
+    string TargetRevision,
+    DateTime RequestedAt,
+    DateTime ExpiresAt,
+    int TrackedSessionCount,
+    int? ReportedActiveSessionCount,
+    DateTime? ActiveSessionsReportedAt,
+    bool IsDrained);
 
 public record ComputeWorkerEnrollmentResponse(
     ComputeWorkerResponse Worker,
@@ -86,6 +106,10 @@ public record TaskRunEventResponse(
     double Progress,
     JsonElement? Result,
     string? Error,
+    string OutcomeState,
+    string? OutcomeReason,
     DateTime UpdatedAt,
+    DateTime? LastReportAt,
+    DateTime? LastProgressAt,
     DateTime? StartedAt,
     DateTime? CompletedAt);

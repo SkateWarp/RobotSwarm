@@ -126,6 +126,16 @@ public sealed class SessionCommandHandler
                         cancellationToken);
                 }
 
+                var taskCancellationConfirmed = false;
+                if (command.Type == "CancelTask" && rosCommand.TaskRunId.HasValue)
+                {
+                    await _sessions.WaitForTaskStoppedAsync(
+                        command.SessionId,
+                        rosCommand.TaskRunId.Value,
+                        cancellationToken);
+                    taskCancellationConfirmed = true;
+                }
+
                 var taskEvent = rosCommand.TaskRunId.HasValue
                                 && rosCommand.ImmediateState is not null
                     ? new TaskEventReport(
@@ -141,7 +151,10 @@ public sealed class SessionCommandHandler
                     {
                         taskRunId = rosCommand.TaskRunId,
                         rosCommand = rosCommand.Command,
-                        emergencyStop = emergencyStopState
+                        emergencyStop = emergencyStopState,
+                        taskCancellationConfirmed = command.Type == "CancelTask"
+                            ? taskCancellationConfirmed
+                            : (bool?)null
                     }),
                     null,
                     taskEvent);

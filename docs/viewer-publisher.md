@@ -120,9 +120,51 @@ The deployment already installs the helper and points
 credential-free RTSP base URL and a successfully initialized H.264 encoder.
 The deployment passes the configured `unix` or `tcp` transport to the same
 probe and preserves it in the release environment. The helper prefers NVENC
-and can fall back to `libx264`; keep the
-backend's worker-publishing gate off until RTSP ingest, external WHEP/ICE/TURN,
-lease expiry, and simultaneous-session isolation all pass.
+and can fall back to `libx264`; keep the backend's worker-publishing gate off
+until RTSP ingest, one browser delivery path, lease expiry, and
+simultaneous-session isolation all pass.
+
+## Primary authenticated low-latency HLS path
+
+The production stack can deliver the same private RTSP stream without opening
+a public MediaMTX port. MediaMTX creates low-latency HLS on port 8888 inside
+the Compose network. The backend proxies only canonical session playlists and
+MP4 parts below `https://robot.zerav.la/api/viewer/hls`; the browser never
+selects the upstream host. Every request carries the short-lived read lease in
+the `Authorization: Bearer` header. The backend validates that lease for the
+exact session and source path, then replaces it with a separate internal CDN
+credential on the private MediaMTX hop. MediaMTX never receives the user's
+read token.
+
+The proxy rejects redirects, unknown query parameters, traversal and
+non-canonical paths. It applies bounded upstream timeouts and response sizes,
+and returns every authenticated playlist and part with `Cache-Control:
+no-store, private`. Port 8888 remains unbound on the host. This avoids the
+public UDP, ICE and TURN requirements of WHEP, at the cost of somewhat higher
+latency and backend bandwidth. A token bucket limits unauthenticated work by
+client address; authenticated upstream reads are bounded globally and per
+session.
+
+Production deployment reads `VIEWER_WORKER_PUBLISHING_ENABLED` and
+`VIEWER_HLS_PROXY_ENABLED` from protected GitHub environment variables. Both
+default to `false`, and deployment rejects values other than the exact strings
+`true` and `false`. When HLS is enabled, the protected
+`MEDIA_HLS_CDN_SECRET` secret is mandatory and must be a 43-128 character
+base64url value. Enabling worker publication also requires `MEDIA_PUBLISH_IP`
+to contain the VM's non-loopback IPv4 address (`10.0.0.126` in the current
+topology). Deployment checks both the value and the actual Docker port binding;
+it cannot silently fall back to loopback and still report success. Keep the
+feature gates false until a real session proves RTSP ingest,
+authenticated playback, lease expiry, cleanup, and simultaneous-user stream
+isolation. After acceptance, set both protected variables to `true`; later
+backend deployments will preserve that commissioned state. WHEP can remain a
+separate optional transport.
+
+CI and the production Compose definition pin MediaMTX 1.18.2 by its
+multi-platform SHA-256 manifest digest, not only by its mutable version tag.
+Before replacement, rollback records the running container's immutable image
+ID. A later registry-tag change therefore cannot silently alter either the
+tested binary or the image restored after a failed deployment.
 
 ## Local commissioning result
 
@@ -136,8 +178,11 @@ helper, proxy, or FFmpeg argument/environment.
 
 That host's FFmpeg 4.2.7 build could not initialize NVENC with the required
 runtime options, so `auto` correctly selected `libx264`; Gazebo rendering still
-used the NVIDIA GPU. Keep the production viewer gate disabled until the public
-WHEP hostname and ICE/TURN path are commissioned.
+used the NVIDIA GPU. Keep the production viewer gates disabled until two
+independent public browser sessions pass through the authenticated backend HLS
+proxy with cross-user denial, lease expiry, and independent cleanup. Public
+WHEP/ICE/TURN is optional and requires a separate acceptance test only if that
+transport is enabled later.
 
 ## Tests
 
@@ -163,4 +208,4 @@ deploy/gpu-worker/robotswarm-viewer-publisher probe \
 
 The probe reports H.264 `Scene` capability only when Docker, the selected X
 server, `xwininfo`, and a supported FFmpeg encoder are present. It does not
-replace the real multi-session GPU/RTSP/WHEP benchmark.
+replace the real multi-session GPU/RTSP/browser benchmark.

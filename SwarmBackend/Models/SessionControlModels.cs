@@ -28,8 +28,12 @@ public record TaskRunResponse(
     JsonElement Parameters,
     JsonElement? Result,
     string? Error,
+    string OutcomeState,
+    string? OutcomeReason,
     DateTime CreatedAt,
     DateTime UpdatedAt,
+    DateTime? LastReportAt,
+    DateTime? LastProgressAt,
     DateTime? StartedAt,
     DateTime? CompletedAt);
 
@@ -72,6 +76,7 @@ public record ViewerLeaseResponse(
     DateTime ExpiresAt,
     bool IsReady,
     string? SignalingUrl,
+    string? HlsUrl,
     WorkerCommandResponse? Command);
 
 public class ViewerAuthRequest

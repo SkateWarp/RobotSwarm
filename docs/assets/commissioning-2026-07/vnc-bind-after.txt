@@ -1,0 +1,12 @@
+Host: robotswarm (10.0.0.126)
+Fecha: 2026-07-19T09:38:52-04:00
+Comando: ss -ltn
+
+State   Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN  0      100       127.0.0.1:6080      0.0.0.0:*
+LISTEN  0      5         127.0.0.1:5901      0.0.0.0:*
+LISTEN  0      5             [::1]:5901         [::]:*
+
+La salida se obtuvo por SSH después del endurecimiento. Se conservaron solo
+los sockets relevantes y no se incluyeron credenciales ni argumentos de
+procesos.

@@ -1,4 +1,14 @@
 # Quick Start Guide
+
+> **Historical local-development guide (2026-01-05).** The commands below
+> describe the original standalone ROS prototype and are not production
+> deployment or acceptance instructions. They include obsolete model, robot
+> count, and direct-WebSocket assumptions. For the current TurtleBot3 Burger
+> worker image and protected deployment flow, use
+> [docs/gpu-worker-deployment.md](docs/gpu-worker-deployment.md); for current
+> architecture and remaining acceptance work, use
+> [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 **Multi-Robot Swarm System - ROS Noetic + Gazebo + TurtleBot3**
 
 ## Installation

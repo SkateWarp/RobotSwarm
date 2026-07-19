@@ -521,6 +521,66 @@ public sealed class DockerSessionManager
         await WaitForEmergencyStopAsync(session, expectedState, cancellationToken);
     }
 
+    public async Task WaitForTaskStoppedAsync(
+        Guid sessionId,
+        Guid taskRunId,
+        CancellationToken cancellationToken)
+    {
+        var session = await GetSingleRunningSessionAsync(sessionId, cancellationToken);
+        await WaitForTaskStoppedAsync(session, taskRunId, cancellationToken);
+    }
+
+    internal async Task WaitForTaskStoppedAsync(
+        ManagedSessionInfo session,
+        Guid taskRunId,
+        CancellationToken cancellationToken)
+    {
+        ValidateOwnership(session);
+        if (!session.Running)
+        {
+            throw new InvalidOperationException(
+                $"Session {session.SessionId} container is not running.");
+        }
+
+        var deadline = DateTime.UtcNow
+            + TimeSpan.FromSeconds(_options.TaskCancellationTimeoutSeconds);
+        Exception? lastError = null;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var status = await ReadTaskStatusAsync(session, cancellationToken);
+                if (IsTaskStopConfirmed(status, taskRunId))
+                {
+                    return;
+                }
+            }
+            catch (Exception exception)
+                when (exception is DockerCliException
+                      or FormatException
+                      or TimeoutException)
+            {
+                lastError = exception;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken);
+        }
+
+        throw new TimeoutException(
+            $"ROS did not confirm that task {taskRunId:D} stopped before the timeout.",
+            lastError);
+    }
+
+    internal static bool IsTaskStopConfirmed(
+        RosTaskStatus? status,
+        Guid taskRunId)
+    {
+        return status?.TaskRunId == taskRunId
+            && status.State is "Cancelled" or "Completed" or "Failed";
+    }
+
     private async Task WaitForEmergencyStopAsync(
         ManagedSessionInfo session,
         bool expectedState,

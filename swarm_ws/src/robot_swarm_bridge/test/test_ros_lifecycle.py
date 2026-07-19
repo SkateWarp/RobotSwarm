@@ -616,6 +616,9 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "phase": "APPROACH",
                 "progress": 0.2,
                 "searching_robot_count": 0,
+                "all_pushers_confirmed": True,
+                "useful_contributor_count": 3,
+                "useful_contributor_ids": ["tb3_2", "tb3_0", "tb3_1"],
                 "discovery": {
                     "event": "payload_found",
                     "event_id": "task-a:payload-found",
@@ -625,7 +628,7 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                     "distance": 0.42,
                     "object_position": {"x": 1.25, "y": -0.75},
                     "sim_time": 12.5,
-                    "notified_robots": ["tb3_0", "tb3_1", "tb3_2"],
+                    "notified_robots": ["tb3_1", "tb3_2"],
                 },
                 "robot_assignments": {"tb3_0": {"command": "private"}},
             })),
@@ -636,6 +639,9 @@ class OrchestratorLifecycleTests(unittest.TestCase):
             "transport": {
                 "phase": "APPROACH",
                 "searching_robot_count": 0,
+                "all_pushers_confirmed": True,
+                "useful_contributor_count": 3,
+                "useful_contributor_ids": ["tb3_0", "tb3_1", "tb3_2"],
                 "discovery": {
                     "event": "payload_found",
                     "event_id": "task-a:payload-found",
@@ -645,11 +651,35 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                     "distance": 0.42,
                     "object_position": {"x": 1.25, "y": -0.75},
                     "sim_time": 12.5,
-                    "notified_robots": ["tb3_0", "tb3_1", "tb3_2"],
+                    "notified_robots": ["tb3_1", "tb3_2"],
                 },
             },
         }, task["result"])
         self.assertNotIn("robot_assignments", task["result"]["transport"])
+
+    def test_transport_push_evidence_rejects_malformed_scalars(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "transport"
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+
+        orchestrator._behavior_status_callback(
+            "transport",
+            String(data=json.dumps({
+                "task_id": "task-a",
+                "phase": "PUSH",
+                "all_pushers_confirmed": 1,
+                "useful_contributor_count": True,
+                "useful_contributor_ids": ["tb3_0"],
+                "control_commands": {"tb3_0": {"linear": 0.1}},
+            })),
+        )
+
+        result = orchestrator._build_status()["task"]["result"]["transport"]
+        self.assertIsNone(result["all_pushers_confirmed"])
+        self.assertIsNone(result["useful_contributor_count"])
+        self.assertIsNone(result["useful_contributor_ids"])
+        self.assertNotIn("control_commands", result)
 
     def test_stale_or_nested_uncorrelated_discovery_is_not_exposed(self):
         orchestrator = make_orchestrator()
@@ -7219,6 +7249,7 @@ class BehaviorLifecycleTests(unittest.TestCase):
             "sim_time": 12.5,
             "notified_robots": ["tb3_0", "tb3_2"],
         }
+        controller.transport_useful_contributors = {"tb3_2", "tb3_0"}
         controller._publish_status(
             ROS["transport"].TransportPhase.APPROACH
         )
@@ -7226,6 +7257,11 @@ class BehaviorLifecycleTests(unittest.TestCase):
         regrouping = json.loads(controller.status_pub.messages[-1].data)
         self.assertEqual(0, regrouping["searching_robot_count"])
         self.assertEqual("tb3_1", regrouping["discovery"]["finder"])
+        self.assertEqual(2, regrouping["useful_contributor_count"])
+        self.assertEqual(
+            ["tb3_0", "tb3_2"],
+            regrouping["useful_contributor_ids"],
+        )
         self.assertEqual(
             "rendezvousing",
             regrouping["robot_assignments"]["tb3_1"]["activity"],

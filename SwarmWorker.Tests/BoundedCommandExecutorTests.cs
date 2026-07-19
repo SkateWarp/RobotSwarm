@@ -12,6 +12,42 @@ namespace SwarmWorker.Tests;
 
 public sealed class BoundedCommandExecutorTests
 {
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task CancelledStaleEnvelopeNeverReachesTheRuntime(
+        bool acceptAcknowledgement,
+        bool acceptRunningTransition)
+    {
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli();
+        var publisher = new RecordingViewerPublisher();
+        var hub = new RecordingWorkerCommandHub
+        {
+            AcceptAcknowledgement = acceptAcknowledgement,
+            AcceptRunningTransition = acceptRunningTransition
+        };
+        var executor = CreateExecutor(docker, publisher, hub);
+        var command = SessionControlCommand(sessionId, "CancelTask");
+
+        await executor.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.True(await executor.EnqueueAsync(command, CancellationToken.None));
+            var failure = await hub.WaitForFailureAsync();
+
+            Assert.Equal(command.Id, failure.CommandId);
+            Assert.Empty(hub.CompletedCommands);
+            Assert.Empty(hub.SessionEvents);
+            Assert.Empty(docker.Calls);
+            Assert.Empty(publisher.StoppedSessions);
+        }
+        finally
+        {
+            await executor.StopAsync(CancellationToken.None);
+        }
+    }
+
     [Fact]
     public async Task LocalEmergencyStopRejectsQueuedFleetUpdateBeforeAcknowledgement()
     {
@@ -592,12 +628,18 @@ public sealed class BoundedCommandExecutorTests
         public ConcurrentQueue<WorkerCommandCompletionRequest> CompletedCommands { get; } = new();
         public ConcurrentQueue<SessionEventReport> SessionEvents { get; } = new();
 
+        public bool AcceptAcknowledgement { get; set; } = true;
+        public bool AcceptRunningTransition { get; set; } = true;
+
         public Task AcknowledgeCommandAsync(
             Guid commandId,
             CancellationToken cancellationToken)
         {
             AcknowledgedCommands.Enqueue(commandId);
-            return Task.CompletedTask;
+            return AcceptAcknowledgement
+                ? Task.CompletedTask
+                : Task.FromException(new InvalidOperationException(
+                    "The backend rejected a stale command acknowledgement."));
         }
 
         public Task MarkCommandRunningAsync(
@@ -605,7 +647,10 @@ public sealed class BoundedCommandExecutorTests
             CancellationToken cancellationToken)
         {
             RunningCommands.Enqueue(commandId);
-            return Task.CompletedTask;
+            return AcceptRunningTransition
+                ? Task.CompletedTask
+                : Task.FromException(new InvalidOperationException(
+                    "The backend rejected a stale command execution."));
         }
 
         public async Task CompleteCommandAsync(

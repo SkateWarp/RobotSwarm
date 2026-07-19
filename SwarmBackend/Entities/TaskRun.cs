@@ -20,8 +20,12 @@ public class TaskRun
     public JsonDocument? Result { get; set; }
 
     public string? Error { get; set; }
+    public TaskOutcomeState OutcomeState { get; set; } = TaskOutcomeState.Pending;
+    public string? OutcomeReason { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? LastReportAt { get; set; }
+    public DateTime? LastProgressAt { get; set; }
     public DateTime? StartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
 
