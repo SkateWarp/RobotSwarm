@@ -100,6 +100,13 @@ jobs:
           Cors__Origins__0: https://rs.zerav.la
           BACKEND_PUBLISH_IP: 10.0.0.126
 
+      - name: Install media probe tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
       - name: Validate pinned MediaMTX configuration
         shell: bash
         run: |
