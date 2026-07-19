@@ -364,7 +364,7 @@ public sealed class ViewerPublisherTests
         var executable = Path.Combine(directory.FullName, "viewer-publisher");
         var startsMarker = Path.Combine(directory.FullName, "starts.marker");
         var publisherPidMarker = Path.Combine(directory.FullName, "publisher.pid");
-        var orphanStoppedMarker = Path.Combine(directory.FullName, "orphan-stopped.marker");
+        var orphanPidMarker = Path.Combine(directory.FullName, "orphan.pid");
         var terminationMarker = Path.Combine(directory.FullName, "term.marker");
         try
         {
@@ -390,12 +390,20 @@ public sealed class ViewerPublisherTests
                   starts="$(cat "$directory/starts.marker")"
                 fi
                 starts=$((starts + 1))
+                if test "$starts" = 2; then
+                  orphan_pid="$(cat "$directory/orphan.pid")"
+                  if kill -0 "$orphan_pid" 2>/dev/null; then
+                    echo 'orphan is still running' >&2
+                    exit 1
+                  fi
+                fi
                 printf '%s' "$starts" > "$directory/starts.marker"
                 if test "$starts" = 1; then
                   (
-                    trap 'printf "%s" TERM > "$directory/orphan-stopped.marker"; exit 0' TERM
+                    trap 'exit 0' TERM
                     while :; do sleep 0.1; done
                   ) &
+                  printf '%s' "$!" > "$directory/orphan.pid"
                   printf '%s' "$$" > "$directory/publisher.pid"
                   echo READY
                   while :; do sleep 0.1; done
@@ -440,18 +448,19 @@ public sealed class ViewerPublisherTests
             await WaitUntilAsync(
                 () => File.Exists(publisherPidMarker),
                 TimeSpan.FromSeconds(2));
+            var orphanProcessId = int.Parse(
+                await File.ReadAllTextAsync(orphanPidMarker),
+                System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(ProcessExists(orphanProcessId));
             await KillAsync(int.Parse(
                 await File.ReadAllTextAsync(publisherPidMarker),
                 System.Globalization.CultureInfo.InvariantCulture));
 
             await WaitUntilAsync(
                 () => File.Exists(startsMarker)
-                    && File.ReadAllText(startsMarker) == "2"
-                    && File.Exists(orphanStoppedMarker),
+                    && File.ReadAllText(startsMarker) == "2",
                 TimeSpan.FromSeconds(5));
-            Assert.Equal(
-                "TERM",
-                await File.ReadAllTextAsync(orphanStoppedMarker));
+            Assert.False(ProcessExists(orphanProcessId));
 
             await publisher.StopSessionAsync(sessionId, CancellationToken.None);
             Assert.Equal(
@@ -557,6 +566,19 @@ public sealed class ViewerPublisherTests
         using var process = Process.GetProcessById(processId);
         process.Kill();
         await process.WaitForExitAsync();
+    }
+
+    private static bool ProcessExists(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static ExternalViewerPublisher Publisher(
