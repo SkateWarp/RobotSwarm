@@ -655,8 +655,27 @@ if [[ "$had_current" == "true" || "$had_unit" == "true" ]]; then
     then
         fail "the stopped worker service state could not be inspected"
     fi
-    [[ "$stopped_active_state" == "inactive" ]] \
-        || fail "the current worker service did not become inactive"
+    case "$stopped_active_state" in
+        inactive)
+            ;;
+        failed)
+            if ! stopped_main_pid="$(
+                systemctl --user show \
+                    --property MainPID \
+                    --value \
+                    "$service_name"
+            )"
+            then
+                fail "the failed worker service process could not be inspected"
+            fi
+            [[ "$stopped_main_pid" == "0" ]] \
+                || fail "the failed worker service still has a running process"
+            echo "The previous worker reported a failed shutdown, but no process remains; deployment will continue." >&2
+            ;;
+        *)
+            fail "the current worker service did not stop (state '$stopped_active_state')"
+            ;;
+    esac
 fi
 
 if ! assert_no_running_sessions; then

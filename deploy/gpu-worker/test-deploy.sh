@@ -86,11 +86,19 @@ case "${1:-}" in
             exit 1
         fi
         touch "$FAKE_STATE/active"
-        rm -f "$FAKE_STATE/activating" "$FAKE_STATE/stopped"
+        rm -f \
+            "$FAKE_STATE/activating" \
+            "$FAKE_STATE/failed" \
+            "$FAKE_STATE/stopped"
         ;;
     stop)
         rm -f "$FAKE_STATE/active" "$FAKE_STATE/activating"
         touch "$FAKE_STATE/stopped"
+        if [[ "${FAKE_FAILED_AFTER_STOP:-0}" == "1" ]]; then
+            touch "$FAKE_STATE/failed"
+        else
+            rm -f "$FAKE_STATE/failed"
+        fi
         if [[ "${FAKE_STOP_FAIL_ONCE:-0}" == "1" \
             && ! -f "$FAKE_STATE/stop-failed" ]]
         then
@@ -115,12 +123,18 @@ case "${1:-}" in
                     echo active
                 elif [[ -f "$FAKE_STATE/activating" ]]; then
                     echo activating
+                elif [[ -f "$FAKE_STATE/failed" ]]; then
+                    echo failed
                 else
                     echo inactive
                 fi
                 ;;
             MainPID)
-                echo 4242
+                if [[ -f "$FAKE_STATE/failed" ]]; then
+                    echo "${FAKE_FAILED_MAIN_PID:-0}"
+                else
+                    echo 4242
+                fi
                 ;;
             *)
                 exit 1
@@ -238,6 +252,61 @@ grep -Fq "first release viewer helper" "$first_viewer_publisher"
 cmp -s \
     "$fake_home/.config/systemd/user/robotswarm-gpu-worker.service" \
     "$project_root/deploy/gpu-worker/robotswarm-gpu-worker.service"
+
+failed_stop_home="${test_root}/failed-stop-home"
+failed_stop_state="${test_root}/failed-stop-state"
+cp -a "$fake_home" "$failed_stop_home"
+cp -a "$fake_state" "$failed_stop_state"
+failed_stop_revision="abababababababababababababababababababab"
+failed_stop_image="sha256:abababababababababababababababababababababababababababababababab"
+failed_stop_release="${failed_stop_revision}-shutdown-regression"
+
+HOME="$failed_stop_home" \
+PATH="$fake_bin:$PATH" \
+FAKE_STATE="$failed_stop_state" \
+FAKE_IMAGE_ID="$failed_stop_image" \
+FAKE_REVISION="$failed_stop_revision" \
+FAKE_FAILED_AFTER_STOP=1 \
+    "$project_root/deploy/gpu-worker/deploy.sh" \
+        --publish-dir "$publish_dir" \
+        --image-id "$failed_stop_image" \
+        --revision "$failed_stop_revision" \
+        --release-id "$failed_stop_release" \
+        --gpu-request device=0 \
+        --unit-file "$project_root/deploy/gpu-worker/robotswarm-gpu-worker.service"
+
+test "$(readlink "$failed_stop_home/.local/share/robotswarm-gpu-worker/current")" = \
+    "$failed_stop_home/.local/share/robotswarm-gpu-worker/releases/$failed_stop_release"
+test -f "$failed_stop_state/active"
+test ! -f "$failed_stop_state/failed"
+
+failed_pid_revision="acacacacacacacacacacacacacacacacacacacac"
+failed_pid_image="sha256:acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
+failed_pid_log="$test_root/failed-stop-live-pid.log"
+if HOME="$failed_stop_home" \
+    PATH="$fake_bin:$PATH" \
+    FAKE_STATE="$failed_stop_state" \
+    FAKE_IMAGE_ID="$failed_pid_image" \
+    FAKE_REVISION="$failed_pid_revision" \
+    FAKE_FAILED_AFTER_STOP=1 \
+    FAKE_FAILED_MAIN_PID=8181 \
+        "$project_root/deploy/gpu-worker/deploy.sh" \
+            --publish-dir "$publish_dir" \
+            --image-id "$failed_pid_image" \
+            --revision "$failed_pid_revision" \
+            --release-id "${failed_pid_revision}-unsafe-shutdown" \
+            --gpu-request device=0 \
+            --unit-file "$project_root/deploy/gpu-worker/robotswarm-gpu-worker.service" \
+            >"$failed_pid_log" 2>&1
+then
+    echo "Expected a failed unit with a live PID to block deployment." >&2
+    exit 1
+fi
+
+grep -Fq "failed worker service still has a running process" "$failed_pid_log"
+test "$(readlink "$failed_stop_home/.local/share/robotswarm-gpu-worker/current")" = \
+    "$failed_stop_home/.local/share/robotswarm-gpu-worker/releases/$failed_stop_release"
+test -f "$failed_stop_state/active"
 
 second_revision="2222222222222222222222222222222222222222"
 second_image="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

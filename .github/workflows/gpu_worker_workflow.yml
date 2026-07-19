@@ -430,6 +430,44 @@ jobs:
               )
           PY
 
+      - name: Snapshot current worker release
+        id: worker_snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_link="$HOME/.local/share/robotswarm-gpu-worker/current"
+          installed_unit="$HOME/.config/systemd/user/robotswarm-gpu-worker.service"
+
+          previous_target="absent"
+          previous_release_digest="absent"
+          if [[ -L "$current_link" ]]; then
+            previous_target="$(readlink -f "$current_link")"
+            test -d "$previous_target"
+            previous_release_digest="$(
+              find "$previous_target" -type f -print0 \
+                | sort --zero-terminated \
+                | xargs --null --no-run-if-empty sha256sum \
+                | sha256sum \
+                | cut -d ' ' -f 1
+            )"
+            [[ "$previous_release_digest" =~ ^[a-f0-9]{64}$ ]]
+          else
+            test ! -e "$current_link"
+          fi
+
+          previous_unit_digest="absent"
+          if [[ -f "$installed_unit" ]]; then
+            previous_unit_digest="$(sha256sum "$installed_unit" | cut -d ' ' -f 1)"
+            [[ "$previous_unit_digest" =~ ^[a-f0-9]{64}$ ]]
+          else
+            test ! -e "$installed_unit"
+          fi
+
+          echo "previous_target=$previous_target" >> "$GITHUB_OUTPUT"
+          echo "previous_release_digest=$previous_release_digest" >> "$GITHUB_OUTPUT"
+          echo "previous_unit_digest=$previous_unit_digest" >> "$GITHUB_OUTPUT"
+
       - name: Deploy worker and verify readiness
         id: worker_deploy
         shell: bash
@@ -449,19 +487,178 @@ jobs:
             --unit-file deploy/gpu-worker/robotswarm-gpu-worker.service
 
       - name: Resume scheduling
-        if: ${{ always() && steps.drain.outcome == 'success' && (steps.worker_deploy.outcome == 'success' || steps.worker_deploy.outcome == 'skipped') }}
+        if: ${{ always() && steps.drain.outcome == 'success' }}
         shell: bash
         env:
           DRAIN_LEASE_ID: ${{ steps.drain.outputs.lease_id }}
           DRAIN_BACKEND_URL: ${{ steps.drain.outputs.backend_url }}
+          WORKER_DEPLOY_OUTCOME: ${{ steps.worker_deploy.outcome }}
+          WORKER_SNAPSHOT_OUTCOME: ${{ steps.worker_snapshot.outcome }}
+          PREVIOUS_WORKER_TARGET: ${{ steps.worker_snapshot.outputs.previous_target }}
+          PREVIOUS_RELEASE_DIGEST: ${{ steps.worker_snapshot.outputs.previous_release_digest }}
+          PREVIOUS_UNIT_DIGEST: ${{ steps.worker_snapshot.outputs.previous_unit_digest }}
         run: |
           set -euo pipefail
+
+          runtime_dir="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$runtime_dir}"
+          export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime_dir/bus}"
 
           identity_file="$HOME/.config/robotswarm/gpu-worker-identity.env"
           set -a
           source "$identity_file"
           set +a
           credential="${Worker__WorkerId}.${Worker__WorkerSecret}"
+
+          if [[ "$WORKER_DEPLOY_OUTCOME" != "success" ]]; then
+            if [[ "$WORKER_DEPLOY_OUTCOME" == "failure" \
+                || "$WORKER_DEPLOY_OUTCOME" == "cancelled" ]]
+            then
+              if [[ "$WORKER_SNAPSHOT_OUTCOME" != "success" ]]; then
+                echo "The pre-deployment snapshot is unavailable; scheduling remains drained." >&2
+                exit 1
+              fi
+
+              current_link="$HOME/.local/share/robotswarm-gpu-worker/current"
+              installed_unit="$HOME/.config/systemd/user/robotswarm-gpu-worker.service"
+              if [[ "$PREVIOUS_WORKER_TARGET" == "absent" ]]; then
+                test ! -e "$current_link" || {
+                  echo "Rollback left an unexpected worker release; scheduling remains drained." >&2
+                  exit 1
+                }
+              else
+                restored_target="$(readlink -f "$current_link")"
+                restored_release_digest="$(
+                  find "$restored_target" -type f -print0 \
+                    | sort --zero-terminated \
+                    | xargs --null --no-run-if-empty sha256sum \
+                    | sha256sum \
+                    | cut -d ' ' -f 1
+                )"
+                if [[ "$restored_target" != "$PREVIOUS_WORKER_TARGET" \
+                    || "$restored_release_digest" != "$PREVIOUS_RELEASE_DIGEST" ]]
+                then
+                  echo "Rollback did not restore the exact worker release; scheduling remains drained." >&2
+                  exit 1
+                fi
+              fi
+
+              if [[ "$PREVIOUS_UNIT_DIGEST" == "absent" ]]; then
+                test ! -e "$installed_unit" || {
+                  echo "Rollback left an unexpected worker unit; scheduling remains drained." >&2
+                  exit 1
+                }
+              else
+                restored_unit_digest="$(sha256sum "$installed_unit" | cut -d ' ' -f 1)"
+                if [[ "$restored_unit_digest" != "$PREVIOUS_UNIT_DIGEST" ]]; then
+                  echo "Rollback did not restore the exact worker unit; scheduling remains drained." >&2
+                  exit 1
+                fi
+              fi
+            elif [[ "$WORKER_DEPLOY_OUTCOME" != "skipped" ]]; then
+              echo "Unknown worker deployment outcome; scheduling remains drained." >&2
+              exit 1
+            fi
+
+            if ! systemctl --user is-active --quiet robotswarm-gpu-worker.service; then
+              echo "Worker rollback is not active; scheduling remains drained." >&2
+              exit 1
+            fi
+            restored_pid="$(
+              systemctl --user show \
+                --property MainPID \
+                --value \
+                robotswarm-gpu-worker.service
+            )"
+            [[ "$restored_pid" =~ ^[1-9][0-9]*$ ]] || {
+              echo "Worker rollback has no live process; scheduling remains drained." >&2
+              exit 1
+            }
+
+            baseline_response="$({
+              curl --silent --show-error --fail \
+                --connect-timeout 5 \
+                --max-time 20 \
+                --header "Authorization: Bearer $credential" \
+                "$DRAIN_BACKEND_URL/api/worker-maintenance/drain/$DRAIN_LEASE_ID"
+            })"
+            baseline_reported_at="$(
+              STATUS="$baseline_response" python3 - <<'PY'
+          import json
+          import os
+
+          status = json.loads(os.environ["STATUS"])
+          print(status.get("activeSessionsReportedAt") or "")
+          PY
+            )"
+            recovery_deadline=$((SECONDS + 45))
+            recovered="false"
+            while (( SECONDS < recovery_deadline )); do
+              if response="$({
+                curl --silent --show-error --fail \
+                  --connect-timeout 5 \
+                  --max-time 20 \
+                  --header "Authorization: Bearer $credential" \
+                  "$DRAIN_BACKEND_URL/api/worker-maintenance/drain/$DRAIN_LEASE_ID"
+              })" \
+                && STATUS="$response" \
+                  BASELINE_REPORTED_AT="$baseline_reported_at" \
+                  python3 - <<'PY'
+          from datetime import datetime, timezone
+          import json
+          import os
+
+          status = json.loads(os.environ["STATUS"])
+          reported_at = status.get("activeSessionsReportedAt")
+          if not reported_at:
+              raise SystemExit(1)
+          reported = datetime.fromisoformat(reported_at.replace("Z", "+00:00"))
+          if reported.tzinfo is None:
+              reported = reported.replace(tzinfo=timezone.utc)
+          else:
+              reported = reported.astimezone(timezone.utc)
+
+          baseline_text = os.environ["BASELINE_REPORTED_AT"]
+          if baseline_text:
+              baseline = datetime.fromisoformat(
+                  baseline_text.replace("Z", "+00:00")
+              )
+              if baseline.tzinfo is None:
+                  baseline = baseline.replace(tzinfo=timezone.utc)
+              else:
+                  baseline = baseline.astimezone(timezone.utc)
+              fresh = reported > baseline
+          else:
+              fresh = True
+          empty = (
+              status.get("isDrained") is True
+              and status.get("trackedSessionCount") == 0
+              and status.get("reportedActiveSessionCount") == 0
+          )
+          raise SystemExit(0 if fresh and empty else 1)
+          PY
+              then
+                recovered="true"
+                break
+              fi
+              sleep 2
+            done
+
+            latest_pid="$(
+              systemctl --user show \
+                --property MainPID \
+                --value \
+                robotswarm-gpu-worker.service
+            )"
+            if [[ "$recovered" != "true" \
+                || "$latest_pid" != "$restored_pid" ]] \
+                || ! systemctl --user is-active --quiet robotswarm-gpu-worker.service
+            then
+              echo "Worker did not recover a fresh heartbeat; scheduling remains drained." >&2
+              exit 1
+            fi
+          fi
+
           status="$({
             curl --silent --show-error \
               --connect-timeout 5 \
