@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "process": {"pid": 3210544, "executable": "/usr/bin/gzclient-11.15.1"},
+  "display": {"x11": "127.0.0.1:102", "wayland": "wayland-0"},
+  "camera": {"name": "gzclient_camera1", "viewport_width": 990, "viewport_height": 588},
+  "renderer": {"api": "OpenGL Rendering Subsystem", "device": "D3D12 (NVIDIA GeForce RTX 3080)", "vendor": "unknown", "gl_vendor": "Microsoft Corporation", "gl_renderer": "D3D12 (NVIDIA GeForce RTX 3080)", "gl_version": "3.1 Mesa 21.2.6"},
+  "render_measurement": {"source": "gazebo::rendering::Camera::AvgFPS", "warmup_seconds": 20.000, "sample_seconds": 30.011, "samples": 1499, "average_fps": 49.961, "post_render_rate_fps": 49.949, "configured_render_rate_fps": 50.000},
+  "physics_measurement": {"source": "gazebo.msgs.WorldStatistics delta(sim_time)/delta(real_time)", "topic": "/gazebo/swarm_arena/world_stats", "samples": 149, "real_time_factor": 2.968}
+}

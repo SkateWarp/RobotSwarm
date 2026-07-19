@@ -522,6 +522,10 @@ public sealed class BoundedCommandExecutorTests
                         [SessionLabels.SessionId] = sessionId.ToString("D")
                     }
                 },
+                HostConfig = new
+                {
+                    PidsLimit = 1024
+                },
                 State = new
                 {
                     Running = running,
@@ -593,6 +597,18 @@ public sealed class BoundedCommandExecutorTests
             StoppedSessions.Add(sessionId);
             return Task.CompletedTask;
         }
+
+        public Task SendInputAsync(
+            ViewerInputEnvelope request,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseInputAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseAllInputsAsync(CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 
     private sealed class RecordingWorkerCommandHub : IWorkerCommandHub

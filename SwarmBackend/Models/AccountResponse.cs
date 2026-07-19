@@ -10,9 +10,21 @@ public record AuthenticateResponse(int Id, string FirstName, string LastName, st
 }
 
 
-public record AccountResponse(int Id, string FirstName, string LastName, string Email, string Role)
+public record AccountResponse(
+    int Id,
+    string FirstName,
+    string LastName,
+    string Email,
+    string Role,
+    bool Enabled)
 {
-    public static AccountResponse From(Entities.Account account) => new(account.Id, account.FirstName, account.LastName, account.Email, account.Role.ToString());
+    public static AccountResponse From(Entities.Account account) => new(
+        account.Id,
+        account.FirstName,
+        account.LastName,
+        account.Email,
+        account.Role.ToString(),
+        account.Enabled);
 }
 
 

@@ -194,17 +194,18 @@ public static class SimulationSessionRoute
 
     internal static bool IsSerializationFailure(Exception exception)
     {
-        return exception is PostgresException
-            {
-                SqlState: PostgresErrorCodes.SerializationFailure
-            }
-            || exception is DbUpdateException
-            {
-                InnerException: PostgresException
+        for (Exception? current = exception; current != null; current = current.InnerException)
+        {
+            if (current is PostgresException
                 {
                     SqlState: PostgresErrorCodes.SerializationFailure
-                }
-            };
+                })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static Expression<Func<SimulationSession, bool>> OccupiesAccountSlot(
@@ -301,6 +302,7 @@ public static class SimulationSessionRoute
         DataContext dataContext,
         IHubContext<WorkerHub> workerHub,
         IHubContext<SessionHub> sessionHub,
+        ViewerControlRegistry viewerControls,
         HttpContext context,
         CancellationToken cancellationToken)
     {
@@ -361,8 +363,28 @@ public static class SimulationSessionRoute
                 }
             }
 
-            await dataContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            var revocationVersion = await viewerControls.BeginSessionRevocationAsync(
+                session.Id,
+                DateTimeOffset.UtcNow,
+                cancellationToken);
+            var revocationCommitted = false;
+            try
+            {
+                await dataContext.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                viewerControls.ConfirmSessionRevocation(session.Id, revocationVersion);
+                revocationCommitted = true;
+                await viewerControls.DrainSessionAsync(
+                    session.Id,
+                    CancellationToken.None);
+            }
+            finally
+            {
+                if (!revocationCommitted)
+                {
+                    viewerControls.CancelSessionRevocation(session.Id, revocationVersion);
+                }
+            }
 
             if (command != null)
             {

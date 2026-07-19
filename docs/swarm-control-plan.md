@@ -206,10 +206,14 @@ The stock Burger model has no supported robot-camera sensor, so the first
 capability is `Scene` only. A private per-session `gzclient` is mandatory; a
 shared WSLg root display or shared VNC desktop does not satisfy user isolation.
 
-Two local publisher pipelines have already run concurrently with different
-displays, paths, and cleanup. Production feature gates must remain false until
-two independently authenticated public browser sessions also prove playback,
-cross-user denial, lease expiry, and stop isolation.
+The local host integration test runs two publisher pipelines concurrently with
+different displays, paths, and cleanup. It uses real Xvfb/XTest but controlled
+Docker and `gzclient` test doubles, so it proves the publisher's local isolation
+logic rather than two GPU streams. Production feature gates must remain false
+for general use until two independently authenticated public browser sessions
+also prove playback, cross-user denial, lease expiry, and stop isolation. They
+may be enabled only for a supervised acceptance window and must be disabled
+again if that acceptance is not completed.
 
 ## Deployment drain
 

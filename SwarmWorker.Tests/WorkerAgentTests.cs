@@ -29,6 +29,7 @@ public sealed class WorkerAgentTests
             $"container-{sessionId:N}",
             $"robotswarm-session-{sessionId:N}",
             "robotswarm:test",
+            1024,
             running,
             running ? "running" : "exited",
             new Dictionary<string, string>());

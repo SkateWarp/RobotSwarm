@@ -52,6 +52,15 @@ public sealed class WorkerCapabilityBuilderTests
             capabilities.GetProperty("viewerPublisher")
                 .GetProperty("videoCodec")
                 .GetString());
+        Assert.Equal(
+            2,
+            capabilities.GetProperty("viewerPublisher")
+                .GetProperty("protocolVersion")
+                .GetInt32());
+        Assert.True(
+            capabilities.GetProperty("viewerPublisher")
+                .GetProperty("interactive")
+                .GetBoolean());
     }
 
     [Fact]

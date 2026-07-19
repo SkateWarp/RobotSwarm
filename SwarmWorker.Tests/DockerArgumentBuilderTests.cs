@@ -26,6 +26,8 @@ public sealed class DockerArgumentBuilderTests
         Assert.Contains("ALL", arguments);
         Assert.Contains("no-new-privileges:true", arguments);
         Assert.Contains("--pids-limit", arguments);
+        var pidsFlag = Array.IndexOf(arguments.ToArray(), "--pids-limit");
+        Assert.Equal("1024", arguments[pidsFlag + 1]);
         Assert.Contains("--memory", arguments);
         Assert.Contains("--cpus", arguments);
         var cpuFlag = Array.IndexOf(arguments.ToArray(), "--cpus");

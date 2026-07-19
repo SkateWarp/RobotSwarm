@@ -52,14 +52,17 @@ builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
 builder.Services.AddScoped<IRobotGroupService, RobotGroupService>();
 builder.Services.AddScoped<WorkerCommandService>();
+builder.Services.AddSingleton<ViewerControlRegistry>();
 builder.Services.AddViewerHlsProxy();
 builder.Services.AddHostedService<SimulationSessionScheduler>();
 builder.Services.AddHostedService<TaskOutcomeMonitor>();
+builder.Services.AddHostedService<ViewerControlReconciler>();
 builder.Services.AddSignalR(hubOptions =>
 {
     hubOptions.EnableDetailedErrors = builder.Environment.IsDevelopment();
     hubOptions.KeepAliveInterval = TimeSpan.FromSeconds(15);
     hubOptions.HandshakeTimeout = TimeSpan.FromSeconds(15);
+    hubOptions.MaximumParallelInvocationsPerClient = 1;
 })
 .AddJsonProtocol(options =>
 {

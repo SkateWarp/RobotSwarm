@@ -179,11 +179,11 @@ relying on an interactive WSL shell's `PATH` when the worker starts under
 systemd and keeps helper rollback coupled to worker rollback. Viewer enablement
 remains in the stable, owner-only identity file rather than release output.
 When enabled, deployment requires the configured RTSP endpoint and a passing
-H.264 helper probe before it changes the active release. Unix display mode
-changes only that installed unit to `PrivateTmp=false`; authenticated TCP mode
-and disabled deployments retain the checked-in `PrivateTmp=true` unit
-unchanged. The probe and active service receive the same display transport,
-encoder policy, and GPU request.
+H.264 helper probe before it changes the active release. Display transport is
+Unix-only: Xvfb publishes an authenticated Linux abstract local endpoint with
+TCP disabled, so the checked-in `PrivateTmp=true` remains enabled on WSLg.
+The probe and active service receive the same display transport, encoder
+policy, and GPU request.
 
 If activation or readiness verification fails, the script restores the prior
 release symlink, release environment, unit file, enabled state, and running
@@ -232,16 +232,20 @@ environment, locally retained image, and systemd state must remain consistent.
 
 The workflow proves that Docker can expose the NVIDIA GPU, the ROS image builds,
 and the packaged viewer helper can initialize its configured X and H.264
-dependencies. Separate host-side commissioning has also run two live publisher
-pipelines concurrently with different private displays, `gzclient` sidecars,
-stream paths, runtime directories, and cleanup. That is useful evidence, but it
-does not by itself prove the final public browser route.
+dependencies. The host integration test also runs two publisher pipelines
+concurrently with different private displays, stream paths, runtime directories,
+and cleanup. It uses real Xvfb/XTest with controlled Docker and `gzclient` test
+doubles; this is useful orchestration evidence, but it neither proves two live
+GPU streams nor the final public browser route.
 
-Every versioned GPU-worker release includes the Scene-only protocol-1 helper and
-records its absolute executable path. Shipping it does not enable media by
+Every versioned GPU-worker release includes the interactive Scene protocol-2
+helper and records its absolute executable path. Shipping it does not enable media by
 default. Keep `Worker__Viewer__Enabled=false`, backend
 `Viewer__WorkerPublishingEnabled=false`, and backend
-`Viewer__HlsProxyEnabled=false` until all of these pass on the release revision:
+`Viewer__HlsProxyEnabled=false` for general use until all of these pass on the
+release revision. The three gates may be enabled together only during a
+supervised acceptance window and must return to `false` if that window ends
+without approval:
 
 - a private display and visible Gazebo client for each simultaneous session;
 - the helper probe against the pinned image, selected encoder, and authenticated
@@ -269,10 +273,11 @@ probe and include its CPU cost in the simultaneous-session benchmark. Set
 `h264_nvenc`, or `libx264`; deployment uses the same policy for its probe and
 the active worker release.
 
-WSLg hosts should set `ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT=tcp` in the identity
-file. Deployment validates and persists `unix` (the general default) or `tcp`;
-TCP keeps the service's private `/tmp`, while Unix mode exposes the X socket as
-documented in the publisher guide.
+WSLg hosts must use `ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT=unix` (the default).
+Deployment rejects TCP display transport. Xvfb starts with
+`-nolisten tcp -listen local`; its authenticated Linux abstract Unix endpoint
+remains usable with `PrivateTmp=true` even when WSLg's filesystem socket mount
+is read-only.
 
 The stock TurtleBot3 Burger model in this repository has no camera sensor, so
 the first honest helper capability is `Scene` only. Do not use the shared WSLg

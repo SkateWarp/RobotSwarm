@@ -352,6 +352,9 @@ fi
 viewer_publish_base_url=""
 viewer_encoder="auto"
 viewer_display_transport="unix"
+viewer_render_rate="50"
+viewer_min_render_rate="45"
+viewer_gpu_adapter_name="NVIDIA"
 if [[ "$viewer_enabled" == "true" ]]; then
     if ! read_identity_value Worker__Viewer__PublishBaseUrl \
         || [[ -z "$identity_value" ]]
@@ -377,13 +380,47 @@ if [[ "$viewer_enabled" == "true" ]]; then
     then
         configured_display_transport="$identity_value"
         case "$configured_display_transport" in
-            unix|tcp)
+            unix)
                 viewer_display_transport="$configured_display_transport"
                 ;;
             *)
-                fail "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix or tcp"
+                fail "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix"
                 ;;
         esac
+    fi
+
+    if read_identity_value ROBOTSWARM_VIEWER_RENDER_RATE
+    then
+        configured_render_rate="$identity_value"
+        [[ "$configured_render_rate" =~ ^[0-9]+$ ]] \
+            || fail "ROBOTSWARM_VIEWER_RENDER_RATE must be an integer"
+        configured_render_rate_value=$((10#$configured_render_rate))
+        (( configured_render_rate_value >= 5 && configured_render_rate_value <= 120 )) \
+            || fail "ROBOTSWARM_VIEWER_RENDER_RATE must be between 5 and 120"
+        viewer_render_rate="$configured_render_rate_value"
+    fi
+
+    if read_identity_value ROBOTSWARM_VIEWER_MIN_RENDER_RATE
+    then
+        configured_min_render_rate="$identity_value"
+        [[ "$configured_min_render_rate" =~ ^[0-9]+$ ]] \
+            || fail "ROBOTSWARM_VIEWER_MIN_RENDER_RATE must be an integer"
+        configured_min_render_rate_value=$((10#$configured_min_render_rate))
+        (( configured_min_render_rate_value >= 5 && configured_min_render_rate_value <= 120 )) \
+            || fail "ROBOTSWARM_VIEWER_MIN_RENDER_RATE must be between 5 and 120"
+        viewer_min_render_rate="$configured_min_render_rate_value"
+    fi
+    (( viewer_min_render_rate <= viewer_render_rate )) \
+        || fail "ROBOTSWARM_VIEWER_MIN_RENDER_RATE must not exceed ROBOTSWARM_VIEWER_RENDER_RATE"
+
+    if read_identity_value ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME
+    then
+        configured_gpu_adapter_name="$identity_value"
+        [[ -n "$configured_gpu_adapter_name" \
+            && ${#configured_gpu_adapter_name} -le 64 \
+            && "$configured_gpu_adapter_name" =~ ^[A-Za-z0-9._+()\ -]+$ ]] \
+            || fail "ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME is invalid"
+        viewer_gpu_adapter_name="$configured_gpu_adapter_name"
     fi
 fi
 
@@ -564,32 +601,29 @@ install -m 0755 \
 test "$(stat -c '%a' "$staging_dir/$viewer_publisher_name")" = "755"
 
 effective_unit_file="$unit_file"
-if [[ "$viewer_enabled" == "true" \
-    && "$viewer_display_transport" == "unix" ]]
-then
-    private_tmp_count="$(grep -Ec '^PrivateTmp=(true|false)$' "$unit_file" || true)"
-    [[ "$private_tmp_count" == "1" ]] \
-        || fail "the worker unit must define PrivateTmp exactly once"
-
-    effective_unit_file="$backup_dir/${service_name}.viewer-enabled"
-    sed 's/^PrivateTmp=true$/PrivateTmp=false/' \
-        "$unit_file" > "$effective_unit_file"
-    grep -Fxq 'PrivateTmp=false' "$effective_unit_file" \
-        || fail "the viewer-enabled worker unit must expose the host X socket"
-elif [[ "$viewer_enabled" == "true" ]]; then
+if [[ "$viewer_enabled" == "true" ]]; then
+    viewer_plugin="$staging_dir/librobotswarm_gazebo_gui_probe.so"
+    viewer_assets="$staging_dir/robotswarm-viewer-assets"
+    [[ -f "$viewer_plugin" && ! -L "$viewer_plugin" ]] \
+        || fail "published host Gazebo GUI plugin is missing"
+    [[ -d "$viewer_assets/ros-share/turtlebot3_description/meshes" \
+        && -d "$viewer_assets/models" ]] \
+        || fail "published host Gazebo visual assets are incomplete"
     private_tmp_count="$(grep -Ec '^PrivateTmp=(true|false)$' "$unit_file" || true)"
     [[ "$private_tmp_count" == "1" ]] \
         || fail "the worker unit must define PrivateTmp exactly once"
     grep -Fxq 'PrivateTmp=true' "$unit_file" \
-        || fail "the TCP viewer transport requires PrivateTmp=true"
+        || fail "the host viewer requires PrivateTmp=true"
 fi
 
 if [[ "$viewer_enabled" == "true" ]]; then
     if ! ROBOTSWARM_VIEWER_ENCODER="$viewer_encoder" \
         ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="$viewer_display_transport" \
-        ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST="$gpu_request" \
+        ROBOTSWARM_VIEWER_RENDER_RATE="$viewer_render_rate" \
+        ROBOTSWARM_VIEWER_MIN_RENDER_RATE="$viewer_min_render_rate" \
+        ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME="$viewer_gpu_adapter_name" \
         "$staging_dir/$viewer_publisher_name" probe \
-            --protocol-version 1 \
+            --protocol-version 2 \
             --publish-base-url "$viewer_publish_base_url" \
             >/dev/null
     then
@@ -614,8 +648,12 @@ if [[ "$viewer_enabled" == "true" ]]; then
         "$viewer_encoder" >> "$staging_dir/gpu-worker-release.env"
     printf 'ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="%s"\n' \
         "$viewer_display_transport" >> "$staging_dir/gpu-worker-release.env"
-    printf 'ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST="%s"\n' \
-        "$gpu_request" >> "$staging_dir/gpu-worker-release.env"
+    printf 'ROBOTSWARM_VIEWER_RENDER_RATE="%s"\n' \
+        "$viewer_render_rate" >> "$staging_dir/gpu-worker-release.env"
+    printf 'ROBOTSWARM_VIEWER_MIN_RENDER_RATE="%s"\n' \
+        "$viewer_min_render_rate" >> "$staging_dir/gpu-worker-release.env"
+    printf 'ROBOTSWARM_VIEWER_GPU_ADAPTER_NAME="%s"\n' \
+        "$viewer_gpu_adapter_name" >> "$staging_dir/gpu-worker-release.env"
 fi
 chmod 0600 "$staging_dir/gpu-worker-release.env"
 

@@ -113,7 +113,10 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
             self.case, self.robots, 0.0, 0.0, self.args
         )
 
-    def _status(self, sequence, control_time, commands, phase="PUSH"):
+    def _status(
+        self, sequence, control_time, commands, phase="PUSH",
+        reference_speed=0.015,
+    ):
         return {
             "phase": phase,
             "engagement_complete": True,
@@ -125,7 +128,7 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
                 robot: {"linear": speed, "angular": 0.0}
                 for robot, speed in commands.items()
             },
-            "push_reference_speed": 0.015,
+            "push_reference_speed": reference_speed,
             "robot_assignments": {
                 "tb3_0": {
                     "role": "payload_push",
@@ -145,6 +148,7 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         self, sequence, control_time, commands, object_x=0.0,
         root_yaw=0.0, companion_yaw=0.0, companion_gap=0.145,
         phase="PUSH", payload_velocity=0.006, parent_velocity=0.006,
+        reference_speed=0.015,
     ):
         root_x = object_x - 0.25
         model_pose = {
@@ -160,7 +164,9 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
             "tb3_0": _twist(parent_velocity),
             "tb3_1": _twist(0.006),
         }
-        status = self._status(sequence, control_time, commands, phase)
+        status = self._status(
+            sequence, control_time, commands, phase, reference_speed
+        )
         self.metrics._transport_participation(
             positions, model_pose, twists, status, {}, control_time,
             control_time, [],
@@ -212,6 +218,64 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         self.assertEqual(0.0, companion["useful_pushing_fraction"])
         self.assertEqual(0.0, report["transport_all_useful_fraction"])
 
+    def test_first_complete_fleet_batch_latency_is_reported(self):
+        self._observe(
+            1, 0.2, {"tb3_0": 0.0061, "tb3_1": 0.0},
+            object_x=0.0,
+        )
+        self._observe(
+            2, 0.8, {name: 0.0061 for name in self.robots},
+            object_x=0.001,
+        )
+        self._observe(
+            3, 1.0, {name: 0.0061 for name in self.robots},
+            object_x=0.002,
+        )
+
+        report = self.metrics.report()
+        self.assertEqual(0.8, report[
+            "transport_first_all_useful_sim_time_s"
+        ])
+        self.assertEqual(0.8, report[
+            "transport_time_to_first_all_useful_batch_sim_s"
+        ])
+        self.assertEqual(0.8, report[
+            "transport_time_to_first_all_useful_batch_wall_s"
+        ])
+
+    def test_short_transport_progress_gate_follows_arrival_contract(self):
+        self.assertEqual(
+            0.5,
+            LIVE.required_transport_goal_progress(0.55, 1.0, 0.5),
+        )
+
+    def test_long_transport_keeps_configured_progress_gate(self):
+        self.assertEqual(
+            0.55,
+            LIVE.required_transport_goal_progress(0.55, 1.4, 0.5),
+        )
+
+    def test_degenerate_transport_keeps_explicit_progress_epsilon(self):
+        self.assertEqual(
+            LIVE.TRANSPORT_PROGRESS_EPSILON_M,
+            LIVE.required_transport_goal_progress(0.55, 0.4, 0.5),
+        )
+
+    def test_push_progress_gate_uses_distance_when_push_becomes_active(self):
+        self.assertAlmostEqual(
+            0.4973,
+            LIVE.required_transport_goal_progress(0.55, 0.9973, 0.5),
+            places=4,
+        )
+
+        self._coordinated_window()
+        self.assertEqual(
+            1.0,
+            self.metrics.report()[
+                "transport_push_initial_goal_distance_m"
+            ],
+        )
+
     def test_companion_tracks_parent_velocity_not_payload_velocity(self):
         for index in range(6):
             self._observe(
@@ -244,11 +308,38 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         report = self.metrics.report()
         self.assertEqual(1.0, report["transport_all_useful_fraction"])
         self.assertAlmostEqual(
-            0.015,
+            0.0112,
             report["transport_participation"]["tb3_1"]
             ["adaptive_contribution_threshold_mps"]["max"],
             places=4,
         )
+
+    def test_measured_payload_momentum_cannot_outrun_requested_pace(self):
+        for index in range(6):
+            self._observe(
+                index + 1, index * 0.2,
+                {"tb3_0": 0.018, "tb3_1": 0.018},
+                object_x=index * 0.001,
+                payload_velocity=0.0248,
+                parent_velocity=0.0248,
+                reference_speed=0.018,
+            )
+
+        report = self.metrics.report()
+        self.assertEqual(1.0, report["transport_all_useful_fraction"])
+        for robot in self.robots:
+            item = report["transport_participation"][robot]
+            self.assertEqual(6, item["useful_pushing_samples"])
+            self.assertAlmostEqual(
+                0.0135,
+                item["adaptive_contribution_threshold_mps"]["max"],
+                places=4,
+            )
+            self.assertAlmostEqual(
+                0.0248,
+                item["role_reference_goal_speed_mps"]["max"],
+                places=4,
+            )
 
     def test_large_fleet_control_cadence_keeps_one_continuous_window(self):
         commands = {name: 0.0061 for name in self.robots}

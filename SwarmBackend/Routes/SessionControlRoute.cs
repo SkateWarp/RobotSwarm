@@ -15,6 +15,8 @@ namespace SwarmBackend.Routes;
 
 public static class SessionControlRoute
 {
+    private const int MaximumViewerLeaseAttempts = 3;
+
     public static RouteGroupBuilder MapSessionControl(this RouteGroupBuilder group)
     {
         group.RequireAuthorization();
@@ -39,8 +41,66 @@ public static class SessionControlRoute
             .Produces<EmergencyStopResponse>(StatusCodes.Status202Accepted);
         group.MapPost("/{id:guid}/viewer-lease", CreateViewerLease)
             .Produces<ViewerLeaseResponse>(StatusCodes.Status201Created);
+        group.MapGet("/{id:guid}/viewer-lease/{leaseId:guid}", GetViewerLeaseStatus)
+            .Produces<ViewerLeaseStatusResponse>();
 
         return group;
+    }
+
+    internal static async Task<IResult> GetViewerLeaseStatus(
+        Guid id,
+        Guid leaseId,
+        HttpContext context,
+        DataContext dataContext,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetAccountId(context, out var accountId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var lease = await dataContext.ViewerLeases
+            .AsNoTracking()
+            .SingleOrDefaultAsync(
+                candidate => candidate.Id == leaseId
+                    && candidate.SimulationSessionId == id
+                    && candidate.AccountId == accountId
+                    && candidate.SimulationSession.AccountId == accountId,
+                cancellationToken);
+        if (lease == null)
+        {
+            return Results.NotFound();
+        }
+
+        WorkerCommand? command = null;
+        if (!string.IsNullOrWhiteSpace(lease.IdempotencyKey))
+        {
+            command = await dataContext.WorkerCommands
+                .AsNoTracking()
+                .SingleOrDefaultAsync(
+                    candidate => candidate.SimulationSessionId == id
+                        && candidate.IdempotencyKey == lease.IdempotencyKey
+                        && candidate.Type == WorkerCommandType.SetViewerSource,
+                    cancellationToken);
+        }
+
+        var commandStatus = command == null
+            ? null
+            : new ViewerLeaseCommandStatusResponse(
+                command.Id,
+                command.State.ToString(),
+                command.LastError,
+                command.UpdatedAt);
+        return Results.Ok(new ViewerLeaseStatusResponse(
+            lease.Id,
+            lease.SimulationSessionId,
+            lease.Source.ToString(),
+            lease.RobotRuntimeId,
+            lease.CreatedAt,
+            lease.ExpiresAt,
+            lease.RevokedAt,
+            command?.State == WorkerCommandState.Completed,
+            commandStatus));
     }
 
     private static async Task<IResult> UpdateFleet(
@@ -709,7 +769,7 @@ public static class SessionControlRoute
         }
     }
 
-    private static async Task<IResult> CreateViewerLease(
+    private static Task<IResult> CreateViewerLease(
         Guid id,
         CreateViewerLeaseRequest request,
         HttpContext context,
@@ -718,6 +778,35 @@ public static class SessionControlRoute
         IConfiguration configuration,
         IHubContext<WorkerHub> workerHub,
         IHubContext<SessionHub> sessionHub,
+        ViewerControlRegistry viewerControls,
+        CancellationToken cancellationToken)
+    {
+        return RetryViewerLeaseSerializationFailures(
+            () => CreateViewerLeaseAttempt(
+                id,
+                request,
+                context,
+                dataContext,
+                commandService,
+                configuration,
+                workerHub,
+                sessionHub,
+                viewerControls,
+                cancellationToken),
+            dataContext.ChangeTracker.Clear,
+            cancellationToken);
+    }
+
+    private static async Task<IResult> CreateViewerLeaseAttempt(
+        Guid id,
+        CreateViewerLeaseRequest request,
+        HttpContext context,
+        DataContext dataContext,
+        WorkerCommandService commandService,
+        IConfiguration configuration,
+        IHubContext<WorkerHub> workerHub,
+        IHubContext<SessionHub> sessionHub,
+        ViewerControlRegistry viewerControls,
         CancellationToken cancellationToken)
     {
         if (!TryGetAccountId(context, out var accountId))
@@ -860,6 +949,8 @@ public static class SessionControlRoute
         };
         dataContext.ViewerLeases.Add(viewerLease);
 
+        var revocationMarkers = new List<(Guid LeaseId, long Version)>();
+        var revocationCommitted = false;
         try
         {
             var workerPublishingEnabled =
@@ -900,8 +991,33 @@ public static class SessionControlRoute
                     cancellationToken);
             }
 
+            var revocationStartedAt = new DateTimeOffset(
+                DateTime.SpecifyKind(now, DateTimeKind.Utc));
+            foreach (var previousLease in previousLeases.OrderBy(lease => lease.Id))
+            {
+                var version = await viewerControls.BeginLeaseRevocationAsync(
+                    id,
+                    previousLease.Id,
+                    revocationStartedAt,
+                    cancellationToken);
+                revocationMarkers.Add((previousLease.Id, version));
+            }
+
             await dataContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            foreach (var marker in revocationMarkers)
+            {
+                viewerControls.ConfirmLeaseRevocation(id, marker.LeaseId, marker.Version);
+            }
+            revocationCommitted = true;
+            foreach (var previousLease in previousLeases)
+            {
+                await viewerControls.DrainLeaseAsync(
+                    id,
+                    previousLease.Id,
+                    CancellationToken.None);
+            }
+
             if (command != null)
             {
                 await NotifyCommand(workerHub, sessionHub, session, command, cancellationToken);
@@ -922,10 +1038,52 @@ public static class SessionControlRoute
                 command == null ? null : WorkerCommandService.ToResponse(command));
             return Results.Created($"/api/sessions/{id}/viewer-lease", response);
         }
-        catch (Exception exception) when (IsCommandConflict(exception))
+        catch (Exception exception) when (
+            IsCommandConflict(exception)
+            && !SimulationSessionRoute.IsSerializationFailure(exception))
         {
             return RetryConflict();
         }
+        finally
+        {
+            if (!revocationCommitted)
+            {
+                foreach (var marker in revocationMarkers)
+                {
+                    viewerControls.CancelLeaseRevocation(id, marker.LeaseId, marker.Version);
+                }
+            }
+        }
+    }
+
+    internal static async Task<IResult> RetryViewerLeaseSerializationFailures(
+        Func<Task<IResult>> operation,
+        Action resetContext,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaximumViewerLeaseAttempts; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception exception)
+                when (SimulationSessionRoute.IsSerializationFailure(exception))
+            {
+                resetContext();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (attempt == MaximumViewerLeaseAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(25 * attempt),
+                    cancellationToken);
+            }
+        }
+
+        return RetryConflict();
     }
 
     private static async Task<SimulationSession?> FindOwnedSession(

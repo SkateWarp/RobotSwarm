@@ -79,6 +79,23 @@ public record ViewerLeaseResponse(
     string? HlsUrl,
     WorkerCommandResponse? Command);
 
+public record ViewerLeaseCommandStatusResponse(
+    Guid Id,
+    string State,
+    string? Error,
+    DateTime UpdatedAt);
+
+public record ViewerLeaseStatusResponse(
+    Guid LeaseId,
+    Guid SessionId,
+    string Source,
+    string? RobotRuntimeId,
+    DateTime CreatedAt,
+    DateTime ExpiresAt,
+    DateTime? RevokedAt,
+    bool IsReady,
+    ViewerLeaseCommandStatusResponse? Command);
+
 public class ViewerAuthRequest
 {
     public string? Token { get; set; }

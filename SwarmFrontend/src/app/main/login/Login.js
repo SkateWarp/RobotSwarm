@@ -1,30 +1,36 @@
 import { motion } from "framer-motion";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import Icon from "@mui/material/Icon";
 import Typography from "@mui/material/Typography";
 import clsx from "clsx";
-import { Link } from "react-router-dom";
 import { makeStyles } from "@mui/styles";
 import { darken } from "@mui/material/styles";
 import JWTLoginTab from "./tabs/JWTLoginTab";
-import { LOGO } from "../../constants/constants";
-import settingsConfig from "../../fuse-configs/settingsConfig";
 
 const useStyles = makeStyles((theme) => ({
     root: {
-        background: `linear-gradient(to left, ${theme.palette.primary.dark} 0%, ${darken(
+        background: `radial-gradient(circle at top left, ${theme.palette.primary.main} 0%, ${darken(
             theme.palette.primary.dark,
-            0.5
-        )} 100%)`,
+            0.55
+        )} 72%)`,
         color: theme.palette.primary.contrastText,
     },
-    leftSection: {},
-    rightSection: {
-        background: `linear-gradient(to right, ${theme.palette.primary.dark} 0%, ${darken(
-            theme.palette.primary.dark,
-            0.5
-        )} 100%)`,
+    card: {
+        border: "1px solid rgba(255, 255, 255, 0.18)",
+        borderRadius: 20,
+        boxShadow: "0 24px 64px rgba(8, 20, 36, 0.34)",
+    },
+    brandIcon: {
+        alignItems: "center",
+        backgroundColor: theme.palette.primary.main,
+        borderRadius: 18,
         color: theme.palette.primary.contrastText,
+        display: "flex",
+        fontSize: 38,
+        height: 72,
+        justifyContent: "center",
+        width: 72,
     },
 }));
 
@@ -36,42 +42,32 @@ function Login() {
             className={clsx(classes.root, "flex flex-col flex-auto items-center justify-center p-16 sm:p-32")}
         >
             <div className="flex flex-col items-center justify-center w-full">
-                <motion.div initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }}>
-                    <Card className="w-full max-w-384">
-                        <CardContent className="flex flex-col items-center justify-center p-16 sm:p-24 md:p-32">
-                            <img className="w-128 m-32" src={LOGO} alt="logo" />
+                <motion.div
+                    className="w-full"
+                    style={{ maxWidth: 420 }}
+                    initial={{ opacity: 0, y: 18 }}
+                    animate={{ opacity: 1, y: 0 }}
+                >
+                    <Card className={clsx(classes.card, "w-full")}>
+                        <CardContent className="flex flex-col items-center justify-center p-24 sm:p-32 md:p-40">
+                            <div className={clsx(classes.brandIcon, "mb-16")} aria-hidden="true">
+                                <Icon fontSize="inherit">device_hub</Icon>
+                            </div>
 
-                            <Typography variant="h6" className="mt-16 mb-24 font-oswald text-18 sm:text-24">
-                                BIENVENIDO
+                            <Typography component="h1" variant="h5" className="font-oswald text-24 sm:text-28">
+                                RobotSwarm
+                            </Typography>
+                            <Typography color="textSecondary" align="center" className="mt-8 mb-24 text-14">
+                                Control y supervisión de simulaciones multi-robot
                             </Typography>
                             <JWTLoginTab />
-                            <div className="flex flex-col items-center justify-center pt-32 pb-24">
-                                <span className="font-normal">¿Olvidaste tu contraseña?</span>
-                                {settingsConfig.layout.project === "fraga" ? (
-                                    <Link
-                                        style={{ color: "#006565" }}
-                                        className="font-normal"
-                                        to="/forgot-password"
-                                    >
-                                        Reestablecer Contraseña
-                                    </Link>
-                                ) : (
-                                    <Link className="font-normal" to="/forgot-password">
-                                        Reestablecer Contraseña
-                                    </Link>
-                                )}
-                            </div>
-                            <div className="w-1/3 mt-32">
-                                <a className="" href="https://www.alternard.com">
-                                    <img src="assets/images/logos/logo.png" alt="logo" />
-                                </a>
-                            </div>
                             <Typography
                                 variant="caption"
-                                className="mt-16"
-                                style={{ fontSize: "12px", color: "#999999" }}
+                                align="center"
+                                className="mt-24"
+                                color="textSecondary"
                             >
-                                © Alterna 4.0 2022 all rights reserved.
+                                El acceso se habilita mediante una cuenta creada por el administrador.
                             </Typography>
                         </CardContent>
                     </Card>

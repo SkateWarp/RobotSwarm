@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "passed": true,
+  "failures": [],
+  "scenario": "transport_grf_n10",
+  "robot_count": 10,
+  "task_outcome": "completed",
+  "phase": "DONE",
+  "search_and_notice": {
+    "finder": "tb3_0",
+    "notified_robots": [
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "missing_notice_recipients": [],
+    "missing_status_acknowledgements": [],
+    "search_motion_samples": 977,
+    "robots_observed_moving_during_search": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "peak_simultaneous_movers": 10
+  },
+  "complete_fleet_push": {
+    "current_useful_pusher_ids": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "useful_contributor_ids": [
+      "tb3_0",
+      "tb3_1",
+      "tb3_2",
+      "tb3_3",
+      "tb3_4",
+      "tb3_5",
+      "tb3_6",
+      "tb3_7",
+      "tb3_8",
+      "tb3_9"
+    ],
+    "all_pushers_confirmed": true,
+    "effective_proof_speed_mps": 0.009,
+    "published_reference_speed_mps": 0.018,
+    "final_command_speed_min_mps": 0.011766739348245627,
+    "final_command_speed_max_mps": 0.011766739348245627,
+    "all_useful_batch_fraction": 0.5914,
+    "all_useful_progress_fraction": 0.5363,
+    "first_all_useful_wall_s": 133.1742
+  },
+  "delivery_contract": {
+    "basis": "distance at synchronized PUSH start minus the controller arrival tolerance",
+    "push_start_goal_distance_m": 0.9992,
+    "required_post_push_progress_m": 0.4992,
+    "measured_post_push_progress_m": 0.5044,
+    "final_goal_distance_m": 0.4945,
+    "goal_progress_efficiency": 0.9996
+  },
+  "safety": {
+    "unexpected_contact_count": 0,
+    "expected_docking_contact_count": 1,
+    "minimum_unexpected_robot_center_distance_m": 0.28,
+    "minimum_static_obstacle_clearance_m": 0.3204,
+    "minimum_boundary_clearance_m": 0.6128,
+    "maximum_windowed_acceleration_mps2": 0.778
+  },
+  "performance": {
+    "acceptance_real_time_factor": 2.9672,
+    "wall_duration_s": 153.0447,
+    "render_average_fps": 49.96,
+    "render_post_rate_fps": 49.959,
+    "render_cap_fps": 50.0,
+    "renderer_device": "D3D12 (NVIDIA GeForce RTX 3080)",
+    "probe_real_time_factor": 2.979
+  },
+  "source_evidence_manifest_sha256": "562d4c8aeefd8f1399f8394beee80127c481f50816617f5c1b67867741c7011c"
+}

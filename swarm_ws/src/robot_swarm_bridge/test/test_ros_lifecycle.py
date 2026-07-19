@@ -5001,6 +5001,216 @@ class BehaviorLifecycleTests(unittest.TestCase):
             controller._rendezvous_pair_key("tb3_10", "tb3_2"),
         )
 
+    def test_rendezvous_recovery_starts_when_avoidance_only_allows_turning(self):
+        controller = ROS["transport"].CollaborativeTransport.__new__(
+            ROS["transport"].CollaborativeTransport
+        )
+        controller.data_lock = threading.Lock()
+        controller.avoidance_modules = {}
+
+        positions = {"tb3_0": np.array([0.0, 0.0])}
+        yaws = {"tb3_0": 0.0}
+        target = {
+            "role": "companion_push",
+            "parent_namespace": None,
+            "push_direction": np.array([1.0, 0.0]),
+        }
+        targets = {"tb3_0": target}
+        empty_neighbours = ({"tb3_0": set()},) * 3
+
+        controller._rendezvous_recovery_command = mock.Mock(
+            side_effect=[None, Message(
+                linear=Message(x=0.06), angular=Message(z=0.0)
+            )]
+        )
+        controller._start_rendezvous_recovery = mock.Mock(return_value=True)
+        controller._transport_robot_lidar_masks = lambda *_args: ()
+        controller._nearby_chain_contacts = lambda *_args: ()
+        controller._parallel_lane_contacts = lambda *_args: ()
+
+        avoidance_calls = []
+
+        def apply_avoidance(_namespace, command, *_args, **_kwargs):
+            avoidance_calls.append(command)
+            if len(avoidance_calls) == 1:
+                return Message(
+                    linear=Message(x=0.0), angular=Message(z=0.45)
+                )
+            return command
+
+        controller._apply_transport_avoidance = apply_avoidance
+        published = {}
+        controller._publish_command = (
+            lambda namespace, command, _epoch:
+            published.__setitem__(namespace, command) or True
+        )
+
+        requested = Twist()
+        requested.linear.x = 0.08
+        controller._publish_concurrent_approach_command(
+            "tb3_0",
+            requested,
+            target,
+            positions,
+            yaws,
+            targets,
+            np.array([1.0, 1.0]),
+            0.0,
+            empty_neighbours,
+            4,
+        )
+
+        controller._start_rendezvous_recovery.assert_called_once()
+        _args, call_kwargs = (
+            controller._start_rendezvous_recovery.call_args
+        )
+        np.testing.assert_allclose(
+            np.array([1.0, 0.0]), call_kwargs["travel_direction"]
+        )
+        self.assertEqual(2, len(avoidance_calls))
+        self.assertAlmostEqual(0.06, published["tb3_0"].linear.x)
+        self.assertEqual(0.0, published["tb3_0"].angular.z)
+
+    def test_rendezvous_recovery_selects_a_blocker_in_front(self):
+        controller = ROS["transport"].CollaborativeTransport.__new__(
+            ROS["transport"].CollaborativeTransport
+        )
+        controller.transport_route_robot_clearance = 0.32
+        controller.transport_rendezvous_recoveries = {}
+        controller.transport_rendezvous_recovery_cooldowns = {}
+        controller.transport_rendezvous_pair_decisions = {}
+        controller.transport_assembly_route_states = {}
+        positions = {
+            "tb3_0": np.array([0.0, 0.0]),
+            "tb3_1": np.array([0.25, 0.04]),
+            "tb3_2": np.array([-0.08, 0.0]),
+            "tb3_3": np.array([0.05, 0.40]),
+        }
+        target = {
+            "position": np.array([1.0, 0.0]),
+            "staging_position": np.array([1.0, 0.0]),
+        }
+
+        with mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=3.0,
+            create=True,
+        ):
+            started = controller._start_rendezvous_recovery(
+                "tb3_0",
+                positions["tb3_0"],
+                target,
+                positions,
+                travel_direction=np.array([1.0, 0.0]),
+            )
+
+        self.assertTrue(started)
+        self.assertEqual(
+            "tb3_1",
+            controller.transport_rendezvous_recoveries["tb3_0"][
+                "obstacle_namespace"
+            ],
+        )
+
+    def test_rendezvous_recovery_ignores_robots_outside_route(self):
+        controller = ROS["transport"].CollaborativeTransport.__new__(
+            ROS["transport"].CollaborativeTransport
+        )
+        controller.transport_route_robot_clearance = 0.32
+        controller.transport_rendezvous_recoveries = {}
+        controller.transport_rendezvous_recovery_cooldowns = {}
+        controller.transport_rendezvous_pair_decisions = {}
+        controller.transport_assembly_route_states = {}
+        positions = {
+            "tb3_0": np.array([0.0, 0.0]),
+            "tb3_1": np.array([-0.08, 0.0]),
+            "tb3_2": np.array([0.05, 0.40]),
+        }
+        target = {
+            "position": np.array([1.0, 0.0]),
+            "staging_position": np.array([1.0, 0.0]),
+        }
+
+        with mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=3.0,
+            create=True,
+        ):
+            started = controller._start_rendezvous_recovery(
+                "tb3_0",
+                positions["tb3_0"],
+                target,
+                positions,
+                travel_direction=np.array([1.0, 0.0]),
+            )
+
+        self.assertFalse(started)
+        self.assertEqual({}, controller.transport_rendezvous_recoveries)
+
+    def test_static_obstacle_turn_does_not_invent_a_robot_detour(self):
+        controller = ROS["transport"].CollaborativeTransport.__new__(
+            ROS["transport"].CollaborativeTransport
+        )
+        controller.data_lock = threading.Lock()
+        controller.avoidance_modules = {}
+        controller.transport_route_robot_clearance = 0.32
+        controller.transport_rendezvous_recoveries = {}
+        controller.transport_rendezvous_recovery_cooldowns = {}
+        controller.transport_rendezvous_pair_decisions = {}
+        controller.transport_assembly_route_states = {}
+
+        positions = {"tb3_0": np.array([0.0, 0.0])}
+        yaws = {"tb3_0": 0.0}
+        target = {
+            "role": "companion_push",
+            "parent_namespace": None,
+            "position": np.array([1.0, 0.0]),
+            "staging_position": np.array([1.0, 0.0]),
+        }
+        targets = {"tb3_0": target}
+        empty_neighbours = ({"tb3_0": set()},) * 3
+
+        controller._transport_robot_lidar_masks = lambda *_args: ()
+        controller._nearby_chain_contacts = lambda *_args: ()
+        controller._parallel_lane_contacts = lambda *_args: ()
+        controller._apply_transport_avoidance = (
+            lambda *_args, **_kwargs: Message(
+                linear=Message(x=0.0), angular=Message(z=0.45)
+            )
+        )
+        published = {}
+        controller._publish_command = (
+            lambda namespace, command, _epoch:
+            published.__setitem__(namespace, command) or True
+        )
+
+        requested = Twist()
+        requested.linear.x = 0.08
+        with mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=3.0,
+            create=True,
+        ):
+            controller._publish_concurrent_approach_command(
+                "tb3_0",
+                requested,
+                target,
+                positions,
+                yaws,
+                targets,
+                np.array([1.0, 1.0]),
+                0.0,
+                empty_neighbours,
+                4,
+            )
+
+        self.assertEqual({}, controller.transport_rendezvous_recoveries)
+        self.assertEqual(0.0, published["tb3_0"].linear.x)
+        self.assertAlmostEqual(0.45, published["tb3_0"].angular.z)
+
     def test_mutual_rendezvous_yield_separates_and_does_not_release_early(self):
         controller, positions, targets = self._mutual_rendezvous_controller()
         clock = [0.0]
@@ -7250,6 +7460,8 @@ class BehaviorLifecycleTests(unittest.TestCase):
             "notified_robots": ["tb3_0", "tb3_2"],
         }
         controller.transport_useful_contributors = {"tb3_2", "tb3_0"}
+        controller.transport_current_useful_pushers = {"tb3_2", "tb3_0"}
+        controller.transport_push_reference_speed = 0.018
         controller._publish_status(
             ROS["transport"].TransportPhase.APPROACH
         )
@@ -7261,6 +7473,14 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertEqual(
             ["tb3_0", "tb3_2"],
             regrouping["useful_contributor_ids"],
+        )
+        self.assertEqual(2, regrouping["current_useful_pusher_count"])
+        self.assertEqual(
+            ["tb3_0", "tb3_2"],
+            regrouping["current_useful_pusher_ids"],
+        )
+        self.assertEqual(
+            0.009, regrouping["all_pusher_proof_minimum_speed"]
         )
         self.assertEqual(
             "rendezvousing",
@@ -7474,6 +7694,60 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertFalse(controller.transport_all_pushers_confirmed)
         self.assertIsNone(controller.transport_all_pushers_since)
         self.assertEqual(set(), controller.transport_useful_contributors)
+
+    def test_transport_all_pusher_proof_tracks_calm_reference_speed(self):
+        (
+            controller,
+            positions,
+            _targets,
+            _published,
+        ) = self._connected_transport_publish_controller()
+        controller.transport_push_reference_speed = 0.018
+        controller.transport_all_push_hold_time = 0.75
+        controller._advance_push_reference = mock.Mock()
+        final_speeds = {"tb3_0": 0.011, "tb3_1": 0.008}
+
+        def apply_avoidance(namespace, command, *_args, **_kwargs):
+            command.linear.x = final_speeds[namespace]
+            return command
+
+        controller._apply_transport_avoidance = apply_avoidance
+        commands = {
+            namespace: ROS["transport"].Vec2(0.018, 0.0)
+            for namespace in positions
+        }
+        yaws = {namespace: 0.0 for namespace in positions}
+
+        with mock.patch.object(
+            ROS["transport"].rospy, "get_time", return_value=9.0,
+            create=True,
+        ):
+            controller._publish_grf_commands(
+                list(positions), commands, positions, yaws,
+                np.zeros(2), 0.0, 4,
+            )
+        # Loaded-chain coordination uses the weakest wheel command for the
+        # whole column, so one lagging robot makes this entire batch weak.
+        self.assertEqual(
+            set(), controller.transport_current_useful_pushers
+        )
+        self.assertFalse(controller.transport_all_pushers_confirmed)
+
+        final_speeds["tb3_1"] = 0.011
+        for timestamp in (10.0, 10.75):
+            with mock.patch.object(
+                ROS["transport"].rospy, "get_time",
+                return_value=timestamp, create=True,
+            ):
+                controller._publish_grf_commands(
+                    list(positions), commands, positions, yaws,
+                    np.zeros(2), 0.0, 4,
+                )
+
+        self.assertEqual(
+            set(positions), controller.transport_current_useful_pushers
+        )
+        self.assertTrue(controller.transport_all_pushers_confirmed)
 
     def test_transport_control_sequence_survives_same_task_recovery(self):
         (

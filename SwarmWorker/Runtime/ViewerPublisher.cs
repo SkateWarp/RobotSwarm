@@ -1,9 +1,12 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using SwarmWorker.Configuration;
+using SwarmWorker.Contracts;
 
 namespace SwarmWorker.Runtime;
 
@@ -44,30 +47,80 @@ public interface IViewerPublisher
         ViewerPublishRequest request,
         CancellationToken cancellationToken);
 
+    Task SendInputAsync(
+        ViewerInputEnvelope request,
+        CancellationToken cancellationToken);
+
+    Task ReleaseInputAsync(
+        Guid sessionId,
+        Guid leaseId,
+        CancellationToken cancellationToken);
+
+    Task ReleaseAllInputsAsync(CancellationToken cancellationToken);
+
     Task StopSessionAsync(Guid sessionId, CancellationToken cancellationToken);
 }
 
 public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
 {
-    private const int ProtocolVersion = 1;
+    private const int ProtocolVersion = 2;
     private const int TerminationSignal = 15;
     private const int KillSignal = 9;
     private const int SignalCheck = 0;
     private const int NoSuchProcessError = 3;
     private const int MaximumUnexpectedExitRestarts = 3;
+    private static readonly TimeSpan InputWriteTimeout = TimeSpan.FromSeconds(2);
 
-    private sealed record ActivePublisher(
-        ViewerPublishRequest Request,
-        Process Process,
-        Task<string> ErrorOutput,
-        CancellationTokenSource ExpiryCancellation,
-        int RestartCount);
+    private sealed class ActivePublisher
+    {
+        private int _stopping;
+        private int _processGroupReaped;
+
+        public ActivePublisher(
+            ViewerPublishRequest request,
+            Process process,
+            Task<string> errorOutput,
+            CancellationTokenSource expiryCancellation,
+            int restartCount)
+        {
+            Request = request;
+            Process = process;
+            ErrorOutput = errorOutput;
+            ExpiryCancellation = expiryCancellation;
+            RestartCount = restartCount;
+        }
+
+        public ViewerPublishRequest Request { get; }
+        public Process Process { get; }
+        public Task<string> ErrorOutput { get; }
+        public CancellationTokenSource ExpiryCancellation { get; }
+        public int RestartCount { get; }
+        public SemaphoreSlim InputGate { get; } = new(1, 1);
+        public SemaphoreSlim ProcessGroupGate { get; } = new(1, 1);
+        public bool IsStopping => Volatile.Read(ref _stopping) != 0;
+        public bool ProcessGroupReaped => Volatile.Read(ref _processGroupReaped) != 0;
+
+        public bool TryBeginStopping() =>
+            Interlocked.CompareExchange(ref _stopping, 1, 0) == 0;
+
+        public void MarkProcessGroupReaped() =>
+            Interlocked.Exchange(ref _processGroupReaped, 1);
+    }
 
     private readonly ViewerPublisherOptions _options;
+    private readonly Guid _workerId;
     private readonly ILogger<ExternalViewerPublisher> _logger;
+    private readonly Func<Guid, Process, string, CancellationToken, Task> _inputWriter;
+    private readonly Func<int, CancellationToken, Task<bool>> _processGroupReaper;
     private readonly SemaphoreSlim _probeGate = new(1, 1);
-    private readonly SemaphoreSlim _processGate = new(1, 1);
+    private readonly object _activeGate = new();
     private readonly Dictionary<Guid, ActivePublisher> _active = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sessionGates = new();
+    private static readonly JsonSerializerOptions InputSerializerOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
     private int _disposeStarted;
     private ViewerPublisherAvailability _availability =
         ViewerPublisherAvailability.Unavailable("Viewer publishing has not been probed.");
@@ -75,9 +128,21 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     public ExternalViewerPublisher(
         IOptions<WorkerOptions> options,
         ILogger<ExternalViewerPublisher> logger)
+        : this(options, logger, WriteInputLineAsync)
+    {
+    }
+
+    internal ExternalViewerPublisher(
+        IOptions<WorkerOptions> options,
+        ILogger<ExternalViewerPublisher> logger,
+        Func<Guid, Process, string, CancellationToken, Task> inputWriter,
+        Func<int, CancellationToken, Task<bool>>? processGroupReaper = null)
     {
         _options = options.Value.Viewer;
+        _workerId = options.Value.WorkerId;
         _logger = logger;
+        _inputWriter = inputWriter ?? throw new ArgumentNullException(nameof(inputWriter));
+        _processGroupReaper = processGroupReaper ?? ReapProcessGroupAsync;
     }
 
     public ViewerPublisherAvailability Availability =>
@@ -158,18 +223,33 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
             throw new InvalidOperationException(error);
         }
 
-        await _processGate.WaitAsync(cancellationToken);
+        ThrowIfDisposed();
+        var sessionGate = SessionGate(request.SessionId);
+        await sessionGate.WaitAsync(cancellationToken);
         try
         {
-            if (_active.TryGetValue(request.SessionId, out var existing))
+            ActivePublisher? existing;
+            lock (_activeGate)
             {
-                if (!existing.Process.HasExited && existing.Request == request)
+                _active.TryGetValue(request.SessionId, out existing);
+                if (existing is not null
+                    && !existing.IsStopping
+                    && !existing.Process.HasExited
+                    && existing.Request == request)
                 {
                     return BuildResult(request, availability.VideoCodec);
                 }
 
-                await StopPublisherAsync(existing, cancellationToken);
-                _active.Remove(request.SessionId);
+                if (existing is not null)
+                {
+                    existing.TryBeginStopping();
+                    _active.Remove(request.SessionId);
+                }
+            }
+
+            if (existing is not null)
+            {
+                await StopPublisherWithInputGateAsync(existing, cancellationToken);
             }
 
             var publisher = await StartPublisherAsync(
@@ -178,18 +258,42 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                 cancellationToken);
             if (request.Command.ExpiresAt <= DateTimeOffset.UtcNow)
             {
-                await StopPublisherAsync(publisher, CancellationToken.None);
+                publisher.TryBeginStopping();
+                await StopPublisherWithInputGateAsync(
+                    publisher,
+                    CancellationToken.None);
                 throw new InvalidOperationException(
                     "The viewer lease expired while publishing was starting.");
             }
 
-            _active[request.SessionId] = publisher;
+            var installed = false;
+            lock (_activeGate)
+            {
+                if (Volatile.Read(ref _disposeStarted) == 0
+                    && !_active.ContainsKey(request.SessionId))
+                {
+                    _active.Add(request.SessionId, publisher);
+                    installed = true;
+                }
+            }
+
+            if (!installed)
+            {
+                publisher.TryBeginStopping();
+                await StopPublisherWithInputGateAsync(
+                    publisher,
+                    CancellationToken.None);
+                ThrowIfDisposed();
+                throw new InvalidOperationException(
+                    "The viewer publisher changed while it was starting.");
+            }
+
             WatchPublisher(publisher);
             return BuildResult(request, availability.VideoCodec);
         }
         finally
         {
-            _processGate.Release();
+            sessionGate.Release();
         }
     }
 
@@ -197,19 +301,253 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         Guid sessionId,
         CancellationToken cancellationToken)
     {
-        await _processGate.WaitAsync(cancellationToken);
+        var sessionGate = SessionGate(sessionId);
+        await sessionGate.WaitAsync(cancellationToken);
         try
         {
-            if (_active.Remove(sessionId, out var publisher))
+            ActivePublisher? publisher = null;
+            lock (_activeGate)
             {
-                await StopPublisherAsync(publisher, cancellationToken);
+                if (_active.Remove(sessionId, out var current))
+                {
+                    current.TryBeginStopping();
+                    publisher = current;
+                }
+            }
+
+            if (publisher is not null)
+            {
+                await StopPublisherWithInputGateAsync(
+                    publisher,
+                    cancellationToken);
             }
         }
         finally
         {
-            _processGate.Release();
+            sessionGate.Release();
         }
     }
+
+    public Task SendInputAsync(
+        ViewerInputEnvelope request,
+        CancellationToken cancellationToken) =>
+        SendInputCoreAsync(request, forceRelease: false, cancellationToken);
+
+    public Task ReleaseInputAsync(
+        Guid sessionId,
+        Guid leaseId,
+        CancellationToken cancellationToken)
+    {
+        if (sessionId == Guid.Empty || leaseId == Guid.Empty)
+        {
+            throw new InvalidOperationException(
+                "Viewer input release identifiers are not valid.");
+        }
+
+        return SendInputCoreAsync(
+            new ViewerInputEnvelope(
+                sessionId,
+                leaseId,
+                new ViewerInputEvent("releaseAll")),
+            forceRelease: true,
+            cancellationToken);
+    }
+
+    public async Task ReleaseAllInputsAsync(CancellationToken cancellationToken)
+    {
+        ActivePublisher[] publishers;
+        lock (_activeGate)
+        {
+            publishers = _active.Values
+                .Where(publisher => !publisher.IsStopping)
+                .ToArray();
+        }
+
+        await Task.WhenAll(publishers.Select(publisher =>
+            ReleaseOrStopPublisherAsync(publisher, cancellationToken)));
+    }
+
+    private async Task SendInputCoreAsync(
+        ViewerInputEnvelope request,
+        bool forceRelease,
+        CancellationToken cancellationToken)
+    {
+        if (request.SessionId == Guid.Empty
+            || request.LeaseId == Guid.Empty
+            || !ViewerInputEventValidator.IsValid(request.Input))
+        {
+            throw new InvalidOperationException("Viewer input is not valid.");
+        }
+
+        var line = SerializeInput(request.Input);
+        if (line.IndexOfAny(['\r', '\n']) >= 0)
+        {
+            throw new InvalidOperationException(
+                "Viewer input cannot contain a line boundary.");
+        }
+
+        ActivePublisher? publisher;
+        lock (_activeGate)
+        {
+            _active.TryGetValue(request.SessionId, out publisher);
+        }
+
+        if (publisher is null)
+        {
+            throw new InvalidOperationException(
+                "Viewer input does not match an active publisher lease.");
+        }
+
+        await SendInputToPublisherAsync(
+            publisher,
+            request,
+            line,
+            forceRelease,
+            cancellationToken);
+    }
+
+    private async Task SendInputToPublisherAsync(
+        ActivePublisher publisher,
+        ViewerInputEnvelope request,
+        string line,
+        bool forceRelease,
+        CancellationToken cancellationToken)
+    {
+        IOException? writeFailure = null;
+        var detachedAfterFailure = false;
+        await publisher.InputGate.WaitAsync(cancellationToken);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (!IsCurrentPublisher(publisher)
+                || !CanTargetActiveLease(
+                    publisher.Request.Command.LeaseId,
+                    publisher.Request.Command.ExpiresAt,
+                    request,
+                    now,
+                    forceRelease)
+                || publisher.Process.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "Viewer input does not match an active publisher lease.");
+            }
+
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+                timeout.CancelAfter(InputWriteTimeout);
+                await _inputWriter(
+                        publisher.Request.SessionId,
+                        publisher.Process,
+                        line,
+                        timeout.Token)
+                    .WaitAsync(timeout.Token);
+            }
+            catch (Exception exception)
+                when (exception is IOException
+                      or InvalidOperationException
+                      or ObjectDisposedException)
+            {
+                writeFailure = new IOException(
+                    "The active viewer publisher did not accept input.",
+                    exception);
+            }
+            catch (OperationCanceledException exception)
+                when (!cancellationToken.IsCancellationRequested)
+            {
+                writeFailure = new IOException(
+                    "The active viewer publisher did not accept input before the timeout.",
+                    exception);
+            }
+
+            if (writeFailure is not null)
+            {
+                // Mark and detach while this publisher's input gate is still
+                // held. A queued writer can then acquire the gate, but it can no
+                // longer validate this exact instance as current.
+                detachedAfterFailure = TryDetachCurrentPublisher(publisher);
+            }
+        }
+        finally
+        {
+            publisher.InputGate.Release();
+        }
+
+        if (writeFailure is null)
+        {
+            return;
+        }
+
+        if (detachedAfterFailure)
+        {
+            await StopPublisherWithInputGateAsync(
+                publisher,
+                CancellationToken.None);
+        }
+
+        throw writeFailure;
+    }
+
+    private async Task ReleaseOrStopPublisherAsync(
+        ActivePublisher publisher,
+        CancellationToken cancellationToken)
+    {
+        var release = new ViewerInputEnvelope(
+            publisher.Request.SessionId,
+            publisher.Request.Command.LeaseId,
+            new ViewerInputEvent("releaseAll"));
+        try
+        {
+            await SendInputToPublisherAsync(
+                publisher,
+                release,
+                SerializeInput(release.Input),
+                forceRelease: true,
+                cancellationToken);
+        }
+        catch (Exception exception)
+            when (exception is IOException
+                  or InvalidOperationException
+                  or ObjectDisposedException
+                  or OperationCanceledException)
+        {
+            _logger.LogWarning(
+                exception,
+                "Viewer input release failed for session {SessionId}; stopping its publisher to fail closed.",
+                publisher.Request.SessionId);
+            await FailClosedPublisherAsync(publisher);
+        }
+    }
+
+    internal static bool CanTargetActiveLease(
+        Guid activeLeaseId,
+        DateTimeOffset activeLeaseExpiresAt,
+        ViewerInputEnvelope request,
+        DateTimeOffset now,
+        bool forceRelease = false)
+    {
+        if (activeLeaseId != request.LeaseId)
+        {
+            return false;
+        }
+
+        if (forceRelease)
+        {
+            return ViewerInputEventValidator.IsReleaseAll(request.Input);
+        }
+
+        if (activeLeaseExpiresAt > now)
+        {
+            return true;
+        }
+
+        return ViewerInputEventValidator.IsReleaseAll(request.Input)
+            && now <= activeLeaseExpiresAt + ViewerInputEventValidator.ReleaseGracePeriod;
+    }
+
+    internal static string SerializeInput(ViewerInputEvent input) =>
+        JsonSerializer.Serialize(input, InputSerializerOptions);
 
     public async ValueTask DisposeAsync()
     {
@@ -218,22 +556,22 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
             return;
         }
 
-        await _processGate.WaitAsync();
-        try
+        ActivePublisher[] publishers;
+        lock (_activeGate)
         {
-            foreach (var publisher in _active.Values)
+            publishers = _active.Values.ToArray();
+            foreach (var publisher in publishers)
             {
-                await StopPublisherAsync(publisher, CancellationToken.None);
+                publisher.TryBeginStopping();
             }
 
             _active.Clear();
         }
-        finally
-        {
-            _processGate.Release();
-            _processGate.Dispose();
-            _probeGate.Dispose();
-        }
+
+        await Task.WhenAll(publishers.Select(publisher =>
+            StopPublisherWithInputGateAsync(
+                publisher,
+                CancellationToken.None)));
     }
 
     private async Task<ViewerPublisherAvailability> ProbeAsync(
@@ -284,13 +622,15 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
             || protocolVersion != ProtocolVersion
             || !root.TryGetProperty("ready", out var ready)
             || ready.ValueKind != JsonValueKind.True
+            || !root.TryGetProperty("interactive", out var interactive)
+            || interactive.ValueKind != JsonValueKind.True
             || !root.TryGetProperty("videoCodec", out var codec)
             || !string.Equals(codec.GetString(), "H264", StringComparison.OrdinalIgnoreCase)
             || !root.TryGetProperty("sources", out var sourcesElement)
             || sourcesElement.ValueKind != JsonValueKind.Array)
         {
             throw new InvalidOperationException(
-                "Publisher probe did not confirm protocol 1 with H.264 output.");
+                "Publisher probe did not confirm interactive protocol 2 with H.264 output.");
         }
 
         var sources = new List<ViewerSourceKind>();
@@ -327,7 +667,8 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     private async Task<ActivePublisher> StartPublisherAsync(
         ViewerPublishRequest request,
         Uri publishBaseUri,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int restartCount = 0)
     {
         var process = CreateProcess();
         AddPublishArguments(process.StartInfo, request, publishBaseUri);
@@ -339,7 +680,6 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                 request.Command.PublishToken.AsMemory(),
                 cancellationToken);
             await process.StandardInput.FlushAsync(cancellationToken);
-            process.StandardInput.Close();
             var errorOutput = process.StandardError.ReadToEndAsync();
             var readyLine = process.StandardOutput.ReadLineAsync();
 
@@ -372,7 +712,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                 process,
                 errorOutput,
                 new CancellationTokenSource(),
-                RestartCount: 0);
+                restartCount);
         }
         catch
         {
@@ -416,7 +756,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         }
     }
 
-    private static void AddPublishArguments(
+    private void AddPublishArguments(
         ProcessStartInfo startInfo,
         ViewerPublishRequest request,
         Uri publishBaseUri)
@@ -425,6 +765,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         AddOption(startInfo, "--protocol-version", ProtocolVersion.ToString(
             System.Globalization.CultureInfo.InvariantCulture));
         AddOption(startInfo, "--session-id", request.SessionId.ToString("D"));
+        AddOption(startInfo, "--worker-id", _workerId.ToString("D"));
         AddOption(startInfo, "--lease-id", request.Command.LeaseId.ToString("D"));
         AddOption(
             startInfo,
@@ -469,15 +810,113 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         }
     }
 
+    private static async Task WriteInputLineAsync(
+        Guid sessionId,
+        Process process,
+        string line,
+        CancellationToken cancellationToken)
+    {
+        _ = sessionId;
+        await process.StandardInput.WriteLineAsync(
+            line.AsMemory(),
+            cancellationToken);
+        await process.StandardInput.FlushAsync(cancellationToken);
+    }
+
+    private SemaphoreSlim SessionGate(Guid sessionId) =>
+        _sessionGates.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposeStarted) != 0)
+        {
+            throw new ObjectDisposedException(nameof(ExternalViewerPublisher));
+        }
+    }
+
+    private bool IsCurrentPublisher(ActivePublisher publisher)
+    {
+        lock (_activeGate)
+        {
+            return !publisher.IsStopping
+                && _active.TryGetValue(
+                    publisher.Request.SessionId,
+                    out var current)
+                && ReferenceEquals(current, publisher);
+        }
+    }
+
+    private bool TryDetachCurrentPublisher(ActivePublisher publisher)
+    {
+        lock (_activeGate)
+        {
+            if (!_active.TryGetValue(
+                    publisher.Request.SessionId,
+                    out var current)
+                || !ReferenceEquals(current, publisher))
+            {
+                return false;
+            }
+
+            publisher.TryBeginStopping();
+            _active.Remove(publisher.Request.SessionId);
+            return true;
+        }
+    }
+
+    private async Task StopPublisherWithInputGateAsync(
+        ActivePublisher publisher,
+        CancellationToken cancellationToken)
+    {
+        // Once an entry is detached, cleanup must still start if the caller is
+        // cancelled. An in-flight write has its own two-second bound.
+        await publisher.InputGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            await StopPublisherAsync(publisher, cancellationToken);
+        }
+        finally
+        {
+            publisher.InputGate.Release();
+        }
+    }
+
+    private async Task FailClosedPublisherAsync(ActivePublisher publisher)
+    {
+        var detached = false;
+        lock (_activeGate)
+        {
+            if (_active.TryGetValue(
+                    publisher.Request.SessionId,
+                    out var current)
+                && ReferenceEquals(current, publisher))
+            {
+                publisher.TryBeginStopping();
+                _active.Remove(publisher.Request.SessionId);
+                detached = true;
+            }
+        }
+
+        if (detached)
+        {
+            await StopPublisherWithInputGateAsync(
+                publisher,
+                CancellationToken.None);
+        }
+    }
+
     private async Task StopPublisherAsync(
         ActivePublisher publisher,
         CancellationToken cancellationToken)
     {
         publisher.ExpiryCancellation.Cancel();
+        var processGroupReaped = false;
+        var processExited = false;
         try
         {
             if (!publisher.Process.HasExited)
             {
+                var exitedGracefully = false;
                 var requestedGracefulStop = TryRequestGracefulStop(publisher.Process);
                 if (requestedGracefulStop)
                 {
@@ -487,7 +926,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                     try
                     {
                         await publisher.Process.WaitForExitAsync(timeout.Token);
-                        return;
+                        exitedGracefully = true;
                     }
                     catch (OperationCanceledException)
                     {
@@ -496,25 +935,22 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                     }
                 }
 
-                TryKill(publisher.Process);
-                using var forcedStopTimeout =
-                    CancellationTokenSource.CreateLinkedTokenSource(
-                        cancellationToken);
-                forcedStopTimeout.CancelAfter(
-                    TimeSpan.FromSeconds(_options.StopTimeoutSeconds));
-                try
+                if (!exitedGracefully)
                 {
-                    await publisher.Process.WaitForExitAsync(
-                        forcedStopTimeout.Token);
+                    TryKill(publisher.Process);
+                    using var forcedStopTimeout = new CancellationTokenSource(
+                        TimeSpan.FromSeconds(_options.StopTimeoutSeconds));
+                    try
+                    {
+                        await publisher.Process.WaitForExitAsync(
+                            forcedStopTimeout.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The independent process-group reaper below gets the
+                        // final bounded attempt, even if the caller cancelled.
+                    }
                 }
-                catch (OperationCanceledException)
-                    when (!cancellationToken.IsCancellationRequested)
-                {
-                    throw new TimeoutException(
-                        "The viewer publisher did not exit after its forced stop.");
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
             }
         }
         catch (InvalidOperationException)
@@ -523,9 +959,31 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         }
         finally
         {
-            publisher.Process.Dispose();
-            publisher.ExpiryCancellation.Dispose();
+            try
+            {
+                processGroupReaped = await EnsureProcessGroupReapedAsync(
+                    publisher,
+                    CancellationToken.None);
+                processExited = publisher.Process.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                processExited = true;
+            }
+            finally
+            {
+                publisher.Process.Dispose();
+                publisher.ExpiryCancellation.Dispose();
+            }
         }
+
+        if (!processGroupReaped || !processExited)
+        {
+            throw new TimeoutException(
+                "The viewer publisher process group did not stop completely.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private bool TryRequestGracefulStop(Process process)
@@ -571,21 +1029,34 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                 await Task.Delay(delay, publisher.ExpiryCancellation.Token);
             }
 
-            await _processGate.WaitAsync(publisher.ExpiryCancellation.Token);
+            var sessionGate = SessionGate(publisher.Request.SessionId);
+            await sessionGate.WaitAsync(publisher.ExpiryCancellation.Token);
             try
             {
-                if (_active.TryGetValue(
-                        publisher.Request.SessionId,
-                        out var current)
-                    && ReferenceEquals(current, publisher))
+                var detached = false;
+                lock (_activeGate)
                 {
-                    _active.Remove(publisher.Request.SessionId);
-                    await StopPublisherAsync(current, CancellationToken.None);
+                    if (_active.TryGetValue(
+                            publisher.Request.SessionId,
+                            out var current)
+                        && ReferenceEquals(current, publisher))
+                    {
+                        publisher.TryBeginStopping();
+                        _active.Remove(publisher.Request.SessionId);
+                        detached = true;
+                    }
+                }
+
+                if (detached)
+                {
+                    await StopPublisherWithInputGateAsync(
+                        publisher,
+                        CancellationToken.None);
                 }
             }
             finally
             {
-                _processGate.Release();
+                sessionGate.Release();
             }
         }
         catch (OperationCanceledException)
@@ -639,8 +1110,8 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         bool processGroupReaped;
         try
         {
-            processGroupReaped = await ReapProcessGroupAsync(
-                publisher.Process.Id,
+            processGroupReaped = await EnsureProcessGroupReapedAsync(
+                publisher,
                 publisher.ExpiryCancellation.Token);
         }
         catch (OperationCanceledException)
@@ -696,9 +1167,10 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                 return;
             }
 
+            var sessionGate = SessionGate(failedPublisher.Request.SessionId);
             try
             {
-                await _processGate.WaitAsync(
+                await sessionGate.WaitAsync(
                     failedPublisher.ExpiryCancellation.Token);
             }
             catch (OperationCanceledException)
@@ -712,18 +1184,14 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
 
             try
             {
-                if (!_active.TryGetValue(
-                        failedPublisher.Request.SessionId,
-                        out var current)
-                    || !ReferenceEquals(current, failedPublisher))
+                if (!IsCurrentPublisher(failedPublisher))
                 {
                     return;
                 }
 
                 if (failedPublisher.Request.Command.ExpiresAt <= DateTimeOffset.UtcNow)
                 {
-                    _active.Remove(failedPublisher.Request.SessionId);
-                    DisposeExitedPublisher(failedPublisher);
+                    await RetireCurrentExitedPublisherAsync(failedPublisher);
                     return;
                 }
 
@@ -738,10 +1206,34 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                     var replacement = await StartPublisherAsync(
                         failedPublisher.Request,
                         publishBaseUri,
-                        failedPublisher.ExpiryCancellation.Token);
-                    replacement = replacement with { RestartCount = restartCount };
-                    _active[failedPublisher.Request.SessionId] = replacement;
-                    DisposeExitedPublisher(failedPublisher);
+                        failedPublisher.ExpiryCancellation.Token,
+                        restartCount);
+                    var installed = false;
+                    lock (_activeGate)
+                    {
+                        if (Volatile.Read(ref _disposeStarted) == 0
+                            && !failedPublisher.IsStopping
+                            && _active.TryGetValue(
+                                failedPublisher.Request.SessionId,
+                                out var current)
+                            && ReferenceEquals(current, failedPublisher))
+                        {
+                            failedPublisher.TryBeginStopping();
+                            _active[failedPublisher.Request.SessionId] = replacement;
+                            installed = true;
+                        }
+                    }
+
+                    if (!installed)
+                    {
+                        replacement.TryBeginStopping();
+                        await StopPublisherWithInputGateAsync(
+                            replacement,
+                            CancellationToken.None);
+                        return;
+                    }
+
+                    await DisposeExitedPublisherWithInputGateAsync(failedPublisher);
                     WatchPublisher(replacement);
                     _logger.LogInformation(
                         "Viewer publisher for session {SessionId} recovered on restart {RestartCount}.",
@@ -773,7 +1265,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
             }
             finally
             {
-                _processGate.Release();
+                sessionGate.Release();
             }
         }
 
@@ -789,6 +1281,34 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     private static TimeSpan RestartDelay(int restartCount)
     {
         return TimeSpan.FromSeconds(1 << Math.Min(restartCount - 1, 2));
+    }
+
+    private async Task<bool> EnsureProcessGroupReapedAsync(
+        ActivePublisher publisher,
+        CancellationToken cancellationToken)
+    {
+        await publisher.ProcessGroupGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (publisher.ProcessGroupReaped)
+            {
+                return true;
+            }
+
+            var reaped = await _processGroupReaper(
+                publisher.Process.Id,
+                cancellationToken);
+            if (reaped)
+            {
+                publisher.MarkProcessGroupReaped();
+            }
+
+            return reaped;
+        }
+        finally
+        {
+            publisher.ProcessGroupGate.Release();
+        }
     }
 
     private static async Task<bool> ReapProcessGroupAsync(
@@ -849,21 +1369,15 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     {
         try
         {
-            await _processGate.WaitAsync();
+            var sessionGate = SessionGate(publisher.Request.SessionId);
+            await sessionGate.WaitAsync();
             try
             {
-                if (_active.TryGetValue(
-                        publisher.Request.SessionId,
-                        out var current)
-                    && ReferenceEquals(current, publisher))
-                {
-                    _active.Remove(publisher.Request.SessionId);
-                    DisposeExitedPublisher(publisher);
-                }
+                await RetireCurrentExitedPublisherAsync(publisher);
             }
             finally
             {
-                _processGate.Release();
+                sessionGate.Release();
             }
         }
         catch (ObjectDisposedException)
@@ -884,11 +1398,44 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         }
     }
 
-    private static void DisposeExitedPublisher(ActivePublisher publisher)
+    private async Task RetireCurrentExitedPublisherAsync(ActivePublisher publisher)
     {
-        publisher.ExpiryCancellation.Cancel();
-        publisher.Process.Dispose();
-        publisher.ExpiryCancellation.Dispose();
+        var detached = false;
+        lock (_activeGate)
+        {
+            if (_active.TryGetValue(
+                    publisher.Request.SessionId,
+                    out var current)
+                && ReferenceEquals(current, publisher))
+            {
+                publisher.TryBeginStopping();
+                _active.Remove(publisher.Request.SessionId);
+                detached = true;
+            }
+        }
+
+        if (detached)
+        {
+            await StopPublisherWithInputGateAsync(
+                publisher,
+                CancellationToken.None);
+        }
+    }
+
+    private static async Task DisposeExitedPublisherWithInputGateAsync(
+        ActivePublisher publisher)
+    {
+        await publisher.InputGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            publisher.ExpiryCancellation.Cancel();
+            publisher.Process.Dispose();
+            publisher.ExpiryCancellation.Dispose();
+        }
+        finally
+        {
+            publisher.InputGate.Release();
+        }
     }
 
     private async Task DrainOutputAsync(Process process, Guid sessionId)

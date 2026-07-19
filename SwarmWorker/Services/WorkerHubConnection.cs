@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Options;
 using SwarmWorker.Configuration;
 using SwarmWorker.Contracts;
+using SwarmWorker.Runtime;
 
 namespace SwarmWorker.Services;
 
@@ -35,6 +36,7 @@ public interface IWorkerCommandHub
 
 public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
 {
+    private static readonly TimeSpan ViewerInputReleaseTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan[] ReconnectDelays =
     {
         TimeSpan.Zero,
@@ -48,15 +50,23 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly SemaphoreSlim _commandSignal = new(0, 1);
     private readonly ILogger<WorkerHubConnection> _logger;
+    private readonly IViewerPublisher _viewerPublisher;
+    private readonly object _viewerInputReleaseGate = new();
     private int _disposeStarted;
+    private bool _viewerInputsReleasedForOutage;
+    private bool _viewerInputReleaseRetryRequested;
+    private Task<bool>? _viewerInputReleaseAttempt;
+    private long _viewerInputReleaseGeneration;
     private long _connectionVersion;
     private long _lastSuccessfulContactTicks = DateTime.UtcNow.Ticks;
 
     public WorkerHubConnection(
         IOptions<WorkerOptions> options,
+        IViewerPublisher viewerPublisher,
         ILogger<WorkerHubConnection> logger)
     {
         var workerOptions = options.Value;
+        _viewerPublisher = viewerPublisher;
         _logger = logger;
 
         _connection = new HubConnectionBuilder()
@@ -85,15 +95,22 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
                 NotifyCommandAvailable();
                 return Task.CompletedTask;
             });
-        _connection.Reconnecting += exception =>
+        _connection.On<ViewerInputEnvelope>(
+            "ViewerInput",
+            request => DispatchViewerInputAsync(request, CancellationToken.None));
+        _connection.On<ViewerInputReleaseEnvelope>(
+            "ViewerInputRelease",
+            request => DispatchViewerInputReleaseAsync(request, CancellationToken.None));
+        _connection.Reconnecting += async exception =>
         {
             _logger.LogWarning(
                 "Worker hub connection lost; SignalR is reconnecting ({ErrorType}).",
                 exception?.GetType().Name ?? "unknown");
-            return Task.CompletedTask;
+            await ReleaseViewerInputsForOutageAsync();
         };
         _connection.Reconnected += connectionId =>
         {
+            ResetViewerInputReleaseState();
             Interlocked.Increment(ref _connectionVersion);
             MarkSuccessfulContact();
             NotifyCommandAvailable();
@@ -102,12 +119,12 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
                 connectionId);
             return Task.CompletedTask;
         };
-        _connection.Closed += exception =>
+        _connection.Closed += async exception =>
         {
             _logger.LogWarning(
                 "Worker hub connection closed; the worker loop will reconnect ({ErrorType}).",
                 exception?.GetType().Name ?? "unknown");
-            return Task.CompletedTask;
+            await ReleaseViewerInputsForOutageAsync();
         };
     }
 
@@ -115,6 +132,159 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
     public bool IsConnected => _connection.State == HubConnectionState.Connected;
     public DateTime LastSuccessfulContactUtc =>
         new(Interlocked.Read(ref _lastSuccessfulContactTicks), DateTimeKind.Utc);
+
+    internal async Task DispatchViewerInputAsync(
+        ViewerInputEnvelope request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _viewerPublisher.SendInputAsync(request, cancellationToken);
+        }
+        catch (Exception exception)
+            when (exception is InvalidOperationException
+                  or IOException
+                  or ObjectDisposedException
+                  or TimeoutException)
+        {
+            _logger.LogDebug(
+                "Dropped viewer input because its active publisher no longer accepts it ({ErrorType}).",
+                exception.GetType().Name);
+        }
+    }
+
+    internal async Task DispatchViewerInputReleaseAsync(
+        ViewerInputReleaseEnvelope request,
+        CancellationToken cancellationToken)
+    {
+        if (request.SessionId == Guid.Empty || request.LeaseId == Guid.Empty)
+        {
+            _logger.LogWarning(
+                "Dropped viewer input release because its identifiers are invalid.");
+            return;
+        }
+
+        try
+        {
+            await _viewerPublisher.ReleaseInputAsync(
+                request.SessionId,
+                request.LeaseId,
+                cancellationToken);
+        }
+        catch (Exception exception)
+            when (exception is InvalidOperationException
+                  or IOException
+                  or ObjectDisposedException
+                  or TimeoutException)
+        {
+            _logger.LogDebug(
+                "Dropped viewer input release because its active publisher no longer accepts it ({ErrorType}).",
+                exception.GetType().Name);
+        }
+    }
+
+    internal async Task ReleaseViewerInputsForOutageAsync(
+        TimeSpan? timeoutOverride = null)
+    {
+        var timeoutDuration = timeoutOverride ?? ViewerInputReleaseTimeout;
+        Task<bool> attempt;
+        lock (_viewerInputReleaseGate)
+        {
+            if (_viewerInputsReleasedForOutage)
+            {
+                return;
+            }
+
+            if (_viewerInputReleaseAttempt is not null)
+            {
+                // Reconnecting and Closed may report the same outage. Coalesce
+                // them, but remember that the later event should retry if the
+                // attempt already in progress ultimately fails.
+                _viewerInputReleaseRetryRequested = true;
+                return;
+            }
+
+            var completion = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            attempt = completion.Task;
+            _viewerInputReleaseAttempt = attempt;
+            var generation = _viewerInputReleaseGeneration;
+            _ = RunViewerInputReleaseAttemptAsync(
+                generation,
+                completion,
+                timeoutDuration);
+        }
+
+        using var callbackTimeout = new CancellationTokenSource(timeoutDuration);
+        try
+        {
+            await attempt.WaitAsync(callbackTimeout.Token);
+        }
+        catch (OperationCanceledException)
+            when (callbackTimeout.IsCancellationRequested)
+        {
+            _logger.LogError(
+                "Viewer input fail-closed cleanup is still running after the hub-outage timeout.");
+        }
+    }
+
+    private async Task RunViewerInputReleaseAttemptAsync(
+        long generation,
+        TaskCompletionSource<bool> completion,
+        TimeSpan timeoutDuration)
+    {
+        await Task.Yield();
+        var succeeded = false;
+        using var timeout = new CancellationTokenSource(timeoutDuration);
+        try
+        {
+            await _viewerPublisher.ReleaseAllInputsAsync(timeout.Token);
+            succeeded = true;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Unable to release viewer input after losing the worker hub connection.");
+        }
+
+        var retry = false;
+        lock (_viewerInputReleaseGate)
+        {
+            if (generation == _viewerInputReleaseGeneration
+                && ReferenceEquals(_viewerInputReleaseAttempt, completion.Task))
+            {
+                _viewerInputReleaseAttempt = null;
+                if (succeeded)
+                {
+                    _viewerInputsReleasedForOutage = true;
+                    _viewerInputReleaseRetryRequested = false;
+                }
+                else
+                {
+                    retry = _viewerInputReleaseRetryRequested;
+                    _viewerInputReleaseRetryRequested = false;
+                }
+            }
+        }
+
+        completion.TrySetResult(succeeded);
+        if (retry)
+        {
+            _ = ReleaseViewerInputsForOutageAsync();
+        }
+    }
+
+    private void ResetViewerInputReleaseState()
+    {
+        lock (_viewerInputReleaseGate)
+        {
+            _viewerInputReleaseGeneration++;
+            _viewerInputsReleasedForOutage = false;
+            _viewerInputReleaseRetryRequested = false;
+            _viewerInputReleaseAttempt = null;
+        }
+    }
 
     public async Task EnsureConnectedAsync(CancellationToken cancellationToken)
     {
@@ -130,6 +300,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
                     try
                     {
                         await _connection.StartAsync(cancellationToken);
+                        ResetViewerInputReleaseState();
                         Interlocked.Increment(ref _connectionVersion);
                         MarkSuccessfulContact();
                         NotifyCommandAvailable();

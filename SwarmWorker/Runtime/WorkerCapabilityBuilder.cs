@@ -47,7 +47,8 @@ public static class WorkerCapabilityBuilder
                 configured = options.Viewer.Enabled,
                 available = viewer.IsAvailable,
                 videoCodec = viewer.VideoCodec,
-                protocolVersion = viewer.IsAvailable ? 1 : (int?)null
+                protocolVersion = viewer.IsAvailable ? 2 : (int?)null,
+                interactive = viewer.IsAvailable
             },
             taskOutcomes = new
             {

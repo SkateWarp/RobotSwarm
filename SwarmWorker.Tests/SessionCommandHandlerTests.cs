@@ -118,6 +118,7 @@ public sealed class SessionCommandHandlerTests
                         [SessionLabels.SessionId] = sessionId.ToString("D")
                     }
                 },
+                HostConfig = new { PidsLimit = 1024 },
                 State = new { Running = true, Status = "running" }
             }
         });
@@ -178,5 +179,17 @@ public sealed class SessionCommandHandlerTests
         public Task StopSessionAsync(
             Guid sessionId,
             CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task SendInputAsync(
+            ViewerInputEnvelope request,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseInputAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseAllInputsAsync(CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 }
