@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using SwarmBackend.Entities;
 using SwarmBackend.Models;
 using SwarmBackend.Routes;
@@ -13,6 +14,59 @@ namespace SwarmBackend.Tests;
 
 public sealed class SessionSafetyTests
 {
+    [Fact]
+    public async Task SessionCreationRetriesShortSerializationConflicts()
+    {
+        var attempts = 0;
+        var resets = 0;
+
+        var result = await SimulationSessionRoute.RetrySerializationFailures(
+            () =>
+            {
+                attempts++;
+                return attempts < 3
+                    ? Task.FromException<IResult>(SerializationFailure())
+                    : Task.FromResult(Results.Ok() as IResult);
+            },
+            () => resets++,
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status200OK, await StatusCode(result));
+        Assert.Equal(3, attempts);
+        Assert.Equal(2, resets);
+    }
+
+    [Fact]
+    public async Task SessionCreationReturnsConflictAfterRepeatedSerializationFailures()
+    {
+        var attempts = 0;
+
+        var result = await SimulationSessionRoute.RetrySerializationFailures(
+            () =>
+            {
+                attempts++;
+                return Task.FromException<IResult>(SerializationFailure());
+            },
+            () => { },
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status409Conflict, await StatusCode(result));
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public async Task SessionCreationHonoursCancellationAfterASerializationFailure()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            SimulationSessionRoute.RetrySerializationFailures(
+                () => Task.FromException<IResult>(SerializationFailure()),
+                () => { },
+                cancellation.Token));
+    }
+
     [Theory]
     [InlineData("999")]
     [InlineData("Queued")]
@@ -567,6 +621,15 @@ public sealed class SessionSafetyTests
             Email = email,
             Enabled = true
         };
+    }
+
+    private static PostgresException SerializationFailure()
+    {
+        return new PostgresException(
+            "concurrent session creation",
+            "ERROR",
+            "ERROR",
+            PostgresErrorCodes.SerializationFailure);
     }
 
     private static SimulationSession Session(

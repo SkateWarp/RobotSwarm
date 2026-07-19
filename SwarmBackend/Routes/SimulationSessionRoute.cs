@@ -12,6 +12,8 @@ namespace SwarmBackend.Routes;
 
 public static class SimulationSessionRoute
 {
+    private const int MaximumCreateAttempts = 3;
+
     public static RouteGroupBuilder MapSimulationSession(this RouteGroupBuilder group)
     {
         group.RequireAuthorization();
@@ -69,6 +71,26 @@ public static class SimulationSessionRoute
             });
         }
 
+        return await RetrySerializationFailures(
+            () => CreateSession(
+                request,
+                accountId.Value,
+                dataContext,
+                configuration,
+                context,
+                cancellationToken),
+            dataContext.ChangeTracker.Clear,
+            cancellationToken);
+    }
+
+    private static async Task<IResult> CreateSession(
+        CreateSimulationSessionRequest request,
+        int accountId,
+        DataContext dataContext,
+        IConfiguration configuration,
+        HttpContext context,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = dataContext.Database.IsRelational()
             ? await dataContext.Database.BeginTransactionAsync(
                 IsolationLevel.Serializable,
@@ -76,7 +98,7 @@ public static class SimulationSessionRoute
             : null;
 
         var hasLiveSession = await dataContext.SimulationSessions
-            .AnyAsync(OccupiesAccountSlot(accountId.Value), cancellationToken);
+            .AnyAsync(OccupiesAccountSlot(accountId), cancellationToken);
 
         if (hasLiveSession)
         {
@@ -101,7 +123,7 @@ public static class SimulationSessionRoute
         var now = DateTime.UtcNow;
         var session = new SimulationSession
         {
-            AccountId = accountId.Value,
+            AccountId = accountId,
             DesiredRobotCount = request.RobotCount,
             State = SimulationSessionState.Queued,
             CreatedAt = now,
@@ -129,20 +151,6 @@ public static class SimulationSessionRoute
                 message = "The account already has an active or queued simulation session."
             });
         }
-        catch (PostgresException exception)
-            when (exception.SqlState == PostgresErrorCodes.SerializationFailure)
-        {
-            return QueueChangedConflict();
-        }
-        catch (DbUpdateException exception)
-            when (exception.InnerException is PostgresException
-            {
-                SqlState: PostgresErrorCodes.SerializationFailure
-            })
-        {
-            return QueueChangedConflict();
-        }
-
         var queuePositions = await GetQueuePositions(dataContext, cancellationToken);
         var response = ToResponse(
             session,
@@ -150,6 +158,53 @@ public static class SimulationSessionRoute
             computeWorkerName: null);
 
         return Results.Accepted($"/api/sessions/{session.Id}", response);
+    }
+
+    internal static async Task<IResult> RetrySerializationFailures(
+        Func<Task<IResult>> operation,
+        Action resetContext,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaximumCreateAttempts; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception exception) when (IsSerializationFailure(exception))
+            {
+                // Two valid requests can both read the queue count before one
+                // commits. PostgreSQL cancels one transaction so the limit is
+                // never exceeded; retry that request with a fresh context.
+                resetContext();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (attempt == MaximumCreateAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(25 * attempt),
+                    cancellationToken);
+            }
+        }
+
+        return QueueChangedConflict();
+    }
+
+    internal static bool IsSerializationFailure(Exception exception)
+    {
+        return exception is PostgresException
+            {
+                SqlState: PostgresErrorCodes.SerializationFailure
+            }
+            || exception is DbUpdateException
+            {
+                InnerException: PostgresException
+                {
+                    SqlState: PostgresErrorCodes.SerializationFailure
+                }
+            };
     }
 
     internal static Expression<Func<SimulationSession, bool>> OccupiesAccountSlot(
