@@ -38,6 +38,14 @@ class TaskState(Enum):
     STOPPED = "stopped"
 
 
+FOLLOW_MODES = {'circular', 'square', 'figure8', 'waypoint', 'random', 'manual'}
+FORMATION_MODES = {'static', 'moving', 'adaptive'}
+FORMATION_SHAPES = {
+    'triangle', 'square', 'circle', 'line', 'v', 'v_formation', 'diamond',
+}
+FORMATION_LETTERS = set('ABCDEFGHIJKLMNOPRSTUVWXYZ')
+
+
 class TaskOrchestrator:
     """
     Central orchestrator for swarm system.
@@ -58,7 +66,11 @@ class TaskOrchestrator:
         self.current_task_config = {}
         self.task_state = TaskState.IDLE
         self.task_progress = 0.0
+        self.task_result = None
+        self.task_error = None
         self.task_dispatched = False
+        self.task_dispatched_at = None
+        self.last_behavior_status_at = None
         self.task_lock = threading.RLock()
 
         # Robot tracking
@@ -67,6 +79,14 @@ class TaskOrchestrator:
         self.robot_count = 0
         self.emergency_stop_active = False
         self.collision_count = 0
+        self.safety_status_timeout = max(
+            0.2,
+            float(rospy.get_param('~safety_status_timeout', 1.0)),
+        )
+        self.behavior_status_timeout = max(
+            1.0,
+            float(rospy.get_param('~behavior_status_timeout', 3.0)),
+        )
 
         # The watchdog uses wall-clock monotonic time, not ROS simulation time,
         # so a paused or stalled Gazebo clock cannot suppress the fail-safe.
@@ -87,6 +107,10 @@ class TaskOrchestrator:
             ),
         )
         self._control_clock = time.monotonic
+        self.behavior_connection_timeout = max(
+            0.1,
+            float(rospy.get_param('~behavior_connection_timeout', 10.0)),
+        )
         self.control_heartbeat_seen = False
         self.last_control_heartbeat = None
         self.control_watchdog_tripped = False
@@ -188,7 +212,9 @@ class TaskOrchestrator:
         # Dynamic robot subscribers
         self.odom_subs = {}
         self.threat_subs = {}
+        self.collision_subs = {}
         self.scan_subs = {}
+        self.cmd_vel_pubs = {}
 
         # Status broadcast timer (10 Hz)
         self.status_timer = rospy.Timer(rospy.Duration(0.1), self._broadcast_status)
@@ -248,6 +274,142 @@ class TaskOrchestrator:
         self.fleet_delete_pub.publish(String(data=cmd))
         rospy.loginfo(f"Sent delete command: {robot_ids if robot_ids else 'ALL'}")
 
+    @staticmethod
+    def _number_in_range(value, label, minimum, maximum):
+        """Parse one finite task number and keep arena limits explicit."""
+        if isinstance(value, bool):
+            raise ValueError("{} must be a number".format(label))
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("{} must be a number".format(label))
+        if not math.isfinite(number):
+            raise ValueError("{} must be finite".format(label))
+        if not minimum <= number <= maximum:
+            raise ValueError(
+                "{} must be between {} and {}".format(
+                    label, minimum, maximum
+                )
+            )
+        return number
+
+    @classmethod
+    def _validated_task_config(cls, task_type, params, config):
+        """Build the small, typed configuration accepted by behavior nodes."""
+        if task_type == 'follow_leader':
+            mode = str(params.get(
+                'leader_mode', config.get('leader_mode', 'circular')
+            )).strip().lower()
+            if mode not in FOLLOW_MODES:
+                raise ValueError(
+                    "leader_mode must be one of: "
+                    + ', '.join(sorted(FOLLOW_MODES))
+                )
+            radius = cls._number_in_range(
+                config.get('radius', 2.0), 'radius', 0.5, 4.0
+            )
+            follow_distance = cls._number_in_range(
+                config.get('follow_distance', 0.7),
+                'follow_distance', 0.35, 2.0,
+            )
+            raw_waypoints = config.get('waypoints', [])
+            if not isinstance(raw_waypoints, list) or len(raw_waypoints) > 64:
+                raise ValueError("waypoints must be a list with at most 64 points")
+            waypoints = []
+            for index, waypoint in enumerate(raw_waypoints):
+                if isinstance(waypoint, dict):
+                    raw_x = waypoint.get('x')
+                    raw_y = waypoint.get('y')
+                elif isinstance(waypoint, (list, tuple)) and len(waypoint) == 2:
+                    raw_x, raw_y = waypoint
+                else:
+                    raise ValueError(
+                        "waypoint {} must contain x and y".format(index)
+                    )
+                waypoints.append([
+                    cls._number_in_range(
+                        raw_x, 'waypoint {} x'.format(index), -4.0, 4.0
+                    ),
+                    cls._number_in_range(
+                        raw_y, 'waypoint {} y'.format(index), -4.0, 4.0
+                    ),
+                ])
+            if mode == 'waypoint' and not waypoints:
+                raise ValueError("waypoint mode requires at least one waypoint")
+            return {
+                'leader_mode': mode,
+                'waypoints': waypoints,
+                'radius': radius,
+                'follow_distance': follow_distance,
+            }
+
+        if task_type == 'formation':
+            shape = str(params.get(
+                'formation_type', config.get('formation_type', 'triangle')
+            )).strip()
+            normalized_shape = shape.lower()
+            is_letter = len(shape) == 1 and shape.upper() in FORMATION_LETTERS
+            if normalized_shape not in FORMATION_SHAPES and not is_letter:
+                raise ValueError("formation_type is not supported")
+            mode = str(params.get(
+                'movement_mode', config.get('movement_mode', 'static')
+            )).strip().lower()
+            if mode not in FORMATION_MODES:
+                raise ValueError(
+                    "movement_mode must be static, moving, or adaptive"
+                )
+            spacing = cls._number_in_range(
+                config.get('spacing', 1.0), 'spacing', 0.35, 2.0
+            )
+            return {
+                'formation_type': shape.upper() if is_letter else normalized_shape,
+                'movement_mode': mode,
+                'spacing': spacing,
+            }
+
+        if task_type == 'transport':
+            target_x = cls._number_in_range(
+                params.get('target_x', config.get('target_x', 3.0)),
+                'target_x', -4.0, 4.0,
+            )
+            target_y = cls._number_in_range(
+                params.get('target_y', config.get('target_y', 3.0)),
+                'target_y', -4.0, 4.0,
+            )
+            planner = str(
+                config.get('transport_planner', 'grf')
+            ).strip().lower()
+            if planner not in {'grf', 'legacy'}:
+                raise ValueError("transport_planner must be grf or legacy")
+            return {
+                'target_x': target_x,
+                'target_y': target_y,
+                'transport_planner': planner,
+            }
+
+        raise ValueError("task_type is not supported")
+
+    def _record_rejected_task(self, task_id, task_type, reason):
+        """Expose a validation failure without disturbing another active task."""
+        with self.task_lock:
+            active = self.task_state in {
+                TaskState.INITIALIZING, TaskState.RUNNING, TaskState.PAUSED,
+            }
+            if active and self.current_task_id != task_id:
+                rospy.logwarn("Rejected task %s: %s", task_id, reason)
+                return
+            self.current_task_id = task_id
+            self.current_task_type = task_type
+            self.current_task_config = {}
+            self.task_state = TaskState.FAILED
+            self.task_progress = 0.0
+            self.task_result = None
+            self.task_error = reason
+            self.task_dispatched = False
+            self.task_dispatched_at = None
+            self.last_behavior_status_at = None
+        rospy.logwarn("Rejected task %s: %s", task_id, reason)
+
     def _handle_start_task(self, params):
         task_type = params.get('task_type', '')
         if not task_type:
@@ -267,33 +429,14 @@ class TaskOrchestrator:
         if not isinstance(config, dict):
             config = {}
 
-        if task_type == 'follow_leader':
-            start_config = {
-                'leader_mode': params.get(
-                    'leader_mode', config.get('leader_mode', 'circular')
-                ),
-                'waypoints': config.get('waypoints', []),
-                'radius': config.get('radius', 2.0),
-                'follow_distance': config.get('follow_distance', 0.7),
-            }
-        elif task_type == 'formation':
-            start_config = {
-                'formation_type': params.get(
-                    'formation_type', config.get('formation_type', 'triangle')
-                ),
-                'movement_mode': params.get(
-                    'movement_mode', config.get('movement_mode', 'static')
-                ),
-                'spacing': config.get('spacing', 1.0),
-            }
-        elif task_type == 'transport':
-            start_config = {
-                'target_x': params.get('target_x', config.get('target_x', 3.0)),
-                'target_y': params.get('target_y', config.get('target_y', 3.0)),
-                'transport_planner': config.get('transport_planner', 'grf'),
-            }
-
         task_id = str(params.get('task_id') or uuid.uuid4())
+        try:
+            start_config = self._validated_task_config(
+                task_type, params, config
+            )
+        except ValueError as exc:
+            self._record_rejected_task(task_id, task_type, str(exc))
+            return
         start_config['task_id'] = task_id
 
         with self.task_lock:
@@ -342,7 +485,11 @@ class TaskOrchestrator:
             self.current_task_config = start_config
             self.task_state = TaskState.INITIALIZING
             self.task_progress = 0.0
+            self.task_result = None
+            self.task_error = None
             self.task_dispatched = False
+            self.task_dispatched_at = None
+            self.last_behavior_status_at = None
 
             sorted_ids = sorted(self.robots.keys(), key=robot_id_sort_key)
             for i, rid in enumerate(sorted_ids):
@@ -355,7 +502,32 @@ class TaskOrchestrator:
                 else:
                     self.robots[rid]['role'] = 'follower'
 
-        rospy.sleep(0.2)
+        # Let the previous stop reach its subscribers before dispatching the
+        # replacement.  This must use wall time because the simulation clock
+        # may be paused or running faster than real time.
+        time.sleep(0.2)
+        behavior_pub = self.behavior_start_pubs[task_type]
+        if not self._wait_for_behavior_subscriber(behavior_pub):
+            with self.task_lock:
+                if (
+                    self.current_task_id == task_id
+                    and self.task_state == TaskState.INITIALIZING
+                ):
+                    self.task_state = TaskState.FAILED
+                    self.task_error = (
+                        "Behavior node for {} did not subscribe within "
+                        "{:.1f}s".format(
+                            task_type, self.behavior_connection_timeout
+                        )
+                    )
+                    self.task_dispatched = False
+            rospy.logerr(
+                "Behavior node for %s did not subscribe within %.1fs",
+                task_type,
+                self.behavior_connection_timeout,
+            )
+            return
+
         with self.task_lock:
             if (
                 self.current_task_id != task_id
@@ -369,12 +541,31 @@ class TaskOrchestrator:
                 self._publish_current_task()
             except Exception as exc:
                 self.task_state = TaskState.FAILED
+                self.task_error = str(exc)
                 rospy.logerr(
                     "Failed to dispatch task %s: %s", task_id, exc
                 )
                 return
             self.task_dispatched = True
+            self.task_dispatched_at = self._control_clock()
+            self.last_behavior_status_at = None
         rospy.loginfo(f"Started task: {task_type} (ID: {task_id}) config={start_config}")
+
+    def _wait_for_behavior_subscriber(self, publisher):
+        """Wait for the selected behavior node without relying on /clock."""
+        connection_count = getattr(publisher, 'get_num_connections', None)
+        if connection_count is None:
+            # Lightweight test publishers and older ROS shims do not expose
+            # connection counts.  Publishing remains backward compatible.
+            return True
+
+        deadline = time.monotonic() + self.behavior_connection_timeout
+        is_shutdown = getattr(rospy, 'is_shutdown', lambda: False)
+        while time.monotonic() < deadline and not is_shutdown():
+            if connection_count() > 0:
+                return True
+            time.sleep(0.05)
+        return connection_count() > 0
 
     def _handle_pause_task(self, params):
         with self.task_lock:
@@ -415,6 +606,8 @@ class TaskOrchestrator:
             if pub is None:
                 return
             self.task_state = TaskState.RUNNING
+            self.task_dispatched_at = self._control_clock()
+            self.last_behavior_status_at = None
             pub.publish(payload)
         rospy.loginfo("Resumed task: %s", self.current_task_id)
 
@@ -433,6 +626,7 @@ class TaskOrchestrator:
             self._stop_all_robots()
             self.task_state = TaskState.STOPPED
             self.task_progress = 0.0
+            self.task_error = None
         rospy.loginfo(f"Stopped task: {self.current_task_type}")
 
     def _task_matches(self, params):
@@ -451,6 +645,7 @@ class TaskOrchestrator:
         self._signal_stop_behaviors()
         self._stop_all_robots()
         self.task_state = TaskState.STOPPED
+        self.task_error = None
 
     def _handle_emergency_stop(self, params):
         with self.task_lock:
@@ -477,6 +672,7 @@ class TaskOrchestrator:
             self.emergency_stop_pub.publish(Bool(data=False))
             self.task_state = TaskState.STOPPED
             self.task_progress = 0.0
+            self.task_error = None
             self._stop_all_robots()
         rospy.logwarn("Emergency stop reset; a new task must be started explicitly")
 
@@ -597,6 +793,7 @@ class TaskOrchestrator:
                 self._stop_all_robots()
                 self.task_state = TaskState.STOPPED
                 self.task_progress = 0.0
+                self.task_error = None
                 rospy.logwarn(
                     "Cancelled task %s because the fleet became empty",
                     self.current_task_id,
@@ -626,6 +823,8 @@ class TaskOrchestrator:
             ):
                 return
 
+            self.last_behavior_status_at = self._control_clock()
+
             if 'progress' in status:
                 try:
                     self.task_progress = max(
@@ -633,6 +832,11 @@ class TaskOrchestrator:
                     )
                 except (TypeError, ValueError):
                     pass
+
+            if task_type == 'transport':
+                self.task_result = self._transport_result(
+                    status, status_task_id
+                )
 
             completed = (
                 task_type == 'transport' and status.get('phase') == 'DONE'
@@ -642,8 +846,116 @@ class TaskOrchestrator:
                 and status.get('state') == 'formed'
             ) or bool(status.get('completed', False))
 
-            if completed:
+            failed = (
+                task_type in ('formation', 'follow_leader')
+                and status.get('state') == 'failed'
+            ) or (
+                task_type == 'transport'
+                and status.get('phase') == 'FAILED'
+            )
+            if failed:
+                self._fail_current_task(
+                    status_task_id,
+                    str(status.get('error') or '{} failed'.format(task_type)),
+                )
+            elif completed:
                 self._complete_current_task(status_task_id)
+
+    def _transport_result(self, status, expected_task_id):
+        """Keep the useful transport summary without forwarding diagnostics."""
+        phase = status.get('phase')
+        if not isinstance(phase, str):
+            phase = None
+
+        searching_count = status.get('searching_robot_count')
+        if (
+            isinstance(searching_count, bool)
+            or not isinstance(searching_count, int)
+            or searching_count < 0
+        ):
+            searching_count = None
+
+        result = {
+            'phase': phase,
+            'searching_robot_count': searching_count,
+            'discovery': self._transport_discovery(
+                status.get('discovery'), expected_task_id
+            ),
+        }
+        return {'transport': result}
+
+    @staticmethod
+    def _transport_discovery(discovery, expected_task_id):
+        """Validate the one-shot payload-found event before exposing it."""
+        if not isinstance(discovery, dict):
+            return None
+        if discovery.get('event') != 'payload_found':
+            return None
+        if str(discovery.get('task_id') or '') != expected_task_id:
+            return None
+        if discovery.get('announced') is not True:
+            return None
+
+        event_id = discovery.get('event_id')
+        finder = discovery.get('finder')
+        position = discovery.get('object_position')
+        if not isinstance(event_id, str) or not event_id:
+            return None
+        if not isinstance(finder, str) or not finder:
+            return None
+        if not isinstance(position, dict):
+            return None
+
+        try:
+            distance = float(discovery.get('distance'))
+            position_x = float(position.get('x'))
+            position_y = float(position.get('y'))
+            sim_time = float(discovery.get('sim_time'))
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (
+            distance, position_x, position_y, sim_time
+        )):
+            return None
+        if distance < 0.0 or sim_time < 0.0:
+            return None
+
+        notified = discovery.get('notified_robots')
+        if not isinstance(notified, list) or not all(
+            isinstance(robot_id, str) and robot_id
+            for robot_id in notified
+        ):
+            return None
+
+        return {
+            'event': 'payload_found',
+            'event_id': event_id,
+            'task_id': expected_task_id,
+            'announced': True,
+            'finder': finder,
+            'distance': distance,
+            'object_position': {
+                'x': position_x,
+                'y': position_y,
+            },
+            'sim_time': sim_time,
+            'notified_robots': list(notified),
+        }
+
+    def _fail_current_task(self, expected_task_id, reason):
+        """Stop a behavior that rejected an unsafe runtime configuration."""
+        with self.task_lock:
+            if (
+                expected_task_id != self.current_task_id
+                or self.task_state != TaskState.RUNNING
+            ):
+                return
+            self._signal_stop_behaviors()
+            self._stop_all_robots()
+            self.task_state = TaskState.FAILED
+            self.task_progress = 0.0
+            self.task_error = reason
+        rospy.logerr("Task %s failed: %s", self.current_task_type, reason)
 
     def _complete_current_task(self, expected_task_id=None):
         with self.task_lock:
@@ -658,6 +970,7 @@ class TaskOrchestrator:
             self._stop_all_robots()
             self.task_state = TaskState.COMPLETED
             self.task_progress = 1.0
+            self.task_error = None
         rospy.loginfo("Task %s completed", self.current_task_type)
 
     def _signal_stop_behaviors(self):
@@ -676,9 +989,18 @@ class TaskOrchestrator:
         self.robots[robot_id] = {
             'pose': Pose(), 'velocity': Twist(),
             'status': 'active', 'threat_level': 0.0,
+            'collision_active': False,
+            'last_threat_at': None,
+            'last_collision_at': None,
+            'last_odom_at': None,
+            'last_scan_at': None,
+            'subscribed_at': self._control_clock(),
             'role': 'follower',
         }
         self.robot_sensor_data[robot_id] = {}
+        self.cmd_vel_pubs[robot_id] = rospy.Publisher(
+            f'/{robot_id}/cmd_vel', Twist, queue_size=1
+        )
 
         self.odom_subs[robot_id] = rospy.Subscriber(
             f'/{robot_id}/odom', Odometry,
@@ -688,16 +1010,30 @@ class TaskOrchestrator:
             f'/{robot_id}/threat_level', Float32,
             lambda msg, rid=robot_id: self._threat_cb(rid, msg), queue_size=1
         )
+        self.collision_subs[robot_id] = rospy.Subscriber(
+            f'/{robot_id}/collision_state', Bool,
+            lambda msg, rid=robot_id: self._collision_cb(rid, msg),
+            queue_size=1,
+        )
         self.scan_subs[robot_id] = rospy.Subscriber(
             f'/{robot_id}/scan', LaserScan,
             lambda msg, rid=robot_id: self._scan_cb(rid, msg), queue_size=1
         )
 
     def _unsubscribe_from_robot(self, robot_id):
-        for subs_dict in [self.odom_subs, self.threat_subs, self.scan_subs]:
+        for subs_dict in [
+            self.odom_subs,
+            self.threat_subs,
+            self.collision_subs,
+            self.scan_subs,
+        ]:
             sub = subs_dict.pop(robot_id, None)
             if sub:
                 sub.unregister()
+        command_pub = self.cmd_vel_pubs.pop(robot_id, None)
+        if command_pub is not None:
+            command_pub.publish(Twist())
+            command_pub.unregister()
         self.robots.pop(robot_id, None)
         self.robot_sensor_data.pop(robot_id, None)
 
@@ -706,14 +1042,37 @@ class TaskOrchestrator:
             if robot_id in self.robots:
                 self.robots[robot_id]['pose'] = msg.pose.pose
                 self.robots[robot_id]['velocity'] = msg.twist.twist
+                self.robots[robot_id]['last_odom_at'] = self._control_clock()
 
     def _threat_cb(self, robot_id, msg):
         with self.task_lock:
             if robot_id in self.robots:
-                prev = self.robots[robot_id]['threat_level']
-                self.robots[robot_id]['threat_level'] = msg.data
-                # Count collision when threat transitions to emergency (1.0)
-                if msg.data >= 1.0 and prev < 1.0:
+                try:
+                    threat = float(msg.data)
+                except (TypeError, ValueError):
+                    return
+                if not math.isfinite(threat):
+                    return
+                self.robots[robot_id]['threat_level'] = max(
+                    0.0, min(1.0, threat)
+                )
+                self.robots[robot_id]['last_threat_at'] = (
+                    self._control_clock()
+                )
+
+    def _collision_cb(self, robot_id, msg):
+        """Aggregate rising physical-contact states into collision episodes."""
+        with self.task_lock:
+            if robot_id in self.robots:
+                active = bool(msg.data)
+                previous = bool(
+                    self.robots[robot_id].get('collision_active', False)
+                )
+                self.robots[robot_id]['collision_active'] = active
+                self.robots[robot_id]['last_collision_at'] = (
+                    self._control_clock()
+                )
+                if active and not previous:
                     self.collision_count += 1
 
     def _scan_cb(self, robot_id, msg):
@@ -735,23 +1094,110 @@ class TaskOrchestrator:
                     'range_max': msg.range_max,
                     'timestamp': datetime.now().isoformat(),
                 }
+                if robot_id in self.robots:
+                    self.robots[robot_id]['last_scan_at'] = (
+                        self._control_clock()
+                    )
 
     # ==================== Status Broadcasting ====================
 
     def _broadcast_status(self, event):
         try:
+            task_id, health_error = self._runtime_health_error()
+            if health_error:
+                self._fail_current_task(task_id, health_error)
             status = self._build_status()
             self.status_pub.publish(String(data=json.dumps(status)))
         except Exception as e:
             rospy.logerr_throttle(5.0, f"Error publishing status: {e}")
 
+    def _runtime_health_error(self):
+        """Return a correlated fail-closed error for a running task."""
+        with self.task_lock:
+            if self.task_state != TaskState.RUNNING:
+                return self.current_task_id, None
+
+            now = self._control_clock()
+            dispatched_at = getattr(self, 'task_dispatched_at', None)
+            last_status_at = getattr(self, 'last_behavior_status_at', None)
+            behavior_timeout = getattr(self, 'behavior_status_timeout', 3.0)
+            status_reference = (
+                last_status_at if last_status_at is not None else dispatched_at
+            )
+            if (
+                status_reference is not None
+                and now - status_reference > behavior_timeout
+            ):
+                return self.current_task_id, (
+                    "Behavior status heartbeat became stale for {}".format(
+                        self.current_task_type
+                    )
+                )
+
+            safety_timeout = self.safety_status_timeout
+            if (
+                dispatched_at is None
+                or now - dispatched_at <= safety_timeout
+            ):
+                return self.current_task_id, None
+
+            stale = {}
+            for robot_id, data in self.robots.items():
+                missing = []
+                for label, key in (
+                    ('odometry', 'last_odom_at'),
+                    ('lidar', 'last_scan_at'),
+                ):
+                    stamp = data.get(key)
+                    if (
+                        stamp is None
+                        or now < stamp
+                        or now - stamp > safety_timeout
+                    ):
+                        missing.append(label)
+                if missing:
+                    stale[robot_id] = missing
+
+            if not stale:
+                return self.current_task_id, None
+            summary = '; '.join(
+                '{}: {}'.format(robot_id, ', '.join(inputs))
+                for robot_id, inputs in sorted(stale.items())
+            )
+            return self.current_task_id, (
+                "Safety telemetry became stale ({})".format(summary)
+            )
+
+    def _safety_freshness(self, data, now):
+        """Describe the age of every safety input without calling unknown safe."""
+        ages = {}
+        stale = []
+        for label, key in (
+            ('odometry', 'last_odom_at'),
+            ('lidar', 'last_scan_at'),
+            ('threat', 'last_threat_at'),
+            ('collision', 'last_collision_at'),
+        ):
+            stamp = data.get(key)
+            age = None if stamp is None else max(0.0, now - stamp)
+            ages[label] = round(age, 3) if age is not None else None
+            if (
+                stamp is None
+                or now < stamp
+                or now - stamp > self.safety_status_timeout
+            ):
+                stale.append(label)
+        return stale, ages
+
     def _build_status(self):
         with self.task_lock:
+            safety_now = self._control_clock()
             robot_snapshots = [
                 (
                     rid,
                     dict(data),
                     self.robot_sensor_data.get(rid, {}),
+                    self._safety_freshness(data, safety_now),
                 )
                 for rid, data in self.robots.items()
             ]
@@ -760,6 +1206,8 @@ class TaskOrchestrator:
                 'task_type': self.current_task_type,
                 'status': self.task_state.value,
                 'progress': self.task_progress,
+                'result': self.task_result,
+                'error': self.task_error,
             }
             robot_count = self.robot_count
             emergency_stop_active = self.emergency_stop_active
@@ -771,9 +1219,14 @@ class TaskOrchestrator:
             heartbeat_timeout = self.control_heartbeat_timeout
 
         robots_list = []
-        for rid, data, sensor in robot_snapshots:
+        stale_robot_ids = []
+        for rid, data, sensor, freshness in robot_snapshots:
             pose = data['pose']
             vel = data['velocity']
+            stale_inputs, safety_ages = freshness
+            safety_stale = bool(stale_inputs)
+            if safety_stale:
+                stale_robot_ids.append(rid)
 
             siny = 2.0 * (pose.orientation.w * pose.orientation.z + pose.orientation.x * pose.orientation.y)
             cosy = 1.0 - 2.0 * (pose.orientation.y ** 2 + pose.orientation.z ** 2)
@@ -786,7 +1239,14 @@ class TaskOrchestrator:
                 'orientation': {'theta': yaw},
                 'velocity': {'linear': vel.linear.x, 'angular': vel.angular.z},
                 'status': data.get('status', 'unknown'),
-                'threat_level': data.get('threat_level', 0.0),
+                'threat_level': (
+                    1.0 if safety_stale
+                    else data.get('threat_level', 0.0)
+                ),
+                'collision': data.get('collision_active', False),
+                'safety_stale': safety_stale,
+                'safety_stale_inputs': stale_inputs,
+                'safety_input_age_seconds': safety_ages,
                 'sensors': {'lidar': sensor},
             })
 
@@ -798,13 +1258,19 @@ class TaskOrchestrator:
             'robot_count': robot_count,
             'emergency_stop': emergency_stop_active,
             'collisions': collision_count,
+            'collision_metric': 'per_robot_geometric_contact_episodes',
+            'safety': {
+                'stale': bool(stale_robot_ids),
+                'stale_robot_ids': stale_robot_ids,
+                'timeout_seconds': self.safety_status_timeout,
+            },
             'control_watchdog': {
                 'enabled': watchdog_enabled,
                 'armed': heartbeat_seen,
                 'tripped': watchdog_tripped,
                 'timeout_seconds': heartbeat_timeout,
                 'heartbeat_age_seconds': (
-                    round(max(0.0, self._control_clock() - last_heartbeat), 3)
+                    round(max(0.0, safety_now - last_heartbeat), 3)
                     if last_heartbeat is not None
                     else None
                 ),
@@ -813,22 +1279,26 @@ class TaskOrchestrator:
 
     def _stop_all_robots(self):
         stop = Twist()
-        for rid in self.robots:
-            pub = rospy.Publisher(f'/{rid}/cmd_vel', Twist, queue_size=1)
-            # Wall sleep is intentional: rospy.sleep() follows /clock and can
-            # wedge the emergency-stop path when Gazebo is paused.
-            time.sleep(0.01)
+        for pub in self.cmd_vel_pubs.values():
             pub.publish(stop)
 
     def _shutdown(self):
-        """Stop the wall-clock watchdog thread during orderly ROS shutdown."""
-        self._control_watchdog_stop.set()
-        watchdog_thread = getattr(self, '_control_watchdog_thread', None)
-        if (
-            watchdog_thread is not None
-            and watchdog_thread is not threading.current_thread()
-        ):
-            watchdog_thread.join(timeout=1.0)
+        """Stop active behaviors and the wall-clock watchdog on shutdown."""
+        try:
+            self._signal_stop_behaviors()
+        finally:
+            try:
+                self._stop_all_robots()
+            finally:
+                self._control_watchdog_stop.set()
+                watchdog_thread = getattr(
+                    self, '_control_watchdog_thread', None
+                )
+                if (
+                    watchdog_thread is not None
+                    and watchdog_thread is not threading.current_thread()
+                ):
+                    watchdog_thread.join(timeout=1.0)
 
 
 if __name__ == '__main__':

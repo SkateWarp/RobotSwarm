@@ -1,4 +1,5 @@
 ﻿using SwarmBackend.Entities;
+using SwarmBackend.Helpers;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
 using System.Security.Claims;
@@ -11,9 +12,14 @@ public static class AccountRoute
     {
 
         group.MapPost("/authenticate", Authenticate)
+            .RequireRateLimiting(AbuseProtection.AuthenticationPolicy)
+            .Produces(StatusCodes.Status429TooManyRequests)
             .Produces<AuthenticateResponse>();
 
         group.MapPost("", Create)
+           .RequireRateLimiting(AbuseProtection.RegistrationPolicy)
+           .Produces(StatusCodes.Status403Forbidden)
+           .Produces(StatusCodes.Status429TooManyRequests)
            .Produces<AccountResponse>();
 
         group.MapPost("/admin", CreateByAdmin)
@@ -63,10 +69,29 @@ public static class AccountRoute
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
-    public static async Task<IResult> Create(AccountRequest request, IAccountService accountService)
+    internal static async Task<IResult> Create(
+        AccountRequest request,
+        IAccountService accountService,
+        IConfiguration configuration)
     {
+        if (!IsPublicRegistrationEnabled(configuration))
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status403Forbidden,
+                title: "Public registration is disabled.",
+                detail: "Ask an administrator to create the account.");
+        }
+
         var response = await accountService.Create(request);
         return response.Match(Results.Ok, Results.BadRequest);
+    }
+
+    internal static bool IsPublicRegistrationEnabled(IConfiguration configuration)
+    {
+        return bool.TryParse(
+                configuration["Accounts:PublicRegistrationEnabled"],
+                out var enabled)
+            && enabled;
     }
 
     public static async Task<IResult> CreateByAdmin(

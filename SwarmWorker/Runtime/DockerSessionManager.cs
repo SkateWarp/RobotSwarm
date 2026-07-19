@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SwarmWorker.Configuration;
@@ -30,6 +31,13 @@ public sealed record FailSafeOperationResult(
 
 public sealed class DockerSessionManager
 {
+    private static readonly TimeSpan ViewerStopCleanupTimeout =
+        TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ContainerCleanupTimeout =
+        TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan NetworkCleanupTimeout =
+        TimeSpan.FromMinutes(1);
+
     private const string ReadRosterScript =
         "source /opt/ros/noetic/setup.bash"
         + " && source /catkin_ws/devel/setup.bash"
@@ -68,16 +76,33 @@ public sealed class DockerSessionManager
         + "\"/swarm/status\", String, timeout=5.0); "
         + "print(\"data: \" + json.dumps(message.data))'";
 
+    private const string CheckBehaviorSubscribersScript =
+        "source /opt/ros/noetic/setup.bash"
+        + " && source /catkin_ws/devel/setup.bash"
+        + " && set -euo pipefail"
+        + " && for pair in"
+        + " '/follow_leader/start|/follow_leader'"
+        + " '/formation/start|/formation_control'"
+        + " '/transport/start|/collaborative_transport'; do"
+        + " topic=${pair%%|*}; node=${pair#*|};"
+        + " info=$(rostopic info \"$topic\");"
+        + " grep -Fq \" * ${node} (\" <<<\"$info\";"
+        + " done"
+        + " && printf ready";
+
     private readonly IDockerCli _docker;
+    private readonly IViewerPublisher _viewerPublisher;
     private readonly WorkerOptions _options;
     private readonly ILogger<DockerSessionManager> _logger;
 
     public DockerSessionManager(
         IDockerCli docker,
+        IViewerPublisher viewerPublisher,
         IOptions<WorkerOptions> options,
         ILogger<DockerSessionManager> logger)
     {
         _docker = docker;
+        _viewerPublisher = viewerPublisher;
         _options = options.Value;
         _logger = logger;
     }
@@ -238,6 +263,10 @@ public sealed class DockerSessionManager
             expectedRobotIds: null,
             TimeSpan.FromSeconds(_options.RosReadyTimeoutSeconds),
             cancellationToken);
+        await WaitForBehaviorSubscribersAsync(
+            session.ContainerId,
+            TimeSpan.FromSeconds(_options.RosReadyTimeoutSeconds),
+            cancellationToken);
 
         var robotIds = await ReplaceFleetAsync(
             session.ContainerId,
@@ -277,34 +306,46 @@ public sealed class DockerSessionManager
         Guid sessionId,
         CancellationToken cancellationToken)
     {
-        var existing = await FindSessionContainersAsync(sessionId, cancellationToken);
-        if (existing.Count > 1)
-        {
-            throw new InvalidOperationException(
-                $"Session {sessionId} has multiple managed containers.");
-        }
-
-        if (existing.Count == 1)
-        {
-            var session = existing[0];
-            ValidateOwnership(session);
-
-            if (session.Running)
+        var failures = new List<Exception>();
+        await RunStopCleanupPhaseAsync(
+            "stop the viewer publisher",
+            ViewerStopCleanupTimeout,
+            token => _viewerPublisher.StopSessionAsync(sessionId, token),
+            failures);
+        await RunStopCleanupPhaseAsync(
+            "remove the session container",
+            ContainerCleanupTimeout,
+            async token =>
             {
-                await RunRequiredAsync(
-                    "stop session container",
-                    new[] { "stop", "--time", "30", session.ContainerId },
-                    cancellationToken,
-                    TimeSpan.FromSeconds(45));
-            }
+                var existing = await FindSessionContainersAsync(sessionId, token);
+                if (existing.Count > 1)
+                {
+                    throw new InvalidOperationException(
+                        $"Session {sessionId} has multiple managed containers.");
+                }
 
-            await RunRequiredAsync(
-                "remove session container",
-                new[] { "rm", "--force", session.ContainerId },
-                cancellationToken);
+                if (existing.Count == 1)
+                {
+                    var session = existing[0];
+                    ValidateOwnership(session);
+                    await RemoveSessionContainerAsync(session, token);
+                }
+            },
+            failures);
+        await RunStopCleanupPhaseAsync(
+            "remove the session network",
+            NetworkCleanupTimeout,
+            token => RemoveSessionNetworkAsync(sessionId, token),
+            failures);
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            failures.Add(new OperationCanceledException(
+                "The session stop request was cancelled after bounded cleanup completed.",
+                cancellationToken));
         }
 
-        await RemoveSessionNetworkAsync(sessionId, cancellationToken);
+        ThrowStopFailures(failures);
 
         return new SessionOperationResult(
             sessionId,
@@ -322,6 +363,21 @@ public sealed class DockerSessionManager
     {
         var session = await GetSingleRunningSessionAsync(sessionId, cancellationToken);
         await PublishSwarmCommandAsync(session, command, cancellationToken);
+    }
+
+    public async Task<ViewerPublishResult> SetViewerSourceAsync(
+        Guid sessionId,
+        ViewerSourceCommand command,
+        CancellationToken cancellationToken)
+    {
+        var session = await GetSingleRunningSessionAsync(sessionId, cancellationToken);
+        return await _viewerPublisher.PublishAsync(
+            new ViewerPublishRequest(
+                sessionId,
+                session.ContainerId,
+                session.ContainerName,
+                command),
+            cancellationToken);
     }
 
     public async Task<FailSafeOperationResult> ApplyDisconnectFailSafeAsync(
@@ -632,6 +688,56 @@ public sealed class DockerSessionManager
             lastError);
     }
 
+    private async Task WaitForBehaviorSubscribersAsync(
+        string containerId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        Exception? lastError = null;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var result = await _docker.RunAsync(
+                    new[]
+                    {
+                        "exec",
+                        containerId,
+                        "/bin/bash",
+                        "-lc",
+                        CheckBehaviorSubscribersScript
+                    },
+                    cancellationToken,
+                    TimeSpan.FromSeconds(10));
+                if (result.IsSuccess
+                    && result.StandardOutput.Contains(
+                        "ready",
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                lastError = new DockerCliException(
+                    "check ROS behavior subscribers",
+                    result);
+            }
+            catch (Exception exception)
+                when (exception is DockerCliException or TimeoutException)
+            {
+                lastError = exception;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+        }
+
+        throw new TimeoutException(
+            "ROS behavior nodes did not subscribe before the session became ready.",
+            lastError);
+    }
+
     private async Task<IReadOnlyList<string>> ReadRosterAsync(
         string containerId,
         CancellationToken cancellationToken)
@@ -726,10 +832,15 @@ public sealed class DockerSessionManager
             cancellationToken);
         if (!result.IsSuccess)
         {
-            _logger.LogWarning(
-                "Managed container {ContainerId} disappeared during reconciliation.",
-                containerId);
-            return null;
+            if (IsMissingDockerContainer(result))
+            {
+                _logger.LogWarning(
+                    "Managed container {ContainerId} disappeared during reconciliation.",
+                    containerId);
+                return null;
+            }
+
+            throw new DockerCliException("inspect managed container", result);
         }
 
         using var document = JsonDocument.Parse(result.StandardOutput);
@@ -842,20 +953,142 @@ public sealed class DockerSessionManager
             cancellationToken);
         if (!inspect.IsSuccess)
         {
-            return;
+            if (IsMissingDockerNetwork(inspect))
+            {
+                return;
+            }
+
+            throw new DockerCliException("inspect session network", inspect);
         }
 
-        ValidateNetworkOwnership(inspect.StandardOutput, sessionId);
+        var networkId = ValidateNetworkOwnership(
+            inspect.StandardOutput,
+            sessionId);
         var remove = await _docker.RunAsync(
-            new[] { "network", "rm", name },
+            new[] { "network", "rm", networkId },
             cancellationToken);
         if (!remove.IsSuccess)
         {
+            var verification = await _docker.RunAsync(
+                new[] { "network", "inspect", networkId },
+                cancellationToken);
+            if (IsMissingDockerNetwork(verification))
+            {
+                _logger.LogInformation(
+                    "Session network {NetworkName} disappeared while it was being removed.",
+                    name);
+                return;
+            }
+
+            if (verification.IsSuccess)
+            {
+                var verifiedNetworkId = ValidateNetworkOwnership(
+                    verification.StandardOutput,
+                    sessionId);
+                if (!verifiedNetworkId.Equals(
+                        networkId,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Docker returned a different network while verifying '{networkId}'.");
+                }
+            }
+
             throw new DockerCliException("remove session network", remove);
         }
     }
 
-    private void ValidateNetworkOwnership(string inspectionJson, Guid sessionId)
+    private async Task RemoveSessionContainerAsync(
+        ManagedSessionInfo session,
+        CancellationToken cancellationToken)
+    {
+        if (session.Running)
+        {
+            try
+            {
+                await RunRequiredAsync(
+                    "stop session container",
+                    new[] { "stop", "--time", "30", session.ContainerId },
+                    cancellationToken,
+                    TimeSpan.FromSeconds(45));
+            }
+            catch (Exception exception)
+                when (exception is DockerCliException or TimeoutException)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Graceful stop failed for owned session container {ContainerId}; forcing its removal.",
+                    session.ContainerId);
+            }
+        }
+
+        try
+        {
+            await RunRequiredAsync(
+                "remove session container",
+                new[] { "rm", "--force", session.ContainerId },
+                cancellationToken,
+                TimeSpan.FromSeconds(30));
+        }
+        catch (Exception exception)
+            when (exception is DockerCliException or TimeoutException)
+        {
+            DockerCommandResult verification;
+            try
+            {
+                verification = await _docker.RunAsync(
+                    new[] { "inspect", session.ContainerId },
+                    cancellationToken,
+                    TimeSpan.FromSeconds(15));
+            }
+            catch (Exception verificationException)
+                when (verificationException is DockerCliException or TimeoutException)
+            {
+                throw new InvalidOperationException(
+                    $"Docker could not verify removal of owned session container '{session.ContainerId}'.",
+                    new AggregateException(exception, verificationException));
+            }
+
+            if (IsMissingDockerContainer(verification))
+            {
+                _logger.LogInformation(
+                    "Owned session container {ContainerId} disappeared while it was being removed.",
+                    session.ContainerId);
+                return;
+            }
+
+            throw;
+        }
+    }
+
+    private static bool IsMissingDockerContainer(DockerCommandResult result)
+    {
+        return !result.IsSuccess
+               && (result.StandardError.Contains(
+                       "No such object",
+                       StringComparison.OrdinalIgnoreCase)
+                   || result.StandardError.Contains(
+                       "No such container",
+                       StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsMissingDockerNetwork(DockerCommandResult result)
+    {
+        return !result.IsSuccess
+               && ((result.StandardError.Contains(
+                        "network",
+                        StringComparison.OrdinalIgnoreCase)
+                    && result.StandardError.Contains(
+                        "not found",
+                        StringComparison.OrdinalIgnoreCase))
+                   || result.StandardError.Contains(
+                       "No such network",
+                       StringComparison.OrdinalIgnoreCase));
+    }
+
+    private string ValidateNetworkOwnership(
+        string inspectionJson,
+        Guid sessionId)
     {
         using var document = JsonDocument.Parse(inspectionJson);
         var root = document.RootElement.EnumerateArray().Single();
@@ -876,6 +1109,63 @@ public sealed class DockerSessionManager
             throw new InvalidOperationException(
                 $"Docker network '{SessionResourceNames.Network(sessionId)}' is not owned by this session.");
         }
+
+        var networkId = root.TryGetProperty("Id", out var id)
+            ? id.GetString()
+            : null;
+        if (string.IsNullOrWhiteSpace(networkId))
+        {
+            throw new InvalidOperationException(
+                $"Docker network '{SessionResourceNames.Network(sessionId)}' has no immutable ID.");
+        }
+
+        return networkId;
+    }
+
+    private async Task RunStopCleanupPhaseAsync(
+        string operation,
+        TimeSpan timeout,
+        Func<CancellationToken, Task> phase,
+        ICollection<Exception> failures)
+    {
+        using var phaseCancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await phase(phaseCancellation.Token).WaitAsync(timeout);
+        }
+        catch (Exception exception)
+        {
+            var phaseTimedOut = phaseCancellation.IsCancellationRequested;
+            phaseCancellation.Cancel();
+            var failure = exception is OperationCanceledException
+                          && phaseTimedOut
+                ? new TimeoutException(
+                    $"Timed out while attempting to {operation}.",
+                    exception)
+                : exception;
+            failures.Add(failure);
+            _logger.LogWarning(
+                failure,
+                "Session cleanup could not {CleanupOperation}; remaining cleanup phases will still run.",
+                operation);
+        }
+    }
+
+    private static void ThrowStopFailures(IReadOnlyCollection<Exception> failures)
+    {
+        if (failures.Count == 0)
+        {
+            return;
+        }
+
+        if (failures.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(failures.Single()).Throw();
+        }
+
+        throw new AggregateException(
+            "One or more session cleanup operations failed.",
+            failures);
     }
 
     private async Task RunRequiredAsync(

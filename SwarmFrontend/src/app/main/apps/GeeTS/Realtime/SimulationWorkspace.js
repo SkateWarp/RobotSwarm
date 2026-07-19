@@ -21,6 +21,7 @@ import WhepViewer from "./WhepViewer";
 const TERMINAL_STATES = new Set(["Stopped", "Failed", "Expired"]);
 const TERMINAL_TASK_STATES = new Set(["Completed", "Cancelled", "Failed"]);
 const UNAVAILABLE_ROBOT_STATES = new Set(["Removed", "Failed"]);
+const CLEANUP_STATES = new Set(["Failed", "Expired"]);
 
 const stateColor = (state) => {
     if (state === "Ready" || state === "Active") return "success";
@@ -35,7 +36,7 @@ const requestMessage = (requestError, fallback) => {
     return response?.message || validationMessage || fallback;
 };
 
-const viewerPlaceholder = (lease, session) => {
+const viewerPlaceholder = (lease, session, cleanupPending) => {
     if (lease) {
         return {
             title: "The viewer route is not commissioned yet",
@@ -46,6 +47,12 @@ const viewerPlaceholder = (lease, session) => {
         return {
             title: "Open your session-owned viewer",
             body: "Each lease is short-lived and restricted to the current user and simulation session.",
+        };
+    }
+    if (cleanupPending) {
+        return {
+            title: "Clean up the previous session to continue",
+            body: "The private viewer will be available after the GPU worker confirms that cleanup finished.",
         };
     }
     return {
@@ -74,6 +81,12 @@ function SimulationWorkspace() {
         () => sessions.find((session) => !TERMINAL_STATES.has(session.state)),
         [sessions]
     );
+    const cleanupSession = useMemo(
+        () =>
+            sessions.find((session) => CLEANUP_STATES.has(session.state) && Boolean(session.computeWorkerId)),
+        [sessions]
+    );
+    const displayedSession = activeSession || cleanupSession;
     const activeSessionId = activeSession?.id;
     const activeRobotCount = activeSession?.desiredRobotCount;
     const availableRobots = useMemo(
@@ -84,7 +97,7 @@ function SimulationWorkspace() {
     const canResizeFleet = Boolean(
         activeSession?.state === "Ready" && !tasks.some((task) => !TERMINAL_TASK_STATES.has(task.state))
     );
-    const viewerPrompt = viewerPlaceholder(viewerLease, activeSession);
+    const viewerPrompt = viewerPlaceholder(viewerLease, activeSession, Boolean(cleanupSession));
 
     const refreshSessions = useCallback(async () => {
         try {
@@ -239,6 +252,15 @@ function SimulationWorkspace() {
         );
     };
 
+    const retryCleanup = () => {
+        if (!cleanupSession) return;
+        setViewerLease(null);
+        runRequest(
+            () => SimulationSessionService.stop(cleanupSession.id),
+            "The GPU session cleanup could not be retried."
+        );
+    };
+
     const updateFleet = () => {
         if (!activeSession) return;
         runRequest(
@@ -332,7 +354,6 @@ function SimulationWorkspace() {
                                         disabled={!canControl}
                                     >
                                         <MenuItem value="Scene">Gazebo overview</MenuItem>
-                                        <MenuItem value="RobotCamera">Robot camera</MenuItem>
                                     </Select>
                                 </FormControl>
                                 {viewerSource === "RobotCamera" && (
@@ -383,7 +404,7 @@ function SimulationWorkspace() {
                                 textAlign: "center",
                             }}
                         >
-                            {viewerLease?.isReady && viewerLease.signalingUrl ? (
+                            {viewerLease?.signalingUrl && viewerLease.token ? (
                                 <WhepViewer
                                     url={viewerLease.signalingUrl}
                                     token={viewerLease.token}
@@ -405,10 +426,10 @@ function SimulationWorkspace() {
                     <Paper elevation={2} sx={{ p: 3, mb: 3 }}>
                         <Box className="flex items-center justify-between" sx={{ mb: 2 }}>
                             <Typography variant="h6">Simulation session</Typography>
-                            {activeSession && (
+                            {displayedSession && (
                                 <Chip
-                                    label={activeSession.state}
-                                    color={stateColor(activeSession.state)}
+                                    label={displayedSession.state}
+                                    color={stateColor(displayedSession.state)}
                                     size="small"
                                 />
                             )}
@@ -416,29 +437,54 @@ function SimulationWorkspace() {
 
                         {!activeSession ? (
                             <>
-                                <Typography variant="body2" color="text.secondary">
-                                    Each account receives an isolated ROS/Gazebo session on the GPU worker.
-                                </Typography>
-                                <Box sx={{ px: 1, mt: 4, mb: 2 }}>
-                                    <Typography gutterBottom>Robots: {robotCount}</Typography>
-                                    <Slider
-                                        value={robotCount}
-                                        min={1}
-                                        max={maxRobotCount}
-                                        step={1}
-                                        marks={maxRobotCount <= 20}
-                                        onChange={(_, value) => setRobotCount(value)}
-                                        valueLabelDisplay="auto"
-                                    />
-                                </Box>
-                                <Button
-                                    fullWidth
-                                    variant="contained"
-                                    onClick={createSession}
-                                    disabled={submitting}
-                                >
-                                    {submitting ? "Creating…" : "Create simulation"}
-                                </Button>
+                                {cleanupSession ? (
+                                    <>
+                                        <Alert severity="error" sx={{ mb: 2 }}>
+                                            {cleanupSession.failureReason ||
+                                                "The previous simulation ended before its GPU resources were released."}
+                                        </Alert>
+                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                                            Cleanup must finish before this account can start another
+                                            simulation.
+                                        </Typography>
+                                        <Button
+                                            fullWidth
+                                            variant="contained"
+                                            color="warning"
+                                            onClick={retryCleanup}
+                                            disabled={submitting}
+                                        >
+                                            {submitting ? "Cleaning up…" : "Retry cleanup"}
+                                        </Button>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Typography variant="body2" color="text.secondary">
+                                            Each account receives an isolated ROS/Gazebo session on the GPU
+                                            worker.
+                                        </Typography>
+                                        <Box sx={{ px: 1, mt: 4, mb: 2 }}>
+                                            <Typography gutterBottom>Robots: {robotCount}</Typography>
+                                            <Slider
+                                                value={robotCount}
+                                                min={1}
+                                                max={maxRobotCount}
+                                                step={1}
+                                                marks={maxRobotCount <= 20}
+                                                onChange={(_, value) => setRobotCount(value)}
+                                                valueLabelDisplay="auto"
+                                            />
+                                        </Box>
+                                        <Button
+                                            fullWidth
+                                            variant="contained"
+                                            onClick={createSession}
+                                            disabled={submitting}
+                                        >
+                                            {submitting ? "Creating…" : "Create simulation"}
+                                        </Button>
+                                    </>
+                                )}
                             </>
                         ) : (
                             <>

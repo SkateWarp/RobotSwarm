@@ -40,6 +40,14 @@ services:
       - AppSettings__Secret=${AppSettings__Secret}
       - AppSettings__Issuer=${AppSettings__Issuer}
       - Cors__Origins__0=${Cors__Origins__0}
+      - Accounts__PublicRegistrationEnabled=${Accounts__PublicRegistrationEnabled:-false}
+      - RateLimits__Authentication__PermitLimit=${RateLimits__Authentication__PermitLimit:-10}
+      - RateLimits__Authentication__WindowSeconds=${RateLimits__Authentication__WindowSeconds:-60}
+      - RateLimits__Registration__PermitLimit=${RateLimits__Registration__PermitLimit:-3}
+      - RateLimits__Registration__WindowMinutes=${RateLimits__Registration__WindowMinutes:-60}
+      - RateLimits__SessionCreation__PermitLimit=${RateLimits__SessionCreation__PermitLimit:-6}
+      - RateLimits__SessionCreation__WindowSeconds=${RateLimits__SessionCreation__WindowSeconds:-60}
+      - ReverseProxy__KnownProxies__0=${ReverseProxy__KnownProxies__0:-}
       - LegacyControl__Enabled=${LegacyControl__Enabled:-false}
       - Viewer__PublicBaseUrl=${Viewer__PublicBaseUrl:-}
       - Viewer__WorkerPublishingEnabled=${Viewer__WorkerPublishingEnabled:-false}
@@ -47,6 +55,9 @@ services:
       - BootstrapAdmin__Password=${BootstrapAdmin__Password:-}
       - Workers__OrphanAfterSeconds=${Workers__OrphanAfterSeconds:-90}
       - Sessions__MaxRobotsPerSession=${Sessions__MaxRobotsPerSession:-10}
+      - Sessions__MaxQueuedSessions=${Sessions__MaxQueuedSessions:-25}
+      - Sessions__QueueTtlMinutes=${Sessions__QueueTtlMinutes:-30}
+      - Sessions__SessionTtlMinutes=${Sessions__SessionTtlMinutes:-180}
     ports:
       - "${BACKEND_PUBLISH_IP:-127.0.0.1}:44336:44336"
     depends_on:

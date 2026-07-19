@@ -33,7 +33,7 @@ public sealed class WorkerOptions
     public int ShutdownDrainSeconds { get; set; } = 30;
 
     public string DockerExecutable { get; set; } = "docker";
-    public double ContainerCpuLimit { get; set; } = 4.0;
+    public double ContainerCpuLimit { get; set; } = 12.0;
     public string ContainerMemory { get; set; } = "3g";
     public string ContainerMemorySwap { get; set; } = "3g";
     public int ContainerPidsLimit { get; set; } = 512;
@@ -42,6 +42,7 @@ public sealed class WorkerOptions
     public bool EnableGpu { get; set; } = true;
     public string GpuRequest { get; set; } = "device=0";
     public bool AllowInsecureTransport { get; set; }
+    public ViewerPublisherOptions Viewer { get; set; } = new();
 
     public Uri GetWorkerHubUri()
     {
@@ -235,6 +236,47 @@ public sealed class WorkerOptionsValidator : IValidateOptions<WorkerOptions>
             errors.Add("Worker:GpuRequest is required when GPU access is enabled.");
         }
 
+        if (options.Viewer.Enabled)
+        {
+            if (string.IsNullOrWhiteSpace(options.Viewer.PublisherExecutable)
+                || !Path.IsPathFullyQualified(options.Viewer.PublisherExecutable))
+            {
+                errors.Add(
+                    "Worker:Viewer:PublisherExecutable must be an absolute path when viewer publishing is enabled.");
+            }
+
+            if (!TryValidateViewerPublishBaseUrl(options.Viewer.PublishBaseUrl))
+            {
+                errors.Add(
+                    "Worker:Viewer:PublishBaseUrl must be an RTSP(S) URL without credentials, query, or fragment when viewer publishing is enabled.");
+            }
+        }
+
+        ValidateRange(
+            errors,
+            options.Viewer.ProbeTimeoutSeconds,
+            1,
+            30,
+            "Worker:Viewer:ProbeTimeoutSeconds");
+        ValidateRange(
+            errors,
+            options.Viewer.StartupTimeoutSeconds,
+            2,
+            60,
+            "Worker:Viewer:StartupTimeoutSeconds");
+        ValidateRange(
+            errors,
+            options.Viewer.StopTimeoutSeconds,
+            1,
+            30,
+            "Worker:Viewer:StopTimeoutSeconds");
+        ValidateRange(
+            errors,
+            options.Viewer.MaximumLeaseMinutes,
+            1,
+            30,
+            "Worker:Viewer:MaximumLeaseMinutes");
+
         return errors.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(errors);
@@ -263,4 +305,38 @@ public sealed class WorkerOptionsValidator : IValidateOptions<WorkerOptions>
             errors.Add($"{setting} must be a positive Docker size such as 512m or 3g.");
         }
     }
+
+    private static bool TryValidateViewerPublishBaseUrl(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || (uri.Scheme != "rtsp" && uri.Scheme != "rtsps")
+            || string.IsNullOrWhiteSpace(uri.Host)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query)
+            || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            return false;
+        }
+
+        try
+        {
+            _ = uri.Port;
+            return true;
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+    }
+}
+
+public sealed class ViewerPublisherOptions
+{
+    public bool Enabled { get; set; }
+    public string PublisherExecutable { get; set; } = string.Empty;
+    public string PublishBaseUrl { get; set; } = string.Empty;
+    public int ProbeTimeoutSeconds { get; set; } = 5;
+    public int StartupTimeoutSeconds { get; set; } = 15;
+    public int StopTimeoutSeconds { get; set; } = 5;
+    public int MaximumLeaseMinutes { get; set; } = 30;
 }

@@ -70,6 +70,33 @@ public sealed class SessionCommandHandler
                     "Stopped",
                     null);
             }
+            case "SetViewerSource":
+            {
+                var payload = ViewerSourceCommandParser.Parse(
+                    command.SessionId,
+                    command.Payload,
+                    DateTimeOffset.UtcNow,
+                    TimeSpan.FromMinutes(_options.Viewer.MaximumLeaseMinutes));
+                var result = await _sessions.SetViewerSourceAsync(
+                    command.SessionId,
+                    payload,
+                    cancellationToken);
+                return new CommandExecutionResult(
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        result.SessionId,
+                        result.LeaseId,
+                        result.ExpiresAt,
+                        source = result.Source.ToString(),
+                        result.RobotRuntimeId,
+                        result.SourceId,
+                        result.StreamPath,
+                        result.Ready,
+                        result.VideoCodec
+                    }),
+                    null,
+                    null);
+            }
             case "StartTask":
             case "PauseTask":
             case "ResumeTask":

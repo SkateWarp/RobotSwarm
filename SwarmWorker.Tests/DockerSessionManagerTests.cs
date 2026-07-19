@@ -18,6 +18,7 @@ public sealed class DockerSessionManagerTests
             new DockerCommandResult(0, string.Empty, string.Empty));
         var manager = new DockerSessionManager(
             docker,
+            new RecordingViewerPublisher(),
             Options.Create(new WorkerOptions
             {
                 BackendUrl = "https://backend.example.test",
@@ -77,6 +78,7 @@ public sealed class DockerSessionManagerTests
                 string.Empty));
         var manager = new DockerSessionManager(
             docker,
+            new RecordingViewerPublisher(),
             Options.Create(new WorkerOptions
             {
                 BackendUrl = "https://backend.example.test",
@@ -117,6 +119,84 @@ public sealed class DockerSessionManagerTests
     }
 
     [Fact]
+    public async Task ReconciliationIgnoresAnExplicitlyMissingContainer()
+    {
+        var workerId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                1,
+                string.Empty,
+                "Error: No such object: container-1"));
+        var manager = CreateManager(docker, workerId);
+
+        var sessions = await manager.GetManagedSessionsAsync(
+            CancellationToken.None);
+
+        Assert.Empty(sessions);
+    }
+
+    [Fact]
+    public async Task ManagedSessionInventoryIncludesStoppedContainers()
+    {
+        var workerId = Guid.NewGuid();
+        var runningSessionId = Guid.NewGuid();
+        var stoppedSessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(
+                0,
+                "container-running\ncontainer-stopped\n",
+                string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(
+                    workerId,
+                    runningSessionId,
+                    "container-running",
+                    running: true),
+                string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(
+                    workerId,
+                    stoppedSessionId,
+                    "container-stopped",
+                    running: false),
+                string.Empty));
+        var manager = CreateManager(docker, workerId);
+
+        var sessions = await manager.GetManagedSessionsAsync(
+            CancellationToken.None);
+
+        Assert.Contains(sessions, session =>
+            session.SessionId == runningSessionId && session.Running);
+        Assert.Contains(sessions, session =>
+            session.SessionId == stoppedSessionId && !session.Running);
+        Assert.Contains("-a", docker.Calls[0]);
+    }
+
+    [Theory]
+    [InlineData("permission denied while contacting the Docker daemon")]
+    [InlineData("network plugin not found while inspecting container metadata")]
+    public async Task ReconciliationReportsTransientContainerInspectFailure(
+        string standardError)
+    {
+        var workerId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                1,
+                string.Empty,
+                standardError));
+        var manager = CreateManager(docker, workerId);
+
+        var error = await Assert.ThrowsAsync<DockerCliException>(
+            () => manager.GetManagedSessionsAsync(CancellationToken.None));
+
+        Assert.Equal("inspect managed container", error.Operation);
+    }
+
+    [Fact]
     public async Task PublishesSwarmJsonAsASeparateDockerArgument()
     {
         var workerId = Guid.NewGuid();
@@ -138,6 +218,7 @@ public sealed class DockerSessionManagerTests
         };
         var manager = new DockerSessionManager(
             docker,
+            new RecordingViewerPublisher(),
             Options.Create(options),
             NullLogger<DockerSessionManager>.Instance);
         var command = JsonSerializer.SerializeToElement(new
@@ -165,13 +246,377 @@ public sealed class DockerSessionManagerTests
         Assert.Contains("touch /tmp/should-not-run", publishArguments[6]);
     }
 
-    private static string BuildInspection(Guid workerId, Guid sessionId)
+    [Fact]
+    public async Task StartsViewerPublisherForTheOwnedRunningSession()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty));
+        var publisher = new RecordingViewerPublisher();
+        var manager = new DockerSessionManager(
+            docker,
+            publisher,
+            Options.Create(new WorkerOptions
+            {
+                WorkerId = workerId,
+                SessionImage = "robotswarm/ros-noetic:test"
+            }),
+            NullLogger<DockerSessionManager>.Instance);
+        var command = SceneCommand(sessionId);
+
+        var result = await manager.SetViewerSourceAsync(
+            sessionId,
+            command,
+            CancellationToken.None);
+
+        Assert.True(result.Ready);
+        var request = Assert.Single(publisher.PublishRequests);
+        Assert.Equal(sessionId, request.SessionId);
+        Assert.Equal("container-1", request.ContainerId);
+        Assert.Equal(command, request.Command);
+    }
+
+    [Fact]
+    public async Task StopsViewerPublisherEvenWhenSessionContainerIsGone()
+    {
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var publisher = new RecordingViewerPublisher();
+        var manager = new DockerSessionManager(
+            docker,
+            publisher,
+            Options.Create(new WorkerOptions
+            {
+                WorkerId = Guid.NewGuid(),
+                SessionImage = "robotswarm/ros-noetic:test"
+            }),
+            NullLogger<DockerSessionManager>.Instance);
+
+        await manager.StopAsync(sessionId, CancellationToken.None);
+
+        Assert.Equal(new[] { sessionId }, publisher.StoppedSessions);
+    }
+
+    [Fact]
+    public async Task ContinuesDockerCleanupWhenViewerStopFails()
+    {
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var publisher = new RecordingViewerPublisher(
+            new InvalidOperationException("viewer stop failed"));
+        var manager = new DockerSessionManager(
+            docker,
+            publisher,
+            Options.Create(new WorkerOptions
+            {
+                WorkerId = Guid.NewGuid(),
+                SessionImage = "robotswarm/ros-noetic:test"
+            }),
+            NullLogger<DockerSessionManager>.Instance);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => manager.StopAsync(sessionId, CancellationToken.None));
+
+        Assert.Equal("viewer stop failed", error.Message);
+        Assert.Equal(2, docker.Calls.Count);
+        Assert.Equal("ps", docker.Calls[0][0]);
+        Assert.Equal(new[] { "network", "inspect", SessionResourceNames.Network(sessionId) },
+            docker.Calls[1]);
+    }
+
+    [Fact]
+    public async Task CallerCancellationIsReportedAfterBoundedCleanup()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildNetworkInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(0, string.Empty, string.Empty));
+        var manager = CreateManager(docker, workerId);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => manager.StopAsync(sessionId, cancellation.Token));
+
+        Assert.Contains(
+            docker.Calls,
+            arguments => arguments.SequenceEqual(
+                new[] { "rm", "--force", "container-1" }));
+        Assert.Contains(
+            docker.Calls,
+            arguments => arguments.SequenceEqual(
+                new[] { "network", "rm", "network-1" }));
+    }
+
+    [Fact]
+    public async Task ForcesRemovalWhenGracefulContainerStopFails()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "stop failed"),
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var manager = CreateManager(docker, workerId);
+
+        await manager.StopAsync(sessionId, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { "stop", "--time", "30", "container-1" },
+            docker.Calls[2]);
+        Assert.Equal(
+            new[] { "rm", "--force", "container-1" },
+            docker.Calls[3]);
+        Assert.Equal(TimeSpan.FromSeconds(30), docker.Timeouts[3]);
+    }
+
+    [Fact]
+    public async Task ForcesRemovalWhenGracefulContainerStopTimesOut()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new TimeoutException("docker stop timed out"),
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var manager = CreateManager(docker, workerId);
+
+        await manager.StopAsync(sessionId, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { "rm", "--force", "container-1" },
+            docker.Calls[3]);
+    }
+
+    [Fact]
+    public async Task AcceptsFailedForceRemoveOnlyAfterContainerIsVerifiedGone()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "stop failed"),
+            new DockerCommandResult(1, string.Empty, "remove raced"),
+            new DockerCommandResult(1, string.Empty, "No such object: container-1"),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var manager = CreateManager(docker, workerId);
+
+        await manager.StopAsync(sessionId, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { "inspect", "container-1" },
+            docker.Calls[4]);
+    }
+
+    [Fact]
+    public async Task ReportsFailedForceRemoveWhenOwnedContainerStillExists()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "stop failed"),
+            new DockerCommandResult(1, string.Empty, "remove failed"),
+            new DockerCommandResult(
+                0,
+                BuildInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var manager = CreateManager(docker, workerId);
+
+        var error = await Assert.ThrowsAsync<DockerCliException>(
+            () => manager.StopAsync(sessionId, CancellationToken.None));
+
+        Assert.Equal("remove session container", error.Operation);
+        Assert.DoesNotContain(
+            docker.Calls,
+            arguments => arguments.Count >= 2
+                         && arguments[0] == "network"
+                         && arguments[1] == "rm");
+    }
+
+    [Fact]
+    public async Task DoesNotStopOrRemoveContainerOwnedByAnotherWorker()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildInspection(Guid.NewGuid(), sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var manager = CreateManager(docker, workerId);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => manager.StopAsync(sessionId, CancellationToken.None));
+
+        Assert.DoesNotContain(
+            docker.Calls,
+            arguments => arguments.Count > 0
+                         && arguments[0] is "stop" or "rm");
+    }
+
+    [Fact]
+    public async Task AcceptsFailedNetworkRemoveOnlyAfterNetworkIsVerifiedGone()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildNetworkInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "remove raced"),
+            new DockerCommandResult(1, string.Empty, "No such network"));
+        var manager = CreateManager(docker, workerId);
+
+        await manager.StopAsync(sessionId, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { "network", "rm", "network-1" },
+            docker.Calls[2]);
+        Assert.Equal(
+            new[] { "network", "inspect", "network-1" },
+            docker.Calls[3]);
+    }
+
+    [Fact]
+    public async Task RemovesTheExactInspectedNetworkId()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        const string networkId = "immutable-network-id";
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(
+                0,
+                BuildNetworkInspection(workerId, sessionId, networkId),
+                string.Empty),
+            new DockerCommandResult(0, string.Empty, string.Empty));
+        var manager = CreateManager(docker, workerId);
+
+        await manager.StopAsync(sessionId, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { "network", "rm", networkId },
+            docker.Calls[2]);
+    }
+
+    [Fact]
+    public async Task ReportsFailedNetworkRemoveWhenOwnedNetworkStillExists()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var networkInspection = BuildNetworkInspection(workerId, sessionId);
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(0, networkInspection, string.Empty),
+            new DockerCommandResult(1, string.Empty, "network is still in use"),
+            new DockerCommandResult(0, networkInspection, string.Empty));
+        var manager = CreateManager(docker, workerId);
+
+        var error = await Assert.ThrowsAsync<DockerCliException>(
+            () => manager.StopAsync(sessionId, CancellationToken.None));
+
+        Assert.Equal("remove session network", error.Operation);
+    }
+
+    [Fact]
+    public async Task ReportsNetworkInspectionFailureInsteadOfAssumingCleanup()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, string.Empty, string.Empty),
+            new DockerCommandResult(1, string.Empty, "daemon unavailable"));
+        var manager = CreateManager(docker, workerId);
+
+        var error = await Assert.ThrowsAsync<DockerCliException>(
+            () => manager.StopAsync(sessionId, CancellationToken.None));
+
+        Assert.Equal("inspect session network", error.Operation);
+    }
+
+    private static DockerSessionManager CreateManager(
+        IDockerCli docker,
+        Guid workerId)
+    {
+        return new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            Options.Create(new WorkerOptions
+            {
+                WorkerId = workerId,
+                SessionImage = "robotswarm/ros-noetic:test"
+            }),
+            NullLogger<DockerSessionManager>.Instance);
+    }
+
+    private static ViewerSourceCommand SceneCommand(Guid sessionId)
+    {
+        var sourceId = $"scene-{sessionId:N}";
+        return new ViewerSourceCommand(
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow.AddMinutes(5),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ViewerSourceKind.Scene,
+            null,
+            sourceId,
+            $"session/{sessionId:N}/{sourceId}");
+    }
+
+    private static string BuildInspection(
+        Guid workerId,
+        Guid sessionId,
+        string containerId = "container-1",
+        bool running = true)
     {
         return JsonSerializer.Serialize(new[]
         {
             new
             {
-                Id = "container-1",
+                Id = containerId,
                 Name = $"/{SessionResourceNames.Container(sessionId)}",
                 Config = new
                 {
@@ -185,8 +630,27 @@ public sealed class DockerSessionManagerTests
                 },
                 State = new
                 {
-                    Running = true,
-                    Status = "running"
+                    Running = running,
+                    Status = running ? "running" : "exited"
+                }
+            }
+        });
+    }
+
+    private static string BuildNetworkInspection(
+        Guid workerId,
+        Guid sessionId,
+        string networkId = "network-1")
+    {
+        return JsonSerializer.Serialize(new[]
+        {
+            new
+            {
+                Id = networkId,
+                Labels = new Dictionary<string, string>
+                {
+                    [SessionLabels.WorkerId] = workerId.ToString("D"),
+                    [SessionLabels.SessionId] = sessionId.ToString("D")
                 }
             }
         });
@@ -194,22 +658,87 @@ public sealed class DockerSessionManagerTests
 
     private sealed class RecordingDockerCli : IDockerCli
     {
-        private readonly Queue<DockerCommandResult> _results;
+        private readonly Queue<object> _results;
 
-        public RecordingDockerCli(params DockerCommandResult[] results)
+        public RecordingDockerCli(params object[] results)
         {
-            _results = new Queue<DockerCommandResult>(results);
+            _results = new Queue<object>(results);
         }
 
         public List<IReadOnlyList<string>> Calls { get; } = new();
+        public List<TimeSpan?> Timeouts { get; } = new();
 
         public Task<DockerCommandResult> RunAsync(
             IReadOnlyList<string> arguments,
             CancellationToken cancellationToken,
             TimeSpan? timeout = null)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Calls.Add(arguments.ToArray());
-            return Task.FromResult(_results.Dequeue());
+            Timeouts.Add(timeout);
+            var next = _results.Dequeue();
+            if (next is Exception exception)
+            {
+                return Task.FromException<DockerCommandResult>(exception);
+            }
+
+            return Task.FromResult((DockerCommandResult)next);
+        }
+    }
+
+    private sealed class RecordingViewerPublisher : IViewerPublisher
+    {
+        private readonly Exception? _stopFailure;
+
+        public RecordingViewerPublisher(Exception? stopFailure = null)
+        {
+            _stopFailure = stopFailure;
+        }
+
+        public ViewerPublisherAvailability Availability { get; } =
+            new(
+                true,
+                new[] { ViewerSourceKind.Scene },
+                "H264",
+                "ready");
+
+        public List<ViewerPublishRequest> PublishRequests { get; } = new();
+        public List<Guid> StoppedSessions { get; } = new();
+
+        public Task RefreshAvailabilityAsync(CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task<ViewerPublishResult> PublishAsync(
+            ViewerPublishRequest request,
+            CancellationToken cancellationToken)
+        {
+            PublishRequests.Add(request);
+            return Task.FromResult(new ViewerPublishResult(
+                request.SessionId,
+                request.Command.LeaseId,
+                request.Command.ExpiresAt,
+                request.Command.Source,
+                request.Command.RobotRuntimeId,
+                request.Command.SourceId,
+                request.Command.StreamPath,
+                Ready: true,
+                "H264"));
+        }
+
+        public Task StopSessionAsync(
+            Guid sessionId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StoppedSessions.Add(sessionId);
+            if (_stopFailure is not null)
+            {
+                return Task.FromException(_stopFailure);
+            }
+
+            return Task.CompletedTask;
         }
     }
 }

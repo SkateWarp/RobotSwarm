@@ -1,5 +1,5 @@
 using System.Data;
-using System.Text.Json;
+using System.Linq.Expressions;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -17,10 +17,13 @@ public static class SimulationSessionRoute
         group.RequireAuthorization();
 
         group.MapPost("", Create)
+            .RequireRateLimiting(AbuseProtection.SessionCreationPolicy)
             .Produces<SimulationSessionResponse>(StatusCodes.Status202Accepted)
             .Produces(StatusCodes.Status400BadRequest)
             .Produces(StatusCodes.Status401Unauthorized)
-            .Produces(StatusCodes.Status409Conflict);
+            .Produces(StatusCodes.Status409Conflict)
+            .Produces(StatusCodes.Status429TooManyRequests)
+            .Produces(StatusCodes.Status503ServiceUnavailable);
 
         group.MapGet("", GetAll)
             .Produces<IEnumerable<SimulationSessionResponse>>()
@@ -43,7 +46,7 @@ public static class SimulationSessionRoute
         return group;
     }
 
-    private static async Task<IResult> Create(
+    internal static async Task<IResult> Create(
         CreateSimulationSessionRequest request,
         DataContext dataContext,
         IConfiguration configuration,
@@ -66,11 +69,14 @@ public static class SimulationSessionRoute
             });
         }
 
+        await using var transaction = dataContext.Database.IsRelational()
+            ? await dataContext.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable,
+                cancellationToken)
+            : null;
+
         var hasLiveSession = await dataContext.SimulationSessions
-            .AnyAsync(
-                session => session.AccountId == accountId.Value
-                    && session.State < SimulationSessionState.Stopped,
-                cancellationToken);
+            .AnyAsync(OccupiesAccountSlot(accountId.Value), cancellationToken);
 
         if (hasLiveSession)
         {
@@ -78,6 +84,18 @@ public static class SimulationSessionRoute
             {
                 message = "The account already has an active or queued simulation session."
             });
+        }
+
+        var queuedCount = await dataContext.SimulationSessions.CountAsync(
+            session => session.State == SimulationSessionState.Queued,
+            cancellationToken);
+        if (queuedCount >= SessionLimits.GetMaxQueuedSessions(configuration))
+        {
+            context.Response.Headers.RetryAfter = "30";
+            return Results.Problem(
+                statusCode: StatusCodes.Status503ServiceUnavailable,
+                title: "The simulation queue is full.",
+                detail: "Try again after another queued session starts or expires.");
         }
 
         var now = DateTime.UtcNow;
@@ -95,6 +113,10 @@ public static class SimulationSessionRoute
         try
         {
             await dataContext.SaveChangesAsync(cancellationToken);
+            if (transaction != null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
         }
         catch (DbUpdateException exception)
             when (exception.InnerException is PostgresException
@@ -107,6 +129,19 @@ public static class SimulationSessionRoute
                 message = "The account already has an active or queued simulation session."
             });
         }
+        catch (PostgresException exception)
+            when (exception.SqlState == PostgresErrorCodes.SerializationFailure)
+        {
+            return QueueChangedConflict();
+        }
+        catch (DbUpdateException exception)
+            when (exception.InnerException is PostgresException
+            {
+                SqlState: PostgresErrorCodes.SerializationFailure
+            })
+        {
+            return QueueChangedConflict();
+        }
 
         var queuePositions = await GetQueuePositions(dataContext, cancellationToken);
         var response = ToResponse(
@@ -115,6 +150,30 @@ public static class SimulationSessionRoute
             computeWorkerName: null);
 
         return Results.Accepted($"/api/sessions/{session.Id}", response);
+    }
+
+    internal static Expression<Func<SimulationSession, bool>> OccupiesAccountSlot(
+        int accountId)
+    {
+        return session => session.AccountId == accountId
+            && (session.State < SimulationSessionState.Stopped
+                || (session.State == SimulationSessionState.Failed
+                    || session.State == SimulationSessionState.Expired)
+                && session.ComputeWorkerId.HasValue);
+    }
+
+    private static IResult QueueChangedConflict()
+    {
+        return Results.Conflict(new
+        {
+            message = "Simulation capacity changed while the request was queued. Try again."
+        });
+    }
+
+    internal static bool RequiresWorkerCleanup(SimulationSessionState state)
+    {
+        return state is SimulationSessionState.Failed
+            or SimulationSessionState.Expired;
     }
 
     private static async Task<IResult> GetAll(
@@ -185,7 +244,6 @@ public static class SimulationSessionRoute
     private static async Task<IResult> Delete(
         Guid id,
         DataContext dataContext,
-        WorkerCommandService commandService,
         IHubContext<WorkerHub> workerHub,
         IHubContext<SessionHub> sessionHub,
         HttpContext context,
@@ -202,6 +260,7 @@ public static class SimulationSessionRoute
             cancellationToken);
         var session = await dataContext.SimulationSessions
             .Include(candidate => candidate.ComputeWorker)
+            .Include(candidate => candidate.Commands)
             .SingleOrDefaultAsync(
                 candidate => candidate.Id == id && candidate.AccountId == accountId.Value,
                 cancellationToken);
@@ -212,7 +271,8 @@ public static class SimulationSessionRoute
         }
 
         if (session.State < SimulationSessionState.Stopped
-            || session.State == SimulationSessionState.Failed)
+            || session.State == SimulationSessionState.Failed
+            || session.State == SimulationSessionState.Expired)
         {
             var now = DateTime.UtcNow;
             WorkerCommand? command = null;
@@ -226,39 +286,18 @@ public static class SimulationSessionRoute
             }
             else
             {
-                if (session.State == SimulationSessionState.Failed)
+                var resourceKnownPresent = session.State < SimulationSessionState.Stopped;
+                command = TerminalCleanupPolicy.TryQueue(
+                    session,
+                    now,
+                    "sys:session-delete",
+                    resourceKnownPresent);
+                if (command != null)
                 {
-                    command = await dataContext.WorkerCommands
-                        .Where(candidate => candidate.SimulationSessionId == session.Id
-                            && candidate.Type == WorkerCommandType.StopSession
-                            && candidate.State != WorkerCommandState.Completed
-                            && candidate.State != WorkerCommandState.Failed
-                            && candidate.State != WorkerCommandState.Cancelled)
-                        .OrderByDescending(candidate => candidate.Sequence)
-                        .FirstOrDefaultAsync(cancellationToken);
+                    dataContext.WorkerCommands.Add(command);
                 }
 
-                if (command == null)
-                {
-                    var cleanupAttempt = session.State == SimulationSessionState.Failed
-                        ? await dataContext.WorkerCommands.CountAsync(
-                            candidate => candidate.SimulationSessionId == session.Id
-                                && candidate.Type == WorkerCommandType.StopSession,
-                            cancellationToken) + 1
-                        : 0;
-                    var commandKey = session.State == SimulationSessionState.Failed
-                        ? $"sys:cleanup-session:{session.Id:N}:{cleanupAttempt}"
-                        : $"sys:stop-session:{session.Id:N}";
-                    (command, _) = await commandService.Queue(
-                        session,
-                        WorkerCommandType.StopSession,
-                        commandKey,
-                        JsonDocument.Parse("{}"),
-                        taskRun: null,
-                        cancellationToken);
-                }
-
-                if (session.State != SimulationSessionState.Failed
+                if (resourceKnownPresent
                     && session.State != SimulationSessionState.Stopping)
                 {
                     session.State = SimulationSessionState.Stopping;

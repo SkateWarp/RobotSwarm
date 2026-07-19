@@ -75,6 +75,38 @@ referenced paper and repository. It uses local range/line-of-sight neighbors,
 object contour tangents, and a lower proposal count for larger fleets. The
 previous controller remains available as a runtime fallback.
 
+## Behavior acceptance result
+
+The commissioned 1-10 robot range passed the following visible simulation
+matrix at roughly a 3.0 physics real-time factor:
+
+- formations: triangle/3, square/5, letter A/7, letter V/8, diamond/9, and
+  letter S/10;
+- follow-the-leader: square/6, circle/3, and a full figure-eight lap/10; and
+- collaborative transport: 1, 3, 4, and 10 robots, including search motion by
+  every robot, discovery notification, simultaneous rendezvous, and full-fleet
+  contribution through at most two payload-contact roots.
+
+The ten-robot figure-eight case completed with zero robot/environment
+collisions, 0.3009 m minimum obstacle clearance, 0.4293 m minimum inter-robot
+distance, 0.0528 m spacing error, and 0.8992 m/s² peak acceleration.
+
+## Visible simulation acceptance
+
+For an N-robot case, the sequential Gazebo matrix reuses `tb3_0` through
+`tb3_{N-1}` instead of making new model namespaces for every case. Between
+cases it verifies that the fleet roster is empty, the departed models have
+disappeared from
+`/gazebo/model_states`, and its per-robot `cmd_vel` monitors were unregistered.
+This bounds ROS-side state even though Gazebo Classic can retain allocator and
+plugin caches after dynamic model deletion.
+
+Ground-truth static-obstacle clearance defaults to 0.13 m from the robot
+centre to the obstacle surface. That is just beyond the Burger body/contact
+threshold (roughly 0.125 m), so a case cannot pass while the model is already
+overlapping an obstacle. An explicit `--min-obstacle-clearance` still overrides
+the commissioning default.
+
 ## Commissioning order
 
 1. Preserve the VM runner's dirty checkout and remove manual/generated files
@@ -84,8 +116,9 @@ previous controller remains available as a runtime fallback.
    source.
 4. Start Docker Desktop and enable WSL integration for this distribution.
 5. Build the ROS image and verify `docker run --gpus all ... nvidia-smi`.
-6. Run one headless session, then four sessions with ten robots each.
-7. Add the Gazebo X display and H.264 publisher. Validate browser playback,
+6. Run one isolated session with its private Gazebo display, then exercise
+   concurrent sessions up to the commissioned GPU/CPU capacity.
+7. Enable the H.264 publisher only after validating browser playback,
    lease expiry, and cross-user denial before exposing WebRTC publicly.
 8. Add TURN if clients cannot reach the MediaMTX ICE port directly.
 9. Only then move the branch through CI and the production deployment
@@ -113,6 +146,14 @@ proxy to `http://10.0.0.126:44336`. Port 44336 must stay LAN-only and should be
 accepted only from the NPM host. PostgreSQL is not published by Compose and
 must remain private. Keep WebSocket support enabled on the NPM proxy host so
 the SignalR hubs can upgrade their connections.
+
+Login, registration, and session creation have separate fixed-window limits.
+The backend accepts forwarded client addresses only from loopback and the
+exact addresses listed under `ReverseProxy:KnownProxies`. If Nginx Proxy
+Manager does not connect from loopback, set
+`ReverseProxy__KnownProxies__0` to its source address before commissioning the
+login limit; otherwise every browser would share the proxy's rate-limit
+bucket.
 
 Gazebo Classic and ROS Noetic are kept for compatibility with the current
 project. They should stay pinned inside the worker image while a ROS 2 / modern

@@ -101,6 +101,11 @@ public static class SessionControlRoute
                 new FleetUpdateResponse(ToSessionResponse(session), WorkerCommandService.ToResponse(existing)));
         }
 
+        if (await HasPendingEmergencyTransition(dataContext, id, cancellationToken))
+        {
+            return EmergencyTransitionConflict();
+        }
+
         if (session.State != SimulationSessionState.Ready
             || !session.ComputeWorkerId.HasValue
             || session.IsEmergencyStopped)
@@ -265,6 +270,17 @@ public static class SessionControlRoute
             });
         }
 
+        if (!TaskParameterValidator.TryValidate(
+                taskType,
+                request.Parameters,
+                out var parameterError))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(request.Parameters)] = new[] { parameterError! }
+            });
+        }
+
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
             IsolationLevel.Serializable,
             cancellationToken);
@@ -292,6 +308,11 @@ public static class SessionControlRoute
                 new TaskCommandResponse(
                     ToTaskResponse(existing.TaskRun),
                     WorkerCommandService.ToResponse(existing)));
+        }
+
+        if (await HasPendingEmergencyTransition(dataContext, id, cancellationToken))
+        {
+            return EmergencyTransitionConflict();
         }
 
         if (!CanControl(session) || session.IsEmergencyStopped)
@@ -473,6 +494,14 @@ public static class SessionControlRoute
                 new TaskCommandResponse(ToTaskResponse(task), WorkerCommandService.ToResponse(existing)));
         }
 
+        if (await HasPendingEmergencyTransition(
+                dataContext,
+                sessionId,
+                cancellationToken))
+        {
+            return EmergencyTransitionConflict();
+        }
+
         if (!CanControl(session))
         {
             return Results.Conflict(new { message = "The session cannot control tasks in the current state." });
@@ -618,14 +647,9 @@ public static class SessionControlRoute
             return Results.Conflict(new { message = "The emergency-stop state cannot make this transition." });
         }
 
-        var emergencyCommandPending = await dataContext.WorkerCommands.AnyAsync(
-            command => command.SimulationSessionId == id
-                && (command.Type == WorkerCommandType.EmergencyStop
-                    || command.Type == WorkerCommandType.ResetEmergencyStop)
-                && (command.State == WorkerCommandState.Pending
-                    || command.State == WorkerCommandState.Dispatched
-                    || command.State == WorkerCommandState.Acknowledged
-                    || command.State == WorkerCommandState.Running),
+        var emergencyCommandPending = await HasPendingEmergencyTransition(
+            dataContext,
+            id,
             cancellationToken);
         if (emergencyCommandPending)
         {
@@ -703,6 +727,26 @@ public static class SessionControlRoute
             return Results.Conflict(new { message = "The session viewer is not available in the current state." });
         }
 
+        if (await HasPendingEmergencyTransition(dataContext, id, cancellationToken))
+        {
+            return EmergencyTransitionConflict();
+        }
+
+        var workerSupportsViewer = session.ComputeWorker is not null
+            && WorkerCapabilities.SupportsCommand(
+                session.ComputeWorker,
+                WorkerCommandType.SetViewerSource.ToString())
+            && WorkerCapabilities.SupportsViewerSource(
+                session.ComputeWorker,
+                source.ToString());
+        if (!workerSupportsViewer)
+        {
+            return Results.Conflict(new
+            {
+                message = "The assigned GPU worker does not support this viewer source."
+            });
+        }
+
         string? robotRuntimeId = null;
         if (source == ViewerSourceType.RobotCamera)
         {
@@ -731,11 +775,18 @@ public static class SessionControlRoute
             });
         }
 
-        using var payload = JsonSerializer.SerializeToDocument(new
+        if (!ViewerStreamAddress.TryCreate(
+                id,
+                source,
+                robotRuntimeId,
+                out var streamAddress))
         {
-            source = source.ToString(),
-            robotRuntimeId
-        });
+            return Results.Conflict(new
+            {
+                message = "The session viewer source has an invalid runtime identifier."
+            });
+        }
+
         var leaseKeyAlreadyUsed = await dataContext.ViewerLeases
             .AsNoTracking()
             .AnyAsync(
@@ -788,16 +839,26 @@ public static class SessionControlRoute
         {
             var workerPublishingEnabled =
                 configuration.GetValue<bool>("Viewer:WorkerPublishingEnabled");
-            var signalingUrl = workerPublishingEnabled
-                ? BuildSignalingUrl(
+            var signalingUrl = workerPublishingEnabled && workerSupportsViewer
+                ? ViewerStreamAddress.BuildWhepUrl(
                     configuration["Viewer:PublicBaseUrl"],
-                    id,
-                    source,
-                    robotRuntimeId)
+                    streamAddress)
                 : null;
             WorkerCommand? command = null;
             if (signalingUrl != null)
             {
+                var (publishToken, publishTokenHash) = ViewerPublishToken.Generate();
+                viewerLease.PublishTokenHash = publishTokenHash;
+                using var payload = JsonSerializer.SerializeToDocument(new
+                {
+                    leaseId = viewerLease.Id,
+                    expiresAt,
+                    source = source.ToString(),
+                    robotRuntimeId,
+                    sourceId = streamAddress.SourceId,
+                    streamPath = streamAddress.StreamPath,
+                    publishToken
+                });
                 (command, _) = await commandService.Queue(
                     session,
                     WorkerCommandType.SetViewerSource,
@@ -819,9 +880,11 @@ public static class SessionControlRoute
                 id,
                 source.ToString(),
                 robotRuntimeId,
+                streamAddress.SourceId,
+                streamAddress.StreamPath,
                 token,
                 expiresAt,
-                IsReady: signalingUrl != null,
+                IsReady: false,
                 signalingUrl,
                 command == null ? null : WorkerCommandService.ToResponse(command));
             return Results.Created($"/api/sessions/{id}/viewer-lease", response);
@@ -851,6 +914,30 @@ public static class SessionControlRoute
             && session.State is SimulationSessionState.Ready
                 or SimulationSessionState.Active
                 or SimulationSessionState.Paused;
+    }
+
+    internal static Task<bool> HasPendingEmergencyTransition(
+        DataContext dataContext,
+        Guid sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        return dataContext.WorkerCommands.AnyAsync(
+            command => command.SimulationSessionId == sessionId
+                && (command.Type == WorkerCommandType.EmergencyStop
+                    || command.Type == WorkerCommandType.ResetEmergencyStop)
+                && (command.State == WorkerCommandState.Pending
+                    || command.State == WorkerCommandState.Dispatched
+                    || command.State == WorkerCommandState.Acknowledged
+                    || command.State == WorkerCommandState.Running),
+            cancellationToken);
+    }
+
+    private static IResult EmergencyTransitionConflict()
+    {
+        return Results.Conflict(new
+        {
+            message = "Wait for the emergency-stop transition to finish before changing the session."
+        });
     }
 
     private static bool TryGetAccountId(HttpContext context, out int accountId)
@@ -933,23 +1020,6 @@ public static class SessionControlRoute
 
         source = default;
         return false;
-    }
-
-    private static string? BuildSignalingUrl(
-        string? publicBaseUrl,
-        Guid sessionId,
-        ViewerSourceType source,
-        string? robotRuntimeId)
-    {
-        if (string.IsNullOrWhiteSpace(publicBaseUrl)
-            || !Uri.TryCreate(publicBaseUrl, UriKind.Absolute, out var baseUri)
-            || baseUri.Scheme is not ("http" or "https"))
-        {
-            return null;
-        }
-
-        var stream = source == ViewerSourceType.Scene ? "scene" : robotRuntimeId;
-        return $"{publicBaseUrl.TrimEnd('/')}/session/{sessionId:N}/{stream}/whep";
     }
 
     private static TaskRunResponse ToTaskResponse(TaskRun task)

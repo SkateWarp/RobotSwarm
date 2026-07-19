@@ -9,6 +9,7 @@ public sealed record WorkerRegistrationRequest(
 public sealed record WorkerHeartbeatRequest(
     string? ImageVersion,
     JsonElement Capabilities,
+    // Wire name retained for compatibility; includes stopped containers until cleanup removes them.
     IReadOnlyList<Guid> ActiveSessionIds);
 
 public sealed record WorkerRegistrationResponse(

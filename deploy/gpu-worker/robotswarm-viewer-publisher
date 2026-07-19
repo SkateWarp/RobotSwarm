@@ -1,0 +1,1493 @@
+#!/usr/bin/env python3
+"""Publish one private Gazebo scene display to the session RTSP path.
+
+This process is intentionally a small supervisor.  It owns the X server, a
+short-lived gzclient sidecar, and FFmpeg, so the worker can stop the complete
+pipeline by stopping this one process.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import socket
+import ssl
+import stat
+import struct
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO, Sequence
+from urllib.parse import quote, urlsplit, urlunsplit
+
+
+PROTOCOL_VERSION = 1
+SESSION_ID_LABEL = "io.robotswarm.session-id"
+WORKER_ID_LABEL = "io.robotswarm.worker-id"
+MANAGED_LABEL = "io.robotswarm.managed"
+VIEWER_LABEL = "io.robotswarm.viewer"
+VIEWER_LEASE_LABEL = "io.robotswarm.viewer-lease"
+CONTAINER_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+GPU_REQUEST_RE = re.compile(
+    r"^(?:all|device=(?:[0-9]+|GPU-[A-Fa-f0-9-]+)"
+    r"(?:,(?:[0-9]+|GPU-[A-Fa-f0-9-]+))*)$"
+)
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
+
+
+class PublisherError(RuntimeError):
+    pass
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise PublisherError(f"{name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise PublisherError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise PublisherError(f"{name} must be a number") from exc
+    if value < minimum or value > maximum:
+        raise PublisherError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def resolve_executable(name: str, default: str) -> str:
+    configured = os.environ.get(name, default)
+    if not configured or any(character.isspace() for character in configured):
+        raise PublisherError(f"{name} must name one executable")
+    resolved = shutil.which(configured)
+    if resolved is None:
+        raise PublisherError(f"required executable '{configured}' was not found")
+    return str(Path(resolved).resolve())
+
+
+@dataclass(frozen=True)
+class Settings:
+    docker: str
+    display_server: str
+    ffmpeg: str
+    xwininfo: str
+    display_transport: str
+    runtime_dir: Path
+    x_socket_dir: Path
+    display_min: int
+    display_max: int
+    width: int
+    height: int
+    frame_rate: int
+    bit_rate: str
+    gpu_request: str
+    startup_timeout: float
+    settle_seconds: float
+    window_pattern: re.Pattern[str]
+
+    @classmethod
+    def load(cls) -> "Settings":
+        runtime_default = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime_default:
+            runtime_default = str(Path(runtime_default) / "robotswarm-viewer")
+        else:
+            runtime_default = f"/tmp/robotswarm-viewer-{os.getuid()}"
+
+        display_min = env_int("ROBOTSWARM_VIEWER_DISPLAY_MIN", 100, 1, 999)
+        display_max = env_int("ROBOTSWARM_VIEWER_DISPLAY_MAX", 199, 1, 999)
+        if display_max < display_min:
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_DISPLAY_MAX must not be below DISPLAY_MIN"
+            )
+
+        backend = os.environ.get("ROBOTSWARM_VIEWER_DISPLAY_BACKEND", "xvfb")
+        if backend != "xvfb":
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_DISPLAY_BACKEND currently supports xvfb only"
+            )
+        display_default = "Xvfb"
+
+        display_transport = os.environ.get(
+            "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT", "unix"
+        )
+        if display_transport not in {"unix", "tcp"}:
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT must be unix or tcp"
+            )
+
+        gpu_request = os.environ.get(
+            "ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST", "device=0"
+        )
+        if gpu_request != "none" and not GPU_REQUEST_RE.fullmatch(gpu_request):
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_GZCLIENT_GPU_REQUEST has an invalid Docker GPU request"
+            )
+
+        pattern_text = os.environ.get(
+            "ROBOTSWARM_VIEWER_GAZEBO_WINDOW_PATTERN", r"Gazebo"
+        )
+        try:
+            window_pattern = re.compile(pattern_text, re.IGNORECASE)
+        except re.error as exc:
+            raise PublisherError(
+                "ROBOTSWARM_VIEWER_GAZEBO_WINDOW_PATTERN is invalid"
+            ) from exc
+
+        runtime_dir = Path(
+            os.environ.get("ROBOTSWARM_VIEWER_RUNTIME_DIR", runtime_default)
+        )
+        x_socket_dir = Path(
+            os.environ.get("ROBOTSWARM_VIEWER_X_SOCKET_DIR", "/tmp/.X11-unix")
+        )
+        if (
+            not runtime_dir.is_absolute()
+            or not x_socket_dir.is_absolute()
+            or any(
+                "," in str(path) or "\n" in str(path)
+                for path in (runtime_dir, x_socket_dir)
+            )
+        ):
+            raise PublisherError(
+                "viewer runtime and X socket paths must be safe absolute paths"
+            )
+
+        bit_rate = os.environ.get("ROBOTSWARM_VIEWER_BIT_RATE", "4M")
+        if not re.fullmatch(r"[1-9][0-9]*(?:[KMG])?", bit_rate):
+            raise PublisherError("ROBOTSWARM_VIEWER_BIT_RATE is invalid")
+
+        return cls(
+            docker=resolve_executable("ROBOTSWARM_VIEWER_DOCKER", "docker"),
+            display_server=resolve_executable(
+                "ROBOTSWARM_VIEWER_DISPLAY_SERVER", display_default
+            ),
+            ffmpeg=resolve_executable("ROBOTSWARM_VIEWER_FFMPEG", "ffmpeg"),
+            xwininfo=resolve_executable("ROBOTSWARM_VIEWER_XWININFO", "xwininfo"),
+            display_transport=display_transport,
+            runtime_dir=runtime_dir,
+            x_socket_dir=x_socket_dir,
+            display_min=display_min,
+            display_max=display_max,
+            width=env_int("ROBOTSWARM_VIEWER_WIDTH", 1280, 320, 3840),
+            height=env_int("ROBOTSWARM_VIEWER_HEIGHT", 720, 240, 2160),
+            frame_rate=env_int("ROBOTSWARM_VIEWER_FRAME_RATE", 30, 5, 60),
+            bit_rate=bit_rate,
+            gpu_request=gpu_request,
+            startup_timeout=env_float(
+                "ROBOTSWARM_VIEWER_STARTUP_TIMEOUT", 12.0, 2.0, 60.0
+            ),
+            settle_seconds=env_float(
+                "ROBOTSWARM_VIEWER_SETTLE_SECONDS", 2.0, 0.1, 10.0
+            ),
+            window_pattern=window_pattern,
+        )
+
+
+@dataclass(frozen=True)
+class PublishRequest:
+    session_id: uuid.UUID
+    lease_id: uuid.UUID
+    expires_at: dt.datetime
+    container_id: str
+    container_name: str
+    source_id: str
+    stream_path: str
+    publish_base_url: str
+
+
+def safe_environment() -> dict[str, str]:
+    child_environment = dict(os.environ)
+    for name in list(child_environment):
+        normalized = name.lower()
+        if (
+            normalized == "robotswarm_media_token"
+            or normalized.startswith("worker__")
+            or normalized in {
+                "robotswarm_worker_secret",
+                "robotswarm_worker_token",
+            }
+        ):
+            child_environment.pop(name, None)
+    return child_environment
+
+
+def sanitize(message: str, token: str | None) -> str:
+    clean = message.replace("\r", " ").replace("\n", " ").strip()
+    if token:
+        clean = clean.replace(token, "[REDACTED]")
+        clean = clean.replace(quote(token, safe=""), "[REDACTED]")
+    return clean[:1200] or "no diagnostic output was available"
+
+
+def validate_uuid(value: str, option: str) -> uuid.UUID:
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise PublisherError(f"{option} must be a canonical non-empty UUID") from exc
+    if parsed.int == 0 or str(parsed) != value:
+        raise PublisherError(f"{option} must be a canonical non-empty UUID")
+    return parsed
+
+
+def validate_base_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"rtsp", "rtsps"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise PublisherError(
+            "publish base URL must be RTSP(S) without credentials, query, or fragment"
+        )
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise PublisherError("publish base URL has an invalid port") from exc
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")
+    )
+
+
+def parse_utc_timestamp(value: str) -> dt.datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise PublisherError("--expires-at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise PublisherError("--expires-at must include a UTC offset")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def parse_publish_request(arguments: argparse.Namespace) -> PublishRequest:
+    session_id = validate_uuid(arguments.session_id, "--session-id")
+    lease_id = validate_uuid(arguments.lease_id, "--lease-id")
+    expires_at = parse_utc_timestamp(arguments.expires_at)
+    if expires_at <= dt.datetime.now(dt.timezone.utc):
+        raise PublisherError("viewer lease has already expired")
+    if arguments.source != "Scene":
+        raise PublisherError("this publisher supports the Scene source only")
+    if arguments.robot_runtime_id is not None:
+        raise PublisherError("Scene must not include --robot-runtime-id")
+    if not CONTAINER_ID_RE.fullmatch(arguments.container_id):
+        raise PublisherError("--container-id must be a full lowercase Docker ID")
+
+    compact_session_id = session_id.hex
+    expected_container_name = f"robotswarm-{compact_session_id}"
+    expected_source_id = f"scene-{compact_session_id}"
+    expected_stream_path = f"session/{compact_session_id}/{expected_source_id}"
+    if arguments.container_name != expected_container_name:
+        raise PublisherError("container name does not match the assigned session")
+    if (
+        arguments.source_id != expected_source_id
+        or arguments.stream_path != expected_stream_path
+    ):
+        raise PublisherError("viewer source path does not match the assigned session")
+
+    return PublishRequest(
+        session_id=session_id,
+        lease_id=lease_id,
+        expires_at=expires_at,
+        container_id=arguments.container_id,
+        container_name=arguments.container_name,
+        source_id=arguments.source_id,
+        stream_path=arguments.stream_path,
+        publish_base_url=validate_base_url(arguments.publish_base_url),
+    )
+
+
+def read_publish_token() -> str:
+    payload = sys.stdin.buffer.read(130)
+    extra = sys.stdin.buffer.read(1)
+    if extra or not payload.endswith(b"\n") or payload.count(b"\n") != 1:
+        raise PublisherError("publish token input must contain exactly one line")
+    if payload.endswith(b"\r\n"):
+        encoded_token = payload[:-2]
+    else:
+        encoded_token = payload[:-1]
+    try:
+        token = encoded_token.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise PublisherError("publish token input is not ASCII") from exc
+    if not TOKEN_RE.fullmatch(token):
+        raise PublisherError("publish token input is missing or invalid")
+    return token
+
+
+def ensure_private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise PublisherError(f"runtime path '{path}' is not a private owned directory")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        path.chmod(0o700)
+
+
+def run_command(
+    command: Sequence[str],
+    *,
+    timeout: float = 10.0,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            env=safe_environment(),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PublisherError(f"failed to run required executable '{command[0]}'") from exc
+    if check and result.returncode != 0:
+        raise PublisherError(f"required executable '{command[0]}' returned an error")
+    return result
+
+
+def available_encoder(settings: Settings) -> str:
+    result = run_command(
+        [settings.ffmpeg, "-hide_banner", "-encoders"], timeout=10.0
+    )
+    encoders = result.stdout + result.stderr
+    preference = os.environ.get("ROBOTSWARM_VIEWER_ENCODER", "auto")
+    if preference not in {"auto", "h264_nvenc", "libx264"}:
+        raise PublisherError(
+            "ROBOTSWARM_VIEWER_ENCODER must be auto, h264_nvenc, or libx264"
+        )
+    candidates = []
+    if preference in {"auto", "h264_nvenc"}:
+        candidates.append("h264_nvenc")
+    if preference in {"auto", "libx264"}:
+        candidates.append("libx264")
+
+    for candidate in candidates:
+        if not re.search(rf"\b{candidate}\b", encoders):
+            continue
+        command = [
+            settings.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            (
+                f"color=c=black:s={settings.width}x{settings.height}:"
+                f"r={settings.frame_rate}"
+            ),
+            "-frames:v",
+            "1",
+            "-an",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            candidate,
+        ]
+        if candidate == "h264_nvenc":
+            command.extend(
+                ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-bf", "0"]
+            )
+        else:
+            command.extend(["-preset", "veryfast", "-tune", "zerolatency"])
+        command.extend(
+            [
+                "-b:v",
+                settings.bit_rate,
+                "-maxrate",
+                settings.bit_rate,
+                "-bufsize",
+                settings.bit_rate,
+                "-f",
+                "null",
+                "-",
+            ]
+        )
+        try:
+            result = run_command(
+                command,
+                timeout=3.0,
+                check=False,
+            )
+        except PublisherError:
+            continue
+        if result.returncode == 0:
+            return candidate
+
+    if preference == "h264_nvenc":
+        raise PublisherError("configured FFmpeg cannot initialize h264_nvenc")
+    if preference == "libx264":
+        raise PublisherError("configured FFmpeg cannot initialize libx264")
+    raise PublisherError("configured FFmpeg has no supported H.264 encoder")
+
+
+def verify_dependencies(settings: Settings) -> str:
+    run_command([settings.docker, "version", "--format", "{{.Server.Version}}"])
+    run_command([settings.xwininfo, "-version"])
+    return available_encoder(settings)
+
+
+class DisplayLease:
+    def __init__(self, settings: Settings, session_dir: Path):
+        self.settings = settings
+        self.session_dir = session_dir
+        self.number: int | None = None
+        self._lock: BinaryIO | None = None
+
+    @property
+    def name(self) -> str:
+        if self.number is None:
+            raise PublisherError("private display has not been allocated")
+        return f":{self.number}"
+
+    @property
+    def host_name(self) -> str:
+        if self.settings.display_transport == "tcp":
+            return f"127.0.0.1:{self.number}"
+        return self.name
+
+    @property
+    def tcp_port(self) -> int:
+        if self.number is None:
+            raise PublisherError("private display has not been allocated")
+        return 6000 + self.number
+
+    def sidecar_name(self, gateway: str | None) -> str:
+        if self.settings.display_transport == "tcp":
+            if gateway is None:
+                raise PublisherError("session network gateway is unavailable")
+            return f"{gateway}:{self.number}"
+        return self.name
+
+    @property
+    def socket_path(self) -> Path:
+        if self.number is None:
+            raise PublisherError("private display has not been allocated")
+        return self.settings.x_socket_dir / f"X{self.number}"
+
+    @property
+    def xauthority_path(self) -> Path:
+        return self.session_dir / "Xauthority"
+
+    def allocate(self) -> None:
+        if self.settings.display_transport == "unix":
+            self.settings.x_socket_dir.mkdir(mode=0o1777, parents=True, exist_ok=True)
+        for number in range(self.settings.display_min, self.settings.display_max + 1):
+            lock_path = self.settings.runtime_dir / f"display-{number}.lock"
+            lock_file = lock_path.open("a+b")
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_file.close()
+                continue
+            if self._display_endpoint_is_busy(number):
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+                continue
+            self.number = number
+            self._lock = lock_file
+            self._write_xauthority(number)
+            return
+        raise PublisherError("no private X display is available")
+
+    def _display_endpoint_is_busy(self, number: int) -> bool:
+        if self.settings.display_transport == "unix":
+            return (self.settings.x_socket_dir / f"X{number}").exists()
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            test_socket.bind(("127.0.0.1", 6000 + number))
+        except OSError:
+            return True
+        finally:
+            test_socket.close()
+        return False
+
+    def _write_xauthority(self, display_number: int) -> None:
+        # FamilyWild lets the same cookie work in the gzclient sidecar, whose
+        # hostname is intentionally different from the worker host.
+        cookie = secrets.token_bytes(16)
+        fields = (b"", str(display_number).encode("ascii"), b"MIT-MAGIC-COOKIE-1", cookie)
+        payload = struct.pack(">H", 0xFFFF)
+        for field in fields:
+            payload += struct.pack(">H", len(field)) + field
+        descriptor = os.open(
+            self.xauthority_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o400,
+        )
+        try:
+            os.write(descriptor, payload)
+        finally:
+            os.close(descriptor)
+
+    def release(self) -> None:
+        if self._lock is not None:
+            fcntl.flock(self._lock.fileno(), fcntl.LOCK_UN)
+            self._lock.close()
+            self._lock = None
+
+
+def open_log(session_dir: Path, name: str) -> BinaryIO:
+    descriptor = os.open(
+        session_dir / name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    return os.fdopen(descriptor, "wb", buffering=0)
+
+
+def tail_log(path: Path, token: str | None) -> str:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 8192))
+            return sanitize(stream.read().decode("utf-8", "replace"), token)
+    except OSError:
+        return "no diagnostic output was available"
+
+
+def terminate_process(process: subprocess.Popen[bytes] | None, interrupt: bool = False) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.send_signal(signal.SIGINT if interrupt else signal.SIGTERM)
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def isolate_process_group() -> None:
+    if os.name != "posix":
+        raise PublisherError("viewer publisher requires POSIX process groups")
+    try:
+        os.setsid()
+    except PermissionError as exc:
+        raise PublisherError(
+            "viewer publisher could not create its private process group"
+        ) from exc
+    if os.getpgrp() != os.getpid() or os.getsid(0) != os.getpid():
+        raise PublisherError("viewer publisher process-group isolation failed")
+
+
+def acquire_lease_lock(path: Path) -> BinaryIO:
+    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise PublisherError("viewer lease lock is not a safe regular file") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise PublisherError("viewer lease lock is not a private owned file")
+        lock = os.fdopen(descriptor, "a+b", buffering=0)
+        descriptor = -1
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            lock.close()
+            raise PublisherError("viewer lease already has a local publisher") from exc
+        return lock
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+class RtspPublishProxy:
+    """Keep the lease token in memory while forwarding one FFmpeg publisher."""
+
+    MAXIMUM_HEADER_BYTES = 64 * 1024
+    MAXIMUM_BODY_BYTES = 2 * 1024 * 1024
+
+    def __init__(self, request: PublishRequest, token: str):
+        self.request = request
+        self.token = token
+        self._base = urlsplit(request.publish_base_url)
+        encoded_path = "/".join(
+            quote(part, safe="") for part in request.stream_path.split("/")
+        )
+        self._path = f"{self._base.path.rstrip('/')}/{encoded_path}"
+        if not self._path.startswith("/"):
+            self._path = "/" + self._path
+        self._listener: socket.socket | None = None
+        self._client: socket.socket | None = None
+        self._upstream: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stopping = threading.Event()
+        self._ready = threading.Event()
+        self._error: str | None = None
+        self._port: int | None = None
+        self._socket_lock = threading.Lock()
+
+    @property
+    def local_url(self) -> str:
+        if self._port is None:
+            raise PublisherError("RTSP credential proxy has not started")
+        return f"rtsp://127.0.0.1:{self._port}{self._path}"
+
+    @property
+    def ready(self) -> bool:
+        return self._ready.is_set()
+
+    def start(self) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(0.25)
+        self._listener = listener
+        self._port = listener.getsockname()[1]
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"viewer-rtsp-{self.request.lease_id.hex[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def raise_if_failed(self) -> None:
+        if self._error is not None:
+            raise PublisherError(f"RTSP credential proxy stopped: {self._error}")
+        if (
+            self._thread is not None
+            and not self._thread.is_alive()
+            and not self._stopping.is_set()
+        ):
+            raise PublisherError("RTSP credential proxy stopped unexpectedly")
+
+    def stop(self) -> None:
+        self._stopping.set()
+        with self._socket_lock:
+            sockets = (self._listener, self._client, self._upstream)
+        for connection in sockets:
+            self._close_socket(connection)
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        try:
+            client = self._accept_client()
+            if client is None:
+                return
+            upstream = self._connect_upstream()
+            with self._socket_lock:
+                self._client = client
+                self._upstream = upstream
+
+            responses = threading.Thread(
+                target=self._relay_responses,
+                args=(upstream, client),
+                daemon=True,
+            )
+            responses.start()
+            self._forward_requests(client, upstream)
+            self._close_socket(upstream)
+            self._close_socket(client)
+            responses.join(timeout=1)
+            if not self._stopping.is_set() and self._error is None:
+                self._error = "publisher connection closed"
+        except (OSError, PublisherError, ssl.SSLError) as exc:
+            if not self._stopping.is_set():
+                self._error = sanitize(str(exc), self.token)
+        finally:
+            with self._socket_lock:
+                sockets = (self._listener, self._client, self._upstream)
+                self._listener = None
+                self._client = None
+                self._upstream = None
+            for connection in sockets:
+                self._close_socket(connection)
+
+    def _accept_client(self) -> socket.socket | None:
+        if self._listener is None:
+            raise PublisherError("RTSP credential proxy listener is unavailable")
+        while not self._stopping.is_set():
+            try:
+                client, address = self._listener.accept()
+            except socket.timeout:
+                continue
+            if address[0] != "127.0.0.1":
+                client.close()
+                continue
+            client.settimeout(None)
+            return client
+        return None
+
+    def _connect_upstream(self) -> socket.socket:
+        host = self._base.hostname
+        if host is None:
+            raise PublisherError("RTSP publish host is unavailable")
+        port = self._base.port or (8322 if self._base.scheme == "rtsps" else 8554)
+        connection = socket.create_connection((host, port), timeout=5)
+        connection.settimeout(None)
+        if self._base.scheme == "rtsps":
+            context = ssl.create_default_context()
+            return context.wrap_socket(connection, server_hostname=host)
+        return connection
+
+    def _forward_requests(
+        self, client: socket.socket, upstream: socket.socket
+    ) -> None:
+        buffer = bytearray()
+        while not self._stopping.is_set():
+            packet = self._read_client_packet(client, buffer)
+            if packet is None:
+                return
+            if packet.startswith(b"$"):
+                upstream.sendall(packet)
+                continue
+            upstream.sendall(self._authorize_request(packet))
+            self._ready.set()
+
+    def _read_client_packet(
+        self, client: socket.socket, buffer: bytearray
+    ) -> bytes | None:
+        if not self._fill_buffer(client, buffer, 1):
+            return None
+        if buffer[0] == ord("$"):
+            if not self._fill_buffer(client, buffer, 4):
+                raise PublisherError("FFmpeg closed a partial RTP frame")
+            length = int.from_bytes(buffer[2:4], "big")
+            if not self._fill_buffer(client, buffer, 4 + length):
+                raise PublisherError("FFmpeg closed a partial RTP frame")
+            packet = bytes(buffer[: 4 + length])
+            del buffer[: 4 + length]
+            return packet
+
+        while True:
+            header_end = buffer.find(b"\r\n\r\n")
+            if header_end >= 0:
+                break
+            if len(buffer) >= self.MAXIMUM_HEADER_BYTES:
+                raise PublisherError("FFmpeg sent an oversized RTSP header")
+            if not self._fill_buffer(client, buffer, len(buffer) + 1):
+                raise PublisherError("FFmpeg closed a partial RTSP request")
+
+        header_length = header_end + 4
+        content_length = self._content_length(bytes(buffer[:header_end]))
+        if content_length > self.MAXIMUM_BODY_BYTES:
+            raise PublisherError("FFmpeg sent an oversized RTSP body")
+        message_length = header_length + content_length
+        if not self._fill_buffer(client, buffer, message_length):
+            raise PublisherError("FFmpeg closed a partial RTSP body")
+        packet = bytes(buffer[:message_length])
+        del buffer[:message_length]
+        return packet
+
+    @staticmethod
+    def _fill_buffer(
+        connection: socket.socket, buffer: bytearray, length: int
+    ) -> bool:
+        while len(buffer) < length:
+            chunk = connection.recv(min(65536, length - len(buffer)))
+            if not chunk:
+                return False
+            buffer.extend(chunk)
+        return True
+
+    @staticmethod
+    def _content_length(header: bytes) -> int:
+        for line in header.split(b"\r\n")[1:]:
+            name, separator, value = line.partition(b":")
+            if separator and name.strip().lower() == b"content-length":
+                try:
+                    length = int(value.strip())
+                except ValueError as exc:
+                    raise PublisherError("FFmpeg sent an invalid Content-Length") from exc
+                if length < 0:
+                    raise PublisherError("FFmpeg sent an invalid Content-Length")
+                return length
+        return 0
+
+    def _authorize_request(self, request: bytes) -> bytes:
+        header, body = request.split(b"\r\n\r\n", 1)
+        lines = header.split(b"\r\n")
+        try:
+            request_line = lines[0].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise PublisherError("FFmpeg sent a non-ASCII RTSP request line") from exc
+        match = re.fullmatch(r"([A-Z_]+) (\S+) RTSP/1\.0", request_line)
+        if match is None:
+            raise PublisherError("FFmpeg sent an invalid RTSP request line")
+
+        target = urlsplit(match.group(2))
+        try:
+            target_port = target.port
+        except ValueError as exc:
+            raise PublisherError("FFmpeg sent an invalid local RTSP URL") from exc
+        if (
+            target.scheme != "rtsp"
+            or target.hostname != "127.0.0.1"
+            or target_port != self._port
+            or target.username is not None
+            or target.password is not None
+            or target.query
+            or target.fragment
+            or (
+                target.path != self._path
+                and not target.path.startswith(self._path + "/")
+            )
+        ):
+            raise PublisherError("FFmpeg requested a different RTSP publish path")
+
+        authorized_target = urlunsplit(
+            (
+                self._base.scheme,
+                self._base.netloc,
+                target.path,
+                f"token={quote(self.token, safe='')}",
+                "",
+            )
+        )
+        lines[0] = (
+            f"{match.group(1)} {authorized_target} RTSP/1.0".encode("ascii")
+        )
+        return b"\r\n".join(lines) + b"\r\n\r\n" + body
+
+    def _relay_responses(
+        self, upstream: socket.socket, client: socket.socket
+    ) -> None:
+        try:
+            while not self._stopping.is_set():
+                chunk = upstream.recv(65536)
+                if not chunk:
+                    if not self._stopping.is_set():
+                        self._error = "upstream media server closed the connection"
+                    self._close_socket(client)
+                    self._close_socket(upstream)
+                    return
+                client.sendall(chunk)
+        except OSError as exc:
+            if not self._stopping.is_set():
+                self._error = sanitize(str(exc), self.token)
+            self._close_socket(client)
+            self._close_socket(upstream)
+
+    @staticmethod
+    def _close_socket(connection: socket.socket | None) -> None:
+        if connection is None:
+            return
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+
+class ScenePipeline:
+    def __init__(
+        self,
+        settings: Settings,
+        request: PublishRequest,
+        token: str,
+        encoder: str,
+    ):
+        self.settings = settings
+        self.request = request
+        self.token = token
+        self.encoder = encoder
+        ensure_private_directory(settings.runtime_dir)
+        self.lease_lock = acquire_lease_lock(
+            settings.runtime_dir / f"lease-{request.lease_id.hex}.lock"
+        )
+        self.session_dir = settings.runtime_dir / f"lease-{request.lease_id.hex}"
+        try:
+            self._prepare_session_directory()
+        except Exception:
+            self._release_lease_lock()
+            raise
+        self.display = DisplayLease(settings, self.session_dir)
+        self.display_process: subprocess.Popen[bytes] | None = None
+        self.gzclient_process: subprocess.Popen[bytes] | None = None
+        self.ffmpeg_process: subprocess.Popen[bytes] | None = None
+        self.rtsp_proxy: RtspPublishProxy | None = None
+        self.sidecar_name = f"robotswarm-viewer-{request.lease_id.hex}"
+        self.logs: list[BinaryIO] = []
+
+    def _prepare_session_directory(self) -> None:
+        try:
+            metadata = self.session_dir.lstat()
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None:
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise PublisherError(
+                    "stale viewer lease runtime is not a private owned directory"
+                )
+            shutil.rmtree(self.session_dir)
+        self.session_dir.mkdir(mode=0o700)
+
+    def _release_lease_lock(self) -> None:
+        if self.lease_lock is None:
+            return
+        fcntl.flock(self.lease_lock.fileno(), fcntl.LOCK_UN)
+        self.lease_lock.close()
+        self.lease_lock = None
+
+    def start(self) -> None:
+        startup_deadline = time.monotonic() + self.settings.startup_timeout
+        self.display.allocate()
+        self._start_display(startup_deadline)
+        image, network_id, worker_id = self._inspect_session_container()
+        gateway = None
+        if self.settings.display_transport == "tcp":
+            gateway = self._inspect_session_network_gateway(network_id, worker_id)
+        self._remove_matching_stale_sidecar()
+        self._start_gzclient(image, gateway)
+        self._wait_for_gazebo_window(startup_deadline)
+        self._start_ffmpeg()
+        self._wait_until_stable(startup_deadline)
+
+    def _start_display(self, startup_deadline: float) -> None:
+        log = open_log(self.session_dir, "display.log")
+        self.logs.append(log)
+        command = [
+            self.settings.display_server,
+            self.display.name,
+            "-screen",
+            "0",
+            f"{self.settings.width}x{self.settings.height}x24",
+        ]
+        if self.settings.display_transport == "tcp":
+            command.extend(["-nolisten", "unix", "-listen", "tcp"])
+        else:
+            command.extend(["-nolisten", "tcp"])
+        command.extend(
+            ["-auth", str(self.display.xauthority_path), "-noreset"]
+        )
+        self.display_process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            env=safe_environment(),
+        )
+        while time.monotonic() < startup_deadline:
+            if stop_requested:
+                raise PublisherError("viewer startup was interrupted")
+            if self.display_process.poll() is not None:
+                raise PublisherError(
+                    "private display failed to start: "
+                    + tail_log(self.session_dir / "display.log", self.token)
+                )
+            if self.settings.display_transport == "tcp":
+                try:
+                    with socket.create_connection(
+                        ("127.0.0.1", self.display.tcp_port),
+                        timeout=0.1,
+                    ):
+                        return
+                except OSError:
+                    pass
+            else:
+                try:
+                    mode = self.display.socket_path.stat().st_mode
+                    if stat.S_ISSOCK(mode):
+                        return
+                except FileNotFoundError:
+                    pass
+            time.sleep(0.1)
+        raise PublisherError("private display did not create its X endpoint")
+
+    def _inspect_session_container(self) -> tuple[str, str, uuid.UUID]:
+        result = run_command(
+            [
+                self.settings.docker,
+                "inspect",
+                "--type",
+                "container",
+                self.request.container_id,
+            ]
+        )
+        try:
+            documents = json.loads(result.stdout)
+            details = documents[0]
+            labels = details["Config"]["Labels"] or {}
+            image = details["Image"]
+            networks = details["NetworkSettings"]["Networks"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise PublisherError("Docker returned invalid session metadata") from exc
+        if details.get("Id") != self.request.container_id:
+            raise PublisherError("Docker resolved a different session container")
+        if details.get("Name") != f"/{self.request.container_name}":
+            raise PublisherError("Docker container name does not match the session")
+        if details.get("State", {}).get("Running") is not True:
+            raise PublisherError("session container is not running")
+        if labels.get(MANAGED_LABEL) != "true":
+            raise PublisherError("session container is not worker-managed")
+        if labels.get(SESSION_ID_LABEL) != str(self.request.session_id):
+            raise PublisherError("session container ownership label is invalid")
+        try:
+            worker_id = uuid.UUID(labels.get(WORKER_ID_LABEL, ""))
+        except ValueError as exc:
+            raise PublisherError("session container worker label is invalid") from exc
+        if str(worker_id) != labels.get(WORKER_ID_LABEL):
+            raise PublisherError("session container worker label is invalid")
+        if not isinstance(image, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
+            raise PublisherError("session container image is not immutable")
+        expected_network_name = f"robotswarm-{self.request.session_id.hex}-net"
+        if not isinstance(networks, dict) or set(networks) != {expected_network_name}:
+            raise PublisherError(
+                "session container is not attached to its one private network"
+            )
+        network_id = networks[expected_network_name].get("NetworkID")
+        if not isinstance(network_id, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", network_id
+        ):
+            raise PublisherError("session container network ID is invalid")
+        return image, network_id, worker_id
+
+    def _inspect_session_network_gateway(
+        self, network_id: str, worker_id: uuid.UUID
+    ) -> str:
+        result = run_command(
+            [self.settings.docker, "network", "inspect", network_id]
+        )
+        try:
+            details = json.loads(result.stdout)[0]
+            labels = details["Labels"] or {}
+            configurations = details["IPAM"]["Config"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise PublisherError("Docker returned invalid session network metadata") from exc
+
+        expected_name = f"robotswarm-{self.request.session_id.hex}-net"
+        if details.get("Id") != network_id or details.get("Name") != expected_name:
+            raise PublisherError("Docker resolved a different session network")
+        if details.get("Internal") is not True or labels.get(MANAGED_LABEL) != "true":
+            raise PublisherError("session network is not a private worker network")
+        if (
+            labels.get(SESSION_ID_LABEL) != str(self.request.session_id)
+            or labels.get(WORKER_ID_LABEL) != str(worker_id)
+        ):
+            raise PublisherError("session network ownership labels are invalid")
+        if not isinstance(configurations, list):
+            raise PublisherError("session network has no usable IPv4 gateway")
+
+        gateways = []
+        for configuration in configurations:
+            if not isinstance(configuration, dict):
+                continue
+            try:
+                gateway = ipaddress.ip_address(configuration.get("Gateway", ""))
+                subnet = ipaddress.ip_network(
+                    configuration.get("Subnet", ""), strict=False
+                )
+            except ValueError:
+                continue
+            if (
+                gateway.version == 4
+                and subnet.version == 4
+                and gateway in subnet
+                and not gateway.is_unspecified
+                and not gateway.is_loopback
+                and not gateway.is_multicast
+            ):
+                gateways.append(str(gateway))
+        if len(gateways) != 1:
+            raise PublisherError("session network has no unique IPv4 gateway")
+        return gateways[0]
+
+    def _remove_matching_stale_sidecar(self) -> None:
+        result = run_command(
+            [self.settings.docker, "inspect", "--type", "container", self.sidecar_name],
+            check=False,
+        )
+        if result.returncode != 0:
+            return
+        try:
+            details = json.loads(result.stdout)[0]
+            labels = details["Config"]["Labels"] or {}
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise PublisherError("existing viewer sidecar metadata is invalid") from exc
+        if (
+            labels.get(VIEWER_LABEL) != "true"
+            or labels.get(VIEWER_LEASE_LABEL) != str(self.request.lease_id)
+            or labels.get(SESSION_ID_LABEL) != str(self.request.session_id)
+        ):
+            raise PublisherError("viewer sidecar name is already owned by another process")
+        run_command(
+            [self.settings.docker, "rm", "--force", self.sidecar_name], timeout=15.0
+        )
+
+    def _start_gzclient(self, image: str, gateway: str | None) -> None:
+        log = open_log(self.session_dir, "gzclient.log")
+        self.logs.append(log)
+        command = [
+            self.settings.docker,
+            "run",
+            "--rm",
+            "--name",
+            self.sidecar_name,
+            "--label",
+            f"{VIEWER_LABEL}=true",
+            "--label",
+            f"{VIEWER_LEASE_LABEL}={self.request.lease_id}",
+            "--label",
+            f"{SESSION_ID_LABEL}={self.request.session_id}",
+            "--network",
+            f"container:{self.request.container_id}",
+            "--init",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "256",
+            "--memory",
+            "2g",
+            "--shm-size",
+            "256m",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
+            "--tmpfs",
+            "/run:rw,nosuid,nodev,size=32m,mode=0755",
+        ]
+        if self.settings.display_transport == "unix":
+            command.extend(
+                [
+                    "--mount",
+                    f"type=bind,src={self.settings.x_socket_dir},dst=/tmp/.X11-unix,readonly",
+                ]
+            )
+        command.extend(
+            [
+                "--mount",
+                f"type=bind,src={self.display.xauthority_path},dst=/run/viewer.Xauthority,readonly",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "--env",
+                f"DISPLAY={self.display.sidecar_name(gateway)}",
+                "--env",
+                "XAUTHORITY=/run/viewer.Xauthority",
+                "--env",
+                "HOME=/tmp",
+                "--env",
+                "ROS_HOME=/tmp/ros",
+                "--env",
+                "ROS_MASTER_URI=http://127.0.0.1:11311",
+                "--env",
+                "GAZEBO_MASTER_URI=http://127.0.0.1:11345",
+                "--env",
+                "QT_X11_NO_MITSHM=1",
+                "--env",
+                "NVIDIA_DRIVER_CAPABILITIES=graphics,utility",
+            ]
+        )
+        if self.settings.gpu_request != "none":
+            command.extend(["--gpus", self.settings.gpu_request])
+        command.extend([image, "gzclient", "--verbose"])
+        self.gzclient_process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            env=safe_environment(),
+        )
+
+    def _wait_for_gazebo_window(self, startup_deadline: float) -> None:
+        environment = safe_environment()
+        environment["DISPLAY"] = self.display.host_name
+        environment["XAUTHORITY"] = str(self.display.xauthority_path)
+        while time.monotonic() < startup_deadline:
+            if stop_requested:
+                raise PublisherError("viewer startup was interrupted")
+            if self.gzclient_process is None or self.gzclient_process.poll() is not None:
+                raise PublisherError(
+                    "gzclient failed to start: "
+                    + tail_log(self.session_dir / "gzclient.log", self.token)
+                )
+            try:
+                result = subprocess.run(
+                    [
+                        self.settings.xwininfo,
+                        "-root",
+                        "-tree",
+                        "-display",
+                        self.display.host_name,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=3,
+                    env=environment,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                time.sleep(0.25)
+                continue
+            if result.returncode == 0 and self.settings.window_pattern.search(result.stdout):
+                return
+            time.sleep(0.25)
+        raise PublisherError("gzclient did not create a Gazebo window")
+
+    def _start_ffmpeg(self) -> None:
+        log = open_log(self.session_dir, "ffmpeg.log")
+        self.logs.append(log)
+        self.rtsp_proxy = RtspPublishProxy(self.request, self.token)
+        self.rtsp_proxy.start()
+        key_interval = self.settings.frame_rate * 2
+        command = [
+            self.settings.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-thread_queue_size",
+            "512",
+            "-f",
+            "x11grab",
+            "-draw_mouse",
+            "0",
+            "-video_size",
+            f"{self.settings.width}x{self.settings.height}",
+            "-framerate",
+            str(self.settings.frame_rate),
+            "-i",
+            f"{self.display.host_name}.0",
+            "-an",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            self.encoder,
+        ]
+        if self.encoder == "h264_nvenc":
+            command.extend(
+                [
+                    "-preset",
+                    "p4",
+                    "-tune",
+                    "ll",
+                    "-rc",
+                    "cbr",
+                    "-bf",
+                    "0",
+                ]
+            )
+        else:
+            command.extend(["-preset", "veryfast", "-tune", "zerolatency"])
+        command.extend(
+            [
+                "-b:v",
+                self.settings.bit_rate,
+                "-maxrate",
+                self.settings.bit_rate,
+                "-bufsize",
+                self.settings.bit_rate,
+                "-g",
+                str(key_interval),
+                "-keyint_min",
+                str(key_interval),
+                "-f",
+                "rtsp",
+                "-rtsp_transport",
+                "tcp",
+                "-muxdelay",
+                "0.1",
+                self.rtsp_proxy.local_url,
+            ]
+        )
+        environment = safe_environment()
+        environment["DISPLAY"] = self.display.host_name
+        environment["XAUTHORITY"] = str(self.display.xauthority_path)
+        self.ffmpeg_process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            env=environment,
+        )
+
+    def _wait_until_stable(self, startup_deadline: float) -> None:
+        stable_at = time.monotonic() + self.settings.settle_seconds
+        while time.monotonic() < stable_at:
+            if stop_requested:
+                raise PublisherError("viewer startup was interrupted")
+            if time.monotonic() >= startup_deadline:
+                raise PublisherError("viewer startup exceeded its time budget")
+            self.raise_if_child_exited()
+            time.sleep(0.1)
+        if self.rtsp_proxy is None or not self.rtsp_proxy.ready:
+            raise PublisherError("FFmpeg did not connect to the RTSP credential proxy")
+
+    def raise_if_child_exited(self) -> None:
+        if self.rtsp_proxy is not None:
+            self.rtsp_proxy.raise_if_failed()
+        checks = (
+            (self.display_process, "private display", "display.log"),
+            (self.gzclient_process, "gzclient", "gzclient.log"),
+            (self.ffmpeg_process, "FFmpeg publisher", "ffmpeg.log"),
+        )
+        for process, description, log_name in checks:
+            if process is not None and process.poll() is not None:
+                raise PublisherError(
+                    f"{description} stopped: "
+                    + tail_log(self.session_dir / log_name, self.token)
+                )
+
+    def stop(self) -> None:
+        terminate_process(self.ffmpeg_process, interrupt=True)
+        if self.rtsp_proxy is not None:
+            self.rtsp_proxy.stop()
+        self._run_cleanup_command(
+            [self.settings.docker, "stop", "--time", "5", self.sidecar_name]
+        )
+        terminate_process(self.gzclient_process)
+        self._run_cleanup_command(
+            [self.settings.docker, "rm", "--force", self.sidecar_name]
+        )
+        terminate_process(self.display_process)
+        for log in self.logs:
+            try:
+                log.close()
+            except OSError:
+                pass
+        self.display.release()
+        shutil.rmtree(self.session_dir, ignore_errors=True)
+        self._release_lease_lock()
+
+    def _run_cleanup_command(self, command: Sequence[str]) -> None:
+        try:
+            run_command(command, timeout=10.0, check=False)
+        except PublisherError:
+            # Cleanup is best effort.  X server loss makes gzclient exit, and
+            # Docker --rm removes the sidecar after that exit as a second path.
+            pass
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="robotswarm-viewer-publisher")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    probe = commands.add_parser("probe")
+    probe.add_argument("--protocol-version", required=True, type=int)
+    probe.add_argument("--publish-base-url", required=True)
+
+    publish = commands.add_parser("publish")
+    publish.add_argument("--protocol-version", required=True, type=int)
+    publish.add_argument("--session-id", required=True)
+    publish.add_argument("--lease-id", required=True)
+    publish.add_argument("--expires-at", required=True)
+    publish.add_argument("--container-id", required=True)
+    publish.add_argument("--container-name", required=True)
+    publish.add_argument("--source", required=True)
+    publish.add_argument("--robot-runtime-id")
+    publish.add_argument("--source-id", required=True)
+    publish.add_argument("--stream-path", required=True)
+    publish.add_argument("--publish-base-url", required=True)
+    return parser
+
+
+stop_requested = False
+publish_token_for_diagnostics: str | None = None
+
+
+def request_stop(_signum: int, _frame: object) -> None:
+    global stop_requested
+    stop_requested = True
+
+
+def run_probe(arguments: argparse.Namespace) -> int:
+    if arguments.protocol_version != PROTOCOL_VERSION:
+        raise PublisherError("unsupported publisher protocol version")
+    validate_base_url(arguments.publish_base_url)
+    settings = Settings.load()
+    verify_dependencies(settings)
+    print(
+        json.dumps(
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "ready": True,
+                "videoCodec": "H264",
+                "sources": ["Scene"],
+            },
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    return 0
+
+
+def run_publish(arguments: argparse.Namespace) -> int:
+    global publish_token_for_diagnostics
+    if arguments.protocol_version != PROTOCOL_VERSION:
+        raise PublisherError("unsupported publisher protocol version")
+    request = parse_publish_request(arguments)
+    if "ROBOTSWARM_MEDIA_TOKEN" in os.environ:
+        raise PublisherError("publish token must be provided on standard input")
+    token = read_publish_token()
+    publish_token_for_diagnostics = token
+    settings = Settings.load()
+    encoder = verify_dependencies(settings)
+    pipeline = ScenePipeline(settings, request, token, encoder)
+    try:
+        pipeline.start()
+        print("READY", flush=True)
+        while not stop_requested:
+            if dt.datetime.now(dt.timezone.utc) >= request.expires_at:
+                break
+            pipeline.raise_if_child_exited()
+            time.sleep(0.25)
+    finally:
+        pipeline.stop()
+    return 0
+
+
+def main() -> int:
+    try:
+        isolate_process_group()
+        signal.signal(signal.SIGINT, request_stop)
+        signal.signal(signal.SIGTERM, request_stop)
+        arguments = build_parser().parse_args()
+        if arguments.command == "probe":
+            return run_probe(arguments)
+        return run_publish(arguments)
+    except (PublisherError, OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"viewer publisher: {sanitize(str(exc), publish_token_for_diagnostics)}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -21,6 +21,12 @@ find_package(catkin REQUIRED COMPONENTS
   actionlib
   actionlib_msgs
 )
+find_package(gazebo REQUIRED)
+# Gazebo Classic's OGRE renderer uses the legacy libGL entry points too.
+set(OpenGL_GL_PREFERENCE LEGACY)
+find_package(OpenGL REQUIRED)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${GAZEBO_CXX_FLAGS}")
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -132,6 +138,19 @@ catkin_package(
 include_directories(
 # include
   ${catkin_INCLUDE_DIRS}
+  ${GAZEBO_INCLUDE_DIRS}
+  ${OPENGL_INCLUDE_DIR}
+)
+
+link_directories(${GAZEBO_LIBRARY_DIRS})
+
+## Loaded only by gzclient during the visible rendering preflight.
+add_library(robotswarm_gazebo_gui_probe SHARED
+  src/gazebo_gui_probe.cpp
+)
+target_link_libraries(robotswarm_gazebo_gui_probe
+  ${GAZEBO_LIBRARIES}
+  ${OPENGL_LIBRARIES}
 )
 
 ## Declare a C++ library
@@ -175,6 +194,7 @@ include_directories(
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   scripts/bridge.py
+  scripts/gazebo_gui_preflight.py
   scripts/spawn_robots.py
   scripts/core/fleet_manager.py
   scripts/core/task_orchestrator.py
@@ -193,11 +213,9 @@ catkin_install_python(PROGRAMS
 
 ## Mark libraries for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_libraries.html
-# install(TARGETS ${PROJECT_NAME}
-#   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-# )
+install(TARGETS robotswarm_gazebo_gui_probe
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+)
 
 ## Mark cpp header files for installation
 # install(DIRECTORY include/${PROJECT_NAME}/
@@ -210,6 +228,7 @@ catkin_install_python(PROGRAMS
 install(DIRECTORY
   config
   launch
+  models
   rviz
   worlds
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}

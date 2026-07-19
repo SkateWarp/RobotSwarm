@@ -100,9 +100,10 @@ permissions.
   containers remain available for restart recovery, but their ROS watchdog
   emergency-stops motion when worker heartbeats cease.
 - If backend contact is lost for 30 seconds, the independent safety monitor
-  emergency-stops every running ROS session. If ROS cannot acknowledge the
-  stop, the worker stops that session container and reports the failure after
-  reconnecting.
+  latches every running session before asking ROS to emergency-stop. The same
+  latch cancels active work and rejects queued motion/fleet commands until a
+  confirmed reset or stop. If ROS cannot acknowledge the stop, the worker
+  stops that session container and reports the failure after reconnecting.
 - Control-heartbeat pulses stop when backend contact is older than 15 seconds.
   ROS then latches its own watchdog stop after the configured 10-second
   timeout, covering a dead worker or a stale worker lease.
@@ -110,8 +111,10 @@ permissions.
 ## Current scaffold boundaries
 
 - `ProvisionSession`, `UpdateFleet`, `StartTask`, `PauseTask`, `ResumeTask`,
-  `CancelTask`, `EmergencyStop`, `ResetEmergencyStop`, and `StopSession` are
-  implemented. `SetViewerSource` remains unsupported.
+  `CancelTask`, `EmergencyStop`, `ResetEmergencyStop`, `StopSession`, and the
+  `SetViewerSource` control path are implemented. Viewer capability is still
+  advertised only after the configured publisher helper passes its runtime
+  probe; the default configuration keeps it disabled.
 - Backend task types map to ROS as `FollowLeader` -> `follow_leader`, `Figure`
   -> `formation`, and `CollaborativeTransport` -> `transport`. The backend
   task-run UUID is always sent as ROS `task_id`; caller-supplied `task_id` and
@@ -122,14 +125,89 @@ permissions.
 - Fleet updates replace the complete robot roster. The current ROS topic API
   cannot safely place incremental additions relative to occupied positions;
   full replacement avoids spawning robots on top of one another.
-- The container is headless and publishes no ports. WebRTC scene/robot-camera
-  encoding, per-session VNC, TURN, and viewer leases remain separate work.
-- Gazebo Classic GPU rendering under WSL/NVIDIA still needs an integration
-  benchmark. `--gpus` exposes the device, but the ROS image does not yet
-  include a verified EGL/VirtualGL/X server path.
+- The simulation container remains isolated and publishes no ports. A viewer
+  helper must create a private per-session display and a visible `gzclient`;
+  attaching every session to the shared WSLg `:0` display is not supported.
+  The shipped helper advertises `Scene` only after its host probe succeeds;
+  the current TurtleBot image has no supported robot-camera sensor.
+- The visible WSL/NVIDIA preflight has been exercised on the commissioning PC:
+  the RTX 3080 rendered the Gazebo viewport at 58.6 average FPS while physics
+  held a 2.996 real-time factor. Deployment should rerun the preflight after
+  driver, Docker Desktop, WSL, or ROS-image changes.
 - Managed containers launch `swarm_main.launch` with
   `start_legacy_bridge:=false`; the worker is the sole backend control-plane
   adapter for those sessions.
 - Completion state is durable in the backend, not in a local worker database.
   If the worker is terminated before reporting completion, the backend
   redelivers the command and the Docker operation reconciles idempotently.
+
+## Viewer publisher helper contract
+
+Viewer publishing is an external, locally configured process. The executable
+is never selected by a backend command. Keep `Worker__Viewer__Enabled=false`
+until the shipped helper and full media path pass the host smoke test.
+
+The worker probes the helper with:
+
+```text
+<publisher> probe --protocol-version 1
+```
+
+The probe must exit successfully and print one JSON object like:
+
+```json
+{"protocolVersion":1,"ready":true,"videoCodec":"H264","sources":["Scene"]}
+```
+
+Do not report `RobotCamera` until the TurtleBot model has a tested camera
+sensor/topic. For a viewer command the worker launches the helper with
+separate, non-shell arguments containing the session/container identity,
+lease ID and expiry, canonical source/path, and configured RTSP base URL. The
+probe receives no backend or media credential. Each `SetViewerSource` command
+instead carries its own short-lived, publish-only token. The worker validates
+that token, writes one bounded line to the publishing helper's redirected
+standard input, then flushes and closes the pipe. The probe receives closed,
+empty input. Neither the long-lived worker credential nor the publish token is
+placed in an environment, process arguments, or logs. The helper's loopback
+RTSP proxy path-checks FFmpeg requests and injects MediaMTX's `token` query
+upstream in memory.
+
+The helper's first stdout line must be exactly `READY`, and only after the
+private display, `gzclient`, H.264 encoder, and MediaMTX publisher are live.
+It must remain in the foreground and own those child processes instead of
+daemonizing them; stopping the helper must stop the whole display/capture
+pipeline for that session.
+The worker completes `SetViewerSource` only after that marker. It kills the
+publisher when the lease expires, when another source replaces it, when the
+session stops, or when the worker service shuts down.
+On Linux and macOS, normal stops first send the helper `SIGTERM` so it can
+remove its private display and encoder processes. The worker waits up to
+`Worker__Viewer__StopTimeoutSeconds` (five seconds by default), then force-kills
+the process tree if the helper has not exited. Failed probes and failed startup
+attempts are force-killed immediately.
+After `READY`, an unexpected helper exit is watched and restarted for the same
+lease up to three times with one-, two-, and four-second delays. An intentional
+stop, replacement, expiry, or worker shutdown cancels recovery. Exhausting the
+budget leaves the publisher stopped instead of spinning indefinitely.
+The publishing helper owns a private POSIX process group. Before recovery the
+worker reaps that exact group with bounded `SIGTERM`/`SIGKILL` escalation, so
+children left behind by a hard-killed helper cannot collide with its
+replacement. A private per-lease lock serializes ownership, and only a
+same-owner mode-0700 stale runtime directory is eligible for reclamation.
+
+Required settings after the production media path is approved:
+
+```bash
+export Worker__Viewer__Enabled="true"
+# The GPU deployment supplies an absolute, versioned PublisherExecutable path.
+export Worker__Viewer__PublishBaseUrl="rtsp://10.0.0.126:8554"
+export Worker__Viewer__StopTimeoutSeconds="5"
+```
+
+The production workflow ships the helper with mode `0755`, and the deployment
+script writes its absolute, versioned path into every release. The stable
+identity file owns the enable switch. When that switch is `true`, deployment
+requires the RTSP endpoint and a successful H.264 helper probe. The Unix
+display transport receives the reviewed `PrivateTmp=false` unit needed for its
+socket mount; authenticated TCP mode and disabled workers retain
+`PrivateTmp=true`.

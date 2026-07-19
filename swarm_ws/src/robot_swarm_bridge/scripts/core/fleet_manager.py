@@ -28,8 +28,15 @@ from typing import Dict, List, Optional, Tuple
 
 from std_msgs.msg import String
 from geometry_msgs.msg import Pose, Point, Quaternion
-from gazebo_msgs.srv import SpawnModel, SpawnModelRequest, DeleteModel, DeleteModelRequest
+from gazebo_msgs.srv import (
+    SpawnModel,
+    SpawnModelRequest,
+    DeleteModel,
+    DeleteModelRequest,
+    GetPhysicsProperties,
+)
 from gazebo_msgs.msg import ModelStates
+from std_srvs.srv import Empty
 import tf.transformations
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -60,7 +67,7 @@ class FleetManager:
     Responsibilities
     ----------------
     * Spawn robots via ``/gazebo/spawn_urdf_model`` after xacro processing
-    * Launch a ``robot_state_publisher`` per robot (subprocess)
+    * Optionally launch a ``robot_state_publisher`` per robot (subprocess)
     * Delete robots via ``/gazebo/delete_model``, kill child processes, clean params
     * Generate spawn positions in *grid*, *circle*, or *line* patterns
     * Track live poses from ``/gazebo/model_states``
@@ -84,7 +91,37 @@ class FleetManager:
             '~minimum_spawn_spacing', 0.35
         )
         self.arena_margin: float = rospy.get_param('~arena_margin', 0.35)
+        self.arena_profile: str = rospy.get_param(
+            '~arena_profile', 'swarm_arena'
+        )
+        # Motion is already ramped by each behaviour's safety controller.
+        # Gazebo Classic's second acceleration integrator can retain an old
+        # wheel speed after a command changes, especially at 3x real time.
+        self.gazebo_wheel_acceleration: float = max(
+            0.0, float(rospy.get_param('~gazebo_wheel_acceleration', 0.0))
+        )
+        # Standalone users keep the historic TF behaviour.  The main swarm
+        # launch disables it because Gazebo already supplies the state used by
+        # our controllers, and one publisher per robot is costly at scale.
+        self.publish_robot_tf: bool = rospy.get_param(
+            '~publish_robot_tf', True
+        )
+        self.spawn_obstacle_clearance: float = max(
+            0.0, rospy.get_param('~spawn_obstacle_clearance', 0.30)
+        )
+        self.spawn_search_step: float = max(
+            0.05, rospy.get_param('~spawn_search_step', 0.10)
+        )
+        self.spawn_exclusion_zones: List[Dict] = rospy.get_param(
+            '~spawn_exclusion_zones', []
+        )
         self.auto_spawn: bool = rospy.get_param('~auto_spawn', False)
+        if self.publish_robot_tf:
+            rospy.loginfo("Per-robot TF publishing is enabled.")
+        else:
+            rospy.loginfo(
+                "Per-robot TF publishing is disabled; Gazebo state remains available."
+            )
 
         # ----- internal state -----
         self.robots: Dict[str, RobotRecord] = {}
@@ -92,6 +129,7 @@ class FleetManager:
         self._spawn_lock = threading.Lock()
         self._next_index: int = 0  # monotonically increasing robot index
         self._retired_robot_ids = set()
+        self._model_poses: Dict[str, Tuple[float, float, float]] = {}
 
         # ----- prepare URDF template once -----
         self._robot_description_xml: str = self._process_urdf()
@@ -100,8 +138,16 @@ class FleetManager:
         rospy.loginfo("Waiting for Gazebo spawn/delete services ...")
         rospy.wait_for_service('/gazebo/spawn_urdf_model', timeout=60.0)
         rospy.wait_for_service('/gazebo/delete_model', timeout=60.0)
+        rospy.wait_for_service('/gazebo/get_physics_properties', timeout=60.0)
+        rospy.wait_for_service('/gazebo/pause_physics', timeout=60.0)
+        rospy.wait_for_service('/gazebo/unpause_physics', timeout=60.0)
         self._spawn_srv = rospy.ServiceProxy('/gazebo/spawn_urdf_model', SpawnModel)
         self._delete_srv = rospy.ServiceProxy('/gazebo/delete_model', DeleteModel)
+        self._get_physics_srv = rospy.ServiceProxy(
+            '/gazebo/get_physics_properties', GetPhysicsProperties
+        )
+        self._pause_srv = rospy.ServiceProxy('/gazebo/pause_physics', Empty)
+        self._unpause_srv = rospy.ServiceProxy('/gazebo/unpause_physics', Empty)
         rospy.loginfo("Gazebo services available.")
 
         # ----- publishers -----
@@ -159,12 +205,32 @@ class FleetManager:
             )
             rospy.loginfo("Processing xacro: %s", urdf_path)
             doc = xacro.process_file(urdf_path)
+            self._configure_drive_plugin(doc)
             robot_description = doc.toxml()
             rospy.loginfo("URDF processed successfully (%d bytes).", len(robot_description))
             return robot_description
         except Exception as exc:
             rospy.logerr("Failed to process TurtleBot3 xacro: %s", exc)
             return ""
+
+    def _configure_drive_plugin(self, document) -> None:
+        """Apply the simulator-specific wheel limit to the processed URDF."""
+        elements = document.getElementsByTagName('wheelAcceleration')
+        if not elements:
+            raise ValueError(
+                'TurtleBot3 URDF has no wheelAcceleration setting'
+            )
+
+        value = '{:g}'.format(self.gazebo_wheel_acceleration)
+        for element in elements:
+            if element.firstChild is None:
+                element.appendChild(document.createTextNode(value))
+            else:
+                element.firstChild.nodeValue = value
+
+        rospy.loginfo(
+            "Gazebo wheel acceleration set to %sm/s^2", value
+        )
 
     # ------------------------------------------------------------------
     # Spawn patterns
@@ -265,35 +331,191 @@ class FleetManager:
         pattern: str,
         existing_positions: List[Tuple[float, float]],
     ) -> List[Pose]:
-        """Choose pattern positions that keep clear of the current fleet."""
-        if not existing_positions:
-            return self._generate_positions(count, pattern)
+        """Place a complete pattern clear of robots and arena obstacles."""
+        poses = self._generate_positions(count, pattern)
+        if not poses:
+            return []
 
-        clearance = max(
+        return self._translate_pattern_to_clear_space(
+            poses, existing_positions
+        )
+
+    def _translate_pattern_to_clear_space(
+        self,
+        poses: List[Pose],
+        existing_positions: List[Tuple[float, float]],
+    ) -> List[Pose]:
+        """
+        Find the smallest safe translation for a requested pattern.
+
+        Moving the whole pattern keeps its spacing and shape intact.  The
+        search is deterministic so replacing a fleet gives the same initial
+        layout every time.
+        """
+        if not poses:
+            return []
+
+        for dx, dy in self._translation_candidates(poses):
+            points = [
+                (pose.position.x + dx, pose.position.y + dy)
+                for pose in poses
+            ]
+            if not all(
+                self._spawn_point_is_clear(x, y, existing_positions)
+                for x, y in points
+            ):
+                continue
+
+            translated: List[Pose] = []
+            for pose, (x, y) in zip(poses, points):
+                moved = Pose()
+                moved.position = Point(x=x, y=y, z=pose.position.z)
+                moved.orientation = Quaternion(
+                    x=pose.orientation.x,
+                    y=pose.orientation.y,
+                    z=pose.orientation.z,
+                    w=pose.orientation.w,
+                )
+                translated.append(moved)
+            return translated
+
+        rospy.logerr(
+            "No obstacle-free location fits this %d-robot pattern in the arena.",
+            len(poses),
+        )
+        return []
+
+    def _translation_candidates(
+        self, poses: List[Pose]
+    ) -> List[Tuple[float, float]]:
+        """Return in-bounds translations, nearest to the origin first."""
+        usable_half = self.arena_size / 2.0 - self.arena_margin
+        min_x = min(pose.position.x for pose in poses)
+        max_x = max(pose.position.x for pose in poses)
+        min_y = min(pose.position.y for pose in poses)
+        max_y = max(pose.position.y for pose in poses)
+
+        min_dx = -usable_half - min_x
+        max_dx = usable_half - max_x
+        min_dy = -usable_half - min_y
+        max_dy = usable_half - max_y
+        if min_dx > max_dx or min_dy > max_dy:
+            return []
+
+        step = self.spawn_search_step
+        x_start = int(math.ceil((min_dx - 1e-9) / step))
+        x_end = int(math.floor((max_dx + 1e-9) / step))
+        y_start = int(math.ceil((min_dy - 1e-9) / step))
+        y_end = int(math.floor((max_dy + 1e-9) / step))
+
+        candidates = [
+            (round(ix * step, 10), round(iy * step, 10))
+            for ix in range(x_start, x_end + 1)
+            for iy in range(y_start, y_end + 1)
+        ]
+        return sorted(candidates, key=self._translation_sort_key)
+
+    @staticmethod
+    def _translation_sort_key(offset: Tuple[float, float]):
+        """Prefer a short move, then a vertical and positive move on ties."""
+        dx, dy = offset
+        return (
+            round(dx * dx + dy * dy, 12),
+            abs(dx) + abs(dy),
+            abs(dx),
+            0 if dy >= 0.0 else 1,
+            0 if dx >= 0.0 else 1,
+        )
+
+    def _spawn_point_is_clear(
+        self,
+        x: float,
+        y: float,
+        existing_positions: List[Tuple[float, float]],
+    ) -> bool:
+        """Check arena bounds, live robots, and configured collision zones."""
+        usable_half = self.arena_size / 2.0 - self.arena_margin
+        if abs(x) > usable_half + 1e-9 or abs(y) > usable_half + 1e-9:
+            return False
+
+        robot_clearance = max(
             self.default_spacing, self.minimum_spawn_spacing
         )
-        candidate_count = len(existing_positions) + count
+        if any(
+            math.hypot(x - other_x, y - other_y)
+            < robot_clearance - 1e-9
+            for other_x, other_y in existing_positions
+        ):
+            return False
 
-        while True:
-            candidates = self._generate_positions(candidate_count, pattern)
-            if not candidates:
-                return []
+        for zone in self._active_exclusion_zones():
+            padding = max(0.0, float(zone.get('padding', 0.0)))
+            required = self.spawn_obstacle_clearance + padding
+            if self._clearance_from_zone(x, y, zone) < required - 1e-9:
+                return False
 
-            available: List[Pose] = []
-            occupied = list(existing_positions)
-            for pose in candidates:
-                point = (pose.position.x, pose.position.y)
-                if all(
-                    math.hypot(point[0] - x, point[1] - y)
-                    >= clearance - 1e-9
-                    for x, y in occupied
-                ):
-                    available.append(pose)
-                    occupied.append(point)
-                    if len(available) == count:
-                        return available
+        return True
 
-            candidate_count += 1
+    def _active_exclusion_zones(self):
+        """Yield zones that belong to the selected arena profile."""
+        for zone in self.spawn_exclusion_zones:
+            if not isinstance(zone, dict):
+                continue
+            worlds = zone.get('worlds')
+            if isinstance(worlds, str):
+                worlds = [worlds]
+            if worlds and self.arena_profile not in worlds:
+                continue
+            if zone.get('shape') in ('box', 'circle'):
+                yield zone
+
+    def _clearance_from_zone(
+        self, x: float, y: float, zone: Dict
+    ) -> float:
+        """Return signed distance from a point to one collision footprint."""
+        center_x = float(zone.get('x', 0.0))
+        center_y = float(zone.get('y', 0.0))
+        yaw = float(zone.get('yaw', 0.0))
+
+        model_name = zone.get('model')
+        if model_name in self._model_poses:
+            center_x, center_y, yaw = self._model_poses[model_name]
+            yaw += float(zone.get('yaw_offset', 0.0))
+
+        if zone.get('shape') == 'circle':
+            radius = max(0.0, float(zone.get('radius', 0.0)))
+            return math.hypot(x - center_x, y - center_y) - radius
+
+        half_width = max(0.0, float(zone.get('width', 0.0))) / 2.0
+        half_height = max(0.0, float(zone.get('height', 0.0))) / 2.0
+        cosine = math.cos(yaw)
+        sine = math.sin(yaw)
+        relative_x = x - center_x
+        relative_y = y - center_y
+        local_x = cosine * relative_x + sine * relative_y
+        local_y = -sine * relative_x + cosine * relative_y
+
+        outside_x = abs(local_x) - half_width
+        outside_y = abs(local_y) - half_height
+        if outside_x > 0.0 or outside_y > 0.0:
+            return math.hypot(max(outside_x, 0.0), max(outside_y, 0.0))
+
+        # A negative value also makes malformed or overlapping placements
+        # straightforward to identify in diagnostics and tests.
+        return -min(half_width - abs(local_x), half_height - abs(local_y))
+
+    @staticmethod
+    def _yaw_from_quaternion(quaternion: Quaternion) -> float:
+        """Extract planar yaw without depending on a second tf conversion."""
+        sin_yaw = 2.0 * (
+            quaternion.w * quaternion.z
+            + quaternion.x * quaternion.y
+        )
+        cos_yaw = 1.0 - 2.0 * (
+            quaternion.y * quaternion.y
+            + quaternion.z * quaternion.z
+        )
+        return math.atan2(sin_yaw, cos_yaw)
 
     # ------------------------------------------------------------------
     # Spawn / delete primitives
@@ -316,7 +538,7 @@ class FleetManager:
         -----
         1. Set ``/{robot_name}/robot_description`` param.
         2. Call ``/gazebo/spawn_urdf_model``.
-        3. Launch ``robot_state_publisher`` in the robot namespace.
+        3. Launch ``robot_state_publisher`` when TF publishing is enabled.
 
         Returns True on success.
         """
@@ -344,8 +566,11 @@ class FleetManager:
             rospy.logerr("Spawn service call failed for %s: %s", robot_name, exc)
             return False
 
-        # 3. Launch robot_state_publisher
-        proc = self._launch_state_publisher(robot_name)
+        # 3. TF is optional for simulation-only fleets.  Keeping this choice
+        # here also covers robots added later through the command interface.
+        proc = None
+        if self.publish_robot_tf:
+            proc = self._launch_state_publisher(robot_name)
 
         # 4. Book-keeping
         record = RobotRecord(robot_name, pose)
@@ -531,20 +756,71 @@ class FleetManager:
             else:
                 robot_ids = list(robot_ids)
 
-            # Gazebo can deliver old model-state snapshots after deletion.
-            # Ignore those IDs until this manager explicitly spawns them again.
-            with self._lock:
-                self._retired_robot_ids.update(robot_ids)
+            if not robot_ids:
+                return 0
 
-            deleted = 0
-            for rid in robot_ids:
-                if self.delete_single_robot(rid):
-                    deleted += 1
-                else:
-                    with self._lock:
-                        self._retired_robot_ids.discard(rid)
+            was_paused = self._pause_for_safe_deletion()
+            if was_paused is None:
+                return 0
+
+            try:
+                # Gazebo can deliver old model-state snapshots after deletion.
+                # Ignore those IDs until this manager explicitly spawns them again.
+                with self._lock:
+                    self._retired_robot_ids.update(robot_ids)
+
+                deleted = 0
+                for rid in robot_ids:
+                    if self.delete_single_robot(rid):
+                        deleted += 1
+                    else:
+                        with self._lock:
+                            self._retired_robot_ids.discard(rid)
+            finally:
+                if not was_paused:
+                    self._resume_after_deletion()
         self._publish_robot_list(None)
         return deleted
+
+    def _pause_for_safe_deletion(self) -> Optional[bool]:
+        """
+        Quiesce Gazebo before removing models and return its prior pause state.
+
+        TurtleBot models own sensor and drive plugins that run on Gazebo's
+        update loop.  Removing several live models can race those callbacks and
+        stall the server, so deletion is only attempted once physics is paused.
+        ``None`` means that the state could not be read or changed safely.
+        """
+        try:
+            physics = self._get_physics_srv()
+            if not physics.success:
+                rospy.logerr(
+                    "Cannot read Gazebo pause state: %s",
+                    physics.status_message,
+                )
+                return None
+
+            was_paused = bool(physics.pause)
+            if not was_paused:
+                self._pause_srv()
+            return was_paused
+        except rospy.ServiceException as exc:
+            rospy.logerr(
+                "Cannot pause Gazebo for safe fleet deletion: %s", exc
+            )
+            return None
+
+    def _resume_after_deletion(self):
+        """Resume a simulation that this manager paused for model removal."""
+        try:
+            self._unpause_srv()
+        except rospy.ServiceException as exc:
+            # Keep the server in its safe paused state and make the operational
+            # failure visible; never hide an exception from the delete itself.
+            rospy.logerr(
+                "Fleet deletion finished, but Gazebo could not resume: %s",
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Topic-based command interface
@@ -634,40 +910,61 @@ class FleetManager:
         Update tracked robot poses from ``/gazebo/model_states``.
         Also auto-detect externally-spawned robots with the ``tb3_`` prefix.
         """
-        # External model discovery changes the same capacity/name/placement
-        # inputs as spawn_robots(), so serialize it with the spawn transaction.
-        with self._spawn_lock:
-            with self._lock:
-                # Update poses for already-tracked robots
-                for robot_name, record in self.robots.items():
-                    try:
-                        idx = msg.name.index(robot_name)
-                        record.pose = msg.pose[idx]
-                    except (ValueError, IndexError):
-                        pass
+        model_entries = list(zip(msg.name, msg.pose))
+        with self._lock:
+            # Pose tracking must stay responsive while a batch spawn/delete
+            # owns _spawn_lock. Blocking this high-rate callback can fill the
+            # Gazebo publisher socket and, in turn, wedge /delete_model.
+            for model_name, pose in model_entries:
+                self._model_poses[model_name] = (
+                    pose.position.x,
+                    pose.position.y,
+                    self._yaw_from_quaternion(pose.orientation),
+                )
+                record = self.robots.get(model_name)
+                if record is not None:
+                    record.pose = pose
 
-                # Auto-detect new tb3_* models spawned externally
-                for i, model_name in enumerate(msg.name):
+            external_candidates = [
+                (model_name, pose)
+                for model_name, pose in model_entries
+                if (
+                    model_name.startswith('tb3_')
+                    and model_name not in self.robots
+                    and model_name not in self._retired_robot_ids
+                )
+            ]
+
+        if not external_candidates:
+            return
+
+        # Discovery affects the same names and capacity as spawn_robots(). If
+        # a fleet transaction is active, skip this snapshot; Gazebo publishes
+        # another one immediately and no pose update is worth blocking here.
+        if not self._spawn_lock.acquire(blocking=False):
+            return
+        try:
+            with self._lock:
+                for model_name, pose in external_candidates:
                     if (
-                        model_name.startswith('tb3_')
-                        and model_name not in self.robots
-                        and model_name not in self._retired_robot_ids
+                        model_name in self.robots
+                        or model_name in self._retired_robot_ids
                     ):
-                        rospy.loginfo(
-                            "Auto-detected externally spawned robot: %s",
-                            model_name,
-                        )
-                        self.robots[model_name] = RobotRecord(
-                            name=model_name, pose=msg.pose[i]
-                        )
-                        # Update next_index to avoid naming collisions
-                        try:
-                            idx_num = int(model_name.split('_')[1])
-                            self._next_index = max(
-                                self._next_index, idx_num + 1
-                            )
-                        except (IndexError, ValueError):
-                            pass
+                        continue
+                    rospy.loginfo(
+                        "Auto-detected externally spawned robot: %s",
+                        model_name,
+                    )
+                    self.robots[model_name] = RobotRecord(
+                        name=model_name, pose=pose
+                    )
+                    try:
+                        index = int(model_name.rsplit('_', 1)[1])
+                        self._next_index = max(self._next_index, index + 1)
+                    except (IndexError, ValueError):
+                        pass
+        finally:
+            self._spawn_lock.release()
 
     # ------------------------------------------------------------------
     # Fleet roster publishing

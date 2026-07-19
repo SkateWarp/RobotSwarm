@@ -11,6 +11,7 @@ public class ViewerLease
     public string? RobotRuntimeId { get; set; }
     public string? IdempotencyKey { get; set; }
     public string TokenHash { get; set; } = null!;
+    public string? PublishTokenHash { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime ExpiresAt { get; set; }
     public DateTime? RevokedAt { get; set; }

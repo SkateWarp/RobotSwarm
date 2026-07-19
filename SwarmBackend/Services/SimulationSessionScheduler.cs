@@ -103,7 +103,50 @@ public class SimulationSessionScheduler(
 
         foreach (var session in orphanedSessions)
         {
-            FailOrphanedSession(session, now);
+            var stopCommand = FailOrphanedSession(session, now);
+            if (stopCommand != null)
+            {
+                dataContext.WorkerCommands.Add(stopCommand);
+            }
+        }
+
+        var expiredSessions = new List<ExpiredSession>();
+        var queueExpiredBefore = now - SessionLimits.GetQueueTtl(configuration);
+        var expiredQueuedSessions = await dataContext.SimulationSessions
+            .Where(session => session.State == SimulationSessionState.Queued
+                && session.CreatedAt <= queueExpiredBefore)
+            .ToListAsync(cancellationToken);
+        foreach (var session in expiredQueuedSessions)
+        {
+            ExpireQueuedSession(session, now);
+            expiredSessions.Add(new ExpiredSession(session, StopCommand: null));
+        }
+
+        var orphanedSessionIds = orphanedSessions
+            .Select(session => session.Id)
+            .ToArray();
+        var sessionExpiredBefore = now - SessionLimits.GetSessionTtl(configuration);
+        var expiredAssignedSessions = await dataContext.SimulationSessions
+            .Include(session => session.ComputeWorker)
+            .Include(session => session.TaskRuns)
+            .Include(session => session.Robots)
+            .Include(session => session.ViewerLeases)
+            .Include(session => session.Commands)
+            .Where(session => session.State >= SimulationSessionState.Provisioning
+                && session.State < SimulationSessionState.Stopped
+                && session.ComputeWorkerId.HasValue
+                && !orphanedSessionIds.Contains(session.Id)
+                && (session.StartedAt ?? session.CreatedAt) <= sessionExpiredBefore)
+            .ToListAsync(cancellationToken);
+        foreach (var session in expiredAssignedSessions)
+        {
+            var stopCommand = ExpireAssignedSession(session, now);
+            if (stopCommand != null)
+            {
+                dataContext.WorkerCommands.Add(stopCommand);
+            }
+
+            expiredSessions.Add(new ExpiredSession(session, stopCommand));
         }
 
         var availableWorkers = await dataContext.ComputeWorkers
@@ -119,15 +162,17 @@ public class SimulationSessionScheduler(
 
         var activeCounts = await dataContext.SimulationSessions
             .Where(session => session.ComputeWorkerId.HasValue
-                && (session.State >= SimulationSessionState.Provisioning
-                    && session.State < SimulationSessionState.Stopped
+                && ((session.State >= SimulationSessionState.Provisioning
+                        && session.State < SimulationSessionState.Stopped)
                     || session.State == SimulationSessionState.Failed
-                    && session.Commands.Any(command =>
+                    || session.State == SimulationSessionState.Expired
+                    || (session.State == SimulationSessionState.Stopped
+                        && session.Commands.Any(command =>
                         command.Type == WorkerCommandType.StopSession
                         && (command.State == WorkerCommandState.Pending
                             || command.State == WorkerCommandState.Dispatched
                             || command.State == WorkerCommandState.Acknowledged
-                            || command.State == WorkerCommandState.Running))))
+                            || command.State == WorkerCommandState.Running)))))
             .GroupBy(session => session.ComputeWorkerId!.Value)
             .Select(group => new { WorkerId = group.Key, Count = group.Count() })
             .ToDictionaryAsync(item => item.WorkerId, item => item.Count, cancellationToken);
@@ -137,12 +182,14 @@ public class SimulationSessionScheduler(
             worker => Math.Max(0, worker.MaxConcurrentSessions
                 - activeCounts.GetValueOrDefault(worker.Id)));
 
-        var queuedSessions = await dataContext.SimulationSessions
+        var queuedSessions = (await dataContext.SimulationSessions
             .Where(session => session.State == SimulationSessionState.Queued
                 && !session.ComputeWorkerId.HasValue)
             .OrderBy(session => session.CreatedAt)
             .ThenBy(session => session.Id)
-            .ToListAsync(cancellationToken);
+            .ToListAsync(cancellationToken))
+            .Where(session => session.State == SimulationSessionState.Queued)
+            .ToList();
 
         var assignments = new List<ScheduledAssignment>();
         foreach (var session in queuedSessions)
@@ -239,9 +286,102 @@ public class SimulationSessionScheduler(
                 },
                 cancellationToken);
         }
+
+        foreach (var expiration in expiredSessions)
+        {
+            if (expiration.StopCommand != null
+                && expiration.Session.ComputeWorkerId.HasValue)
+            {
+                await workerHubContext.Clients
+                    .Group(ControlPlaneGroups.Worker(
+                        expiration.Session.ComputeWorkerId.Value))
+                    .SendAsync("CommandAvailable", cancellationToken);
+            }
+
+            var group = sessionHubContext.Clients
+                .Group(ControlPlaneGroups.Session(expiration.Session.Id));
+            await group.SendAsync(
+                "SessionUpdated",
+                ToResponse(expiration.Session, expiration.Session.ComputeWorker),
+                cancellationToken);
+            await group.SendAsync(
+                "SessionEvent",
+                new
+                {
+                    sessionId = expiration.Session.Id,
+                    state = expiration.Session.State.ToString(),
+                    error = expiration.Session.FailureReason,
+                    eventType = "SessionExpired",
+                    timestamp = now
+                },
+                cancellationToken);
+        }
     }
 
-    private static void FailOrphanedSession(
+    internal static void ExpireQueuedSession(
+        SimulationSession session,
+        DateTime now)
+    {
+        session.State = SimulationSessionState.Expired;
+        session.FailureReason = "The session expired while waiting for a compute worker.";
+        session.IsEmergencyStopped = false;
+        session.StoppedAt ??= now;
+        session.UpdatedAt = now;
+        session.Revision++;
+    }
+
+    internal static WorkerCommand? ExpireAssignedSession(
+        SimulationSession session,
+        DateTime now)
+    {
+        const string reason =
+            "The session reached its configured lifetime and was closed.";
+
+        session.State = SimulationSessionState.Expired;
+        session.FailureReason = reason;
+        session.IsEmergencyStopped = false;
+        session.StoppedAt ??= now;
+        session.UpdatedAt = now;
+        session.Revision++;
+
+        foreach (var task in session.TaskRuns.Where(task => task.State < TaskRunState.Completed))
+        {
+            task.State = TaskRunState.Failed;
+            task.Error = reason;
+            task.CompletedAt = now;
+            task.UpdatedAt = now;
+        }
+
+        foreach (var robot in session.Robots.Where(
+                     robot => robot.State != SessionRobotState.Removed))
+        {
+            robot.State = SessionRobotState.Removed;
+            robot.UpdatedAt = now;
+        }
+
+        foreach (var lease in session.ViewerLeases.Where(lease => !lease.RevokedAt.HasValue))
+        {
+            lease.RevokedAt = now;
+        }
+
+        foreach (var command in session.Commands.Where(command =>
+                     command.Type != WorkerCommandType.StopSession
+                     && IsInFlight(command.State)))
+        {
+            command.State = WorkerCommandState.Cancelled;
+            command.LastError = reason;
+            command.CompletedAt = now;
+            command.UpdatedAt = now;
+        }
+
+        return TerminalCleanupPolicy.TryQueue(
+            session,
+            now,
+            "sys:session-expired",
+            resourceKnownPresent: true);
+    }
+
+    private static WorkerCommand? FailOrphanedSession(
         SimulationSession session,
         DateTime now)
     {
@@ -287,26 +427,16 @@ public class SimulationSessionScheduler(
             command.UpdatedAt = now;
         }
 
-        var sequence = session.Commands.Count == 0
-            ? 1
-            : session.Commands.Max(command => command.Sequence) + 1;
-        session.Commands.Add(new WorkerCommand
-        {
-            SimulationSessionId = session.Id,
-            ComputeWorkerId = session.ComputeWorkerId,
-            Type = WorkerCommandType.StopSession,
-            State = WorkerCommandState.Pending,
-            IdempotencyKey = $"sys:orphan-cleanup:{session.Id:N}",
-            Sequence = sequence,
-            Payload = JsonDocument.Parse("{}"),
-            CreatedAt = now,
-            UpdatedAt = now
-        });
+        return TerminalCleanupPolicy.TryQueue(
+            session,
+            now,
+            "sys:orphan-cleanup",
+            resourceKnownPresent: true);
     }
 
     private static SimulationSessionResponse ToResponse(
         SimulationSession session,
-        ComputeWorker worker)
+        ComputeWorker? worker)
     {
         return new SimulationSessionResponse(
             session.Id,
@@ -314,8 +444,8 @@ public class SimulationSessionScheduler(
             session.DesiredRobotCount,
             QueuePosition: null,
             session.ArenaVersion,
-            worker.Id,
-            worker.Name,
+            worker?.Id,
+            worker?.Name,
             session.IsEmergencyStopped,
             session.Revision,
             session.FailureReason,
@@ -328,4 +458,16 @@ public class SimulationSessionScheduler(
     private sealed record ScheduledAssignment(
         SimulationSession Session,
         ComputeWorker Worker);
+
+    private sealed record ExpiredSession(
+        SimulationSession Session,
+        WorkerCommand? StopCommand);
+
+    private static bool IsInFlight(WorkerCommandState state)
+    {
+        return state is WorkerCommandState.Pending
+            or WorkerCommandState.Dispatched
+            or WorkerCommandState.Acknowledged
+            or WorkerCommandState.Running;
+    }
 }

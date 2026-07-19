@@ -14,6 +14,7 @@ public sealed class WorkerAgent : BackgroundService
     private readonly WorkerHubConnection _hub;
     private readonly BoundedCommandExecutor _executor;
     private readonly DockerSessionManager _sessions;
+    private readonly IViewerPublisher _viewerPublisher;
     private readonly WorkerOptions _options;
     private readonly ILogger<WorkerAgent> _logger;
 
@@ -21,12 +22,14 @@ public sealed class WorkerAgent : BackgroundService
         WorkerHubConnection hub,
         BoundedCommandExecutor executor,
         DockerSessionManager sessions,
+        IViewerPublisher viewerPublisher,
         IOptions<WorkerOptions> options,
         ILogger<WorkerAgent> logger)
     {
         _hub = hub;
         _executor = executor;
         _sessions = sessions;
+        _viewerPublisher = viewerPublisher;
         _options = options.Value;
         _logger = logger;
     }
@@ -62,6 +65,12 @@ public sealed class WorkerAgent : BackgroundService
             try
             {
                 await _hub.EnsureConnectedAsync(stoppingToken);
+                if (registeredConnectionVersion != _hub.ConnectionVersion
+                    || DateTime.UtcNow >= nextHeartbeat)
+                {
+                    await _viewerPublisher.RefreshAvailabilityAsync(stoppingToken);
+                }
+
                 if (registeredConnectionVersion != _hub.ConnectionVersion)
                 {
                     var registration = await _hub.RegisterAsync(
@@ -133,63 +142,33 @@ public sealed class WorkerAgent : BackgroundService
 
     private async Task SendHeartbeatAsync(CancellationToken cancellationToken)
     {
-        var activeSessionIds = (await _sessions.GetManagedSessionsAsync(cancellationToken))
-            .Where(session => session.Running)
-            .Select(session => session.SessionId)
-            .Distinct()
-            .Order()
-            .ToArray();
+        var managedSessionIds = ManagedSessionIdsForHeartbeat(
+            await _sessions.GetManagedSessionsAsync(cancellationToken));
 
         var response = await _hub.HeartbeatAsync(
             new WorkerHeartbeatRequest(
                 _options.ImageVersion,
                 BuildCapabilities(),
-                activeSessionIds),
+                managedSessionIds),
             cancellationToken);
         ValidateRegistration(response);
     }
 
+    internal static Guid[] ManagedSessionIdsForHeartbeat(
+        IEnumerable<ManagedSessionInfo> managedSessions)
+    {
+        return managedSessions
+            .Select(session => session.SessionId)
+            .Distinct()
+            .Order()
+            .ToArray();
+    }
+
     private JsonElement BuildCapabilities()
     {
-        return JsonSerializer.SerializeToElement(new
-        {
-            workerName = _options.Name,
-            maxConcurrentSessions = _options.MaxConcurrentSessions,
-            maxRobotsPerSession = _options.MaxRobotsPerSession,
-            sessionImage = _options.SessionImage,
-            gpuEnabled = _options.EnableGpu,
-            gpuRequest = _options.EnableGpu ? _options.GpuRequest : null,
-            turtleBotModel = "burger",
-            rosDistribution = "noetic",
-            gazeboGeneration = "classic-11",
-            commandTypes = new[]
-            {
-                "ProvisionSession",
-                "UpdateFleet",
-                "StartTask",
-                "PauseTask",
-                "ResumeTask",
-                "CancelTask",
-                "EmergencyStop",
-                "ResetEmergencyStop",
-                "StopSession"
-            },
-            isolation = new
-            {
-                perSessionContainer = true,
-                internalDockerNetwork = true,
-                publishedRosPorts = false,
-                privileged = false
-            },
-            safety = new
-            {
-                controlHeartbeatSeconds = _options.ControlHeartbeatIntervalSeconds,
-                backendDisconnectStopSeconds =
-                    _options.BackendDisconnectEmergencyStopSeconds,
-                emergencyStopConfirmationSeconds =
-                    _options.EmergencyStopTimeoutSeconds
-            }
-        });
+        return WorkerCapabilityBuilder.Build(
+            _options,
+            _viewerPublisher.Availability);
     }
 
     private void ValidateRegistration(WorkerRegistrationResponse response)

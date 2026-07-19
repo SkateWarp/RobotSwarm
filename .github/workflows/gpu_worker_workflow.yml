@@ -172,6 +172,13 @@ jobs:
         working-directory: _deploy/gpu-source
         run: dotnet test SwarmWorker.Tests/SwarmWorker.Tests.csproj --configuration Release
 
+      - name: Test viewer publisher helper
+        working-directory: _deploy/gpu-source
+        run: |
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/robotswarm-viewer-pycache" \
+            python3 -m py_compile deploy/gpu-worker/robotswarm-viewer-publisher
+          deploy/gpu-worker/test-viewer-publisher.sh
+
       - name: Test atomic worker deployment
         working-directory: _deploy/deploy-harness
         run: deploy/gpu-worker/test-deploy.sh
@@ -252,7 +259,12 @@ jobs:
             --self-contained true \
             --output "$publish_dir"
 
+          install -m 0755 \
+            deploy/gpu-worker/robotswarm-viewer-publisher \
+            "$publish_dir/robotswarm-viewer-publisher"
+
           test -x "$publish_dir/SwarmWorker"
+          test "$(stat -c '%a' "$publish_dir/robotswarm-viewer-publisher")" = "755"
           echo "publish_dir=$publish_dir" >> "$GITHUB_OUTPUT"
 
       - name: Deploy worker and verify readiness

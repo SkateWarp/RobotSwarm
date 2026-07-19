@@ -22,6 +22,9 @@ jobs:
       - name: Build backend
         run: dotnet build SwarmBackend/SwarmBackend.csproj --configuration Release
 
+      - name: Test backend control plane
+        run: dotnet test SwarmBackend.Tests/SwarmBackend.Tests.csproj --configuration Release
+
       - name: Check migrations
         run: |
           dotnet tool install --global dotnet-ef --version 7.0.5
@@ -43,6 +46,12 @@ jobs:
       - name: Test GPU worker
         run: dotnet test SwarmWorker.Tests/SwarmWorker.Tests.csproj --configuration Release
 
+      - name: Test viewer publisher helper
+        run: |
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/robotswarm-viewer-pycache" \
+            python3 -m py_compile deploy/gpu-worker/robotswarm-viewer-publisher
+          deploy/gpu-worker/test-viewer-publisher.sh
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -61,6 +70,7 @@ jobs:
       - name: Lint session control frontend
         run: |
           npm run lint -- --quiet \
+            src/app/auth/Auth.js \
             src/app/constants/constants.js \
             src/app/fuse-configs/navigationGTSConfig.js \
             src/app/main/apps/GeeTS/Realtime/RealtimeConfigApp.js \
@@ -69,7 +79,12 @@ jobs:
             src/app/main/apps/GeeTS/Realtime/SimulationWorkspace.js \
             src/app/main/apps/GeeTS/Realtime/SwarmTaskPanel.js \
             src/app/main/apps/GeeTS/Realtime/WhepViewer.js \
+            src/app/main/apps/GeeTS/Realtime/transportTaskStatus.js \
+            src/app/services/jwtService/authTokenUtils.js \
+            src/app/services/jwtService/jwtService.js \
             src/services/SimulationSessionService.js
+      - name: Test frontend session and authentication helpers
+        run: npm test -- --watchAll=false
       - name: Build frontend
         run: npm run build
         env:
@@ -85,7 +100,8 @@ jobs:
           python3 -m venv /tmp/robotswarm-ros-ci
           /tmp/robotswarm-ros-ci/bin/pip install \
             --disable-pip-version-check \
-            numpy==1.26.4
+            numpy==1.26.4 \
+            pyyaml==6.0.1
 
       - name: Test swarm algorithms
         run: |

@@ -7,6 +7,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SwarmBackend", "SwarmBacken
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ros_wss", "..\ros_wss\ros_wss.csproj", "{CCB01DBB-9BC0-49A3-BBFC-4A7CB0F5521A}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBackend.Tests", "..\SwarmBackend.Tests\SwarmBackend.Tests.csproj", "{A8828477-7120-43A3-9BD6-EA10BA4E9E46}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{CCB01DBB-9BC0-49A3-BBFC-4A7CB0F5521A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CCB01DBB-9BC0-49A3-BBFC-4A7CB0F5521A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CCB01DBB-9BC0-49A3-BBFC-4A7CB0F5521A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A8828477-7120-43A3-9BD6-EA10BA4E9E46}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A8828477-7120-43A3-9BD6-EA10BA4E9E46}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A8828477-7120-43A3-9BD6-EA10BA4E9E46}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A8828477-7120-43A3-9BD6-EA10BA4E9E46}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

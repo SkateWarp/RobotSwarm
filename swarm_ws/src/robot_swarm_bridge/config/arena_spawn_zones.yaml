@@ -1,0 +1,29 @@
+# Collision geometry used only while choosing fleet spawn positions.
+#
+# The model name lets the fleet manager follow an object if Gazebo moves it.
+# x, y and yaw remain as a safe fallback before the first model-state message.
+# Clearance is measured from the robot centre to the obstacle collision surface;
+# Keep planned poses outside the 0.20 m emergency-stop band.  At 0.30 m the
+# controller can still decelerate and steer naturally instead of stopping on
+# a valid formation slot beside a wall.
+spawn_obstacle_clearance: 0.30
+spawn_search_step: 0.10
+# The 10-robot letters sometimes need to move around the long diagonal wall.
+# This remains a bounded search and takes about a tenth of a second in tests.
+formation_search_limit: 512
+
+spawn_exclusion_zones:
+  - {name: box_1, model: obstacle_box_1, worlds: [swarm_arena], shape: box, x: -3.0, y: 3.0, width: 0.6, height: 0.6, yaw: 0.0}
+  - {name: box_2, model: obstacle_box_2, worlds: [swarm_arena], shape: box, x: 2.5, y: 0.5, width: 0.8, height: 0.4, yaw: 0.3}
+  - {name: box_3, model: obstacle_box_3, worlds: [swarm_arena], shape: box, x: 3.5, y: -3.0, width: 0.5, height: 0.5, yaw: 0.0}
+
+  - {name: cylinder_1, model: obstacle_cyl_1, worlds: [swarm_arena], shape: circle, x: 3.0, y: 2.5, radius: 0.25}
+  - {name: cylinder_2, model: obstacle_cyl_2, worlds: [swarm_arena], shape: circle, x: -2.0, y: -1.5, radius: 0.30}
+  - {name: cylinder_3, model: obstacle_cyl_3, worlds: [swarm_arena], shape: circle, x: 0.5, y: -3.5, radius: 0.20}
+
+  - {name: wall_1, model: obstacle_wall_1, worlds: [swarm_arena], shape: box, x: -1.0, y: 1.5, width: 1.5, height: 0.1, yaw: 0.0}
+  - {name: wall_2, model: obstacle_wall_2, worlds: [swarm_arena], shape: box, x: -0.25, y: 2.05, width: 0.1, height: 1.2, yaw: 0.0}
+  - {name: wall_3, model: obstacle_wall_3, worlds: [swarm_arena], shape: box, x: 1.0, y: -1.5, width: 1.8, height: 0.1, yaw: 0.6}
+
+  # This object is pushable. Its live Gazebo pose replaces this fallback pose.
+  - {name: transport_object, model: transport_object, worlds: [swarm_arena], shape: box, x: -3.0, y: -3.0, width: 0.4, height: 0.4, yaw: 0.0}

@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
 using SwarmBackend.Models;
@@ -18,6 +19,10 @@ public class WorkerHub(
     ILogger<WorkerHub> logger) : Hub
 {
     private static readonly ConcurrentDictionary<Guid, string> ActiveConnections = new();
+    internal const int MaximumTerminalCleanupAttempts = TerminalCleanupPolicy.MaximumAttempts;
+    internal static readonly TimeSpan TerminalCleanupBaseDelay =
+        TerminalCleanupPolicy.BaseRetryDelay;
+    private const int MaximumFailSafeTransactionAttempts = 3;
 
     public static void InvalidateConnection(Guid workerId)
     {
@@ -87,7 +92,43 @@ public class WorkerHub(
 
         worker.LastHeartbeatAt = now;
         worker.UpdatedAt = now;
+        var reconciliation = await ReconcileTerminalSessions(
+            worker.Id,
+            request.ActiveSessionIds,
+            now);
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+        foreach (var command in reconciliation.CleanupCommands)
+        {
+            await sessionHubContext.Clients
+                .Group(ControlPlaneGroups.Session(command.SimulationSessionId))
+                .SendAsync("SessionEvent", new
+                {
+                    sessionId = command.SimulationSessionId,
+                    commandId = command.Id,
+                    eventType = "CommandQueued",
+                    state = command.State.ToString(),
+                    timestamp = command.CreatedAt
+                }, Context.ConnectionAborted);
+        }
+
+        foreach (var session in reconciliation.ReconciledSessions)
+        {
+            var group = sessionHubContext.Clients
+                .Group(ControlPlaneGroups.Session(session.Id));
+            await group.SendAsync(
+                "SessionUpdated",
+                ToSessionResponse(session),
+                Context.ConnectionAborted);
+            await group.SendAsync("SessionEvent", new
+            {
+                sessionId = session.Id,
+                state = session.State.ToString(),
+                error = session.FailureReason,
+                eventType = "SessionReconciled",
+                timestamp = now
+            }, Context.ConnectionAborted);
+        }
+
         return ToRegistrationResponse(worker, now);
     }
 
@@ -218,6 +259,19 @@ public class WorkerHub(
                 updatedSession.Revision++;
             }
         }
+        else if (command.Type == WorkerCommandType.SetViewerSource)
+        {
+            var validationError = "Viewer command completion did not include a result.";
+            if (!request.Result.HasValue
+                || !ViewerPublishCompletionValidator.TryValidate(
+                    command.SimulationSessionId,
+                    command.Payload.RootElement,
+                    request.Result.Value,
+                    out validationError))
+            {
+                throw new HubException(validationError);
+            }
+        }
 
         command.State = WorkerCommandState.Completed;
         command.Result = request.Result.HasValue
@@ -316,25 +370,73 @@ public class WorkerHub(
         }
 
         var workerId = (await GetWorker()).Id;
-        var session = await dataContext.SimulationSessions
-            .Include(candidate => candidate.ComputeWorker)
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == report.SessionId
-                    && candidate.ComputeWorkerId == workerId,
-                Context.ConnectionAborted)
-            ?? throw new HubException("Assigned simulation session not found.");
-        if (session.State >= SimulationSessionState.Stopped)
+        SimulationSession? session = null;
+        IReadOnlyList<WorkerCommand> cancelledCommands = Array.Empty<WorkerCommand>();
+        var now = DateTime.UtcNow;
+        for (var attempt = 1; attempt <= MaximumFailSafeTransactionAttempts; attempt++)
         {
-            throw new HubException("The simulation session is already closed.");
+            await using var transaction = await dataContext.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable,
+                Context.ConnectionAborted);
+            try
+            {
+                session = await dataContext.SimulationSessions
+                    .Include(candidate => candidate.ComputeWorker)
+                    .Include(candidate => candidate.Commands)
+                    .SingleOrDefaultAsync(
+                        candidate => candidate.Id == report.SessionId
+                            && candidate.ComputeWorkerId == workerId,
+                        Context.ConnectionAborted)
+                    ?? throw new HubException("Assigned simulation session not found.");
+                if (session.State >= SimulationSessionState.Stopped)
+                {
+                    throw new HubException("The simulation session is already closed.");
+                }
+
+                var wasEmergencyStopped = session.IsEmergencyStopped;
+                cancelledCommands = ApplyFailSafeTransition(session, now);
+                if (!wasEmergencyStopped || cancelledCommands.Count > 0)
+                {
+                    await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+                }
+
+                await transaction.CommitAsync(Context.ConnectionAborted);
+                break;
+            }
+            catch (Exception exception)
+                when (IsSerializationFailure(exception))
+            {
+                if (attempt < MaximumFailSafeTransactionAttempts)
+                {
+                    logger.LogDebug(
+                        exception,
+                        "Fail-safe transaction for session {SessionId} conflicted; retrying attempt {Attempt}.",
+                        report.SessionId,
+                        attempt + 1);
+                }
+                else
+                {
+                    logger.LogWarning(
+                        exception,
+                        "Fail-safe transaction for session {SessionId} exhausted its retry budget.",
+                        report.SessionId);
+                }
+
+                dataContext.ChangeTracker.Clear();
+                session = null;
+                cancelledCommands = Array.Empty<WorkerCommand>();
+            }
         }
 
-        var now = DateTime.UtcNow;
-        if (!session.IsEmergencyStopped)
+        if (session == null)
         {
-            session.IsEmergencyStopped = true;
-            session.UpdatedAt = now;
-            session.Revision++;
-            await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+            throw new HubException(
+                "The emergency-stop report conflicted repeatedly. Retry the report.");
+        }
+
+        foreach (var command in cancelledCommands)
+        {
+            await PublishCommandUpdate(command);
         }
 
         var response = ToSessionResponse(session);
@@ -369,8 +471,7 @@ public class WorkerHub(
             throw new HubException("Assigned simulation session not found.");
         }
 
-        if (!Enum.TryParse<SimulationSessionState>(report.State, true, out var nextState)
-            || nextState is SimulationSessionState.Queued or SimulationSessionState.Expired)
+        if (!TryParseSessionReportState(report.State, out var nextState))
         {
             throw new HubException("Unsupported simulation session state.");
         }
@@ -385,15 +486,11 @@ public class WorkerHub(
             return ToSessionResponse(session);
         }
 
-        var failedSessionCleanup =
-            session.State == SimulationSessionState.Failed
-            && nextState == SimulationSessionState.Stopped;
         var now = DateTime.UtcNow;
-        var failureReason = nextState == SimulationSessionState.Failed
-            ? Truncate(report.FailureReason ?? "Worker reported a session failure.", 2000)
-            : failedSessionCleanup
-                ? session.FailureReason
-                : null;
+        var failureReason = FailureReasonForSessionEvent(
+            session,
+            nextState,
+            report.FailureReason);
         var changed = session.State != nextState || session.FailureReason != failureReason;
         IReadOnlyList<TaskRun> finalizedTasks = Array.Empty<TaskRun>();
 
@@ -462,8 +559,7 @@ public class WorkerHub(
             throw new HubException("Assigned task run not found.");
         }
 
-        if (!Enum.TryParse<TaskRunState>(report.State, true, out var nextState)
-            || nextState == TaskRunState.Queued)
+        if (!TryParseTaskReportState(report.State, out var nextState))
         {
             throw new HubException("Unsupported task run state.");
         }
@@ -481,6 +577,11 @@ public class WorkerHub(
         if (report.Progress.HasValue && !double.IsFinite(report.Progress.Value))
         {
             throw new HubException("Task progress must be finite.");
+        }
+
+        if (IsDuplicateTaskReport(task, nextState, report))
+        {
+            return ToTaskResponse(task);
         }
 
         var now = DateTime.UtcNow;
@@ -573,6 +674,83 @@ public class WorkerHub(
         }
 
         return worker;
+    }
+
+    private async Task<HeartbeatReconciliation> ReconcileTerminalSessions(
+        Guid workerId,
+        IReadOnlyList<Guid>? activeSessionIds,
+        DateTime now)
+    {
+        if (activeSessionIds == null)
+        {
+            return HeartbeatReconciliation.Empty;
+        }
+
+        var reportedIds = activeSessionIds
+            .Take(1000)
+            .Distinct()
+            .ToArray();
+        var reportedIdSet = reportedIds.ToHashSet();
+        var reportIsComplete = activeSessionIds.Count <= 1000;
+        var sessions = await dataContext.SimulationSessions
+            .Include(session => session.ComputeWorker)
+            .Include(session => session.Commands)
+            .Where(session => session.ComputeWorkerId == workerId
+                && (session.State == SimulationSessionState.Failed
+                    || session.State == SimulationSessionState.Expired
+                    || (session.State == SimulationSessionState.Stopped
+                        && (reportedIds.Contains(session.Id)
+                            || (session.Commands.Count(command =>
+                                    command.Type == WorkerCommandType.StopSession)
+                                < MaximumTerminalCleanupAttempts
+                                && (!session.Commands.Any(command =>
+                                        command.Type == WorkerCommandType.StopSession)
+                                    || session.Commands.Any(command =>
+                                        command.Type == WorkerCommandType.StopSession
+                                        && (command.State == WorkerCommandState.Failed
+                                            || command.State == WorkerCommandState.Cancelled)
+                                        && !session.Commands.Any(later =>
+                                            later.Type == WorkerCommandType.StopSession
+                                            && later.Sequence > command.Sequence))))))))
+            .ToListAsync(Context.ConnectionAborted);
+
+        var queued = new List<WorkerCommand>();
+        var reconciled = new List<SimulationSession>();
+        foreach (var session in sessions)
+        {
+            var reportedByWorker = reportedIdSet.Contains(session.Id);
+            if (reportIsComplete
+                && !reportedByWorker
+                && ReconcileAbsentTerminalSession(session, now))
+            {
+                reconciled.Add(session);
+                logger.LogInformation(
+                    "Worker {WorkerId} no longer reports terminal session {SessionId} as managed; released its capacity while cleanup remains command-confirmed.",
+                    workerId,
+                    session.Id);
+            }
+
+            if (!NeedsTerminalCleanupAttempt(session, reportedByWorker))
+            {
+                continue;
+            }
+
+            var command = QueueTerminalCleanup(
+                session,
+                now,
+                resourceKnownPresent: reportedByWorker);
+            if (command != null)
+            {
+                dataContext.WorkerCommands.Add(command);
+                queued.Add(command);
+                logger.LogWarning(
+                    "Terminal session {SessionId} on worker {WorkerId} still needs cleanup; queued another bounded attempt.",
+                    session.Id,
+                    workerId);
+            }
+        }
+
+        return new HeartbeatReconciliation(queued, reconciled);
     }
 
     private async Task<WorkerCommand> GetOwnedCommand(Guid commandId)
@@ -758,7 +936,8 @@ public class WorkerHub(
             return true;
         }
 
-        if (current == SimulationSessionState.Failed
+        if ((current == SimulationSessionState.Failed
+                || current == SimulationSessionState.Expired)
             && next == SimulationSessionState.Stopped)
         {
             return true;
@@ -776,6 +955,207 @@ public class WorkerHub(
 
         return current == SimulationSessionState.Provisioning
             && next == SimulationSessionState.Ready;
+    }
+
+    internal static bool TryParseSessionReportState(
+        string state,
+        out SimulationSessionState parsed)
+    {
+        return Enum.TryParse(state, true, out parsed)
+               && Enum.IsDefined(parsed)
+               && parsed is not SimulationSessionState.Queued
+                   and not SimulationSessionState.Expired;
+    }
+
+    internal static bool TryParseTaskReportState(
+        string state,
+        out TaskRunState parsed)
+    {
+        return Enum.TryParse(state, true, out parsed)
+               && Enum.IsDefined(parsed)
+               && parsed != TaskRunState.Queued;
+    }
+
+    internal static string? FailureReasonForSessionEvent(
+        SimulationSession session,
+        SimulationSessionState nextState,
+        string? reportedReason)
+    {
+        if (nextState == SimulationSessionState.Failed)
+        {
+            return Truncate(
+                reportedReason ?? "Worker reported a session failure.",
+                2000);
+        }
+
+        return nextState == SimulationSessionState.Stopped
+            ? session.FailureReason
+            : null;
+    }
+
+    internal static bool IsDuplicateTaskReport(
+        TaskRun task,
+        TaskRunState nextState,
+        TaskEventReport report)
+    {
+        if (task.State != nextState)
+        {
+            return false;
+        }
+
+        var progress = report.Progress.HasValue
+            ? Math.Max(task.Progress, Math.Clamp(report.Progress.Value, 0, 1))
+            : task.Progress;
+        if (nextState == TaskRunState.Completed)
+        {
+            progress = 1;
+        }
+
+        if (progress != task.Progress)
+        {
+            return false;
+        }
+
+        var error = nextState == TaskRunState.Failed
+            ? Truncate(report.Error ?? "Worker reported a task failure.", 4000)
+            : null;
+        if (!string.Equals(task.Error, error, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (report.Result.HasValue
+            && (task.Result == null
+                || !WorkerCommandService.SamePayload(
+                    task.Result.RootElement,
+                    report.Result.Value)))
+        {
+            return false;
+        }
+
+        if (nextState == TaskRunState.Running && !task.StartedAt.HasValue)
+        {
+            return false;
+        }
+
+        if (nextState >= TaskRunState.Completed && !task.CompletedAt.HasValue)
+        {
+            return false;
+        }
+
+        if (task.SimulationSession.State < SimulationSessionState.Stopping)
+        {
+            var expectedSessionState = nextState switch
+            {
+                TaskRunState.Running => SimulationSessionState.Active,
+                TaskRunState.Paused => SimulationSessionState.Paused,
+                TaskRunState.Completed
+                    or TaskRunState.Cancelled
+                    or TaskRunState.Failed => SimulationSessionState.Ready,
+                _ => task.SimulationSession.State
+            };
+            if (task.SimulationSession.State != expectedSessionState)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static IReadOnlyList<WorkerCommand> CancelCommandsAfterFailSafe(
+        SimulationSession session,
+        DateTime now)
+    {
+        const string reason =
+            "Cancelled because the worker applied its disconnect fail-safe.";
+        var cancelled = session.Commands
+            .Where(command => IsInFlight(command.State)
+                && command.Type is not WorkerCommandType.StopSession
+                    and not WorkerCommandType.EmergencyStop)
+            .ToList();
+        foreach (var command in cancelled)
+        {
+            command.State = WorkerCommandState.Cancelled;
+            command.LastError = reason;
+            command.CompletedAt = now;
+            command.UpdatedAt = now;
+        }
+
+        return cancelled;
+    }
+
+    internal static IReadOnlyList<WorkerCommand> ApplyFailSafeTransition(
+        SimulationSession session,
+        DateTime now)
+    {
+        var cancelled = CancelCommandsAfterFailSafe(session, now);
+        if (!session.IsEmergencyStopped)
+        {
+            session.IsEmergencyStopped = true;
+            session.UpdatedAt = now;
+            session.Revision++;
+        }
+
+        return cancelled;
+    }
+
+    internal static bool ReconcileAbsentTerminalSession(
+        SimulationSession session,
+        DateTime now)
+    {
+        if (!session.ComputeWorkerId.HasValue
+            || session.State is not (SimulationSessionState.Failed
+                or SimulationSessionState.Expired))
+        {
+            return false;
+        }
+
+        session.State = SimulationSessionState.Stopped;
+        session.IsEmergencyStopped = false;
+        session.StoppedAt ??= now;
+        session.UpdatedAt = now;
+        session.Revision++;
+        return true;
+    }
+
+    internal static bool NeedsTerminalCleanupAttempt(
+        SimulationSession session,
+        bool reportedByWorker)
+    {
+        return TerminalCleanupPolicy.NeedsAttempt(session, reportedByWorker);
+    }
+
+    internal static WorkerCommand? QueueTerminalCleanup(
+        SimulationSession session,
+        DateTime now,
+        bool resourceKnownPresent = true)
+    {
+        return TerminalCleanupPolicy.TryQueue(
+            session,
+            now,
+            "sys:heartbeat-cleanup",
+            resourceKnownPresent);
+    }
+
+    internal static TimeSpan GetTerminalCleanupRetryDelay(int completedAttempts)
+    {
+        return TerminalCleanupPolicy.GetRetryDelay(completedAttempts);
+    }
+
+    private static bool IsSerializationFailure(Exception exception)
+    {
+        return exception is PostgresException
+            {
+                SqlState: PostgresErrorCodes.SerializationFailure
+            }
+            || exception is DbUpdateException
+            {
+                InnerException: PostgresException
+                {
+                    SqlState: PostgresErrorCodes.SerializationFailure
+                }
+            };
     }
 
     private static bool CanApplyTaskTransition(TaskRun task, TaskRunState next)
@@ -931,6 +1311,23 @@ public class WorkerHub(
         return state is WorkerCommandState.Completed
             or WorkerCommandState.Failed
             or WorkerCommandState.Cancelled;
+    }
+
+    private static bool IsInFlight(WorkerCommandState state)
+    {
+        return state is WorkerCommandState.Pending
+            or WorkerCommandState.Dispatched
+            or WorkerCommandState.Acknowledged
+            or WorkerCommandState.Running;
+    }
+
+    private sealed record HeartbeatReconciliation(
+        IReadOnlyList<WorkerCommand> CleanupCommands,
+        IReadOnlyList<SimulationSession> ReconciledSessions)
+    {
+        public static HeartbeatReconciliation Empty { get; } = new(
+            Array.Empty<WorkerCommand>(),
+            Array.Empty<SimulationSession>());
     }
 
     private static WorkerRegistrationResponse ToRegistrationResponse(

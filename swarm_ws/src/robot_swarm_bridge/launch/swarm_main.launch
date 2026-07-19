@@ -14,6 +14,9 @@
   <arg name="rviz" default="false"/>
   <arg name="spawn_pattern" default="grid"/>
   <arg name="spawn_spacing" default="1.0"/>
+  <arg name="gazebo_wheel_acceleration" default="0.75"/>
+  <arg name="gazebo_clock_frequency" default="100"/>
+  <arg name="publish_robot_tf" default="false"/>
   <arg name="obstacle_density" default="none"/>
   <arg name="paused" default="false"/>
   <arg name="start_legacy_bridge" default="true"/>
@@ -24,6 +27,10 @@
   <env name="TURTLEBOT3_MODEL" value="$(arg robot_model)"/>
 
   <!-- ==================== GAZEBO ==================== -->
+  <!-- Keep /clock useful without publishing it at the full physics rate. -->
+  <param name="/gazebo/pub_clock_frequency" type="double"
+         value="$(arg gazebo_clock_frequency)"/>
+
   <include file="$(find gazebo_ros)/launch/empty_world.launch">
     <arg name="world_name" value="$(find robot_swarm_bridge)/worlds/$(arg world_file).world"/>
     <arg name="paused" value="$(arg paused)"/>
@@ -36,11 +43,15 @@
   <!-- ==================== CORE NODES ==================== -->
   <!-- The fleet manager is the sole spawner for every fleet size. -->
   <node pkg="robot_swarm_bridge" type="fleet_manager.py" name="fleet_manager" output="screen">
+    <rosparam command="load" file="$(find robot_swarm_bridge)/config/arena_spawn_zones.yaml"/>
     <param name="robot_count" value="$(arg robot_count)"/>
     <param name="robot_model" value="$(arg robot_model)"/>
     <param name="max_robots" value="$(arg max_robots)"/>
+    <param name="arena_profile" value="$(arg world_file)"/>
     <param name="spawn_pattern" value="$(arg spawn_pattern)"/>
     <param name="spawn_spacing" value="$(arg spawn_spacing)"/>
+    <param name="gazebo_wheel_acceleration" value="$(arg gazebo_wheel_acceleration)"/>
+    <param name="publish_robot_tf" type="bool" value="$(arg publish_robot_tf)"/>
     <param name="auto_spawn" value="true"/>
   </node>
 
@@ -62,18 +73,24 @@
   <!-- ==================== BEHAVIOR NODES (idle until triggered) ==================== -->
   <!-- All three run simultaneously; each waits for its /start topic from task_orchestrator -->
   <node pkg="robot_swarm_bridge" type="follow_leader.py" name="follow_leader"
-        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+        output="screen">
+    <rosparam command="load" file="$(find robot_swarm_bridge)/config/arena_spawn_zones.yaml"/>
     <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="arena_profile" value="$(arg world_file)"/>
   </node>
 
   <node pkg="robot_swarm_bridge" type="formation_control.py" name="formation_control"
-        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+        output="screen">
+    <rosparam command="load" file="$(find robot_swarm_bridge)/config/arena_spawn_zones.yaml"/>
     <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="arena_profile" value="$(arg world_file)"/>
   </node>
 
   <node pkg="robot_swarm_bridge" type="collaborative_transport.py" name="collaborative_transport"
-        output="screen" launch-prefix="bash -c 'sleep 15; $0 $@'">
+        output="screen">
+    <rosparam command="load" file="$(find robot_swarm_bridge)/config/arena_spawn_zones.yaml"/>
     <param name="robot_count" value="$(arg robot_count)"/>
+    <param name="arena_profile" value="$(arg world_file)"/>
   </node>
 
   <!-- ==================== SIGNALR BRIDGE ==================== -->

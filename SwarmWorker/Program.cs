@@ -13,9 +13,14 @@ builder.Services
 builder.Services.AddSingleton<IValidateOptions<WorkerOptions>, WorkerOptionsValidator>();
 
 builder.Services.AddSingleton<IDockerCli, DockerCli>();
+builder.Services.AddSingleton<ExternalViewerPublisher>();
+builder.Services.AddSingleton<IViewerPublisher>(
+    services => services.GetRequiredService<ExternalViewerPublisher>());
 builder.Services.AddSingleton<DockerSessionManager>();
 builder.Services.AddSingleton<TaskStatusTracker>();
 builder.Services.AddSingleton<WorkerHubConnection>();
+builder.Services.AddSingleton<IWorkerCommandHub>(
+    services => services.GetRequiredService<WorkerHubConnection>());
 builder.Services.AddSingleton<SessionCommandHandler>();
 
 builder.Services.AddSingleton<BoundedCommandExecutor>();

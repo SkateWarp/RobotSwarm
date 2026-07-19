@@ -10,6 +10,18 @@ namespace SwarmWorker.Services;
 
 public sealed class BoundedCommandExecutor : IHostedService
 {
+    private sealed class EmergencyStopLatch
+    {
+    }
+
+    private sealed class EmergencyStopLatchException : InvalidOperationException
+    {
+        public EmergencyStopLatchException()
+            : base("The command was blocked because a local emergency stop is active.")
+        {
+        }
+    }
+
     private sealed record ActiveSessionOperation(
         string CommandType,
         CancellationTokenSource Cancellation);
@@ -21,10 +33,10 @@ public sealed class BoundedCommandExecutor : IHostedService
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _emergencyLocks = new();
     private readonly ConcurrentDictionary<Guid, ActiveSessionOperation> _activeOperations = new();
     private readonly ConcurrentDictionary<Guid, Task> _urgentCommands = new();
-    private readonly ConcurrentDictionary<Guid, byte> _emergencyRequested = new();
+    private readonly ConcurrentDictionary<Guid, EmergencyStopLatch> _emergencyRequested = new();
     private readonly CancellationTokenSource _abort = new();
     private readonly SessionCommandHandler _handler;
-    private readonly WorkerHubConnection _hub;
+    private readonly IWorkerCommandHub _hub;
     private readonly TaskStatusTracker _taskStatusTracker;
     private readonly WorkerOptions _options;
     private readonly ILogger<BoundedCommandExecutor> _logger;
@@ -33,7 +45,7 @@ public sealed class BoundedCommandExecutor : IHostedService
 
     public BoundedCommandExecutor(
         SessionCommandHandler handler,
-        WorkerHubConnection hub,
+        IWorkerCommandHub hub,
         TaskStatusTracker taskStatusTracker,
         IOptions<WorkerOptions> options,
         ILogger<BoundedCommandExecutor> logger)
@@ -124,8 +136,7 @@ public sealed class BoundedCommandExecutor : IHostedService
         {
             if (command.Type == "EmergencyStop")
             {
-                _emergencyRequested[command.SessionId] = 0;
-                CancelActiveOperation(command.SessionId);
+                RequestLocalEmergencyStop(command.SessionId);
                 var task = ExecuteEmergencyCommandAsync(command, _abort.Token);
                 _urgentCommands[command.Id] = task;
                 _ = ObserveUrgentCommandAsync(command, task);
@@ -140,6 +151,12 @@ public sealed class BoundedCommandExecutor : IHostedService
             _scheduled.TryRemove(deduplicationKey, out _);
             throw;
         }
+    }
+
+    public void RequestLocalEmergencyStop(Guid sessionId)
+    {
+        _emergencyRequested[sessionId] = new EmergencyStopLatch();
+        CancelActiveOperation(sessionId);
     }
 
     private async Task ConsumeAsync(int consumerId, CancellationToken cancellationToken)
@@ -244,17 +261,21 @@ public sealed class BoundedCommandExecutor : IHostedService
 
         try
         {
-            await _hub.AcknowledgeCommandAsync(command.Id, executionToken);
-            await _hub.MarkCommandRunningAsync(command.Id, executionToken);
-
-            if (_emergencyRequested.ContainsKey(command.SessionId)
+            var latchAtStart = _emergencyRequested.TryGetValue(
+                command.SessionId,
+                out var currentLatch)
+                    ? currentLatch
+                    : null;
+            if (latchAtStart is not null
                 && command.Type is not "EmergencyStop"
                     and not "ResetEmergencyStop"
                     and not "StopSession")
             {
-                throw new InvalidOperationException(
-                    "The command was blocked because an emergency stop is active.");
+                throw new EmergencyStopLatchException();
             }
+
+            await _hub.AcknowledgeCommandAsync(command.Id, executionToken);
+            await _hub.MarkCommandRunningAsync(command.Id, executionToken);
 
             var startingState = GetStartingState(command.Type);
             if (startingState is not null)
@@ -300,11 +321,11 @@ public sealed class BoundedCommandExecutor : IHostedService
             if (command.Type == "StopSession")
             {
                 _taskStatusTracker.RemoveSession(command.SessionId);
-                _emergencyRequested.TryRemove(command.SessionId, out _);
+                TryClearEmergencyStopLatch(command.SessionId, latchAtStart);
             }
             else if (command.Type == "ResetEmergencyStop")
             {
-                _emergencyRequested.TryRemove(command.SessionId, out _);
+                TryClearEmergencyStopLatch(command.SessionId, latchAtStart);
             }
 
             _logger.LogInformation(
@@ -319,21 +340,32 @@ public sealed class BoundedCommandExecutor : IHostedService
         }
         catch (Exception exception)
         {
+            var rejectedBySafetyLatch = exception is EmergencyStopLatchException;
             var error = exception is OperationCanceledException
                         && executionToken.IsCancellationRequested
                 ? "Command was preempted by an emergency stop."
                 : SanitizeError(exception);
-            _logger.LogError(
-                exception,
-                "Command {CommandId} failed for session {SessionId}.",
-                command.Id,
-                command.SessionId);
+            if (rejectedBySafetyLatch)
+            {
+                _logger.LogWarning(
+                    "Command {CommandId} was rejected because the local emergency-stop latch is active for session {SessionId}.",
+                    command.Id,
+                    command.SessionId);
+            }
+            else
+            {
+                _logger.LogError(
+                    exception,
+                    "Command {CommandId} failed for session {SessionId}.",
+                    command.Id,
+                    command.SessionId);
+            }
 
             try
             {
-                if (command.Type is "ProvisionSession"
-                    or "UpdateFleet"
-                    or "EmergencyStop")
+                if (!rejectedBySafetyLatch
+                    && command.Type is (
+                        "ProvisionSession" or "UpdateFleet" or "EmergencyStop"))
                 {
                     try
                     {
@@ -351,7 +383,7 @@ public sealed class BoundedCommandExecutor : IHostedService
                     }
                 }
 
-                if (IsSessionFatal(command.Type))
+                if (!rejectedBySafetyLatch && IsSessionFatal(command.Type))
                 {
                     await _hub.ReportSessionEventAsync(
                         new SessionEventReport(
@@ -395,6 +427,19 @@ public sealed class BoundedCommandExecutor : IHostedService
         {
             // The command finished between the lookup and cancellation.
         }
+    }
+
+    private void TryClearEmergencyStopLatch(
+        Guid sessionId,
+        EmergencyStopLatch? latchAtStart)
+    {
+        if (latchAtStart is null)
+        {
+            return;
+        }
+
+        _ = ((ICollection<KeyValuePair<Guid, EmergencyStopLatch>>)_emergencyRequested)
+            .Remove(new KeyValuePair<Guid, EmergencyStopLatch>(sessionId, latchAtStart));
     }
 
     private async Task WaitForWorkToFinish()

@@ -66,6 +66,8 @@ public record ViewerLeaseResponse(
     Guid SessionId,
     string Source,
     string? RobotRuntimeId,
+    string SourceId,
+    string StreamPath,
     string Token,
     DateTime ExpiresAt,
     bool IsReady,

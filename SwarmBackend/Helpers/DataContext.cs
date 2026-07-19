@@ -161,7 +161,9 @@ public class DataContext : DbContext
             entity.Property(lease => lease.RobotRuntimeId).HasMaxLength(100);
             entity.Property(lease => lease.IdempotencyKey).HasMaxLength(200);
             entity.Property(lease => lease.TokenHash).HasMaxLength(128);
+            entity.Property(lease => lease.PublishTokenHash).HasMaxLength(64);
             entity.HasIndex(lease => lease.TokenHash).IsUnique();
+            entity.HasIndex(lease => lease.PublishTokenHash).IsUnique();
             entity.HasIndex(lease => new { lease.SimulationSessionId, lease.ExpiresAt });
             entity.HasIndex(lease => new { lease.SimulationSessionId, lease.IdempotencyKey })
                 .IsUnique();
