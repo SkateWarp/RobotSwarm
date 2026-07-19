@@ -162,13 +162,23 @@ jobs:
             source "$identity_file"
             set +a
             credential="${Worker__WorkerId}.${Worker__WorkerSecret}"
-            status="$({
+            if ! status="$({
               curl --silent --show-error --fail \
                 --connect-timeout 5 \
                 --max-time 20 \
                 --header "Authorization: Bearer $credential" \
                 "$DRAIN_BACKEND_URL/api/worker-maintenance/drain/$DRAIN_LEASE_ID"
             })"
+            then
+              unset credential Worker__WorkerSecret
+              if (( SECONDS >= deadline )); then
+                echo "The drain status endpoint remained unavailable for 15 minutes." >&2
+                exit 1
+              fi
+              echo "Drain status request failed; retrying in 10 seconds." >&2
+              sleep 10
+              continue
+            fi
             unset credential Worker__WorkerSecret
 
             read -r is_drained tracked reported < <(
