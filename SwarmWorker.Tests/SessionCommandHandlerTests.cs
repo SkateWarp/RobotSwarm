@@ -73,6 +73,68 @@ public sealed class SessionCommandHandlerTests
         Assert.Empty(publisher.Requests);
     }
 
+    [Fact]
+    public async Task StopViewerStopsOnlyTheRequestedLeaseWithoutTouchingDocker()
+    {
+        var sessionId = Guid.NewGuid();
+        var leaseId = Guid.NewGuid();
+        var options = Options.Create(new WorkerOptions());
+        var docker = new RecordingDockerCli();
+        var publisher = new RecordingViewerPublisher();
+        var handler = new SessionCommandHandler(
+            new DockerSessionManager(
+                docker,
+                publisher,
+                options,
+                NullLogger<DockerSessionManager>.Instance),
+            options);
+        var command = new WorkerCommandEnvelope(
+            Guid.NewGuid(),
+            sessionId,
+            "StopViewer",
+            $"sys:viewer-stop:{leaseId:N}",
+            Guid.NewGuid(),
+            2,
+            JsonSerializer.SerializeToElement(new { leaseId }),
+            DateTime.UtcNow);
+
+        var execution = await handler.ExecuteAsync(command, CancellationToken.None);
+
+        Assert.Equal(sessionId, execution.Result.GetProperty("SessionId").GetGuid());
+        Assert.Equal(leaseId, execution.Result.GetProperty("LeaseId").GetGuid());
+        Assert.True(execution.Result.GetProperty("Stopped").GetBoolean());
+        Assert.Equal(new[] { (sessionId, leaseId) }, publisher.StoppedLeases);
+        Assert.Empty(docker.Calls);
+    }
+
+    [Fact]
+    public async Task StopViewerRejectsAnUncorrelatedLeasePayload()
+    {
+        var options = Options.Create(new WorkerOptions());
+        var publisher = new RecordingViewerPublisher();
+        var handler = new SessionCommandHandler(
+            new DockerSessionManager(
+                new RecordingDockerCli(),
+                publisher,
+                options,
+                NullLogger<DockerSessionManager>.Instance),
+            options);
+        var command = new WorkerCommandEnvelope(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "StopViewer",
+            "viewer-stop-invalid",
+            Guid.NewGuid(),
+            1,
+            JsonSerializer.SerializeToElement(new { leaseId = Guid.Empty }),
+            DateTime.UtcNow);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => handler.ExecuteAsync(command, CancellationToken.None));
+
+        Assert.Empty(publisher.StoppedLeases);
+    }
+
     private static WorkerCommandEnvelope Command(Guid sessionId, JsonElement payload)
     {
         return new WorkerCommandEnvelope(
@@ -155,6 +217,7 @@ public sealed class SessionCommandHandlerTests
                 "ready");
 
         public List<ViewerPublishRequest> Requests { get; } = new();
+        public List<(Guid SessionId, Guid LeaseId)> StoppedLeases { get; } = new();
 
         public Task RefreshAvailabilityAsync(CancellationToken cancellationToken) =>
             Task.CompletedTask;
@@ -191,5 +254,14 @@ public sealed class SessionCommandHandlerTests
 
         public Task ReleaseAllInputsAsync(CancellationToken cancellationToken) =>
             Task.CompletedTask;
+
+        public Task<bool> StopLeaseAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken)
+        {
+            StoppedLeases.Add((sessionId, leaseId));
+            return Task.FromResult(true);
+        }
     }
 }

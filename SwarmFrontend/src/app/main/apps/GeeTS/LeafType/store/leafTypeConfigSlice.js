@@ -1,132 +1,95 @@
-import { createSlice, createAsyncThunk, createEntityAdapter } from "@reduxjs/toolkit";
-import axios from "axios";
-import { URL } from "app/constants/constants";
+import { createAsyncThunk, createEntityAdapter, createSlice } from "@reduxjs/toolkit";
+import { getTaskTemplateErrorMessage, listTaskTemplates, saveTaskTemplate } from "../taskTemplateApi";
 
-export const getLeafTypes = createAsyncThunk(
-    "leafTypesConfigApp/leafType-components/getLeafTypes",
-    async (routeParams, { getState }) => {
-        routeParams = routeParams || getState().leafTypesConfigApp.leafTypes.routeParams;
-
-        const response = await axios.get(`${URL}/TaskTemplate`);
-        const data = await response.data;
-
-        return { data, routeParams };
+export const getTaskTemplates = createAsyncThunk(
+    "leafTypesConfigApp/taskTemplates/getTaskTemplates",
+    async (_, { rejectWithValue }) => {
+        try {
+            return await listTaskTemplates();
+        } catch (error) {
+            return rejectWithValue(getTaskTemplateErrorMessage(error));
+        }
     }
 );
 
-export const addNewLeafType = createAsyncThunk(
-    "leafTypesConfigApp/leafType-components/addNewLeafType",
-    async (newLeafType, { dispatch }) => {
-        const response = await axios.post(`${URL}/api/LeafType`, newLeafType);
-        const data = await response.data;
-
-        dispatch(getLeafTypes());
-
-        return data;
+export const updateTaskTemplate = createAsyncThunk(
+    "leafTypesConfigApp/taskTemplates/updateTaskTemplate",
+    async (template, { rejectWithValue }) => {
+        try {
+            return await saveTaskTemplate(template);
+        } catch (error) {
+            return rejectWithValue(getTaskTemplateErrorMessage(error));
+        }
     }
 );
 
-export const updateLeafType = createAsyncThunk(
-    "leafTypesConfigApp/leafType-components/updateLeafType",
-    async (leafType, { dispatch }) => {
-        const response = await axios.put(`${URL}/api/LeafType`, leafType);
-        const data = await response.data;
+const taskTemplateAdapter = createEntityAdapter({
+    sortComparer: (left, right) => left.id - right.id,
+});
 
-        dispatch(getLeafTypes());
-
-        return data;
-    }
-);
-
-export const removeLeafType = createAsyncThunk(
-    "leafTypesConfigApp/leafType-components/removeLeafType",
-    async (idForDelete, { dispatch }) => {
-        const response = await axios.put(`${URL}/api/LeafType/disable/${idForDelete}`);
-        const data = await response.data;
-        dispatch(getLeafTypes());
-
-        return data;
-    }
-);
-
-const leafTypeConfigAdapter = createEntityAdapter({});
-
-export const { selectAll: selectLeafTypes } = leafTypeConfigAdapter.getSelectors(
+export const { selectAll: selectTaskTemplates } = taskTemplateAdapter.getSelectors(
     (state) => state.leafTypesConfigApp.leafTypes
 );
 
 const leafTypesConfigSlice = createSlice({
-    name: "leafTypesConfigApp/leafTypes",
-    initialState: leafTypeConfigAdapter.getInitialState({
-        searchText: "",
-        routeParams: {},
-        leafTypesConfigs: [],
-        leafTypesConfigDialog: {
-            type: "new",
-            props: {
-                open: false,
-            },
-            data: null,
+    name: "leafTypesConfigApp/taskTemplates",
+    initialState: taskTemplateAdapter.getInitialState({
+        loading: false,
+        error: null,
+        saving: false,
+        saveError: null,
+        editDialog: {
+            open: false,
+            template: null,
         },
     }),
     reducers: {
-        openNewLeafTypesConfigDialog: (state) => {
-            state.leafTypesConfigDialog = {
-                type: "new",
-                props: {
-                    open: true,
-                },
-                data: null,
+        openTaskTemplateDialog: (state, action) => {
+            state.editDialog = {
+                open: true,
+                template: action.payload,
             };
+            state.saveError = null;
         },
-
-        closeNewLeafTypesConfigDialog: (state) => {
-            state.leafTypesConfigDialog = {
-                type: "new",
-                props: {
-                    open: false,
-                },
-                data: null,
+        closeTaskTemplateDialog: (state) => {
+            state.editDialog = {
+                open: false,
+                template: null,
             };
-        },
-
-        openEditLeafTypesConfigDialog: (state, action) => {
-            state.leafTypesConfigDialog = {
-                type: "edit",
-                props: {
-                    open: true,
-                },
-                data: action.payload,
-            };
-        },
-        closeEditLeafTypesConfigDialog: (state) => {
-            state.leafTypesConfigDialog = {
-                type: "edit",
-                props: {
-                    open: false,
-                },
-                data: null,
-            };
+            state.saveError = null;
         },
     },
-
-    extraReducers: {
-        [getLeafTypes.fulfilled]: (state, action) => {
-            const { data, routeParams } = action.payload;
-
-            leafTypeConfigAdapter.setAll(state, data);
-
-            state.leafTypesConfigs = data;
-            state.routeParams = routeParams;
-        },
+    extraReducers: (builder) => {
+        builder
+            .addCase(getTaskTemplates.pending, (state) => {
+                state.loading = true;
+                state.error = null;
+            })
+            .addCase(getTaskTemplates.fulfilled, (state, action) => {
+                state.loading = false;
+                state.error = null;
+                taskTemplateAdapter.setAll(state, action.payload);
+            })
+            .addCase(getTaskTemplates.rejected, (state, action) => {
+                state.loading = false;
+                state.error = action.payload || "No fue posible cargar las plantillas.";
+            })
+            .addCase(updateTaskTemplate.pending, (state) => {
+                state.saving = true;
+                state.saveError = null;
+            })
+            .addCase(updateTaskTemplate.fulfilled, (state, action) => {
+                state.saving = false;
+                state.saveError = null;
+                taskTemplateAdapter.upsertOne(state, action.payload);
+            })
+            .addCase(updateTaskTemplate.rejected, (state, action) => {
+                state.saving = false;
+                state.saveError = action.payload || "No fue posible guardar la plantilla.";
+            });
     },
 });
 
-export const {
-    openNewLeafTypesConfigDialog,
-    closeNewLeafTypesConfigDialog,
-    openEditLeafTypesConfigDialog,
-    closeEditLeafTypesConfigDialog,
-} = leafTypesConfigSlice.actions;
+export const { openTaskTemplateDialog, closeTaskTemplateDialog } = leafTypesConfigSlice.actions;
 
 export default leafTypesConfigSlice.reducer;

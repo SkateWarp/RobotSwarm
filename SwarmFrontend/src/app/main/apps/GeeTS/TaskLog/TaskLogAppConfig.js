@@ -1,7 +1,7 @@
 import { lazy } from "react";
 import authRoles from "../../../../auth/authRoles";
 
-const TaskLogApp = lazy(() => import("./TaskLogApp"));
+const TaskLogApp = lazy(() => import("./TaskRunHistoryApp"));
 
 const TaskLogAppConfig = {
     settings: {
@@ -10,7 +10,7 @@ const TaskLogAppConfig = {
         },
     },
 
-    auth: authRoles.admin,
+    auth: authRoles.user,
 
     routes: [
         {

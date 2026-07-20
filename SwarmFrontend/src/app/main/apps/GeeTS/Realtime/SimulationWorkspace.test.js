@@ -1,10 +1,46 @@
-import {
+/** @jest-environment jsdom */
+
+import ReactDOM from "react-dom";
+import { act } from "react-dom/test-utils";
+import SimulationSessionService from "../../../../../services/SimulationSessionService";
+import SimulationWorkspace, {
     mergeViewerCommandEvent,
     mergeViewerLeaseStatus,
     requestMessage,
     sendViewerControlInput,
+    sessionRobotStateColor,
+    sessionRobotSummary,
     viewerCommandFailureMessage,
+    viewerCloseOutcomeNotice,
 } from "./SimulationWorkspace";
+
+jest.mock("../../../../../services/SimulationSessionService", () => ({
+    __esModule: true,
+    default: {
+        getLimits: jest.fn(),
+        list: jest.fn(),
+        listRobots: jest.fn(),
+        listTasks: jest.fn(),
+        createViewerLease: jest.fn(),
+        closeViewerLease: jest.fn(),
+        getViewerLeaseStatus: jest.fn(),
+        waitForViewerClose: jest.fn(),
+        stop: jest.fn(),
+        createRealtimeConnection: jest.fn(),
+    },
+}));
+jest.mock("./HlsViewer", () => ({
+    __esModule: true,
+    default: () => "HLS activo",
+}));
+jest.mock("./WhepViewer", () => ({
+    __esModule: true,
+    default: () => "WHEP activo",
+}));
+jest.mock("./SwarmTaskPanel", () => ({
+    __esModule: true,
+    default: () => null,
+}));
 
 describe("simulation API problem details", () => {
     it("uses the RFC 7807 detail when the API does not return message", () => {
@@ -114,6 +150,26 @@ describe("viewer command lifecycle", () => {
         ).toBe("El worker no pudo preparar el visor: Gazebo did not expose a display.");
         expect(viewerCommandFailureMessage({ state: "Cancelled" })).toContain("cancelada");
     });
+
+    it("distinguishes a failed close from a close that is still unconfirmed", () => {
+        expect(
+            viewerCloseOutcomeNotice({
+                state: "Failed",
+                command: { error: "Publisher process is still alive." },
+            })
+        ).toMatchObject({
+            severity: "error",
+            message: expect.stringContaining("Publisher process is still alive."),
+        });
+        expect(viewerCloseOutcomeNotice({ state: "TimedOut" })).toMatchObject({
+            severity: "warning",
+            message: expect.stringContaining("aún no confirmó"),
+        });
+        expect(viewerCloseOutcomeNotice({ state: "Cancelled" })).toMatchObject({
+            severity: "warning",
+            message: expect.stringContaining("cancelado"),
+        });
+    });
 });
 
 describe("acknowledged viewer input", () => {
@@ -130,5 +186,308 @@ describe("acknowledged viewer input", () => {
         );
         expect(connection.invoke).toHaveBeenCalledWith("SendViewerInput", "session-1", "lease-1", input);
         expect(connection.send).not.toHaveBeenCalled();
+    });
+});
+
+describe("session robot monitor", () => {
+    it("summarizes operational, provisioning, and unavailable robots", () => {
+        expect(
+            sessionRobotSummary([
+                { state: "Ready" },
+                { state: "Active" },
+                { state: "Provisioning" },
+                { state: "Offline" },
+                { state: "Failed" },
+            ])
+        ).toEqual({ total: 5, operational: 2, provisioning: 1, unavailable: 2 });
+        expect(sessionRobotStateColor("Ready")).toBe("success");
+        expect(sessionRobotStateColor("Failed")).toBe("error");
+    });
+});
+
+describe("explicit viewer close", () => {
+    let host;
+    let connection;
+    let consoleError;
+
+    const flush = async () => {
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+    };
+
+    const button = (label) =>
+        Array.from(document.querySelectorAll("button")).find((candidate) =>
+            candidate.textContent.includes(label)
+        );
+
+    beforeEach(() => {
+        host = document.createElement("div");
+        document.body.appendChild(host);
+        consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+        connection = {
+            state: "Connected",
+            on: jest.fn(),
+            onreconnected: jest.fn(),
+            onreconnecting: jest.fn(),
+            onclose: jest.fn(),
+            start: jest.fn().mockResolvedValue(undefined),
+            stop: jest.fn().mockResolvedValue(undefined),
+            invoke: jest.fn((method) => {
+                if (method === "BeginViewerControl") {
+                    return Promise.resolve({ authorizedUntil: "2099-01-01T00:00:00Z" });
+                }
+                return Promise.resolve(undefined);
+            }),
+        };
+        SimulationSessionService.createRealtimeConnection.mockReturnValue(connection);
+        SimulationSessionService.getLimits.mockResolvedValue({ maxRobotsPerSession: 10 });
+        SimulationSessionService.list.mockResolvedValue([
+            {
+                id: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                state: "Ready",
+                desiredRobotCount: 10,
+                arenaVersion: "test-arena",
+                computeWorkerId: "df4a00c0-2ee7-42a9-95a7-8b550bd40a63",
+                computeWorkerName: "gpu-test",
+                isEmergencyStopped: false,
+            },
+        ]);
+        SimulationSessionService.listRobots.mockResolvedValue([]);
+        SimulationSessionService.listTasks.mockResolvedValue([]);
+        SimulationSessionService.createViewerLease.mockResolvedValue({
+            leaseId: "a023236e-868c-4898-b4cb-d6361bc25945",
+            token: "private-token",
+            expiresAt: "2099-01-01T00:00:00Z",
+            hlsUrl: "https://robot.example/private/index.m3u8",
+            command: {
+                id: "3c24ab34-f81b-4d0b-9822-521451696efa",
+                state: "Completed",
+                updatedAt: "2026-07-19T12:00:00Z",
+            },
+        });
+        SimulationSessionService.closeViewerLease.mockResolvedValue({
+            leaseId: "a023236e-868c-4898-b4cb-d6361bc25945",
+        });
+        SimulationSessionService.waitForViewerClose.mockResolvedValue({
+            state: "Completed",
+            command: { id: "stop-viewer", state: "Completed" },
+        });
+        SimulationSessionService.stop.mockResolvedValue({ state: "Stopping" });
+    });
+
+    afterEach(() => {
+        act(() => ReactDOM.unmountComponentAtNode(host));
+        host.remove();
+        consoleError.mockRestore();
+        jest.clearAllMocks();
+        jest.useRealTimers();
+    });
+
+    it("shows Cerrar visor and clears interaction, stream, and lease state after revocation", async () => {
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+        await flush();
+
+        expect(host.textContent).toContain("HLS activo");
+        expect(button("Cerrar visor")).toBeDefined();
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "BeginViewerControl",
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945"
+        );
+
+        await act(async () => {
+            button("Cerrar visor").click();
+        });
+        await flush();
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945"
+        );
+        expect(host.textContent).not.toContain("HLS activo");
+        expect(button("Cerrar visor")).toBeUndefined();
+        expect(host.textContent).toContain("Abre el visor de tu sesión");
+    });
+
+    it("keeps an unconfirmed lease visible and succeeds when the owner retries the close", async () => {
+        SimulationSessionService.closeViewerLease.mockResolvedValue({
+            leaseId: "a023236e-868c-4898-b4cb-d6361bc25945",
+            revokedAt: "2026-07-19T12:01:00Z",
+            command: { id: "stop-viewer-1", state: "Pending" },
+        });
+        SimulationSessionService.waitForViewerClose
+            .mockResolvedValueOnce({
+                state: "TimedOut",
+                command: { id: "stop-viewer-1", state: "Running" },
+            })
+            .mockResolvedValueOnce({
+                state: "Completed",
+                command: { id: "stop-viewer-1", state: "Completed" },
+            });
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+        expect(host.textContent).toContain("HLS activo");
+
+        await act(async () => {
+            button("Cerrar visor").click();
+        });
+        await flush();
+
+        expect(host.textContent).not.toContain("HLS activo");
+        expect(host.querySelector("[data-testid='viewer-close-notice']")).not.toBeNull();
+        expect(host.textContent).toContain("aún no confirmó");
+        expect(button("Reintentar cierre")).toBeDefined();
+
+        await act(async () => {
+            button("Reintentar cierre").click();
+        });
+        await flush();
+
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledTimes(2);
+        expect(SimulationSessionService.waitForViewerClose).toHaveBeenCalledTimes(2);
+        expect(button("Reintentar cierre")).toBeUndefined();
+        expect(host.textContent).toContain("Abre el visor de tu sesión");
+    });
+
+    it("shows the worker error and offers a retry after a failed close", async () => {
+        SimulationSessionService.closeViewerLease.mockResolvedValue({
+            leaseId: "a023236e-868c-4898-b4cb-d6361bc25945",
+            revokedAt: "2026-07-19T12:01:00Z",
+            command: { id: "stop-viewer-failed", state: "Pending" },
+        });
+        SimulationSessionService.waitForViewerClose.mockResolvedValue({
+            state: "Failed",
+            command: {
+                id: "stop-viewer-failed",
+                state: "Failed",
+                error: "Publisher did not exit.",
+            },
+        });
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+        await act(async () => {
+            button("Cerrar visor").click();
+        });
+        await flush();
+
+        expect(host.querySelector("[data-testid='viewer-close-notice']")).not.toBeNull();
+        expect(host.textContent).toContain("Publisher did not exit.");
+        expect(button("Reintentar cierre")).toBeDefined();
+    });
+
+    it("shows every runtime robot separately from the persistent inventory", async () => {
+        SimulationSessionService.listRobots.mockResolvedValue([
+            {
+                id: "runtime-1",
+                ordinal: 0,
+                runtimeId: "tb3_0",
+                namespace: "/tb3_0",
+                role: "leader",
+                state: "Active",
+                updatedAt: "2026-07-19T12:00:00Z",
+            },
+            {
+                id: "runtime-2",
+                ordinal: 1,
+                runtimeId: "tb3_1",
+                namespace: "/tb3_1",
+                role: "follower",
+                state: "Offline",
+                updatedAt: "2026-07-19T12:00:01Z",
+            },
+        ]);
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+
+        expect(host.querySelector("[data-testid='session-robot-monitor']")).not.toBeNull();
+        expect(host.textContent).toContain("tb3_0");
+        expect(host.textContent).toContain("tb3_1");
+        expect(host.textContent).toContain("1/2 operativos");
+        expect(host.textContent).toContain("1 robot(es) requieren atención");
+    });
+
+    it("requires confirmation before stopping and releasing the whole session", async () => {
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+
+        act(() => button("Detener sesión").click());
+        expect(SimulationSessionService.stop).not.toHaveBeenCalled();
+        expect(document.body.textContent).toContain("Esta acción no se puede deshacer");
+
+        await act(async () => {
+            button("Detener y liberar").click();
+        });
+        await flush();
+
+        expect(SimulationSessionService.stop).toHaveBeenCalledWith("46643be0-a7b2-44ef-95c5-30c8657c6489");
+    });
+
+    it("retries an initial SignalR failure without requiring a page reload", async () => {
+        jest.useFakeTimers();
+        connection.start
+            .mockRejectedValueOnce(new Error("temporary gateway failure"))
+            .mockResolvedValueOnce(undefined);
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+
+        expect(host.querySelector("[data-testid='realtime-status']")).not.toBeNull();
+        expect(connection.start).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            jest.advanceTimersByTime(2000);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(connection.start).toHaveBeenCalledTimes(2);
+        expect(host.querySelector("[data-testid='realtime-status']")).toBeNull();
+        expect(host.textContent).toContain("Tiempo real conectado");
+        jest.useRealTimers();
     });
 });

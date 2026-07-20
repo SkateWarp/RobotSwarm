@@ -269,7 +269,8 @@ public sealed class BoundedCommandExecutor : IHostedService
             if (latchAtStart is not null
                 && command.Type is not "EmergencyStop"
                     and not "ResetEmergencyStop"
-                    and not "StopSession")
+                    and not "StopSession"
+                    and not "StopViewer")
             {
                 throw new EmergencyStopLatchException();
             }
@@ -414,7 +415,7 @@ public sealed class BoundedCommandExecutor : IHostedService
     private void CancelActiveOperation(Guid sessionId)
     {
         if (!_activeOperations.TryGetValue(sessionId, out var operation)
-            || operation.CommandType == "StopSession")
+            || operation.CommandType is "StopSession" or "StopViewer")
         {
             return;
         }

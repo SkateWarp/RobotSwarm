@@ -16,6 +16,7 @@ namespace SwarmBackend.Routes;
 public static class SessionControlRoute
 {
     private const int MaximumViewerLeaseAttempts = 3;
+    private const int MaximumViewerStopAttempts = 3;
 
     public static RouteGroupBuilder MapSessionControl(this RouteGroupBuilder group)
     {
@@ -25,6 +26,8 @@ public static class SessionControlRoute
             .Produces<FleetUpdateResponse>(StatusCodes.Status202Accepted);
         group.MapGet("/{id:guid}/robots", GetRobots)
             .Produces<IEnumerable<SessionRobotResponse>>();
+        group.MapGet("/tasks/history", GetTaskHistory)
+            .Produces<TaskRunHistoryResponse>();
         group.MapGet("/{id:guid}/tasks", GetTasks)
             .Produces<IEnumerable<TaskRunResponse>>();
         group.MapPost("/{id:guid}/tasks", CreateTask)
@@ -43,6 +46,9 @@ public static class SessionControlRoute
             .Produces<ViewerLeaseResponse>(StatusCodes.Status201Created);
         group.MapGet("/{id:guid}/viewer-lease/{leaseId:guid}", GetViewerLeaseStatus)
             .Produces<ViewerLeaseStatusResponse>();
+        group.MapDelete("/{id:guid}/viewer-lease/{leaseId:guid}", CloseViewerLease)
+            .Produces<ViewerLeaseCloseResponse>(StatusCodes.Status200OK)
+            .Produces<ViewerLeaseCloseResponse>(StatusCodes.Status202Accepted);
 
         return group;
     }
@@ -84,6 +90,15 @@ public static class SessionControlRoute
                     cancellationToken);
         }
 
+        var stopKeys = ViewerStopIdempotencyKeys(leaseId);
+        var closeCommand = await dataContext.WorkerCommands
+            .AsNoTracking()
+            .Where(candidate => candidate.SimulationSessionId == id
+                && candidate.Type == WorkerCommandType.StopViewer
+                && stopKeys.Contains(candidate.IdempotencyKey))
+            .OrderByDescending(candidate => candidate.Sequence)
+            .FirstOrDefaultAsync(cancellationToken);
+
         var commandStatus = command == null
             ? null
             : new ViewerLeaseCommandStatusResponse(
@@ -91,6 +106,13 @@ public static class SessionControlRoute
                 command.State.ToString(),
                 command.LastError,
                 command.UpdatedAt);
+        var closeCommandStatus = closeCommand == null
+            ? null
+            : new ViewerLeaseCommandStatusResponse(
+                closeCommand.Id,
+                closeCommand.State.ToString(),
+                closeCommand.LastError,
+                closeCommand.UpdatedAt);
         return Results.Ok(new ViewerLeaseStatusResponse(
             lease.Id,
             lease.SimulationSessionId,
@@ -99,8 +121,240 @@ public static class SessionControlRoute
             lease.CreatedAt,
             lease.ExpiresAt,
             lease.RevokedAt,
-            command?.State == WorkerCommandState.Completed,
-            commandStatus));
+            !lease.RevokedAt.HasValue
+                && command?.State == WorkerCommandState.Completed,
+            commandStatus,
+            closeCommandStatus));
+    }
+
+    internal static Task<IResult> CloseViewerLease(
+        Guid id,
+        Guid leaseId,
+        HttpContext context,
+        DataContext dataContext,
+        WorkerCommandService commandService,
+        IHubContext<WorkerHub> workerHub,
+        IHubContext<SessionHub> sessionHub,
+        ViewerControlRegistry viewerControls,
+        CancellationToken cancellationToken)
+    {
+        return RetryViewerCloseConflicts(
+            () => CloseViewerLeaseAttempt(
+                id,
+                leaseId,
+                context,
+                dataContext,
+                commandService,
+                workerHub,
+                sessionHub,
+                viewerControls,
+                cancellationToken),
+            dataContext.ChangeTracker.Clear,
+            cancellationToken);
+    }
+
+    private static async Task<IResult> CloseViewerLeaseAttempt(
+        Guid id,
+        Guid leaseId,
+        HttpContext context,
+        DataContext dataContext,
+        WorkerCommandService commandService,
+        IHubContext<WorkerHub> workerHub,
+        IHubContext<SessionHub> sessionHub,
+        ViewerControlRegistry viewerControls,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetAccountId(context, out var accountId))
+        {
+            return Results.Unauthorized();
+        }
+
+        await using var transaction = await dataContext.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+        var session = await FindOwnedSession(dataContext, id, accountId, cancellationToken);
+        if (session == null)
+        {
+            return Results.NotFound();
+        }
+
+        var lease = await dataContext.ViewerLeases.SingleOrDefaultAsync(
+            candidate => candidate.Id == leaseId
+                && candidate.SimulationSessionId == id
+                && candidate.AccountId == accountId,
+            cancellationToken);
+        if (lease == null)
+        {
+            return Results.NotFound();
+        }
+
+        using var stopPayload = JsonSerializer.SerializeToDocument(new { leaseId });
+        var stopKeys = ViewerStopIdempotencyKeys(leaseId);
+        var stopCommands = await dataContext.WorkerCommands
+            .Where(candidate => candidate.SimulationSessionId == id
+                && candidate.Type == WorkerCommandType.StopViewer
+                && stopKeys.Contains(candidate.IdempotencyKey))
+            .OrderByDescending(candidate => candidate.Sequence)
+            .ToListAsync(cancellationToken);
+        var existing = stopCommands.FirstOrDefault();
+        if (existing != null)
+        {
+            if (!WorkerCommandService.SamePayload(existing.Payload, stopPayload))
+            {
+                return IdempotencyConflict();
+            }
+
+            var existingResponse = new ViewerLeaseCloseResponse(
+                lease.Id,
+                id,
+                lease.RevokedAt ?? existing.CreatedAt,
+                WorkerCommandService.ToResponse(existing));
+            if (existing.State == WorkerCommandState.Completed)
+            {
+                return Results.Ok(existingResponse);
+            }
+
+            if (IsViewerStopInFlight(existing.State))
+            {
+                return Results.Accepted(
+                    $"/api/sessions/{id}/viewer-lease/{leaseId}",
+                    existingResponse);
+            }
+
+            if (existing.State is not (WorkerCommandState.Failed
+                or WorkerCommandState.Cancelled))
+            {
+                return Results.Conflict(new
+                {
+                    message = "The viewer stop command is in an unsupported state."
+                });
+            }
+
+            if (stopCommands.Count >= MaximumViewerStopAttempts)
+            {
+                return Results.Conflict(new
+                {
+                    message = "The GPU worker could not confirm the viewer close after three attempts."
+                });
+            }
+        }
+
+        if (lease.RevokedAt.HasValue && existing == null)
+        {
+            return Results.Ok(new ViewerLeaseCloseResponse(
+                lease.Id,
+                id,
+                lease.RevokedAt.Value,
+                Command: null));
+        }
+
+        WorkerCommand? command = null;
+        if (CanControl(session))
+        {
+            if (session.ComputeWorker is null
+                || !WorkerCapabilities.SupportsCommand(
+                    session.ComputeWorker,
+                    WorkerCommandType.StopViewer.ToString()))
+            {
+                return Results.Conflict(new
+                {
+                    message = "The assigned GPU worker cannot stop the viewer independently."
+                });
+            }
+
+            var attempt = stopCommands.Count + 1;
+            var idempotencyKey = ViewerStopIdempotencyKey(leaseId, attempt);
+            (command, _) = await commandService.Queue(
+                session,
+                WorkerCommandType.StopViewer,
+                idempotencyKey,
+                JsonDocument.Parse(stopPayload.RootElement.GetRawText()),
+                taskRun: null,
+                cancellationToken);
+        }
+        else if (existing != null)
+        {
+            return Results.Conflict(new
+            {
+                message = "The GPU worker is no longer available to retry the viewer close."
+            });
+        }
+
+        var now = DateTime.UtcNow;
+        long? revocationVersion = null;
+        if (!lease.RevokedAt.HasValue)
+        {
+            lease.RevokedAt = now;
+            revocationVersion = await viewerControls.BeginLeaseRevocationAsync(
+                id,
+                leaseId,
+                new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc)),
+                cancellationToken);
+        }
+        var revocationCommitted = false;
+        try
+        {
+            await dataContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            if (revocationVersion.HasValue)
+            {
+                viewerControls.ConfirmLeaseRevocation(id, leaseId, revocationVersion.Value);
+            }
+            revocationCommitted = true;
+            if (revocationVersion.HasValue)
+            {
+                await viewerControls.DrainLeaseAsync(id, leaseId, CancellationToken.None);
+            }
+
+            if (command != null)
+            {
+                await NotifyCommand(
+                    workerHub,
+                    sessionHub,
+                    session,
+                    command,
+                    cancellationToken);
+            }
+
+            var response = new ViewerLeaseCloseResponse(
+                lease.Id,
+                id,
+                lease.RevokedAt ?? now,
+                command == null ? null : WorkerCommandService.ToResponse(command));
+            return command == null
+                ? Results.Ok(response)
+                : Results.Accepted(
+                    $"/api/sessions/{id}/viewer-lease/{leaseId}",
+                    response);
+        }
+        finally
+        {
+            if (!revocationCommitted && revocationVersion.HasValue)
+            {
+                viewerControls.CancelLeaseRevocation(id, leaseId, revocationVersion.Value);
+            }
+        }
+    }
+
+    private static string ViewerStopIdempotencyKey(Guid leaseId, int attempt)
+    {
+        var prefix = $"sys:viewer-stop:{leaseId:N}";
+        return attempt == 1 ? prefix : $"{prefix}:{attempt}";
+    }
+
+    private static string[] ViewerStopIdempotencyKeys(Guid leaseId)
+    {
+        return Enumerable.Range(1, MaximumViewerStopAttempts)
+            .Select(attempt => ViewerStopIdempotencyKey(leaseId, attempt))
+            .ToArray();
+    }
+
+    private static bool IsViewerStopInFlight(WorkerCommandState state)
+    {
+        return state is WorkerCommandState.Pending
+            or WorkerCommandState.Dispatched
+            or WorkerCommandState.Acknowledged
+            or WorkerCommandState.Running;
     }
 
     private static async Task<IResult> UpdateFleet(
@@ -289,6 +543,96 @@ public static class SessionControlRoute
             .OrderByDescending(task => task.CreatedAt)
             .ToListAsync(cancellationToken);
         return Results.Ok(tasks.Select(ToTaskResponse));
+    }
+
+    internal static async Task<IResult> GetTaskHistory(
+        HttpContext context,
+        DataContext dataContext,
+        CancellationToken cancellationToken,
+        int offset = 0,
+        int limit = 25,
+        string? type = null,
+        string? state = null,
+        string? outcome = null)
+    {
+        if (!TryGetAccountId(context, out var accountId))
+        {
+            return Results.Unauthorized();
+        }
+
+        if (offset < 0 || limit < 1 || limit > 100)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(offset)] = offset < 0
+                    ? new[] { "Offset must be zero or greater." }
+                    : Array.Empty<string>(),
+                [nameof(limit)] = limit is < 1 or > 100
+                    ? new[] { "Limit must be between 1 and 100." }
+                    : Array.Empty<string>()
+            }
+            .Where(entry => entry.Value.Length > 0)
+            .ToDictionary(entry => entry.Key, entry => entry.Value));
+        }
+
+        if (!TryParseOptionalEnum(type, out SwarmTaskRunType? taskType)
+            || !TryParseOptionalEnum(state, out TaskRunState? taskState)
+            || !TryParseOptionalEnum(outcome, out TaskOutcomeState? outcomeState))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["filters"] = new[] { "Type, state, or outcome contains an unsupported value." }
+            });
+        }
+
+        var query = dataContext.TaskRuns
+            .AsNoTracking()
+            .Where(task => task.SimulationSession.AccountId == accountId);
+        if (taskType.HasValue)
+        {
+            query = query.Where(task => task.Type == taskType.Value);
+        }
+        if (taskState.HasValue)
+        {
+            query = query.Where(task => task.State == taskState.Value);
+        }
+        if (outcomeState.HasValue)
+        {
+            query = query.Where(task => task.OutcomeState == outcomeState.Value);
+        }
+        var total = await query.CountAsync(cancellationToken);
+        var tasks = await query
+            .OrderByDescending(task => task.CreatedAt)
+            .ThenByDescending(task => task.Id)
+            .Skip(offset)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        return Results.Ok(new TaskRunHistoryResponse(
+            total,
+            offset,
+            limit,
+            tasks.Select(ToTaskResponse).ToList()));
+    }
+
+    private static bool TryParseOptionalEnum<TEnum>(string? value, out TEnum? parsed)
+        where TEnum : struct, Enum
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            parsed = null;
+            return true;
+        }
+
+        if (Enum.TryParse<TEnum>(value.Trim(), ignoreCase: true, out var result)
+            && Enum.IsDefined(result))
+        {
+            parsed = result;
+            return true;
+        }
+
+        parsed = null;
+        return false;
     }
 
     private static async Task<IResult> CreateTask(
@@ -1086,6 +1430,37 @@ public static class SessionControlRoute
         return RetryConflict();
     }
 
+    internal static async Task<IResult> RetryViewerCloseConflicts(
+        Func<Task<IResult>> operation,
+        Action resetContext,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaximumViewerLeaseAttempts; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception exception) when (
+                SimulationSessionRoute.IsSerializationFailure(exception)
+                || IsUniqueViolation(exception))
+            {
+                resetContext();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (attempt == MaximumViewerLeaseAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(25 * attempt),
+                    cancellationToken);
+            }
+        }
+
+        return RetryConflict();
+    }
+
     private static async Task<SimulationSession?> FindOwnedSession(
         DataContext dataContext,
         Guid id,
@@ -1323,5 +1698,21 @@ public static class SessionControlRoute
                         or PostgresErrorCodes.UniqueViolation
                 }
             };
+    }
+
+    private static bool IsUniqueViolation(Exception exception)
+    {
+        for (Exception? current = exception; current != null; current = current.InnerException)
+        {
+            if (current is PostgresException
+                {
+                    SqlState: PostgresErrorCodes.UniqueViolation
+                })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

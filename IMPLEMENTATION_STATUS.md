@@ -1,6 +1,6 @@
 # RobotSwarm implementation status
 
-**Snapshot date:** 2026-07-19
+**Snapshot date:** 2026-07-20
 **Scope:** current commissioning branch, not an assertion that every change is
 already active in production
 
@@ -18,11 +18,11 @@ evidence, is available in
 
 | Layer | Current responsibility | Repository status |
 | --- | --- | --- |
-| React frontend | User-owned session, fleet and task controls; live status; private HLS scene player | Integrated in the commissioning branch |
-| .NET backend | Authentication, ownership checks, session queue, worker commands, task outcomes, viewer leases and deployment drain leases | Integrated in the commissioning branch |
-| .NET GPU worker | Isolated Docker session lifecycle, ROS command bridge, heartbeats, immutable image selection and viewer-publisher supervision | Implemented; final release deployment remains pending |
+| React frontend | User-owned session, fleet and task controls; live status; private HLS scene player | PR #99 base integrated and public; post-PR #99 management delta is still local |
+| .NET backend | Authentication, ownership checks, session queue, worker commands, task outcomes, viewer leases and deployment drain leases | PR #99 base integrated; post-PR #99 API delta is still local |
+| .NET GPU worker | Isolated Docker session lifecycle, ROS command bridge, heartbeats, immutable image selection and viewer-publisher supervision | PR #99 base implemented; lease-specific viewer stop delta is still local |
 | ROS Noetic and Gazebo | Dynamic TurtleBot3 Burger fleet, safety control, task orchestration and three scalable behaviours | Implemented and exercised in visible simulation |
-| MediaMTX and viewer helper | Private X display and `gzclient` per lease, H.264/RTSP publishing and internal low-latency HLS origin | Implemented with feature gates disabled by default |
+| MediaMTX and viewer helper | Private X display and `gzclient` per lease, H.264/RTSP publishing and internal low-latency HLS origin | Implemented; gates active only inside the supervised commissioning window |
 
 The layers use one correlated lifecycle rather than separate ad-hoc controls:
 the frontend calls the authenticated backend, the backend issues durable worker
@@ -30,10 +30,15 @@ commands, the worker translates those commands into the private ROS namespace,
 and ROS reports fleet and task state through the worker hub. A browser is not
 given Docker, ROS, Gazebo, VNC, or MediaMTX administrative access.
 
-Contract alignment is therefore implemented. Final production acceptance is
-not complete until the same revision passes CI, is deployed to both the backend
-VM and GPU worker, and two independent browser users prove session and stream
-isolation.
+The integrated base is merge
+`bbc7c4611d6d3284c08da1fd2b713afafe641f40` from PR #99. It passed CI and its
+frontend is public. Work performed after that merge adds the missing web
+management functions described below, but it is still an uncommitted local
+candidate: it has no PR, CI result, deployment, or public-browser evidence.
+The delayed deployment of `bbc7c46` completed after GitHub rotated the expired
+Actions certificate, so the backend now has the integrated base. It still
+cannot be called the final release: the local management/viewer delta has not
+passed PR CI or been deployed to the backend and GPU worker.
 
 ## Implemented components
 
@@ -97,6 +102,49 @@ Follow-the-leader is intentionally continuous and is not failed merely because
 it remains active without reaching a finite completion value. Finite formation
 and transport tasks are monitored for acceptance and progress.
 
+### Delta local de administración web posterior al PR #99
+
+El candidato local completa las secciones que todavía dependían de rutas
+heredadas o no mostraban el estado real del plano de control:
+
+- **Historial de tareas:** la pantalla consulta `TaskRun`, paginado y filtrado
+  por la cuenta propietaria de la sesión. `TaskLog` se conserva únicamente para
+  compatibilidad y diagnóstico administrativo del flujo antiguo; ya no
+  alimenta el historial de usuario.
+- **Plantillas de tareas:** el catálogo administrativo expone únicamente las
+  operaciones reales `GET` y `PUT`. La interfaz permite listar y editar nombre
+  y tipo; no presenta creación o eliminación que el backend no implemente.
+- **Robots:** el registro persistente dispone de búsqueda, alta, edición y
+  desactivación. La identidad autenticada fija el propietario al crear, un
+  usuario solo modifica sus robots y un administrador puede supervisar el
+  inventario activo completo. Los robots públicos continúan siendo visibles,
+  pero no editables por terceros.
+- **Grupos de robots:** la sección administrativa gestiona grupos y membresía,
+  exige confirmación para transferir un robot y deja los miembros disponibles
+  al eliminar un grupo. Se retiró la antigua ruta de “asignar tarea”, porque
+  solo generaba `TaskLog` y cambiaba estados; nunca ejecutaba ROS. Las tareas
+  reales siguen iniciándose desde Control de simulación.
+- **Operación de sesión:** el frontend muestra el roster runtime informado por
+  el worker, sus roles, namespaces, estados y última actualización. Reintenta
+  también el primer fallo de SignalR sin requerir recargar la página y pide
+  confirmación antes de detener y liberar una sesión completa.
+- **Visor:** `Cerrar visor` revoca el lease propio, libera entradas y emite el
+  comando durable `StopViewer`, que detiene solo ese publicador sin apagar ROS,
+  Gazebo, el contenedor o la red de la sesión.
+- **Usuarios:** la navegación GTS y el encabezado administrativo utilizan el
+  nombre visible «Usuarios», conservando el CRUD y la autorización de
+  administrador existentes.
+
+Una ejecución focal local, sin consumir minutos de GitHub Actions, aprobó
+31/31 pruebas de backend, 19/19 del worker y 39/39 de frontend para este delta.
+El lint focal y la compilación de producción de las nuevas pantallas
+administrativas también aprobaron. Después de ese corte, las suites locales integrales de
+backend (213/213), worker (121/121) y ROS (362/362), además del auxiliar del
+publicador, aprobaron sobre el árbol actual. Frontend aprobó 132/132 pruebas en
+22 suites, el lint de todos los archivos modificados y una compilación de
+producción. Ninguno de estos resultados sustituye CI ni la aceptación visible
+posterior al despliegue.
+
 ### Private browser viewer
 
 The implemented primary delivery path is:
@@ -120,8 +168,16 @@ ICE/TURN is no longer a prerequisite for accepting the HLS path.
 
 The stock Burger model has no supported camera sensor, so the honest current
 viewer capability is `Scene`. `RobotCamera` requests are rejected. Publishing
-and HLS proxying remain disabled by default until the final two-user public
-browser test succeeds.
+and HLS proxying are protected gates. They are active on the last compatible
+backend release for the supervised commissioning window, but that state does
+not count as production acceptance of either the PR #99 base or the local
+post-PR #99 delta.
+
+The post-PR #99 candidate also adds an explicit, owner-scoped viewer close.
+Revocation is idempotent and fenced against a replaced lease. The worker keeps
+a short tombstone so a delayed start cannot revive a viewer that was already
+closed. This behavior has focused local regression coverage but is not active
+in production yet.
 
 ### Deployment and host hardening
 
@@ -156,6 +212,11 @@ final public rollout:
 - A separate distant-search run recorded motion from 10/10 robots, one finder
   notification, 10/10 acknowledgements, responses from the other 9 robots, and
   zero collision deltas.
+- The most recent isolated N=10 transport repetition recorded 977 search
+  samples with all ten robots moving, one finder plus nine notices and
+  acknowledgements, useful pushing by all ten robots, 59.14% full-roster
+  contribution, 0.5044 m progress, RTF 2.9672, 49.960 visible FPS on the RTX
+  3080, and no unexpected contact.
 - The local host integration test has run two publisher pipelines concurrently
   with distinct displays, stream paths, runtime directories, and cleanup. It
   uses real Xvfb/XTest with controlled Docker and `gzclient` test doubles, so it
@@ -163,8 +224,11 @@ final public rollout:
   It does **not** replace the pending public two-account browser test through
   `rs.zerav.la` and `robot.zerav.la`.
 - Production maintenance ports were checked after hardening: VNC and
-  websockify listen on loopback. The viewer feature gates were intentionally
-  left off during the pre-release baseline.
+  websockify listen on loopback. The viewer gates were off during the initial
+  baseline and later enabled together for the supervised commissioning window.
+- The post-PR #99 management delta passed the focused local checks listed
+  above. No claim is made that its pages, `StopViewer` command, or runtime robot
+  monitor have been exercised against the public deployment.
 
 Raw measurements, screenshots, incident analysis, and the distinction between
 negative and accepted runs are recorded in the
@@ -172,19 +236,27 @@ negative and accepted runs are recorded in the
 
 ## Work that remains before declaring the release complete
 
-1. Require the exact published revision to pass GitHub CI. The integrated
-   concurrency/security review and complete local suite are already closed.
-2. Merge and deploy the backend contract and database migration first, with
-   viewer feature gates still disabled.
-3. Deploy the same current `main` SHA to the GPU worker through the automatic
-   drain workflow and verify service readiness and the immutable image ID.
-4. Enable worker publishing and the backend HLS proxy only after their
-   prerequisites are healthy.
-5. Run two simultaneous, independently authenticated browser sessions with
+1. Preserve the completed local review of the post-PR #99 delta. Backend
+   213/213, worker 121/121, ROS 362/362, frontend 132/132, modified-file lint,
+   production build and the publisher helper pass on the current tree; repeat
+   any affected check if the code changes again.
+2. Publish that delta through one consolidated PR and CI execution. GitHub
+   already restored the Actions broker affected by I-053 and the original
+   `bbc7c46` deployment completed successfully, but that base is not the final
+   candidate after this functional delta.
+3. Deploy the resulting exact merge SHA first to the backend VM and then to the
+   GPU worker through the automatic drain workflow; verify health, capability
+   negotiation and immutable image identity at both stages.
+4. Run two simultaneous, independently authenticated browser sessions with
    different fleets/tasks and prove distinct displays and streams, cross-user
    denial, lease expiry, independent stop/cleanup, visible FPS/real-time factor,
    and terminal task outcomes.
-6. Remove temporary accounts and sessions, finish the Spanish report, and keep
+5. Repeat the representative formation, leader-following, normal transport and
+   loaded-payload gates on the deployed revision.
+6. Capture the new History, Templates, Robots, Groups, Runtime monitor, Viewer
+   close and Users pages only after that public rollout; sanitize and hash the
+   real images.
+7. Remove temporary accounts and sessions, finish the Spanish report, and keep
    the rollback tags until the release has remained healthy.
 
 Until these steps finish, “implemented” must not be read as “final production
@@ -202,10 +274,16 @@ acceptance passed”.
 - The live matrix samples representative robot counts and shapes. It does not
   imply that every shape, path, world, and parameter combination has been
   exhaustively verified.
+- Persistent robots and administrator groups are inventory metadata. They do
+  not select the exact runtime identities inside a simulation session; the
+  worker roster is the authoritative source for live ROS/Gazebo instances.
+- The focused post-PR #99 checks are not a full regression suite. The local
+  candidate remains subject to review, CI, deployment and public acceptance.
 
 ## Current documentation
 
 - [Swarm control plan](docs/swarm-control-plan.md)
 - [GPU worker deployment](docs/gpu-worker-deployment.md)
 - [Scene viewer publisher](docs/viewer-publisher.md)
+- [Production acceptance harnesses](scripts/acceptance/README.md)
 - [Spanish final commissioning report](docs/informe-comisionamiento-final.md)

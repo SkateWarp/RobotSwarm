@@ -1,0 +1,11 @@
+RobotSwarm commissioning - sanitized TLS observation
+observed_utc=2026-07-20T00:47:10Z
+endpoint=pipelinesghubeus11.actions.githubusercontent.com:443
+sni=pipelinesghubeus11.actions.githubusercontent.com
+subject=CN=*.actions.githubusercontent.com
+not_before=2026-04-20T23:05:55Z
+not_after=2026-07-19T23:05:54Z
+serial=05E5F127DCD8CC9F060D56DDEB33E55B42C8
+verification_result=expired
+independent_sources=backend-vm,wsl-gpu-station
+note=Both hosts returned the same leaf certificate while their UTC clocks were correct.

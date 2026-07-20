@@ -48,7 +48,7 @@ function AccountsApp() {
                     <GeneralHeader
                         searchText={searchText}
                         pageLayout={pageLayout}
-                        headerName="Cuentas"
+                        headerName={isGts ? "Usuarios" : "Cuentas"}
                         handleSearchTextChange={setAccountsSearchText}
                         iconType="account_box"
                     />

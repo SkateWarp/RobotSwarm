@@ -97,6 +97,18 @@ public sealed class SessionCommandHandler
                     null,
                     null);
             }
+            case "StopViewer":
+            {
+                var leaseId = ParseViewerStopLeaseId(command.Payload);
+                var result = await _sessions.StopViewerAsync(
+                    command.SessionId,
+                    leaseId,
+                    cancellationToken);
+                return new CommandExecutionResult(
+                    JsonSerializer.SerializeToElement(result),
+                    null,
+                    null);
+            }
             case "StartTask":
             case "PauseTask":
             case "ResumeTask":
@@ -170,5 +182,20 @@ public sealed class SessionCommandHandler
         CancellationToken cancellationToken)
     {
         return _sessions.StopAsync(sessionId, cancellationToken);
+    }
+
+    private static Guid ParseViewerStopLeaseId(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object
+            || !payload.TryGetProperty("leaseId", out var leaseIdElement)
+            || leaseIdElement.ValueKind != JsonValueKind.String
+            || !Guid.TryParse(leaseIdElement.GetString(), out var leaseId)
+            || leaseId == Guid.Empty)
+        {
+            throw new InvalidOperationException(
+                "StopViewer payload must contain a valid leaseId.");
+        }
+
+        return leaseId;
     }
 }

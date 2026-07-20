@@ -6,6 +6,11 @@ import {
     Chip,
     CircularProgress,
     Divider,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogContentText,
+    DialogTitle,
     FormControl,
     Grid,
     InputLabel,
@@ -25,6 +30,42 @@ const TERMINAL_TASK_STATES = new Set(["Completed", "Cancelled", "Failed"]);
 const TERMINAL_VIEWER_COMMAND_STATES = new Set(["Completed", "Cancelled", "Failed"]);
 const UNAVAILABLE_ROBOT_STATES = new Set(["Removed", "Failed"]);
 const CLEANUP_STATES = new Set(["Failed", "Expired"]);
+
+const SESSION_ROBOT_STATE_LABELS = {
+    Provisioning: "Preparando",
+    Ready: "Listo",
+    Active: "Activo",
+    Offline: "Sin conexión",
+    Removed: "Retirado",
+    Failed: "Fallido",
+};
+
+export const sessionRobotStateColor = (state) => {
+    if (state === "Ready" || state === "Active") return "success";
+    if (state === "Offline" || state === "Removed") return "warning";
+    if (state === "Failed") return "error";
+    return "info";
+};
+
+export const sessionRobotSummary = (robots) => {
+    const list = Array.isArray(robots) ? robots : [];
+    return {
+        total: list.length,
+        operational: list.filter((robot) => ["Ready", "Active"].includes(robot.state)).length,
+        provisioning: list.filter((robot) => robot.state === "Provisioning").length,
+        unavailable: list.filter((robot) => ["Offline", "Removed", "Failed"].includes(robot.state)).length,
+    };
+};
+
+const formatRobotUpdate = (value) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "sin actualización";
+    return new Intl.DateTimeFormat("es-BO", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    }).format(date);
+};
 
 const commandTimestamp = (command) => {
     const value = Date.parse(command?.updatedAt || command?.createdAt);
@@ -97,6 +138,28 @@ export const viewerCommandFailureMessage = (command) => {
         return "La preparación del visor fue cancelada. Puedes solicitar una vista nueva.";
     }
     return "El worker no pudo preparar el visor. Puedes volver a intentarlo sin crear otra sesión.";
+};
+
+export const viewerCloseOutcomeNotice = (outcome) => {
+    if (outcome?.state === "Failed") {
+        const detail = outcome.command?.error ? `: ${outcome.command.error}` : ".";
+        return {
+            severity: "error",
+            message: `El worker no pudo cerrar el proceso del visor${detail} El acceso privado ya fue revocado, pero la liberación del publicador sigue sin confirmarse. Puedes reintentar sin detener la sesión.`,
+        };
+    }
+    if (outcome?.state === "Cancelled") {
+        return {
+            severity: "warning",
+            message:
+                "El cierre del visor fue cancelado por el worker. El acceso privado ya fue revocado; reintenta para confirmar la liberación del publicador.",
+        };
+    }
+    return {
+        severity: "warning",
+        message:
+            "El acceso privado ya fue revocado, pero el worker aún no confirmó que liberó el publicador. Puedes volver a comprobar el cierre sin detener la sesión ROS.",
+    };
 };
 
 export const sendViewerControlInput = (connection, sessionId, leaseId, input) =>
@@ -181,7 +244,12 @@ function SimulationWorkspace() {
     const [viewerLease, setViewerLease] = useState(null);
     const [hlsUnavailable, setHlsUnavailable] = useState(false);
     const [viewerControlReady, setViewerControlReady] = useState(false);
+    const [closingViewer, setClosingViewer] = useState(false);
+    const [viewerCloseNotice, setViewerCloseNotice] = useState(null);
     const [connectionVersion, setConnectionVersion] = useState(0);
+    const [realtimeStatus, setRealtimeStatus] = useState("Idle");
+    const [realtimeRetryVersion, setRealtimeRetryVersion] = useState(0);
+    const [stopConfirmationOpen, setStopConfirmationOpen] = useState(false);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
@@ -204,6 +272,7 @@ function SimulationWorkspace() {
         () => robots.filter((robot) => !UNAVAILABLE_ROBOT_STATES.has(robot.state)),
         [robots]
     );
+    const robotSummary = useMemo(() => sessionRobotSummary(robots), [robots]);
     const canControl = Boolean(activeSession && ["Ready", "Active", "Paused"].includes(activeSession.state));
     const canResizeFleet = Boolean(
         activeSession?.state === "Ready" && !tasks.some((task) => !TERMINAL_TASK_STATES.has(task.state))
@@ -212,7 +281,7 @@ function SimulationWorkspace() {
     const viewerCommandPending = Boolean(
         viewerLease?.command && !TERMINAL_VIEWER_COMMAND_STATES.has(viewerCommandState)
     );
-    const viewerReady = viewerCommandState === "Completed";
+    const viewerReady = viewerCommandState === "Completed" && !viewerLease?.revokedAt;
     const viewerPrompt = viewerPlaceholder(viewerLease, activeSession, Boolean(cleanupSession));
     const useWhepFallback = useCallback(() => setHlsUnavailable(true), []);
 
@@ -294,12 +363,18 @@ function SimulationWorkspace() {
     useEffect(() => {
         setHlsUnavailable(false);
         setViewerControlReady(false);
+        setViewerCloseNotice(null);
     }, [viewerLease?.token]);
 
     useEffect(() => {
-        if (!activeSessionId) return undefined;
+        if (!activeSessionId) {
+            setRealtimeStatus("Idle");
+            return undefined;
+        }
 
         let disposed = false;
+        let retryTimer;
+        let retryAttempt = 0;
         const connection = SimulationSessionService.createRealtimeConnection();
         connectionRef.current = connection;
 
@@ -309,8 +384,36 @@ function SimulationWorkspace() {
         };
         const joinSession = async () => {
             if (disposed) return;
-            joinedSessionRef.current = activeSessionId;
             await connection.invoke("JoinSession", activeSessionId);
+            joinedSessionRef.current = activeSessionId;
+        };
+        const scheduleStart = (delay = 3000) => {
+            if (disposed) return;
+            window.clearTimeout(retryTimer);
+            setRealtimeStatus("Retrying");
+            retryTimer = window.setTimeout(() => {
+                startConnection();
+            }, delay);
+        };
+        const startConnection = async () => {
+            if (disposed) return;
+            setRealtimeStatus(retryAttempt === 0 ? "Connecting" : "Retrying");
+            try {
+                await connection.start();
+                await joinSession();
+                if (!disposed) {
+                    retryAttempt = 0;
+                    setRealtimeStatus("Connected");
+                    setConnectionVersion((current) => current + 1);
+                }
+            } catch (_requestError) {
+                if (disposed) return;
+                retryAttempt += 1;
+                if (connection.state !== "Disconnected") {
+                    await connection.stop().catch(() => {});
+                }
+                scheduleStart(Math.min(10000, 1000 * 2 ** Math.min(retryAttempt, 3)));
+            }
         };
 
         connection.on("SessionUpdated", refresh);
@@ -329,21 +432,31 @@ function SimulationWorkspace() {
         connection.onreconnected(() => {
             setViewerControlReady(false);
             joinSession()
-                .then(() => setConnectionVersion((current) => current + 1))
-                .catch(() => {});
+                .then(() => {
+                    setRealtimeStatus("Connected");
+                    setConnectionVersion((current) => current + 1);
+                })
+                .catch(() => {
+                    connection.stop().catch(() => {});
+                    scheduleStart();
+                });
         });
-        connection.onreconnecting(() => setViewerControlReady(false));
+        connection.onreconnecting(() => {
+            setViewerControlReady(false);
+            setRealtimeStatus("Retrying");
+        });
+        connection.onclose(() => {
+            if (!disposed) {
+                setViewerControlReady(false);
+                scheduleStart(3000);
+            }
+        });
 
-        connection
-            .start()
-            .then(joinSession)
-            .then(() => setConnectionVersion((current) => current + 1))
-            .catch(() => {
-                // Polling above remains available while SignalR reconnects.
-            });
+        startConnection();
 
         return () => {
             disposed = true;
+            window.clearTimeout(retryTimer);
             const joinedSessionId = joinedSessionRef.current;
             if (joinedSessionId && connection.state === "Connected") {
                 connection.invoke("LeaveSession", joinedSessionId).catch(() => {});
@@ -352,10 +465,10 @@ function SimulationWorkspace() {
             connectionRef.current = null;
             joinedSessionRef.current = null;
         };
-    }, [activeSessionId, refreshSessionDetails, refreshSessions]);
+    }, [activeSessionId, realtimeRetryVersion, refreshSessionDetails, refreshSessions]);
 
     useEffect(() => {
-        if (!activeSessionId || !viewerLease?.leaseId || !viewerReady) {
+        if (closingViewer || !activeSessionId || !viewerLease?.leaseId || !viewerReady) {
             setViewerControlReady(false);
             return undefined;
         }
@@ -396,7 +509,7 @@ function SimulationWorkspace() {
             window.clearTimeout(retryTimer);
             setViewerControlReady(false);
         };
-    }, [activeSessionId, connectionVersion, viewerLease?.leaseId, viewerReady]);
+    }, [activeSessionId, closingViewer, connectionVersion, viewerLease?.leaseId, viewerReady]);
 
     const sendViewerInput = useCallback(
         (input) => {
@@ -468,6 +581,12 @@ function SimulationWorkspace() {
 
     const stopSession = () => {
         if (!activeSession) return;
+        setStopConfirmationOpen(true);
+    };
+
+    const confirmStopSession = () => {
+        if (!activeSession) return;
+        setStopConfirmationOpen(false);
         setViewerLease(null);
         runRequest(
             () => SimulationSessionService.stop(activeSession.id),
@@ -546,6 +665,65 @@ function SimulationWorkspace() {
         }
     };
 
+    const closeViewer = async () => {
+        if (!activeSessionId || !viewerLease?.leaseId || closingViewer) {
+            return;
+        }
+
+        const { leaseId } = viewerLease;
+        const connection = connectionRef.current;
+        const releaseInput =
+            viewerControlReady && connection?.state === "Connected"
+                ? sendViewerControlInput(connection, activeSessionId, leaseId, { type: "releaseAll" }).catch(
+                      () => {}
+                  )
+                : Promise.resolve();
+        setClosingViewer(true);
+        setViewerControlReady(false);
+        setViewerCloseNotice(null);
+        setError("");
+        try {
+            await releaseInput;
+            const response = await SimulationSessionService.closeViewerLease(activeSessionId, leaseId);
+            const initialState = response?.command?.state;
+            if (initialState === "Completed" || (!response?.accepted && !response?.command)) {
+                setHlsUnavailable(false);
+                setViewerLease((current) => (current?.leaseId === leaseId ? null : current));
+                return;
+            }
+
+            setViewerLease((current) =>
+                current?.leaseId === leaseId
+                    ? {
+                          ...current,
+                          revokedAt: response.revokedAt || new Date().toISOString(),
+                          closeCommand: response.command,
+                      }
+                    : current
+            );
+
+            const outcome = TERMINAL_VIEWER_COMMAND_STATES.has(initialState)
+                ? { state: initialState, command: response.command }
+                : await SimulationSessionService.waitForViewerClose(activeSessionId, leaseId);
+            if (outcome.state === "Completed") {
+                setHlsUnavailable(false);
+                setViewerLease((current) => (current?.leaseId === leaseId ? null : current));
+                return;
+            }
+
+            setViewerLease((current) =>
+                current?.leaseId === leaseId
+                    ? { ...current, closeCommand: outcome.command || current.closeCommand }
+                    : current
+            );
+            setViewerCloseNotice(viewerCloseOutcomeNotice(outcome));
+        } catch (requestError) {
+            setError(requestMessage(requestError, "No fue posible cerrar el visor privado."));
+        } finally {
+            setClosingViewer(false);
+        }
+    };
+
     let workflowStage = 3;
     if (!activeSession) workflowStage = 1;
     else if (!viewerReady) workflowStage = 2;
@@ -568,6 +746,12 @@ function SimulationWorkspace() {
         operationalLabel = "Limpieza pendiente";
         operationalColor = "warning";
     }
+    let closeViewerLabel = "Cerrar visor";
+    if (closingViewer) {
+        closeViewerLabel = "Confirmando cierre…";
+    } else if (viewerCloseNotice) {
+        closeViewerLabel = "Reintentar cierre";
+    }
 
     let viewerContent = (
         <Box sx={{ px: 4 }}>
@@ -577,7 +761,32 @@ function SimulationWorkspace() {
             <Typography variant="body2">{viewerPrompt.body}</Typography>
         </Box>
     );
-    if (viewerCommandPending) {
+    if (closingViewer || viewerLease?.revokedAt) {
+        viewerContent = (
+            <Box data-testid="viewer-closing" sx={{ width: "100%", px: 3 }} aria-live="polite">
+                {closingViewer ? (
+                    <>
+                        <CircularProgress size={34} color="inherit" sx={{ mb: 2 }} />
+                        <Typography variant="h6" sx={{ mb: 1 }}>
+                            Confirmando cierre del visor…
+                        </Typography>
+                        <Typography variant="body2">
+                            El acceso y la interacción ya están deshabilitados. Esperando la confirmación del
+                            worker GPU sin detener ROS ni Gazebo.
+                        </Typography>
+                    </>
+                ) : (
+                    <Alert
+                        data-testid="viewer-close-notice"
+                        severity={viewerCloseNotice?.severity || "warning"}
+                    >
+                        {viewerCloseNotice?.message ||
+                            "El cierre fue solicitado y continúa pendiente de confirmación del worker."}
+                    </Alert>
+                )}
+            </Box>
+        );
+    } else if (viewerCommandPending) {
         viewerContent = (
             <Box data-testid="viewer-preparing" sx={{ px: 4 }} aria-live="polite">
                 <CircularProgress size={34} color="inherit" sx={{ mb: 2 }} />
@@ -711,6 +920,27 @@ function SimulationWorkspace() {
             {error && (
                 <Alert data-testid="workspace-error" severity="error" aria-live="assertive" sx={{ mb: 2 }}>
                     {error}
+                </Alert>
+            )}
+
+            {activeSession && realtimeStatus !== "Connected" && (
+                <Alert
+                    data-testid="realtime-status"
+                    severity="warning"
+                    aria-live="polite"
+                    sx={{ mb: 2 }}
+                    action={
+                        <Button
+                            color="inherit"
+                            size="small"
+                            onClick={() => setRealtimeRetryVersion((current) => current + 1)}
+                        >
+                            Reconectar ahora
+                        </Button>
+                    }
+                >
+                    Reconectando el canal en tiempo real. El estado continúa actualizándose por sondeo, pero la
+                    interacción con el visor permanece deshabilitada hasta recuperar la conexión.
                 </Alert>
             )}
 
@@ -964,13 +1194,25 @@ function SimulationWorkspace() {
                                     onClick={openViewer}
                                     disabled={
                                         submitting ||
+                                        closingViewer ||
                                         viewerCommandPending ||
+                                        Boolean(viewerLease?.revokedAt) ||
                                         !canControl ||
                                         (viewerSource === "RobotCamera" && !viewerRobotId)
                                     }
                                 >
                                     Abrir visor
                                 </Button>
+                                {viewerLease && (
+                                    <Button
+                                        color="error"
+                                        variant="outlined"
+                                        onClick={closeViewer}
+                                        disabled={closingViewer}
+                                    >
+                                        {closeViewerLabel}
+                                    </Button>
+                                )}
                             </Box>
                         </Box>
 
@@ -1008,6 +1250,93 @@ function SimulationWorkspace() {
 
                 {activeSession && (
                     <Grid item xs={12}>
+                        <Paper data-testid="session-robot-monitor" elevation={2} sx={{ p: { xs: 2, md: 3 } }}>
+                            <Box
+                                className="flex items-start justify-between"
+                                sx={{ gap: 2, flexWrap: "wrap", mb: 2 }}
+                            >
+                                <Box>
+                                    <Typography variant="h6">Robots de esta sesión</Typography>
+                                    <Typography variant="body2" color="text.secondary">
+                                        Instancias reales informadas por el worker para este entorno
+                                        ROS/Gazebo.
+                                    </Typography>
+                                </Box>
+                                <Box className="flex items-center" sx={{ gap: 1, flexWrap: "wrap" }}>
+                                    <Chip
+                                        size="small"
+                                        color={realtimeStatus === "Connected" ? "success" : "warning"}
+                                        label={
+                                            realtimeStatus === "Connected"
+                                                ? "Tiempo real conectado"
+                                                : "Actualización por sondeo"
+                                        }
+                                    />
+                                    <Chip
+                                        size="small"
+                                        variant="outlined"
+                                        label={`${robotSummary.operational}/${robotSummary.total} operativos`}
+                                    />
+                                </Box>
+                            </Box>
+
+                            {robots.length === 0 && (
+                                <Alert severity="info">
+                                    El worker todavía no ha publicado el roster de robots de esta sesión.
+                                </Alert>
+                            )}
+                            {robotSummary.unavailable > 0 && (
+                                <Alert severity="warning" sx={{ mb: 2 }}>
+                                    {robotSummary.unavailable} robot(es) requieren atención. Revise su estado
+                                    antes de iniciar otra tarea.
+                                </Alert>
+                            )}
+
+                            {robots.length > 0 && (
+                                <Grid container spacing={1.5}>
+                                    {robots.map((robot) => (
+                                        <Grid item xs={12} sm={6} md={4} xl={3} key={robot.id}>
+                                            <Paper variant="outlined" sx={{ p: 1.5, height: "100%" }}>
+                                                <Box
+                                                    className="flex items-start justify-between"
+                                                    sx={{ gap: 1, mb: 0.75 }}
+                                                >
+                                                    <Box sx={{ minWidth: 0 }}>
+                                                        <Typography variant="subtitle2" noWrap>
+                                                            {robot.runtimeId}
+                                                        </Typography>
+                                                        <Typography
+                                                            variant="caption"
+                                                            color="text.secondary"
+                                                            noWrap
+                                                        >
+                                                            {robot.namespace}
+                                                        </Typography>
+                                                    </Box>
+                                                    <Chip
+                                                        size="small"
+                                                        color={sessionRobotStateColor(robot.state)}
+                                                        label={
+                                                            SESSION_ROBOT_STATE_LABELS[robot.state] ||
+                                                            robot.state
+                                                        }
+                                                    />
+                                                </Box>
+                                                <Typography variant="caption" color="text.secondary">
+                                                    #{robot.ordinal + 1} · rol {robot.role || "sin asignar"} ·
+                                                    actualizado {formatRobotUpdate(robot.updatedAt)}
+                                                </Typography>
+                                            </Paper>
+                                        </Grid>
+                                    ))}
+                                </Grid>
+                            )}
+                        </Paper>
+                    </Grid>
+                )}
+
+                {activeSession && (
+                    <Grid item xs={12}>
                         <Paper elevation={2} sx={{ p: { xs: 2, md: 3 } }}>
                             <SwarmTaskPanel
                                 session={activeSession}
@@ -1020,6 +1349,34 @@ function SimulationWorkspace() {
                     </Grid>
                 )}
             </Grid>
+
+            <Dialog
+                open={stopConfirmationOpen}
+                onClose={submitting ? undefined : () => setStopConfirmationOpen(false)}
+                fullWidth
+                maxWidth="xs"
+            >
+                <DialogTitle>Detener sesión de simulación</DialogTitle>
+                <DialogContent>
+                    <DialogContentText>
+                        Se cancelará cualquier tarea activa y se liberarán el visor, Gazebo, ROS, el contenedor
+                        y la red privada de esta sesión. Esta acción no se puede deshacer.
+                    </DialogContentText>
+                </DialogContent>
+                <DialogActions>
+                    <Button onClick={() => setStopConfirmationOpen(false)} disabled={submitting}>
+                        Conservar sesión
+                    </Button>
+                    <Button
+                        color="error"
+                        variant="contained"
+                        onClick={confirmStopSession}
+                        disabled={submitting}
+                    >
+                        {submitting ? "Deteniendo…" : "Detener y liberar"}
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </Box>
     );
 }

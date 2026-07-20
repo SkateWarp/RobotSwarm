@@ -408,6 +408,18 @@ public sealed class DockerSessionManager
             Created: false);
     }
 
+    public async Task<ViewerStopResult> StopViewerAsync(
+        Guid sessionId,
+        Guid leaseId,
+        CancellationToken cancellationToken)
+    {
+        var stopped = await _viewerPublisher.StopLeaseAsync(
+            sessionId,
+            leaseId,
+            cancellationToken);
+        return new ViewerStopResult(sessionId, leaseId, stopped);
+    }
+
     public async Task PublishSwarmCommandAsync(
         Guid sessionId,
         JsonElement command,

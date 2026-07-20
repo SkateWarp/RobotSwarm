@@ -37,6 +37,12 @@ public record TaskRunResponse(
     DateTime? StartedAt,
     DateTime? CompletedAt);
 
+public record TaskRunHistoryResponse(
+    int Total,
+    int Offset,
+    int Limit,
+    IReadOnlyList<TaskRunResponse> Items);
+
 public record WorkerCommandResponse(
     Guid Id,
     Guid SessionId,
@@ -94,7 +100,14 @@ public record ViewerLeaseStatusResponse(
     DateTime ExpiresAt,
     DateTime? RevokedAt,
     bool IsReady,
-    ViewerLeaseCommandStatusResponse? Command);
+    ViewerLeaseCommandStatusResponse? Command,
+    ViewerLeaseCommandStatusResponse? CloseCommand);
+
+public record ViewerLeaseCloseResponse(
+    Guid LeaseId,
+    Guid SessionId,
+    DateTime RevokedAt,
+    WorkerCommandResponse? Command);
 
 public class ViewerAuthRequest
 {

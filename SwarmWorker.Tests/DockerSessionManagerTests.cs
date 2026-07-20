@@ -867,6 +867,7 @@ public sealed class DockerSessionManagerTests
 
         public List<ViewerPublishRequest> PublishRequests { get; } = new();
         public List<Guid> StoppedSessions { get; } = new();
+        public List<(Guid SessionId, Guid LeaseId)> StoppedLeases { get; } = new();
 
         public Task RefreshAvailabilityAsync(CancellationToken cancellationToken)
         {
@@ -915,5 +916,15 @@ public sealed class DockerSessionManagerTests
 
         public Task ReleaseAllInputsAsync(CancellationToken cancellationToken) =>
             Task.CompletedTask;
+
+        public Task<bool> StopLeaseAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StoppedLeases.Add((sessionId, leaseId));
+            return Task.FromResult(true);
+        }
     }
 }

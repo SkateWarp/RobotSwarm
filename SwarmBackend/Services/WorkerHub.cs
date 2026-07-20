@@ -408,6 +408,15 @@ public class WorkerHub(
                 throw new HubException(validationError);
             }
         }
+        else if (command.Type == WorkerCommandType.StopViewer)
+        {
+            if (!request.Result.HasValue
+                || !TryValidateViewerStopCompletion(command, request.Result.Value))
+            {
+                throw new HubException(
+                    "Viewer stop completion did not match the durable command.");
+            }
+        }
 
         command.State = WorkerCommandState.Completed;
         command.Result = request.Result.HasValue
@@ -1361,7 +1370,8 @@ public class WorkerHub(
         var cancelled = session.Commands
             .Where(command => IsInFlight(command.State)
                 && command.Type is not WorkerCommandType.StopSession
-                    and not WorkerCommandType.EmergencyStop)
+                    and not WorkerCommandType.EmergencyStop
+                    and not WorkerCommandType.StopViewer)
             .ToList();
         foreach (var command in cancelled)
         {
@@ -1577,6 +1587,26 @@ public class WorkerHub(
             && taskRunId.ValueKind == JsonValueKind.String
             && Guid.TryParse(taskRunId.GetString(), out var reportedTaskRunId)
             && reportedTaskRunId == command.TaskRunId.Value;
+    }
+
+    internal static bool TryValidateViewerStopCompletion(
+        WorkerCommand command,
+        JsonElement result)
+    {
+        return command.Type == WorkerCommandType.StopViewer
+            && TryGetProperty(command.Payload.RootElement, "leaseId", out var expectedLease)
+            && expectedLease.ValueKind == JsonValueKind.String
+            && Guid.TryParse(expectedLease.GetString(), out var expectedLeaseId)
+            && TryGetProperty(result, "sessionId", out var reportedSession)
+            && reportedSession.ValueKind == JsonValueKind.String
+            && Guid.TryParse(reportedSession.GetString(), out var reportedSessionId)
+            && reportedSessionId == command.SimulationSessionId
+            && TryGetProperty(result, "leaseId", out var reportedLease)
+            && reportedLease.ValueKind == JsonValueKind.String
+            && Guid.TryParse(reportedLease.GetString(), out var reportedLeaseId)
+            && reportedLeaseId == expectedLeaseId
+            && TryGetProperty(result, "stopped", out var stopped)
+            && stopped.ValueKind is JsonValueKind.True or JsonValueKind.False;
     }
 
     private static void ApplyWorkerMetadata(

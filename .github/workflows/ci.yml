@@ -93,6 +93,12 @@ jobs:
               )
           PY
 
+      - name: Compile production acceptance harnesses
+        run: |
+          python3 -m py_compile \
+            scripts/acceptance/robotswarm-prod-e2e.py \
+            scripts/acceptance/robotswarm-visible-e2e.py
+
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
@@ -408,24 +414,59 @@ jobs:
           cache-dependency-path: SwarmFrontend/package-lock.json
 
       - run: npm ci
-      - name: Lint session control frontend
+      - name: Lint changed frontend surfaces
         run: |
           npm run lint -- --quiet \
             src/app/auth/Auth.js \
             src/app/constants/constants.js \
             src/app/fuse-configs/navigationGTSConfig.js \
+            src/app/fuse-configs/navigationGTSConfig.test.js \
+            src/app/fuse-configs/routesConfig.js \
+            src/app/main/apps/GeeTS/LeafSorting/LeafSortingAppConfig.js \
+            src/app/main/apps/GeeTS/LeafSorting/RobotRegistryApp.js \
+            src/app/main/apps/GeeTS/LeafSorting/RobotRegistryApp.test.js \
+            src/app/main/apps/GeeTS/LeafSorting/robotRegistryApi.js \
+            src/app/main/apps/GeeTS/LeafSorting/robotRegistryApi.test.js \
+            src/app/main/apps/GeeTS/LeafSorting/robotRegistryModel.js \
+            src/app/main/apps/GeeTS/LeafSorting/robotRegistryModel.test.js \
+            src/app/main/apps/GeeTS/LeafType/LeafTypeAppConfig.js \
+            src/app/main/apps/GeeTS/LeafType/LeafTypeConfigApp.js \
+            src/app/main/apps/GeeTS/LeafType/LeafTypeConfigDialog.js \
+            src/app/main/apps/GeeTS/LeafType/LeafTypeConfigList.js \
+            src/app/main/apps/GeeTS/LeafType/store/leafTypeConfigSlice.js \
+            src/app/main/apps/GeeTS/LeafType/taskTemplateApi.js \
+            src/app/main/apps/GeeTS/LeafType/taskTemplateApi.test.js \
+            src/app/main/apps/GeeTS/LeafType/taskTemplateModel.js \
+            src/app/main/apps/GeeTS/LeafType/taskTemplateModel.test.js \
             src/app/main/apps/GeeTS/Realtime/RealtimeConfigApp.js \
             src/app/main/apps/GeeTS/Realtime/RealtimeConfigAppConfig.js \
             src/app/main/apps/GeeTS/Realtime/HlsViewer.js \
             src/app/main/apps/GeeTS/Realtime/HlsViewer.test.js \
             src/app/main/apps/GeeTS/Realtime/VncViewer.js \
             src/app/main/apps/GeeTS/Realtime/SimulationWorkspace.js \
+            src/app/main/apps/GeeTS/Realtime/SimulationWorkspace.test.js \
             src/app/main/apps/GeeTS/Realtime/SwarmTaskPanel.js \
             src/app/main/apps/GeeTS/Realtime/WhepViewer.js \
             src/app/main/apps/GeeTS/Realtime/transportTaskStatus.js \
+            src/app/main/apps/GeeTS/RobotDetail/RobotDetailAppConfig.js \
+            src/app/main/apps/GeeTS/RobotGroups/RobotGroupsApp.js \
+            src/app/main/apps/GeeTS/RobotGroups/RobotGroupsApp.test.js \
+            src/app/main/apps/GeeTS/RobotGroups/RobotGroupsAppConfig.js \
+            src/app/main/apps/GeeTS/RobotGroups/robotGroupApi.js \
+            src/app/main/apps/GeeTS/RobotGroups/robotGroupApi.test.js \
+            src/app/main/apps/GeeTS/RobotGroups/robotGroupModel.js \
+            src/app/main/apps/GeeTS/RobotGroups/robotGroupModel.test.js \
+            src/app/main/apps/GeeTS/TaskLog/TaskLogAppConfig.js \
+            src/app/main/apps/GeeTS/TaskLog/TaskRunHistoryApp.component.test.js \
+            src/app/main/apps/GeeTS/TaskLog/TaskRunHistoryApp.js \
+            src/app/main/apps/GeeTS/TaskLog/TaskRunHistoryApp.test.js \
+            src/app/main/apps/accounts/AccountsApp.js \
+            src/app/main/apps/accounts/AccountsAppConfig.js \
+            src/app/main/apps/accounts/AccountsList.js \
             src/app/services/jwtService/authTokenUtils.js \
             src/app/services/jwtService/jwtService.js \
-            src/services/SimulationSessionService.js
+            src/services/SimulationSessionService.js \
+            src/services/SimulationSessionService.test.js
       - name: Test frontend session and authentication helpers
         run: npm test -- --watchAll=false
       - name: Build frontend

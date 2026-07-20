@@ -210,7 +210,7 @@ function AccountsList() {
                 </Alert>
             ) : null}
 
-            {filteredAccounts.length === 0 ? (
+            {!error && filteredAccounts.length === 0 ? (
                 <div className="flex flex-1 flex-col items-center justify-center min-h-256 text-center p-24">
                     <Icon className="text-48 mb-12" color="disabled">
                         manage_accounts
@@ -220,7 +220,9 @@ function AccountsList() {
                         Cambie los filtros o el texto de búsqueda para ampliar los resultados.
                     </Typography>
                 </div>
-            ) : (
+            ) : null}
+
+            {filteredAccounts.length > 0 ? (
                 <motion.div
                     initial={{ y: 12, opacity: 0 }}
                     animate={{ y: 0, opacity: 1 }}
@@ -236,7 +238,7 @@ function AccountsList() {
                         }}
                     />
                 </motion.div>
-            )}
+            ) : null}
 
             <Dialog open={!!accountToDisable} onClose={closeDisableDialog}>
                 <DialogTitle>Desactivar cuenta</DialogTitle>

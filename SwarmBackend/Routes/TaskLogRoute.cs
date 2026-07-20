@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using SwarmBackend.Entities;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
 
@@ -9,6 +10,9 @@ public static class TaskLogRoute
 {
     public static RouteGroupBuilder MapTaskLog(this RouteGroupBuilder group)
     {
+        // TaskLog belongs to the retired direct-robot control path. Keep it available
+        // for administrative diagnosis, but never expose global legacy logs to users.
+        group.RequireAuthorization(policy => policy.RequireRole(Role.Admin.ToString()));
 
         group.MapGet("", GetAll);
         group.MapPost("", Create);
@@ -32,7 +36,7 @@ public static class TaskLogRoute
 
             // If valid, proceed to create the TaskLog
             var response = await service.Create(request);
-            return response.Match(Results.Ok, Results.BadRequest);
+            return response.Match(Results.Ok, BadRequest);
         }
         catch (JsonException ex)
         {
@@ -51,12 +55,12 @@ public static class TaskLogRoute
     public static async Task<IResult> CreateByRobot(int robotId, RosTaskTemplateRequest request, ITaskLogService service)
     {
         var response = await service.Create(robotId, request);
-        return response.Match(Results.Ok, Results.BadRequest);
+        return response.Match(Results.Ok, BadRequest);
     }
     public static async Task<IResult> Update(int id, TaskLogRequest request, ITaskLogService service)
     {
         var response = await service.Update(id, request);
-        return response.Match(Results.Ok, Results.BadRequest);
+        return response.Match(Results.Ok, BadRequest);
     }
 
     public static async Task<IResult> CancelTasksByRobot(int robotId, ITaskLogService service, HttpContext context)
@@ -70,7 +74,7 @@ public static class TaskLogRoute
             }
 
             var response = await service.CancelTasksByRobot(robotId, accountId.Value);
-            return response.Match(Results.Ok, Results.BadRequest);
+            return response.Match(Results.Ok, BadRequest);
         }
         catch (Exception ex)
         {
@@ -101,6 +105,11 @@ public static class TaskLogRoute
     {
         var accountIdClaim = context.User.FindFirst("id");
         return accountIdClaim != null ? int.Parse(accountIdClaim.Value) : null;
+    }
+
+    private static IResult BadRequest(Exception error)
+    {
+        return Results.BadRequest(new { message = error.Message });
     }
 
 

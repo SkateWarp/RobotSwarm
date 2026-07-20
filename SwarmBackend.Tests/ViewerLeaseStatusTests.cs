@@ -11,6 +11,53 @@ namespace SwarmBackend.Tests;
 public sealed class ViewerLeaseStatusTests
 {
     [Fact]
+    public async Task StatusReportsViewerCloseFromQueuedThroughCompleted()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var owner = Account(10, "viewer-close-status@example.test");
+        var session = Session(owner);
+        const string sourceKey = "viewer-close-source";
+        var lease = Lease(session, owner, sourceKey);
+        lease.RevokedAt = DateTime.UtcNow;
+        var sourceCommand = Command(session, sourceKey, WorkerCommandState.Completed);
+        var closeCommand = new WorkerCommand
+        {
+            SimulationSessionId = session.Id,
+            SimulationSession = session,
+            Type = WorkerCommandType.StopViewer,
+            State = WorkerCommandState.Pending,
+            IdempotencyKey = $"sys:viewer-stop:{lease.Id:N}",
+            Sequence = 2,
+            Payload = JsonDocument.Parse($"{{\"leaseId\":\"{lease.Id:D}\"}}"),
+            UpdatedAt = DateTime.UtcNow
+        };
+        dataContext.AddRange(owner, session, lease, sourceCommand, closeCommand);
+        await dataContext.SaveChangesAsync();
+
+        var queued = await ReadStatus(dataContext, owner.Id, session.Id, lease.Id);
+        Assert.False(queued.GetProperty("isReady").GetBoolean());
+        Assert.Equal(
+            "Completed",
+            queued.GetProperty("command").GetProperty("state").GetString());
+        Assert.Equal(
+            "Pending",
+            queued.GetProperty("closeCommand").GetProperty("state").GetString());
+
+        closeCommand.State = WorkerCommandState.Completed;
+        closeCommand.CompletedAt = DateTime.UtcNow;
+        closeCommand.UpdatedAt = closeCommand.CompletedAt.Value;
+        await dataContext.SaveChangesAsync();
+
+        var completed = await ReadStatus(dataContext, owner.Id, session.Id, lease.Id);
+        Assert.Equal(
+            closeCommand.Id,
+            completed.GetProperty("closeCommand").GetProperty("id").GetGuid());
+        Assert.Equal(
+            "Completed",
+            completed.GetProperty("closeCommand").GetProperty("state").GetString());
+    }
+
+    [Fact]
     public async Task OwnerCanReadTheViewerCommandFailureWithoutReceivingCredentials()
     {
         await using var dataContext = TestDataContext.Create();
@@ -163,6 +210,24 @@ public sealed class ViewerLeaseStatusTests
                 new[] { new Claim("id", accountId.ToString()) },
                 "test"))
         };
+    }
+
+    private static async Task<JsonElement> ReadStatus(
+        TestDataContext dataContext,
+        int accountId,
+        Guid sessionId,
+        Guid leaseId)
+    {
+        var result = await SessionControlRoute.GetViewerLeaseStatus(
+            sessionId,
+            leaseId,
+            HttpContext(accountId),
+            dataContext,
+            CancellationToken.None);
+        var (statusCode, body) = await Execute(result);
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+        using var document = JsonDocument.Parse(body);
+        return document.RootElement.Clone();
     }
 
     private static async Task<(int StatusCode, string Body)> Execute(IResult result)
