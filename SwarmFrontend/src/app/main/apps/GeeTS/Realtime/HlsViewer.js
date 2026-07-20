@@ -3,10 +3,22 @@ import PropTypes from "prop-types";
 import Hls from "hls.js";
 import FullscreenExitRoundedIcon from "@mui/icons-material/FullscreenExitRounded";
 import FullscreenRoundedIcon from "@mui/icons-material/FullscreenRounded";
+import MouseRoundedIcon from "@mui/icons-material/MouseRounded";
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
-import { Alert, Box, Button, Chip, CircularProgress, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, Tooltip, Typography } from "@mui/material";
 
 export const VIEWER_STARTUP_BUDGET_MS = 30000;
+export const viewerScreenReaderOnlySx = {
+    border: 0,
+    clip: "rect(0 0 0 0)",
+    height: 1,
+    margin: -1,
+    overflow: "hidden",
+    padding: 0,
+    position: "absolute",
+    whiteSpace: "nowrap",
+    width: 1,
+};
 
 export const createHlsRetryWindow = (
     now = () => Date.now(),
@@ -842,6 +854,15 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
         statusColor = "error";
     }
     const countdown = formatLeaseCountdown(remainingSeconds);
+    const compactCountdown = remainingSeconds === 0 ? "Expirado" : countdown.replace("Vence en ", "");
+    const fpsLabel = fps === null ? "Video FPS —" : `Video ${fps.toFixed(1)} FPS`;
+    const compactFpsLabel = fps === null ? "FPS —" : `${fps.toFixed(1)} FPS`;
+    const interactionLabel = interactionEnabled
+        ? "Desactivar control interactivo"
+        : "Activar control interactivo";
+    const fullscreenLabel = isFullscreen
+        ? "Salir de pantalla completa"
+        : "Abrir visor en pantalla completa";
     let alertSeverity = "info";
     if (error) alertSeverity = "warning";
     if (interactionError) alertSeverity = "error";
@@ -902,80 +923,125 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
             <Box
                 sx={{
                     position: "absolute",
-                    top: 12,
-                    left: 12,
-                    right: 12,
+                    top: { xs: 6, sm: 12 },
+                    left: { xs: 6, sm: 12 },
+                    right: { xs: 6, sm: 12 },
                     display: "flex",
                     alignItems: "center",
-                    gap: 1,
-                    flexWrap: "wrap",
+                    gap: { xs: 0.5, sm: 1 },
+                    flexWrap: { xs: "nowrap", sm: "wrap" },
                     pointerEvents: "none",
                 }}
             >
+                <Box
+                    component="span"
+                    data-testid="viewer-status-live"
+                    aria-live="polite"
+                    sx={viewerScreenReaderOnlySx}
+                >
+                    Estado del visor: {status}
+                </Box>
                 <Chip
                     data-testid="viewer-status"
-                    aria-live="polite"
+                    aria-hidden="true"
                     label={status}
                     color={statusColor}
                     size="small"
-                    sx={{ fontWeight: 700 }}
+                    sx={{ display: { xs: "none", sm: "inline-flex" }, fontWeight: 700 }}
                 />
                 <Chip
                     data-testid="viewer-lease-countdown"
-                    label={countdown}
+                    aria-label={countdown}
+                    label={
+                        <>
+                            <Box component="span" sx={{ display: { xs: "inline", sm: "none" } }}>
+                                {compactCountdown}
+                            </Box>
+                            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+                                {countdown}
+                            </Box>
+                        </>
+                    }
                     color={remainingSeconds === 0 ? "error" : "default"}
                     size="small"
                     sx={{ bgcolor: "rgba(255,255,255,.9)" }}
                 />
                 <Chip
                     data-testid="viewer-fps"
-                    label={fps === null ? "Video FPS —" : `Video ${fps.toFixed(1)} FPS`}
+                    aria-label={fpsLabel}
+                    label={
+                        <>
+                            <Box component="span" sx={{ display: { xs: "inline", sm: "none" } }}>
+                                {compactFpsLabel}
+                            </Box>
+                            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+                                {fpsLabel}
+                            </Box>
+                        </>
+                    }
                     size="small"
                     sx={{ bgcolor: "rgba(255,255,255,.9)" }}
                 />
                 <Box sx={{ flex: 1 }} />
-                <Button
-                    aria-label={
-                        interactionEnabled ? "Desactivar control interactivo" : "Activar control interactivo"
-                    }
-                    aria-pressed={interactionEnabled}
-                    size="small"
-                    variant="contained"
-                    disabled={!connected || !interactiveAvailable || !interactionHasTime}
-                    onClick={changeInteraction}
-                    sx={{
-                        color: "common.white",
-                        bgcolor: interactionEnabled ? "success.main" : "rgba(17,24,39,.78)",
-                        pointerEvents: "auto",
-                        textTransform: "none",
-                        whiteSpace: "nowrap",
-                        "&:hover": {
-                            bgcolor: interactionEnabled ? "success.dark" : "rgba(17,24,39,.96)",
-                        },
-                    }}
-                >
-                    {interactionEnabled ? "Control activo" : "Interactuar"}
-                </Button>
-                <Button
-                    aria-label={
-                        isFullscreen ? "Salir de pantalla completa" : "Abrir visor en pantalla completa"
-                    }
-                    aria-pressed={isFullscreen}
-                    size="small"
-                    variant="contained"
-                    startIcon={isFullscreen ? <FullscreenExitRoundedIcon /> : <FullscreenRoundedIcon />}
-                    onClick={changeFullscreen}
-                    sx={{
-                        color: "common.white",
-                        bgcolor: "rgba(17,24,39,.78)",
-                        pointerEvents: "auto",
-                        textTransform: "none",
-                        whiteSpace: "nowrap",
-                        "&:hover": { bgcolor: "rgba(17,24,39,.96)" },
-                    }}
-                >
-                    {isFullscreen ? "Salir" : "Pantalla completa"}
-                </Button>
+                <Tooltip describeChild title={interactionLabel}>
+                    <Box component="span" sx={{ display: "inline-flex", pointerEvents: "auto" }}>
+                        <Button
+                            aria-label={interactionLabel}
+                            aria-pressed={interactionEnabled}
+                            size="small"
+                            variant="contained"
+                            startIcon={<MouseRoundedIcon />}
+                            disabled={!connected || !interactiveAvailable || !interactionHasTime}
+                            onClick={changeInteraction}
+                            sx={{
+                                color: "common.white",
+                                bgcolor: interactionEnabled ? "success.main" : "rgba(17,24,39,.78)",
+                                textTransform: "none",
+                                whiteSpace: "nowrap",
+                                minWidth: { xs: 36, sm: "auto" },
+                                px: { xs: 1, sm: 1.5 },
+                                "& .MuiButton-startIcon": { mr: { xs: 0, sm: 0.75 } },
+                                "&:hover": {
+                                    bgcolor: interactionEnabled
+                                        ? "success.dark"
+                                        : "rgba(17,24,39,.96)",
+                                },
+                            }}
+                        >
+                            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+                                {interactionEnabled ? "Control activo" : "Interactuar"}
+                            </Box>
+                        </Button>
+                    </Box>
+                </Tooltip>
+                <Tooltip describeChild title={fullscreenLabel}>
+                    <Box component="span" sx={{ display: "inline-flex", pointerEvents: "auto" }}>
+                        <Button
+                            aria-label={fullscreenLabel}
+                            aria-pressed={isFullscreen}
+                            size="small"
+                            variant="contained"
+                            startIcon={
+                                isFullscreen ? <FullscreenExitRoundedIcon /> : <FullscreenRoundedIcon />
+                            }
+                            onClick={changeFullscreen}
+                            sx={{
+                                color: "common.white",
+                                bgcolor: "rgba(17,24,39,.78)",
+                                textTransform: "none",
+                                whiteSpace: "nowrap",
+                                minWidth: { xs: 36, sm: "auto" },
+                                px: { xs: 1, sm: 1.5 },
+                                "& .MuiButton-startIcon": { mr: { xs: 0, sm: 0.75 } },
+                                "&:hover": { bgcolor: "rgba(17,24,39,.96)" },
+                            }}
+                        >
+                            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+                                {isFullscreen ? "Salir" : "Pantalla completa"}
+                            </Box>
+                        </Button>
+                    </Box>
+                </Tooltip>
             </Box>
 
             {!error && !connected && (

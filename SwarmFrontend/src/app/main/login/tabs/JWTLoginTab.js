@@ -92,7 +92,7 @@ function JWTLoginTab() {
                             type="email"
                             error={!!errors.email}
                             helperText={errors?.email?.message}
-                            label="Correo Electrónico"
+                            label="Correo electrónico"
                             autoComplete="email"
                             disabled={login.busy}
                             InputProps={{
@@ -159,7 +159,7 @@ function JWTLoginTab() {
                     type="submit"
                     variant="contained"
                     color="primary"
-                    className="w-full mx-auto mt-16 uppercase"
+                    className="w-full mx-auto mt-16"
                     aria-label="Iniciar sesión"
                     disabled={login.busy || _.isEmpty(dirtyFields) || !isValid}
                     value="legacy"

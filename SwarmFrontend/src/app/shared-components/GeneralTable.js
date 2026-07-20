@@ -10,17 +10,40 @@ import {
     TableSortLabel,
 } from "@mui/material";
 
+export const activateTableRowFromKeyboard = (event, onRowClick, row) => {
+    if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    onRowClick(event, row);
+};
+
 // Componente general para ser utilizado en todas las tablas
-const GeneralTable = ({ getTableProps, headerGroups, page, prepareRow, onRowClick, pagination }) => {
+const GeneralTable = ({
+    getTableProps,
+    headerGroups,
+    page,
+    prepareRow,
+    onRowClick,
+    pagination,
+    tableAriaLabel,
+    getRowAriaLabel,
+    rowAriaHasPopup,
+}) => {
     const cellsCount = Object.keys(page[0]?.values ?? []).length;
     const emptyRows =
         pagination.pageNumber > 0
             ? Math.max(0, pagination.pageNumber * pagination.pageSize - pagination.totalRecords)
             : 0;
+    const rowsAreInteractive = typeof onRowClick === "function";
 
     return (
         <TableContainer className="flex flex-1">
-            <Table {...getTableProps()} stickyHeader size="small" className="simple">
+            <Table
+                {...getTableProps()}
+                aria-label={tableAriaLabel}
+                stickyHeader
+                size="small"
+                className="simple"
+            >
                 <TableHead>
                     {headerGroups.map((headerGroup) => (
                         <TableRow {...headerGroup.getHeaderGroupProps()}>
@@ -49,8 +72,20 @@ const GeneralTable = ({ getTableProps, headerGroups, page, prepareRow, onRowClic
                         return (
                             <TableRow
                                 {...row.getRowProps()}
-                                onClick={(ev) => onRowClick(ev, row)}
-                                className="truncate cursor-pointer"
+                                tabIndex={rowsAreInteractive ? 0 : undefined}
+                                aria-label={
+                                    rowsAreInteractive && getRowAriaLabel
+                                        ? getRowAriaLabel(row)
+                                        : undefined
+                                }
+                                aria-haspopup={rowsAreInteractive ? rowAriaHasPopup : undefined}
+                                onClick={rowsAreInteractive ? (ev) => onRowClick(ev, row) : undefined}
+                                onKeyDown={
+                                    rowsAreInteractive
+                                        ? (event) => activateTableRowFromKeyboard(event, onRowClick, row)
+                                        : undefined
+                                }
+                                className={clsx("truncate", rowsAreInteractive && "cursor-pointer")}
                                 style={{
                                     height: 47,
                                     minHeight: 47,
@@ -91,6 +126,16 @@ GeneralTable.propTypes = {
     prepareRow: PropTypes.func.isRequired,
     onRowClick: PropTypes.func,
     pagination: PropTypes.object.isRequired,
+    tableAriaLabel: PropTypes.string,
+    getRowAriaLabel: PropTypes.func,
+    rowAriaHasPopup: PropTypes.oneOf(["dialog", "menu", "listbox", "tree", "grid"]),
+};
+
+GeneralTable.defaultProps = {
+    onRowClick: undefined,
+    tableAriaLabel: undefined,
+    getRowAriaLabel: undefined,
+    rowAriaHasPopup: undefined,
 };
 
 export default GeneralTable;

@@ -1,4 +1,5 @@
-import { motion } from "framer-motion";
+import PropTypes from "prop-types";
+import clsx from "clsx";
 import { useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import {
@@ -19,7 +20,13 @@ import {
     Typography,
 } from "@mui/material";
 import AccountsTable from "./AccountsTable";
-import { disableAccount, getAccounts, openEditAccountDialog, selectAccounts } from "./store/accountsSlice";
+import {
+    disableAccount,
+    getAccounts,
+    openEditAccountDialog,
+    selectAccounts,
+    setAccountsSearchText,
+} from "./store/accountsSlice";
 import { filterAccounts, isCurrentAccount } from "./accountsViewModel";
 import { showMessage } from "../../../store/fuse/messageSlice";
 
@@ -28,7 +35,7 @@ const roleLabels = {
     User: "Usuario",
 };
 
-function AccountsList() {
+function AccountsList({ embedded, showSearch }) {
     const dispatch = useDispatch();
     const accounts = useSelector(selectAccounts);
     const currentUser = useSelector(({ auth }) => auth.user);
@@ -160,12 +167,26 @@ function AccountsList() {
     }
 
     return (
-        <div className="flex flex-col flex-auto w-full min-h-full p-8 sm:p-16 gap-12">
+        <div
+            className={clsx(
+                "flex flex-col flex-auto w-full min-h-full gap-12",
+                embedded ? "p-0" : "p-8 sm:p-16"
+            )}
+        >
             <Paper
                 className="flex flex-col sm:flex-row sm:items-center gap-12 p-12 sm:p-16"
                 variant="outlined"
             >
                 <div className="flex flex-1 flex-col sm:flex-row gap-12">
+                    {showSearch ? (
+                        <TextField
+                            fullWidth
+                            label="Buscar usuarios"
+                            onChange={(event) => dispatch(setAccountsSearchText(event))}
+                            size="small"
+                            value={searchText}
+                        />
+                    ) : null}
                     <TextField
                         aria-label="Filtrar cuentas por estado"
                         label="Estado"
@@ -223,11 +244,7 @@ function AccountsList() {
             ) : null}
 
             {filteredAccounts.length > 0 ? (
-                <motion.div
-                    initial={{ y: 12, opacity: 0 }}
-                    animate={{ y: 0, opacity: 1 }}
-                    className="flex flex-auto w-full min-h-0"
-                >
+                <div className="flex flex-auto w-full min-h-0">
                     <AccountsTable
                         columns={columns}
                         data={filteredAccounts}
@@ -237,7 +254,7 @@ function AccountsList() {
                             }
                         }}
                     />
-                </motion.div>
+                </div>
             ) : null}
 
             <Dialog open={!!accountToDisable} onClose={closeDisableDialog}>
@@ -261,5 +278,15 @@ function AccountsList() {
         </div>
     );
 }
+
+AccountsList.propTypes = {
+    embedded: PropTypes.bool,
+    showSearch: PropTypes.bool,
+};
+
+AccountsList.defaultProps = {
+    embedded: false,
+    showSearch: false,
+};
 
 export default AccountsList;

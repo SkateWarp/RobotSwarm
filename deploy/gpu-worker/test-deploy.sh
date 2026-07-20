@@ -648,6 +648,10 @@ grep -Fxq -- 'rtsp://127.0.0.1:8554/robotswarm' \
 grep -Fxq 'PrivateTmp=true' "$viewer_unit"
 ! grep -Fxq 'PrivateTmp=false' "$viewer_unit"
 grep -Fxq 'KillMode=control-group' "$viewer_unit"
+grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+    "$viewer_unit"
+grep -Fxq 'ExecStartPre=/usr/bin/python3 -c "import socket; socket.if_nameindex()"' \
+    "$viewer_unit"
 ! grep -Fq 'Worker__Viewer__Enabled=' "$viewer_environment"
 grep -Fxq 'ROBOTSWARM_VIEWER_ENCODER="auto"' "$viewer_environment"
 grep -Fxq 'ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT="unix"' \

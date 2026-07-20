@@ -1,4 +1,3 @@
-import { motion } from "framer-motion";
 import {
     Alert,
     Box,
@@ -34,14 +33,26 @@ function LeafTypesConfigList() {
     }
 
     return (
-        <Box className="flex flex-col flex-auto w-full min-h-full p-8 sm:p-16 gap-12">
-            <Paper className="p-12 sm:p-16" variant="outlined">
-                <Typography variant="body1">Plantillas disponibles: {templates.length}</Typography>
-                <Typography color="textSecondary" variant="body2">
-                    Estas plantillas pertenecen al catálogo del backend. Sólo es posible editar su nombre y el
-                    tipo de algoritmo asociado.
-                </Typography>
-            </Paper>
+        <Box className="flex flex-col flex-auto w-full min-h-full gap-12">
+            <Box
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-12 pb-12"
+                sx={{ borderBottom: 1, borderColor: "divider" }}
+            >
+                <Box>
+                    <Typography variant="body1">{templates.length} plantillas disponibles</Typography>
+                    <Typography color="textSecondary" variant="body2">
+                        Catálogo del backend. Se puede editar el nombre y el algoritmo asociado.
+                    </Typography>
+                </Box>
+                <Button
+                    disabled={loading}
+                    onClick={retry}
+                    startIcon={<Icon>refresh</Icon>}
+                    variant="outlined"
+                >
+                    Actualizar
+                </Button>
+            </Box>
 
             {loading ? <LinearProgress aria-label="Actualizando plantillas" /> : null}
 
@@ -76,10 +87,9 @@ function LeafTypesConfigList() {
 
             {templates.length > 0 ? (
                 <TableContainer
-                    component={motion.div}
-                    initial={{ y: 12, opacity: 0 }}
-                    animate={{ y: 0, opacity: 1 }}
-                    className="border-1 rounded-12"
+                    component={Paper}
+                    elevation={0}
+                    variant="outlined"
                 >
                     <Table aria-label="Plantillas de tareas" size="small" stickyHeader>
                         <TableHead>

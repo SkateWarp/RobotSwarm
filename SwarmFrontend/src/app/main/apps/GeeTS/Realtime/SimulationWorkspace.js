@@ -21,6 +21,7 @@ import {
     Typography,
 } from "@mui/material";
 import SimulationSessionService from "../../../../../services/SimulationSessionService";
+import PageHeading from "../../../../shared-components/PageHeading";
 import HlsViewer from "./HlsViewer";
 import SwarmTaskPanel from "./SwarmTaskPanel";
 import WhepViewer from "./WhepViewer";
@@ -829,84 +830,79 @@ function SimulationWorkspace() {
 
     if (loading) {
         return (
-            <Box className="flex items-center justify-center" sx={{ minHeight: 360 }}>
-                <CircularProgress />
+            <Box sx={{ p: { xs: 2, md: 3 }, width: "100%", maxWidth: 1920, mx: "auto" }}>
+                <PageHeading
+                    title="Control de simulación"
+                    description="Administre una sesión ROS/Gazebo aislada y su visor privado."
+                    status={<Chip label="Consultando" color="info" size="small" variant="outlined" />}
+                />
+                <Box
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center justify-center"
+                    sx={{ minHeight: 280, gap: 1.5 }}
+                >
+                    <CircularProgress size={28} />
+                    <Typography color="text.secondary">Consultando sesiones disponibles…</Typography>
+                </Box>
             </Box>
         );
     }
 
     return (
         <Box sx={{ p: { xs: 2, md: 3 }, width: "100%", maxWidth: 1920, mx: "auto" }}>
-            <Paper
-                elevation={0}
-                sx={{
-                    mb: 3,
-                    p: { xs: 2, md: 3 },
-                    color: "common.white",
-                    background: "linear-gradient(135deg, #172554 0%, #1d4ed8 58%, #0891b2 100%)",
-                    borderRadius: 3,
-                }}
-            >
-                <Box className="flex items-start justify-between" sx={{ gap: 2, flexWrap: "wrap", mb: 3 }}>
-                    <Box>
-                        <Typography variant="h5" component="h1" sx={{ fontWeight: 700 }}>
-                            Centro de control del enjambre
-                        </Typography>
-                        <Typography variant="body2" sx={{ mt: 0.75, color: "rgba(255,255,255,.82)" }}>
-                            Controla una sesión ROS/Gazebo aislada y observa solamente el video asignado a tu
-                            cuenta.
-                        </Typography>
-                    </Box>
+            <PageHeading
+                title="Control de simulación"
+                description="Administre una sesión ROS/Gazebo aislada y su visor privado."
+                status={
                     <Chip
                         data-testid="operational-status"
                         label={operationalLabel}
                         color={operationalColor}
-                        sx={{ bgcolor: "rgba(255,255,255,.92)", fontWeight: 700 }}
+                        size="small"
+                        variant="outlined"
                     />
-                </Box>
-
-                <Grid container spacing={1.5} aria-label="Recorrido de control">
+                }
+            >
+                <Grid container columnSpacing={3} rowSpacing={1.5} aria-label="Recorrido de control">
                     {workflowSteps.map((step) => {
                         const current = workflowStage === step.number;
                         let stepStatus = "Pendiente";
                         if (current) stepStatus = "Siguiente paso";
                         if (step.completed) stepStatus = "Listo";
+                        let stepBorderColor = "divider";
+                        if (current) stepBorderColor = "primary.main";
+                        else if (step.completed) stepBorderColor = "success.main";
                         return (
                             <Grid item xs={12} sm={4} key={step.number}>
                                 <Box
                                     data-testid={`workflow-step-${step.number}`}
                                     aria-current={current ? "step" : undefined}
                                     sx={{
-                                        p: 1.5,
-                                        minHeight: 58,
+                                        py: 0.5,
+                                        pl: 1.5,
+                                        minHeight: 42,
                                         display: "flex",
                                         alignItems: "center",
                                         gap: 1.25,
-                                        border: 1,
-                                        borderColor: current
-                                            ? "rgba(255,255,255,.9)"
-                                            : "rgba(255,255,255,.26)",
-                                        bgcolor: step.completed ? "rgba(22,163,74,.35)" : "rgba(15,23,42,.22)",
-                                        borderRadius: 2,
+                                        borderLeft: 3,
+                                        borderColor: stepBorderColor,
                                     }}
                                 >
-                                    <Box
+                                    <Typography
+                                        variant="caption"
                                         sx={{
-                                            width: 30,
-                                            height: 30,
-                                            display: "grid",
-                                            placeItems: "center",
+                                            width: 20,
                                             flex: "0 0 auto",
-                                            bgcolor: step.completed ? "success.main" : "rgba(255,255,255,.16)",
-                                            borderRadius: "50%",
                                             fontWeight: 700,
+                                            color: step.completed ? "success.main" : "text.secondary",
                                         }}
                                     >
-                                        {step.number}
-                                    </Box>
+                                        {String(step.number).padStart(2, "0")}
+                                    </Typography>
                                     <Box>
                                         <Typography variant="subtitle2">{step.label}</Typography>
-                                        <Typography variant="caption" sx={{ color: "rgba(255,255,255,.72)" }}>
+                                        <Typography variant="caption" color="text.secondary">
                                             {stepStatus}
                                         </Typography>
                                     </Box>
@@ -915,7 +911,7 @@ function SimulationWorkspace() {
                         );
                     })}
                 </Grid>
-            </Paper>
+            </PageHeading>
 
             {error && (
                 <Alert data-testid="workspace-error" severity="error" aria-live="assertive" sx={{ mb: 2 }}>
@@ -946,12 +942,17 @@ function SimulationWorkspace() {
 
             <Grid container spacing={3} alignItems="stretch">
                 <Grid item xs={12} lg={4} xl={3}>
-                    <Paper data-testid="session-panel" elevation={2} sx={{ p: 3, height: "100%" }}>
+                    <Paper
+                        data-testid="session-panel"
+                        elevation={0}
+                        variant="outlined"
+                        sx={{ p: 3, height: "100%" }}
+                    >
                         <Box className="flex items-start justify-between" sx={{ mb: 2, gap: 2 }}>
                             <Box>
                                 <Typography variant="h6">Sesión de simulación</Typography>
                                 <Typography variant="body2" color="text.secondary">
-                                    1 · Crea y administra tu sesión aislada
+                                    Cree y administre un entorno ROS/Gazebo aislado.
                                 </Typography>
                             </Box>
                             {displayedSession && (
@@ -1029,13 +1030,6 @@ function SimulationWorkspace() {
                                         >
                                             {submitting ? "Creando…" : "Crear simulación"}
                                         </Button>
-                                        <Typography
-                                            variant="caption"
-                                            color="text.secondary"
-                                            sx={{ display: "block", mt: 1 }}
-                                        >
-                                            Crear simulación
-                                        </Typography>
                                     </>
                                 )}
                             </>
@@ -1131,7 +1125,8 @@ function SimulationWorkspace() {
                 <Grid item xs={12} lg={8} xl={9}>
                     <Paper
                         data-testid="viewer-panel"
-                        elevation={2}
+                        elevation={0}
+                        variant="outlined"
                         sx={{
                             p: { xs: 2, md: 3 },
                             height: "100%",
@@ -1146,7 +1141,7 @@ function SimulationWorkspace() {
                             <Box>
                                 <Typography variant="h6">Visor privado de Gazebo</Typography>
                                 <Typography variant="body2" color="text.secondary">
-                                    2 · Abre o renueva el video exclusivo de esta sesión
+                                    Abra o renueve el video exclusivo de esta sesión.
                                 </Typography>
                             </Box>
                             <Box className="flex items-start" sx={{ gap: 1, flexWrap: "wrap" }}>
@@ -1226,13 +1221,13 @@ function SimulationWorkspace() {
                                 flex: "0 0 auto",
                                 bgcolor: "#111827",
                                 color: "grey.300",
-                                borderRadius: 2,
+                                borderRadius: 1,
                                 overflow: "hidden",
                                 display: "flex",
                                 alignItems: "center",
                                 justifyContent: "center",
                                 textAlign: "center",
-                                boxShadow: "inset 0 0 0 1px rgba(255,255,255,.08)",
+                                border: "1px solid rgba(255,255,255,.12)",
                             }}
                         >
                             {viewerContent}
@@ -1250,7 +1245,12 @@ function SimulationWorkspace() {
 
                 {activeSession && (
                     <Grid item xs={12}>
-                        <Paper data-testid="session-robot-monitor" elevation={2} sx={{ p: { xs: 2, md: 3 } }}>
+                        <Paper
+                            data-testid="session-robot-monitor"
+                            elevation={0}
+                            variant="outlined"
+                            sx={{ p: { xs: 2, md: 3 } }}
+                        >
                             <Box
                                 className="flex items-start justify-between"
                                 sx={{ gap: 2, flexWrap: "wrap", mb: 2 }}
@@ -1337,7 +1337,7 @@ function SimulationWorkspace() {
 
                 {activeSession && (
                     <Grid item xs={12}>
-                        <Paper elevation={2} sx={{ p: { xs: 2, md: 3 } }}>
+                        <Paper elevation={0} variant="outlined" sx={{ p: { xs: 2, md: 3 } }}>
                             <SwarmTaskPanel
                                 session={activeSession}
                                 tasks={tasks}

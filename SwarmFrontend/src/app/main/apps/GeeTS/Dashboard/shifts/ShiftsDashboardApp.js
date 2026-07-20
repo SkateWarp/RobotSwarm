@@ -19,7 +19,7 @@ function ShiftsDashboardApp() {
         <motion.div initial={{ y: 10 }} animate={{ y: 0, transition: { delay: 2 } }}>
             {productions.length > 0 ? (
                 <div className="flex flex-col w-full inline-flex m-auto justify-center">
-                    <Typography className="font-oswald text-center my-16 pb-10" color="primary" variant="h4">
+                    <Typography className="font-semibold text-center my-16 pb-10" color="primary" variant="h4">
                         Información de Turnos
                     </Typography>
 

@@ -58,13 +58,13 @@ export const defaultThemeOptions = {
       styleOverrides: {
         root: {
           textTransform: 'none',
-          borderRadius: '18px',
+          borderRadius: '6px',
         },
         sizeSmall: {
-          borderRadius: '15px',
+          borderRadius: '6px',
         },
         sizeLarge: {
-          borderRadius: '21px',
+          borderRadius: '8px',
         },
         contained: {
           boxShadow: 'none',
@@ -77,7 +77,7 @@ export const defaultThemeOptions = {
     MuiButtonGroup: {
       styleOverrides: {
         contained: {
-          borderRadius: 18,
+          borderRadius: 6,
         },
       },
     },
@@ -91,14 +91,14 @@ export const defaultThemeOptions = {
     MuiDialog: {
       styleOverrides: {
         paper: {
-          borderRadius: 16,
+          borderRadius: 8,
         },
       },
     },
     MuiPaper: {
       styleOverrides: {
         rounded: {
-          borderRadius: 16,
+          borderRadius: 8,
         },
       },
     },

@@ -53,6 +53,7 @@ except ImportError as exc:  # pragma: no cover - checked before a production run
 
 
 DEFAULT_URL = "https://rs.zerav.la/apps/GTS/realtime"
+PRODUCTION_ORIGIN = "https://rs.zerav.la"
 DEFAULT_CHROME = Path("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe")
 DEFAULT_CREDENTIALS = Path("/tmp/robotswarm-e2e-credentials.env")
 DEFAULT_BINDING_KEY = Path("/tmp/robotswarm-e2e-binding.key")
@@ -64,8 +65,10 @@ LOGIN_EMAIL = 'input[name="email"]'
 LOGIN_PASSWORD = 'input[name="password"]'
 LOGIN_SUBMIT = 'button[type="submit"]'
 WORKSPACE_HEADING = "Sesión de simulación"
+WORKSPACE_SELECTOR = '[data-testid="session-panel"]'
 CREATE_BUTTON = "Crear simulación"
 OPEN_VIEWER_BUTTON = "Abrir visor"
+CLOSE_VIEWER_BUTTON = "Cerrar visor"
 STOP_BUTTON = "Detener sesión"
 START_TASK_BUTTON = "Iniciar tarea"
 TASK_HEADING = "Tarea del enjambre"
@@ -86,6 +89,8 @@ UI_OUTCOMES = {
     "Fallido": "Failed",
     "Cancelado": "Cancelled",
 }
+
+SESSION_SLOT_STATES = {"Queued", "Provisioning", "Ready", "Active", "Paused", "Stopping"}
 
 
 class DriverError(RuntimeError):
@@ -739,6 +744,16 @@ class RobotSwarmUi:
             time.sleep(0.2)
         raise DriverError(f"Material UI option did not open: {option_text}")
 
+    def select_task_type(self, task_type: str) -> None:
+        """Choose one of the task cards exposed as an accessible radio."""
+        selector = f'[data-testid="task-option-{task_type}"]'
+        self.click_selector(selector, f"task type {task_type}")
+        self.wait_js(
+            f"document.querySelector({json.dumps(selector)})?.getAttribute('aria-checked') === 'true'",
+            8,
+            f"selected task type {task_type}",
+        )
+
     @staticmethod
     def _text_element_expression(selector: str, text: str, *, click: bool) -> str:
         action = "element.click(); return true;" if click else "return true;"
@@ -772,7 +787,7 @@ class RobotSwarmUi:
     def login(self, email: str, password: str) -> None:
         self.assert_origin()
         self.wait_js(
-            f"document.querySelector({json.dumps(LOGIN_EMAIL)}) || document.body.innerText.includes({json.dumps(WORKSPACE_HEADING)})",
+            f"document.querySelector({json.dumps(LOGIN_EMAIL)}) || document.querySelector({json.dumps(WORKSPACE_SELECTOR)})",
             45,
             "login or workspace",
         )
@@ -786,7 +801,7 @@ class RobotSwarmUi:
             )
             self.click_selector(LOGIN_SUBMIT, "login")
         self.wait_js(
-            f"document.body.innerText.includes({json.dumps(WORKSPACE_HEADING)})",
+            f"Boolean(document.querySelector({json.dumps(WORKSPACE_SELECTOR)}))",
             75,
             "simulation workspace",
         )
@@ -845,6 +860,45 @@ class RobotSwarmUi:
             })()
         """
         self.wait_js(condition, timeout, "a decoded private viewer frame")
+
+    def close_viewer_while_task_runs(self, continuity_seconds: float = 10.0) -> dict[str, Any]:
+        before = self.task_status()
+        if before.get("state") != "Running":
+            raise DriverError("The viewer-close check requires a running task")
+
+        self.click_button(CLOSE_VIEWER_BUTTON)
+        self.wait_js(
+            """
+                !document.querySelector('[data-testid="private-viewer"]') &&
+                !document.querySelector('[data-testid="viewer-closing"]') &&
+                [...document.querySelectorAll('button')].some(button =>
+                    button.textContent.trim() === 'Abrir visor' && !button.disabled)
+            """,
+            90,
+            "completed viewer close",
+        )
+
+        deadline = time.monotonic() + continuity_seconds
+        samples = 0
+        while time.monotonic() < deadline:
+            state = self.task_status()
+            if state.get("state") != "Running":
+                raise DriverError(
+                    f"The ROS task stopped after closing only the viewer ({state.get('state')})"
+                )
+            if self.has_button(CREATE_BUTTON) or not self.has_button(STOP_BUTTON):
+                raise DriverError("The simulation session was released while closing only its viewer")
+            samples += 1
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+
+        return {
+            "viewerClosed": True,
+            "continuitySeconds": continuity_seconds,
+            "runningSamples": samples,
+            "taskBefore": before,
+            "taskAfter": self.task_status(),
+            "sessionStillAllocated": True,
+        }
 
     def viewer_state(self) -> dict[str, Any]:
         result = self.cdp.evaluate("""
@@ -1288,7 +1342,7 @@ class RobotSwarmUi:
         return result
 
     def start_figure_triangle(self, start_barrier: threading.Barrier) -> dict[str, Any]:
-        self.select_option("task-type-label", "Figura o letra")
+        self.select_task_type("Figure")
         self.wait_js("Boolean(document.getElementById('formation-type-label'))", 10, "figure controls")
         self.select_option("formation-type-label", "Triángulo")
         try:
@@ -1305,7 +1359,7 @@ class RobotSwarmUi:
         }
 
     def start_follow_figure8(self, start_barrier: threading.Barrier) -> dict[str, Any]:
-        self.select_option("task-type-label", "Seguir al líder")
+        self.select_task_type("FollowLeader")
         self.wait_js("Boolean(document.getElementById('leader-mode-label'))", 10, "leader controls")
         self.select_option("leader-mode-label", "Ocho")
         try:
@@ -1338,7 +1392,7 @@ class RobotSwarmUi:
                     .find(item => normalize(item.textContent).startsWith('Resultado verificado:'));
                 const outcomeText = normalize(outcomeNode?.textContent).replace('Resultado verificado:', '').trim();
                 const outcome = outcomeLabels[outcomeText] || null;
-                const progress = text.match(/\\b(\\d{{1,3}})%\\b/)?.[1] || null;
+                const progress = text.match(/\\b(\\d{{1,3}})\\s*%/)?.[1] || null;
                 return {{state, outcome, progressPercent: progress === null ? null : Number(progress)}};
             }})()
         """)
@@ -1564,15 +1618,23 @@ class RobotSwarmUi:
                         privateNodes.push({{element, visibility: element.style.visibility}});
                         element.style.visibility = 'hidden';
                     }};
-                    document.querySelectorAll('input[type="password"], input[name="email"], .email, .username')
+                    document.querySelectorAll(
+                        'input[type="password"], input[type="email"], input[type="search"], '
+                        + 'input[name="email"], input[aria-label="Search"], .email, .username, '
+                        + 'button[aria-label="Abrir menú de usuario"] .MuiTypography-root, '
+                        + 'button[aria-label="Abrir menú de usuario"] .MuiAvatar-root, '
+                        + '.user .avatar'
+                    )
                         .forEach(hide);
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
                     while (walker.nextNode()) {{
                         const value = walker.currentNode.nodeValue || '';
+                        const hasEmail = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{{2,}}/.test(value);
                         const hasUuid = /(?:^|[^0-9a-f])[0-9a-f]{{8}}-[0-9a-f]{{4}}-[1-5][0-9a-f]{{3}}-[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}}(?=$|[^0-9a-f])/i.test(value);
+                        const hasSessionMarker = /(?:sesi[oó]n)[ ]+[0-9a-f]{{8}}(?:$|[^0-9a-f])/i.test(value);
                         const hasPrivateIp = /(?:^|[^0-9])(?:10(?:[.][0-9]{{1,3}}){{3}}|192[.]168(?:[.][0-9]{{1,3}}){{2}}|172[.](?:1[6-9]|2[0-9]|3[01])(?:[.][0-9]{{1,3}}){{2}})(?=$|[^0-9])/.test(value);
                         const hasWorkerName = /(?:worker|trabajador)[ ]*[:#-][ ]*[A-Za-z0-9._-]+/i.test(value);
-                        if (value.includes({json.dumps(email)}) || hasUuid || hasPrivateIp || hasWorkerName) {{
+                        if (value.includes({json.dumps(email)}) || hasEmail || hasUuid || hasSessionMarker || hasPrivateIp || hasWorkerName) {{
                             hide(walker.currentNode.parentElement);
                         }}
                     }}
@@ -1618,19 +1680,144 @@ class RobotSwarmUi:
         finally:
             self.restore_after_capture()
 
+    def _session_api_request(self, method: str, session_id: str | None = None) -> Any:
+        """Use the browser's current login without bringing a token back into Python."""
+        if method not in {"GET", "DELETE"}:
+            raise DriverError("The session cleanup requested an unsupported HTTP method")
+        if session_id is not None and not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            session_id,
+            flags=re.I,
+        ):
+            raise DriverError("The session cleanup received an invalid session identifier")
+
+        endpoint = f"https://{DEFAULT_API_HOST}/api/sessions"
+        if session_id is not None:
+            endpoint += f"/{session_id}"
+        response = self.cdp.evaluate(
+            f"""
+                (async () => {{
+                    const token = localStorage.getItem('jwt_access_token');
+                    if (!token) return {{authenticated: false, status: 0, body: null}};
+                    try {{
+                        const response = await fetch({json.dumps(endpoint)}, {{
+                            method: {json.dumps(method)},
+                            cache: 'no-store',
+                            credentials: 'omit',
+                            headers: {{
+                                Accept: 'application/json',
+                                Authorization: `Bearer ${{token}}`,
+                            }},
+                        }});
+                        let body = null;
+                        try {{
+                            body = await response.json();
+                        }} catch (_) {{
+                            // A 404 or an empty response body is still represented by its status.
+                        }}
+                        return {{authenticated: true, status: response.status, body}};
+                    }} catch (_) {{
+                        return {{authenticated: true, status: 0, body: null}};
+                    }}
+                }})()
+            """,
+            await_promise=True,
+            timeout=30,
+        )
+        if not isinstance(response, dict) or response.get("authenticated") is not True:
+            raise DriverError("The authenticated session inventory is unavailable")
+        status = response.get("status")
+        accepted = {200} if method == "GET" else {200, 404}
+        if not isinstance(status, int) or status not in accepted:
+            raise DriverError("The authenticated session cleanup request failed")
+        return response.get("body")
+
+    @staticmethod
+    def _occupies_account_slot(session: Any) -> bool:
+        if not isinstance(session, dict):
+            raise DriverError("The authenticated session inventory is invalid")
+        session_id = session.get("id")
+        state = session.get("state")
+        if not isinstance(session_id, str) or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            session_id,
+            flags=re.I,
+        ):
+            raise DriverError("The authenticated session inventory has an invalid identifier")
+        if state in SESSION_SLOT_STATES:
+            return True
+        if state in {"Failed", "Expired"}:
+            return session.get("computeWorkerId") is not None
+        if state != "Stopped":
+            raise DriverError("The authenticated session inventory has an unknown state")
+        return False
+
+    def _occupying_sessions(self) -> list[dict[str, Any]]:
+        sessions = self._session_api_request("GET")
+        if not isinstance(sessions, list):
+            raise DriverError("The authenticated session inventory is invalid")
+        return [session for session in sessions if self._occupies_account_slot(session)]
+
+    def _stop_session_via_api(self, session_id: str) -> None:
+        self._session_api_request("DELETE", session_id)
+
     def stop_created_session(self, timeout: float = 180) -> dict[str, Any]:
         if not (self.created_session or self.create_requested):
             return {"requested": False, "reason": "not-created-by-driver"}
+        uncertain_creation = self.create_requested and not self.created_session
         if self.has_button(STOP_BUTTON):
             self.click_button(STOP_BUTTON)
+            self.wait_js(
+                "Boolean(document.querySelector('[role=\"dialog\"]'))",
+                10,
+                "stop-session confirmation",
+            )
+            self.click_button("Detener y liberar")
+
         deadline = time.monotonic() + timeout
+        stop_attempts: dict[str, float] = {}
+        stop_requests = 0
+        last_error: str | None = None
         while time.monotonic() < deadline:
-            if self.has_button(CREATE_BUTTON):
+            try:
+                occupants = self._occupying_sessions()
+                last_error = None
+            except DriverError as exc:
+                last_error = str(exc)
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
+                continue
+
+            if not occupants:
                 self.created_session = False
                 self.create_requested = False
-                return {"requested": True, "released": True}
-            time.sleep(1)
-        return {"requested": True, "released": False, "error": "cleanup timeout"}
+                return {
+                    "requested": True,
+                    "released": True,
+                    "verifiedBy": "authenticated-session-list",
+                    "reconciledUncertainCreation": uncertain_creation,
+                    "stopRequests": stop_requests,
+                }
+
+            now = time.monotonic()
+            made_request = False
+            for session in occupants:
+                session_id = session["id"]
+                if now - stop_attempts.get(session_id, -10) < 5:
+                    continue
+                stop_attempts[session_id] = now
+                try:
+                    self._stop_session_via_api(session_id)
+                    stop_requests += 1
+                    made_request = True
+                except DriverError as exc:
+                    last_error = str(exc)
+            if not made_request:
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+        result = {"requested": True, "released": False, "error": "cleanup timeout"}
+        if last_error:
+            result["lastError"] = last_error
+        return result
 
 
 @dataclass
@@ -1657,13 +1844,14 @@ def parallel(users: list[UserRun], operation: Callable[[UserRun], Any]) -> dict[
                     if user.ui:
                         user.ui.stop_event.set()
                 for pending in jobs:
-                    if pending is not job:
-                        pending.cancel()
-                pool.shutdown(wait=False)
+                    pending.cancel()
+                # A cancelled Future may already be running. Join every submitted
+                # operation before the caller clears stop_event and starts cleanup.
+                for started in jobs:
+                    with contextlib.suppress(BaseException):
+                        started.result()
                 raise
-    except BaseException:
-        raise
-    else:
+    finally:
         pool.shutdown(wait=True)
     return results
 
@@ -2161,7 +2349,10 @@ def validate_site(url: str) -> str:
         raise DriverError("The test URL must be an HTTPS origin without embedded credentials")
     if parsed.query or parsed.fragment:
         raise DriverError("The test URL must not contain a query string or fragment")
-    return f"{parsed.scheme}://{parsed.netloc}"
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if origin != PRODUCTION_ORIGIN:
+        raise DriverError("The production credentials may only be sent to https://rs.zerav.la")
+    return origin
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2445,6 +2636,25 @@ def main() -> int:
         report["users"]["A"]["task"]["accepted"] = verified_a
         report["users"]["B"]["task"]["accepted"] = running_b
 
+        viewer_close_b = user_b.ui.close_viewer_while_task_runs(10.0)
+        viewer_closed_screenshot = user_b.ui.screenshot(
+            args.output_dir / f"{run_id}-b-viewer-closed-task-running.png",
+            user_b.credentials["email"],
+            user_b.credentials["password"],
+        )
+        user_b.ui.open_viewer(args.viewer_timeout)
+        reopened_state = user_b.ui.require_interactive_hls()
+        if user_b.ui.task_status().get("state") != "Running":
+            raise DriverError("User B task did not remain Running after reopening its viewer")
+        report["users"]["B"]["viewerLifecycle"] = {
+            **viewer_close_b,
+            "closedScreenshot": viewer_closed_screenshot,
+            "reopened": True,
+            "reopenedState": reopened_state,
+            "taskStillRunning": True,
+        }
+        print("B closed and reopened only its viewer while ROS kept running.", flush=True)
+
         metrics = parallel(users, lambda user: user.ui.video_metrics(args.video_seconds))  # type: ignore[union-attr]
         for label, result in metrics.items():
             require_live_video(
@@ -2548,6 +2758,9 @@ def main() -> int:
             "message": sanitizer.text(exc),
         }
     finally:
+        # A signal interrupts the normal traversal, but it must not interrupt
+        # the release of the viewers, sessions, Chrome profiles, or report.
+        stop_event.clear()
         for user in users:
             if user.ui:
                 report["cleanup"][f"viewer{user.label}"] = user.ui.normalize_viewer()

@@ -6,7 +6,7 @@
 
 html {
     font-size: 62.5%;
-    font-family: Muli, 'Inter var', Roboto, Helvetica Neue, Arial, sans-serif;
+    font-family: 'Inter var', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
     background-color: #121212;
     -webkit-font-smoothing: antialiased;
     text-size-adjust: 100%;
@@ -96,10 +96,6 @@ body.no-animate *::after {
     animation: none !important;
 }
 
-button:focus {
-    outline: none;
-}
-
 /* Removes webkit's autofill backgorund color */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
@@ -110,8 +106,9 @@ input:-webkit-autofill:active
     transitionProperty: background-color, color;
 }
 
-:focus {
-    outline-color: transparent;
+:focus-visible {
+    outline: 2px solid #0288d1;
+    outline-offset: 2px;
 }
 
 /*fullcalendar Fix*/

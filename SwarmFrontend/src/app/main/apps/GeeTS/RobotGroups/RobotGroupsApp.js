@@ -4,7 +4,6 @@ import {
     Add,
     DeleteOutline,
     EditOutlined,
-    GroupsOutlined,
     Refresh,
     RemoveCircleOutline,
 } from "@mui/icons-material";
@@ -13,7 +12,6 @@ import {
     Box,
     Button,
     Card,
-    CardActions,
     CardContent,
     CardHeader,
     Chip,
@@ -35,6 +33,7 @@ import {
     Tooltip,
     Typography,
 } from "@mui/material";
+import PageHeading from "../../../../shared-components/PageHeading";
 import {
     addRobotToGroup,
     createRobotGroup,
@@ -120,7 +119,8 @@ function RobotGroupsApp() {
         }
     };
 
-    const saveGroup = async () => {
+    const saveGroup = async (event) => {
+        event?.preventDefault();
         const validation = validateRobotGroupDraft(editor);
         setEditorErrors(validation);
         if (Object.keys(validation).length > 0) return;
@@ -187,43 +187,19 @@ function RobotGroupsApp() {
 
     return (
         <Box data-testid="robot-groups-page" sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
-            <Paper
-                elevation={0}
-                sx={{
-                    p: { xs: 2, md: 3 },
-                    mb: 3,
-                    color: "common.white",
-                    borderRadius: 3,
-                    background: "linear-gradient(135deg, #312e81 0%, #4f46e5 55%, #0891b2 100%)",
-                }}
-            >
-                <Stack direction={{ xs: "column", md: "row" }} spacing={2} justifyContent="space-between">
-                    <Box>
-                        <Stack direction="row" spacing={1.5} alignItems="center">
-                            <GroupsOutlined />
-                            <Typography component="h1" variant="h5" sx={{ fontWeight: 700 }}>
-                                Grupos de robots
-                            </Typography>
-                        </Stack>
-                        <Typography variant="body2" sx={{ mt: 1, color: "rgba(255,255,255,.84)" }}>
-                            Organice el inventario persistente. Las tareas ROS se ejecutan desde el control de
-                            simulación.
-                        </Typography>
-                        <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
-                            {groups.length} grupos · {assignedRobotCount} de {robots.length} robots activos
-                            asignados
-                        </Typography>
-                    </Box>
-                    <Stack direction="row" spacing={1} alignItems="center">
+            <PageHeading
+                title="Grupos de robots"
+                description="Organice el inventario en flotas reutilizables para las simulaciones."
+                meta={`${groups.length} grupos · ${assignedRobotCount} de ${robots.length} robots activos asignados`}
+                actions={
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", gap: 1 }}>
                         <Button
-                            color="inherit"
                             variant="outlined"
                             onClick={() => navigate("/apps/GTS/realtime")}
                         >
-                            Abrir control ROS
+                            Abrir Control
                         </Button>
                         <Button
-                            color="inherit"
                             variant="contained"
                             startIcon={<Add />}
                             onClick={() => {
@@ -234,10 +210,10 @@ function RobotGroupsApp() {
                             Crear grupo
                         </Button>
                     </Stack>
-                </Stack>
-            </Paper>
+                }
+            />
 
-            <Paper elevation={1} sx={{ p: 2, mb: 2, borderRadius: 2 }}>
+            <Paper elevation={0} variant="outlined" sx={{ p: 2, mb: 2 }}>
                 <Stack direction="row" spacing={1} alignItems="center">
                     <TextField
                         fullWidth
@@ -303,7 +279,7 @@ function RobotGroupsApp() {
                         );
                         return (
                             <Grid item xs={12} lg={6} key={group.id}>
-                                <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
+                                <Card variant="outlined" sx={{ height: "100%" }}>
                                     <CardHeader
                                         title={group.name}
                                         subheader={`${
@@ -357,14 +333,15 @@ function RobotGroupsApp() {
                                         ) : (
                                             <Stack spacing={1} sx={{ mb: 2 }}>
                                                 {(group.robots || []).map((robot) => (
-                                                    <Paper
+                                                    <Box
                                                         key={robot.id}
-                                                        variant="outlined"
                                                         sx={{
-                                                            p: 1,
+                                                            py: 1,
                                                             display: "flex",
                                                             alignItems: "center",
                                                             gap: 1,
+                                                            borderTop: 1,
+                                                            borderColor: "divider",
                                                         }}
                                                     >
                                                         <Box sx={{ minWidth: 0, flexGrow: 1 }}>
@@ -410,7 +387,7 @@ function RobotGroupsApp() {
                                                                 </IconButton>
                                                             </span>
                                                         </Tooltip>
-                                                    </Paper>
+                                                    </Box>
                                                 ))}
                                             </Stack>
                                         )}
@@ -441,11 +418,6 @@ function RobotGroupsApp() {
                                             </Select>
                                         </FormControl>
                                     </CardContent>
-                                    <CardActions sx={{ px: 2, pt: 0 }}>
-                                        <Typography variant="caption" color="text.secondary">
-                                            La membresía no inicia ni detiene procesos ROS.
-                                        </Typography>
-                                    </CardActions>
                                 </Card>
                             </Grid>
                         );
@@ -458,6 +430,7 @@ function RobotGroupsApp() {
                 onClose={busy ? undefined : () => setEditor(null)}
                 fullWidth
                 maxWidth="sm"
+                PaperProps={{ component: "form", onSubmit: saveGroup }}
             >
                 <DialogTitle>{editor?.id ? "Editar grupo" : "Crear grupo"}</DialogTitle>
                 <DialogContent>
@@ -488,7 +461,7 @@ function RobotGroupsApp() {
                     <Button onClick={() => setEditor(null)} disabled={busy}>
                         Cancelar
                     </Button>
-                    <Button variant="contained" onClick={saveGroup} disabled={busy}>
+                    <Button variant="contained" type="submit" disabled={busy}>
                         {busy ? "Guardando…" : "Guardar"}
                     </Button>
                 </DialogActions>

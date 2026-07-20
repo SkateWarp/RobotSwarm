@@ -80,9 +80,12 @@ const HeaderFullScreenToggle = (props) => {
     }
   }
 
+  const actionLabel = isFullScreen ? 'Salir de pantalla completa' : 'Abrir pantalla completa';
+
   return (
-    <Tooltip title="Fullscreen toggle" placement="bottom">
+    <Tooltip title={actionLabel} placement="bottom">
       <IconButton
+        aria-label={actionLabel}
         onClick={toggleFullScreen}
         className={clsx('w-40 h-40', props.className)}
         size="large"

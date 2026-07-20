@@ -102,7 +102,7 @@ function JWTRegisterTab() {
                             type="text"
                             error={!!errors.email}
                             helperText={errors?.email?.message}
-                            label="Correo Electrónico"
+                            label="Correo electrónico"
                             autoComplete="current-email"
                             InputProps={{
                                 endAdornment: (
@@ -137,7 +137,11 @@ function JWTRegisterTab() {
                                 endAdornment: (
                                     <InputAdornment position="end">
                                         <IconButton
+                                            type="button"
                                             onClick={() => setShowPassword(!showPassword)}
+                                            aria-label={
+                                                showPassword ? "Ocultar contraseña" : "Mostrar contraseña"
+                                            }
                                             size="large"
                                         >
                                             <Icon className="text-20" color="action">
@@ -156,8 +160,8 @@ function JWTRegisterTab() {
                     type="submit"
                     variant="contained"
                     color="primary"
-                    className="w-full mx-auto mt-16 uppercase"
-                    aria-label="LOG IN"
+                    className="w-full mx-auto mt-16"
+                    aria-label="Registrar cuenta"
                     disabled={_.isEmpty(dirtyFields) || !isValid}
                     value="legacy"
                 >

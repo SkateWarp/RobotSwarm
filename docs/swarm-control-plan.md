@@ -5,16 +5,18 @@
 This is the current target architecture and release plan for the commissioning
 branch. It supersedes the earlier design that treated public WHEP/ICE/TURN and
 a manually confirmed empty GPU worker as prerequisites. PR #100 integrated the
-management and viewer-lifecycle delta as merge `baba2c1`; its PR and `main` CI,
-Cloudflare publication and backend deployment passed. The GPU deployment
-rolled back safely to `62a136a` because its final preflight called `xprop`
-without the private Xvfb display. I-063 contains the focused headless hotfix.
-The release is not production-accepted until one exact post-hotfix revision is
-deployed to backend and GPU and passes the two-user test.
+management and viewer-lifecycle delta. PR #101 then closed the `xprop` preflight
+failure and deployed merge `538ba066` to Cloudflare, backend and the GPU worker.
+The first two-user acceptance exposed the AF_NETLINK sandbox defect I-064 and a
+serializable task-start race I-065. Those fixes, the visible section harness,
+the stronger SEARCH/load gates, the visual consistency pass I-068 and the
+fail-closed acceptance cleanup I-069/I-070 form the current candidate. It is not
+production-accepted until one exact new revision is deployed to all three
+layers and passes the full browser and ROS matrix.
 
-The earlier GitHub certificate incident I-053 remains closed. The current
-deployment gap is limited to the GPU host preflight: frontend and backend
-already run `baba2c1`, while the compatible final worker revision is pending.
+The earlier GitHub certificate incident I-053 and the `xprop` incident I-063
+remain closed. All deployed components currently run `538ba066`; the current
+gap is the not-yet-published candidate for I-064–I-070, not version skew.
 
 See the [implementation status](../IMPLEMENTATION_STATUS.md) for that boundary
 and the
@@ -92,6 +94,12 @@ siguiente manera:
 | Robots de esta sesión | Roster informado por el worker para la sesión propiedad del usuario | Estado, rol, namespace, ordinal, última actualización y resumen operativo | No fabrica posición ni velocidad: esos campos no forman parte del contrato actual |
 | Usuarios | CRUD de cuentas existente, rol `Admin` | Navegación y encabezado coherentes bajo el nombre «Usuarios» | No cambia el modelo de roles ni crea permisos nuevos |
 
+Las seis secciones utilizan capitalización normal, tipografía Inter,
+encabezados sobrios, foco visible y superficies delineadas en lugar de
+gradientes y sombras decorativas. Robots se presenta como tabla; Grupos conserva
+tarjetas únicamente para representar membresías. «Crear usuario» queda junto al
+título y el contenido no reserva una barra lateral vacía.
+
 Las tareas ROS se inician exclusivamente en Control de simulación. Un grupo
 administrativo puede ayudar a organizar el inventario, pero no selecciona por
 sí mismo las instancias `tb3_*` de una sesión ni sustituye el roster que publica
@@ -104,13 +112,14 @@ reconexión inmediata. Detener la sesión completa abre una confirmación que
 explica que se cancelarán tareas y se liberarán visor, Gazebo, ROS, contenedor y
 red privada.
 
-La validación focal local del delta aprobó 31/31 casos de backend, 19/19 del
-worker y 39/39 de frontend. El lint focal y la compilación de producción de
-Robots y Grupos también aprobaron. Un corte integral posterior aprobó backend
-213/213, worker 121/121, ROS 362/362, frontend 132/132 en 22 suites y el
-auxiliar del publicador. El lint de todos los archivos frontend modificados y
-la compilación de producción también aprobaron. Estos resultados son locales y
-no se presentan como CI ni aceptación del navegador público.
+La validación histórica del delta aprobó backend 213/213, worker 121/121, ROS
+362/362 y frontend 132/132. El candidato actual ya aprobó backend 216/216 y ROS
+391/391; sus contratos de aceptación aprobaron API 8/8, visor 10/10 y secciones
+14/14. Además, un Chrome normal comprobó con rol User el Historial, el menú
+reducido, los 403 reales del backend y las cuatro redirecciones administrativas,
+con perfil y capturas saneadas. El árbol completo aprobó worker 121/121,
+frontend 141/141 en 28 suites, lint del delta y build de producción. El siguiente
+paso es el único CI del candidato y la aceptación del SHA desplegado.
 
 ## Task outcome monitoring
 
@@ -326,38 +335,30 @@ deployment rather than silently enabling a path.
 
 ## Remaining release sequence
 
-1. **Control plane integrated:** PR #100, its `main` CI, Cloudflare and the
-   backend deployment passed for `baba2c1`. Preserve the rollback tag and those
-   run IDs as evidence.
-2. **GPU failure contained:** workflow `29712833482` passed tests, ROS build and
-   NVIDIA smoke, then rolled back before activation because `xprop -version`
-   required ambient `DISPLAY`; scheduling resumed on release `62a136a`.
-3. Publish only the focused I-063 hotfix after its local and independent review.
-   Do not rerun the known-bad `baba2c1` GPU workflow or create duplicate
-   dispatches.
-4. Deploy the exact hotfix merge SHA to the backend; verify health,
-   authorization, migration compatibility, worker registration and drain API.
-5. Dispatch the GPU workflow once for that same SHA and verify the active revision,
-   `StopViewer` capability, image ID, service readiness, zero residual sessions,
-   and transport-evidence capability version 1.
-6. Preserve the three already commissioned gates and the local worker identity
-   when activating the final backend/GPU pair; re-check their effective values
-   rather than inferring them from repository defaults.
-7. Use the versioned [production acceptance harnesses](../scripts/acceptance/README.md)
-   with two separate visible browser profiles and accounts to run simultaneous sessions
-   with different robot counts/tasks. Verify different displays/streams,
-   cross-user `401/403`, token expiry, independent stop, task outcomes, visible
-   FPS, and physics real-time factor.
-8. Exercise the administrative pages with their correct roles: owner-filtered
-   history for two users, administrator-only templates/groups/users, protected
-   robot mutation and a lease close that leaves the ROS session operating.
-9. If any isolation or outcome criterion fails, turn both viewer gates off and
-   use the recorded rollback revision; do not make VNC the user-facing fallback.
-10. Repeat representative formation, follow-leader, N=1/3/4/10 transport and
-   loaded-payload cases on the deployed revision, with cleanup between cases.
-11. Remove temporary test accounts/sessions and complete the commissioning
-    report with real, sanitized “after” screenshots for every new section and
-    the exact final revision.
+1. Commit the reviewed and locally validated I-064–I-070 candidate once, open
+   one PR and use one normal CI run;
+   do not rerun successful jobs merely to collect duplicate evidence.
+2. After merge, let Cloudflare and backend deploy the exact merge SHA. Remove
+   the temporary AF_NETLINK override before the GPU switch, dispatch the GPU
+   workflow exactly once and verify that the installed unit itself contains
+   AF_NETLINK and the new preflight.
+3. Use the versioned [production acceptance harnesses](../scripts/acceptance/README.md)
+   with two visible Chrome profiles and separate accounts. Require N=3/N=7,
+   different streams, HLS isolation, task overlap, fullscreen/input, independent
+   `Cerrar visor`, peer survival and complete cleanup.
+4. Repeat the User section run, elevate one controlled account to Admin only for
+   the Admin run, revoke refresh tokens at both role transitions, visit
+   Historial, Plantillas, Robots, Grupos and Usuarios, delete only the owned
+   temporary group, then restore and recheck User denial.
+5. Run every final formation, follow-leader and N=1/3/4/10 transport scenario in
+   fresh sessions. SEARCH must show sustained motion by the whole assigned
+   roster, followed by one notice, rendezvous and complete useful push.
+6. Pair the loaded-payload+GRF probe with the visible NVIDIA preflight on the
+   same Gazebo master. Require at least 45 render FPS and RTF 2.90, then restore
+   the practice payload and verify no active task, robot or process remains.
+7. Remove the diagnostic systemd file, temporary roles/tokens, sessions,
+   profiles and artifacts that contain operational identifiers. Add only
+   sanitized screenshots and checksums to the Spanish commissioning report.
 
 ## Deferred work
 

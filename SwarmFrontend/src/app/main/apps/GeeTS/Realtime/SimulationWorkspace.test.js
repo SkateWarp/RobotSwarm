@@ -286,6 +286,19 @@ describe("explicit viewer close", () => {
         jest.useRealTimers();
     });
 
+    it("keeps the Control context visible while sessions are loading", () => {
+        SimulationSessionService.list.mockReturnValue(new Promise(() => {}));
+
+        act(() => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+
+        expect(host.querySelector("h1").textContent).toBe("Control de simulación");
+        const loadingStatus = host.querySelector('[role="status"]');
+        expect(loadingStatus).not.toBeNull();
+        expect(loadingStatus.textContent).toContain("Consultando sesiones disponibles");
+    });
+
     it("shows Cerrar visor and clears interaction, stream, and lease state after revocation", async () => {
         await act(async () => {
             ReactDOM.render(<SimulationWorkspace />, host);

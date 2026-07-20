@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Add, DeleteOutline, EditOutlined, Refresh, SmartToyOutlined } from "@mui/icons-material";
+import { Add, DeleteOutline, EditOutlined, Refresh } from "@mui/icons-material";
 import {
     Alert,
     Box,
     Button,
-    Card,
-    CardContent,
     Chip,
     CircularProgress,
     Dialog,
@@ -15,15 +13,21 @@ import {
     DialogContentText,
     DialogTitle,
     FormControlLabel,
-    Grid,
     IconButton,
     Paper,
     Stack,
     Switch,
+    Table,
+    TableBody,
+    TableCell,
+    TableContainer,
+    TableHead,
+    TableRow,
     TextField,
     Tooltip,
     Typography,
 } from "@mui/material";
+import PageHeading from "../../../../shared-components/PageHeading";
 import {
     createRegistryRobot,
     disableRegistryRobot,
@@ -96,7 +100,8 @@ function RobotRegistryApp() {
         }
     };
 
-    const saveRobot = async () => {
+    const saveRobot = async (event) => {
+        event?.preventDefault();
         const validation = validateRobotDraft(editor);
         setEditorErrors(validation);
         if (Object.keys(validation).length > 0) return;
@@ -115,56 +120,29 @@ function RobotRegistryApp() {
 
     return (
         <Box data-testid="robot-registry-page" sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
-            <Paper
-                elevation={0}
-                sx={{
-                    p: { xs: 2, md: 3 },
-                    mb: 3,
-                    borderRadius: 3,
-                    color: "common.white",
-                    background: "linear-gradient(135deg, #0f172a 0%, #334155 54%, #0f766e 100%)",
-                }}
-            >
-                <Stack direction={{ xs: "column", md: "row" }} spacing={2} justifyContent="space-between">
-                    <Box>
-                        <Stack direction="row" spacing={1.5} alignItems="center">
-                            <SmartToyOutlined />
-                            <Typography component="h1" variant="h5" sx={{ fontWeight: 700 }}>
-                                Registro de robots
-                            </Typography>
-                        </Stack>
-                        <Typography variant="body2" sx={{ mt: 1, color: "rgba(255,255,255,.84)" }}>
-                            Inventario persistente de TurtleBot3. Las instancias activas de Gazebo se
-                            supervisan por sesión.
-                        </Typography>
-                        <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
-                            {robots.length} robots activos · {connectedCount} conectados
-                        </Typography>
-                    </Box>
-                    <Stack direction="row" spacing={1} alignItems="center">
+            <PageHeading
+                title="Robots"
+                description="Inventario persistente de TurtleBot3 disponibles para las simulaciones."
+                meta={`${robots.length} robots activos · ${connectedCount} conectados`}
+                actions={
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", gap: 1 }}>
                         <Button
-                            color="inherit"
                             variant="outlined"
                             onClick={() => navigate("/apps/GTS/realtime")}
                         >
                             Ver robots de sesión
                         </Button>
-                        <Button
-                            color="inherit"
-                            variant="contained"
-                            startIcon={<Add />}
-                            onClick={() => {
-                                setEditor(emptyRobot);
-                                setEditorErrors({});
-                            }}
-                        >
+                        <Button variant="contained" startIcon={<Add />} onClick={() => {
+                            setEditor(emptyRobot);
+                            setEditorErrors({});
+                        }}>
                             Registrar robot
                         </Button>
                     </Stack>
-                </Stack>
-            </Paper>
+                }
+            />
 
-            <Paper elevation={1} sx={{ p: 2, mb: 2, borderRadius: 2 }}>
+            <Paper elevation={0} variant="outlined" sx={{ p: 2, mb: 2 }}>
                 <Stack direction="row" spacing={1} alignItems="center">
                     <TextField
                         fullWidth
@@ -225,21 +203,58 @@ function RobotRegistryApp() {
             )}
 
             {!loading && visibleRobots.length > 0 && (
-                <Grid container spacing={2}>
-                    {visibleRobots.map((robot) => (
-                        <Grid item xs={12} md={6} xl={4} key={robot.id}>
-                            <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
-                                <CardContent>
-                                    <Stack direction="row" justifyContent="space-between" spacing={1}>
-                                        <Box sx={{ minWidth: 0 }}>
-                                            <Typography variant="h6" noWrap>
-                                                {robot.name}
-                                            </Typography>
+                <TableContainer component={Paper} elevation={0} variant="outlined">
+                    <Table aria-label="Inventario de robots" size="small" sx={{ minWidth: 900 }}>
+                        <TableHead>
+                            <TableRow>
+                                <TableCell>Robot</TableCell>
+                                <TableCell>Estado</TableCell>
+                                <TableCell>Conexión</TableCell>
+                                <TableCell>Acceso</TableCell>
+                                <TableCell>Descripción</TableCell>
+                                <TableCell align="right">Acciones</TableCell>
+                            </TableRow>
+                        </TableHead>
+                        <TableBody>
+                            {visibleRobots.map((robot) => (
+                                <TableRow hover key={robot.id}>
+                                    <TableCell component="th" scope="row">
+                                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                            {robot.name}
+                                        </Typography>
+                                        <Typography variant="caption" color="text.secondary">
+                                            {robot.namespace || "Sin namespace ROS"}
+                                        </Typography>
+                                    </TableCell>
+                                    <TableCell>
+                                        <Chip size="small" label={robotRegistryStatus(robot)} />
+                                    </TableCell>
+                                    <TableCell>
+                                        <Chip
+                                            size="small"
+                                            color={robot.isConnected ? "success" : "default"}
+                                            label={robot.isConnected ? "Conectado" : "Sin conexión"}
+                                        />
+                                    </TableCell>
+                                    <TableCell>
+                                        <Chip
+                                            size="small"
+                                            variant="outlined"
+                                            label={robot.isPublic ? "Público" : "Privado"}
+                                        />
+                                    </TableCell>
+                                    <TableCell>
+                                        <Typography variant="body2">
+                                            {robot.description || "Sin descripción"}
+                                        </Typography>
+                                        {robot.notes ? (
                                             <Typography variant="caption" color="text.secondary">
-                                                {robot.namespace || "Sin namespace ROS"}
+                                                {robot.notes}
                                             </Typography>
-                                        </Box>
-                                        <Stack direction="row">
+                                        ) : null}
+                                    </TableCell>
+                                    <TableCell align="right">
+                                        <Stack direction="row" justifyContent="flex-end">
                                             <Tooltip title="Editar robot">
                                                 <span>
                                                     <IconButton
@@ -266,41 +281,12 @@ function RobotRegistryApp() {
                                                 </span>
                                             </Tooltip>
                                         </Stack>
-                                    </Stack>
-                                    <Stack
-                                        direction="row"
-                                        spacing={1}
-                                        sx={{ my: 2, flexWrap: "wrap", gap: 0.5 }}
-                                    >
-                                        <Chip size="small" label={robotRegistryStatus(robot)} />
-                                        <Chip
-                                            size="small"
-                                            color={robot.isConnected ? "success" : "default"}
-                                            label={robot.isConnected ? "Conectado" : "Sin conexión"}
-                                        />
-                                        <Chip
-                                            size="small"
-                                            variant="outlined"
-                                            label={robot.isPublic ? "Público" : "Privado"}
-                                        />
-                                    </Stack>
-                                    <Typography variant="body2">
-                                        {robot.description || "Sin descripción."}
-                                    </Typography>
-                                    {robot.notes && (
-                                        <Typography
-                                            variant="caption"
-                                            color="text.secondary"
-                                            sx={{ display: "block", mt: 1 }}
-                                        >
-                                            Notas: {robot.notes}
-                                        </Typography>
-                                    )}
-                                </CardContent>
-                            </Card>
-                        </Grid>
-                    ))}
-                </Grid>
+                                    </TableCell>
+                                </TableRow>
+                            ))}
+                        </TableBody>
+                    </Table>
+                </TableContainer>
             )}
 
             <Dialog
@@ -308,6 +294,7 @@ function RobotRegistryApp() {
                 onClose={busy ? undefined : () => setEditor(null)}
                 fullWidth
                 maxWidth="sm"
+                PaperProps={{ component: "form", onSubmit: saveRobot }}
             >
                 <DialogTitle>{editor?.id ? "Editar robot" : "Registrar robot"}</DialogTitle>
                 <DialogContent>
@@ -359,7 +346,7 @@ function RobotRegistryApp() {
                     <Button onClick={() => setEditor(null)} disabled={busy}>
                         Cancelar
                     </Button>
-                    <Button variant="contained" onClick={saveRobot} disabled={busy}>
+                    <Button variant="contained" type="submit" disabled={busy}>
                         {busy ? "Guardando…" : "Guardar"}
                     </Button>
                 </DialogActions>

@@ -76,6 +76,7 @@ class HttpResult:
 
 @dataclasses.dataclass(frozen=True)
 class ViewerLease:
+    lease_id: str
     token: str
     hls_url: str
     expires_at_raw: str
@@ -772,6 +773,7 @@ def validate_lease(data: Any, session_id: str) -> ViewerLease:
         raise HarnessFailure("viewer_lease_response_invalid", "viewer")
     if data.get("sessionId") != session_id or data.get("source") != "Scene":
         raise HarnessFailure("viewer_lease_scope_invalid", "viewer")
+    lease_id = require_uuid(data, "leaseId", "viewer")
     token = data.get("token")
     hls_url = data.get("hlsUrl")
     expires_at_value = data.get("expiresAt")
@@ -786,7 +788,7 @@ def validate_lease(data: Any, session_id: str) -> ViewerLease:
         raise HarnessFailure("viewer_expiry_invalid", "viewer") from None
     if expires_at <= dt.datetime.now(dt.timezone.utc):
         raise HarnessFailure("viewer_lease_already_expired", "viewer")
-    return ViewerLease(token, hls_url, expires_at_value, expires_at)
+    return ViewerLease(lease_id, token, hls_url, expires_at_value, expires_at)
 
 
 def lease_remaining_seconds(lease: ViewerLease) -> int:
@@ -829,17 +831,49 @@ def get_post_stop_playlist(
 
 
 def wait_playlist(
-    transport: Transport,
-    actor: str,
-    token: str,
-    hls_url: str,
+    user: AuthenticatedUser,
+    session_id: str,
+    lease: ViewerLease,
     timeout: float,
     poll_interval: float,
 ) -> HttpResult:
+    transport = user.transport
+    actor = user.alias
     deadline = time.monotonic() + timeout
     last_status = 0
     while time.monotonic() < deadline:
-        result = transport.raw("GET", hls_url, bearer=token, hls_only=True)
+        _, status = user.call(
+            "GET",
+            f"/api/sessions/{session_id}/viewer-lease/{lease.lease_id}",
+            target="viewer_self",
+            name="poll_viewer_lease_status",
+            expected={200},
+            record=False,
+        )
+        if not isinstance(status, dict):
+            raise HarnessFailure("viewer_status_response_invalid", "viewer")
+        command = status.get("command")
+        command_state = command.get("state") if isinstance(command, dict) else None
+        if command_state in {"Failed", "Cancelled"}:
+            transport.report.add_http(
+                "viewer_playlist_self",
+                actor,
+                "viewer_self",
+                "GET",
+                {200},
+                last_status,
+                0,
+                False,
+            )
+            raise HarnessFailure("viewer_command_failed", "viewer")
+
+        if command_state != "Completed" or status.get("isReady") is not True:
+            time.sleep(poll_interval)
+            continue
+
+        result = transport.raw(
+            "GET", lease.hls_url, bearer=lease.token, hls_only=True
+        )
         last_status = result.status
         if result.status == 200 and result.body.startswith(b"#EXTM3U"):
             transport.report.add_http(
@@ -1090,30 +1124,78 @@ def reconcile_created_session(
     """Recupera una creacion cuyo resultado de red pudo quedar indeterminado."""
 
     try:
-        _, listed = user.call(
-            "GET",
-            "/api/sessions",
-            target="session_list_self",
-            name="reconcile_session_creation",
-            expected={200},
+        matches = list_created_sessions(
+            user,
+            robot_count,
+            "reconcile_session_creation",
         )
     except HarnessFailure:
         return None
-    if not isinstance(listed, list):
-        return None
-    matches = [
-        item
-        for item in listed
-        if isinstance(item, dict)
-        and item.get("desiredRobotCount") == robot_count
-        and occupying_session(item)
-    ]
     if len(matches) != 1:
         return None
-    try:
-        return require_uuid(matches[0], "id", "session_reconciliation")
-    except HarnessFailure:
-        return None
+    return matches[0]
+
+
+def list_created_sessions(
+    user: AuthenticatedUser,
+    robot_count: int | None,
+    request_name: str,
+) -> list[str]:
+    """Lista sesiones activas del ensayo sin conservar datos de la cuenta."""
+
+    _, listed = user.call(
+        "GET",
+        "/api/sessions",
+        target="session_list_self",
+        name=request_name,
+        expected={200},
+    )
+    if not isinstance(listed, list):
+        raise HarnessFailure("session_list_response_invalid", "cleanup")
+
+    matches = []
+    for item in listed:
+        if not isinstance(item, dict):
+            raise HarnessFailure("session_response_invalid", "cleanup")
+        if (
+            (robot_count is None or item.get("desiredRobotCount") == robot_count)
+            and occupying_session(item)
+        ):
+            matches.append(
+                require_uuid(item, "id", "session_reconciliation")
+            )
+    return matches
+
+
+def wait_for_uncertain_creation(
+    user: AuthenticatedUser,
+    timeout: float,
+    poll_interval: float,
+) -> list[str]:
+    """Da tiempo a que aparezca un POST cuyo resultado de red fue incierto."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            matches = list_created_sessions(
+                user,
+                None,
+                "cleanup_reconcile_session_creation",
+            )
+        except HarnessFailure:
+            matches = []
+        else:
+            if matches:
+                return matches
+        time.sleep(poll_interval)
+
+    # Close the gap between the last periodic observation and the deadline.
+    # A failed final read is not evidence that the uncertain POST rolled back.
+    return list_created_sessions(
+        user,
+        None,
+        "cleanup_final_session_reconciliation",
+    )
 
 
 def issue_lease(
@@ -1174,27 +1256,71 @@ def cleanup_sessions(
         user = users.get(alias)
         if session_id is None:
             if alias in uncertain_creations:
-                report.set_path("cleanup", alias, value="creation_outcome_unknown")
-                complete = False
+                if user is None:
+                    report.set_path(
+                        "cleanup", alias, value="authentication_unavailable"
+                    )
+                    complete = False
+                    continue
+                try:
+                    recovered_ids = wait_for_uncertain_creation(
+                        user,
+                        timeout,
+                        poll_interval,
+                    )
+                except HarnessFailure:
+                    report.set_path(
+                        "cleanup", alias, value="reconciliation_failed"
+                    )
+                    complete = False
+                    continue
+                if not recovered_ids:
+                    report.set_path(
+                        "cleanup",
+                        alias,
+                        value="not_created_after_reconciliation",
+                    )
+                    uncertain_creations.discard(alias)
+                    continue
+                session_ids = recovered_ids
+                sessions[alias] = recovered_ids[0]
+                uncertain_creations.discard(alias)
             else:
                 report.set_path("cleanup", alias, value="not_created")
-            continue
+                continue
+        else:
+            session_ids = [session_id]
+
         if user is None:
             report.set_path("cleanup", alias, value="authentication_unavailable")
             complete = False
             continue
+
         try:
-            user.call(
-                "DELETE",
-                f"/api/sessions/{session_id}",
-                target="session_self",
-                name="cleanup_stop_session",
-                expected={200, 404},
-            )
-            state = wait_session_stopped(user, session_id, timeout, poll_interval)
+            states = []
+            for recovered_id in dict.fromkeys(session_ids):
+                user.call(
+                    "DELETE",
+                    f"/api/sessions/{recovered_id}",
+                    target="session_self",
+                    name="cleanup_stop_session",
+                    expected={200, 404},
+                )
+                states.append(
+                    wait_session_stopped(
+                        user,
+                        recovered_id,
+                        timeout,
+                        poll_interval,
+                    )
+                )
+            state = states[0] if len(states) == 1 else "released_all"
             report.set_path("cleanup", alias, value=state)
             report.set_path("sessions", alias, "final_state", value=state)
-            if state not in {"Stopped", "released", "released_terminal"}:
+            if any(
+                item not in {"Stopped", "released", "released_terminal"}
+                for item in states
+            ):
                 complete = False
         except HarnessFailure:
             report.set_path("cleanup", alias, value="failed")
@@ -1365,10 +1491,9 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
             futures = {
                 alias: executor.submit(
                     wait_playlist,
-                    transport,
-                    alias,
-                    leases[alias].token,
-                    leases[alias].hls_url,
+                    users[alias],
+                    sessions[alias],
+                    leases[alias],
                     args.viewer_timeout,
                     args.poll_interval,
                 )
@@ -1397,10 +1522,9 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
         )
         report.set_path("viewer", "user_a", "previous_lease_revoked", value=True)
         wait_playlist(
-            transport,
-            "user_a",
-            leases["user_a"].token,
-            leases["user_a"].hls_url,
+            users["user_a"],
+            sessions["user_a"],
+            leases["user_a"],
             args.viewer_timeout,
             args.poll_interval,
         )
@@ -1590,10 +1714,9 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
             playlist_futures = {
                 alias: executor.submit(
                     wait_playlist,
-                    transport,
-                    alias,
-                    leases[alias].token,
-                    leases[alias].hls_url,
+                    users[alias],
+                    sessions[alias],
+                    leases[alias],
                     args.viewer_timeout,
                     args.poll_interval,
                 )

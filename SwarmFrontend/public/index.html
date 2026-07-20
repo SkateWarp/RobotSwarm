@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
     <head>
         <script src="https://cdn.onesignal.com/sdks/OneSignalSDK.js" async=""></script>
         <script>
             const currentURL = window.location.href;
-            if(currentURL.includes('tarea.alternard.com')) {
+            if (currentURL.includes('tarea.alternard.com')) {
                 window.OneSignal = window.OneSignal || [];
                 OneSignal.push(function() {
                     OneSignal.init({
@@ -14,11 +14,11 @@
             }
         </script>
         <meta charset="utf-8">
-        <meta name="description" content="Fill Click - Sistema de transformación digital para líneas de producción.">
-        <meta name="keywords" content="telemetria oee eficiencia produccion">
-        <meta name="author" content="Alterna 4.0">
+        <meta name="description" content="Control y supervisión de simulaciones multi-robot con ROS y Gazebo.">
+        <meta name="keywords" content="robótica, ROS, Gazebo, TurtleBot3, enjambre">
+        <meta name="author" content="RobotSwarm">
         <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-        <meta name="theme-color" content="#000000">
+        <meta name="theme-color" content="#0f172a">
         <base href="/">
 
         <link href="%PUBLIC_URL%/assets/tailwind-base.css" rel="stylesheet">
@@ -28,7 +28,7 @@
           homescreen on Android. See https://developers.google.com/web/fundamentals/engage-and-retain/web-app-manifest/
         -->
         <link rel="manifest" href="%PUBLIC_URL%/manifest.json">
-        <link rel="shortcut icon" href="%PUBLIC_URL%/logo.png">
+        <link rel="icon" type="image/svg+xml" href="%PUBLIC_URL%/robotswarm-mark.svg">
 
         <!--<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">-->
 
@@ -41,10 +41,6 @@
 
         <link href="%PUBLIC_URL%/assets/fonts/inter/inter.css" rel="stylesheet">
         <link href="%PUBLIC_URL%/assets/fonts/meteocons/style.css" rel="stylesheet">
-        <link rel="preconnect" href="https://fonts.gstatic.com">
-        <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@200;300;400;500;600;700&display=swap" rel="stylesheet">
-        <link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,100;0,300;0,400;0,700;0,900;1,100;1,300;1,400;1,700;1,900&display=swap" rel="stylesheet">
-
         <noscript id="emotion-insertion-point"></noscript>
         <!--
           Notice the use of %PUBLIC_URL% in the tags above.
@@ -55,7 +51,7 @@
           work correctly both with client-side routing and a non-root public URL.
           Learn how to configure a non-root public URL by running `npm run build`.
         -->
-        <title>Robot Swarm</title>
+        <title>RobotSwarm</title>
 
         <!-- FUSE Splash Screen CSS -->
         <style type="text/css">
@@ -222,7 +218,7 @@
     </head>
     <body>
         <noscript>
-            You need to enable JavaScript to run this app.
+            Debe habilitar JavaScript para utilizar RobotSwarm.
         </noscript>
         <div id="root" class="flex">
             <!-- FUSE Splash Screen -->
@@ -231,7 +227,7 @@
                 <div class="center">
 
                     <div class="logo">
-                        <img width="128" src="assets/images/logos/logo.png" alt="logo">
+                        <img width="128" src="robotswarm-mark.svg" alt="RobotSwarm">
                     </div>
 
                     <!-- Material Design Spinner -->

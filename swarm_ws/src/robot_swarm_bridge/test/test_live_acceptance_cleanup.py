@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """ROS-free checks for sequential live-acceptance cleanup."""
 
+import contextlib
+import io
 import json
 import threading
 import types
@@ -55,8 +57,16 @@ class LiveAcceptanceCleanupTest(unittest.TestCase):
         harness.active_collision_missing_robots = set()
         harness.active_task_id = None
         harness.swarm_task = {}
+        harness.model_names = {"world", *harness.roster}
         harness.emergency_stop = False
         harness.collision_count = 0
+        harness.stop_requested = False
+        harness.case_cleanup_failures = []
+        harness.last_cleanup_failures = []
+        harness.args = types.SimpleNamespace(
+            delete_after=False,
+            task_id=None,
+        )
         return harness
 
     def test_departed_cmd_vel_monitors_are_unregistered_and_forgotten(self):
@@ -155,6 +165,256 @@ class LiveAcceptanceCleanupTest(unittest.TestCase):
             parser.parse_args([
                 "--min-obstacle-clearance", "0.2"
             ]).min_obstacle_clearance,
+        )
+
+    def test_unconfirmed_stop_keeps_the_correlated_task_identity(self):
+        harness = self.make_harness()
+        harness.active_task_id = "case-1"
+        harness.swarm_task = {"task_id": "case-1", "status": "running"}
+        commands = []
+        waits = []
+        harness.send = lambda command, parameters=None: commands.append(
+            (command, parameters)
+        )
+
+        def wait_for(
+            _predicate, _timeout, description, continue_after_stop=False,
+        ):
+            waits.append((description, continue_after_stop))
+            return False
+
+        harness.wait_for = wait_for
+
+        with self.assertRaisesRegex(RuntimeError, "correlated stop"):
+            harness.stop_task(continue_after_stop=True)
+
+        self.assertEqual("case-1", harness.active_task_id)
+        self.assertEqual(
+            [("stop_task", {"task_id": "case-1"})], commands
+        )
+        self.assertEqual([("task stop", True)], waits)
+
+    def test_cleanup_can_confirm_a_stop_after_a_signal(self):
+        harness = self.make_harness()
+        harness.stop_requested = True
+        harness.active_task_id = "case-2"
+        harness.swarm_task = {"task_id": "case-2", "status": "running"}
+        commands = []
+
+        def send(command, parameters=None):
+            commands.append((command, parameters))
+            harness.swarm_task["status"] = "STOPPED"
+
+        def wait_for(
+            predicate, _timeout, description, continue_after_stop=False,
+        ):
+            self.assertEqual("task stop", description)
+            self.assertTrue(continue_after_stop)
+            return predicate()
+
+        harness.send = send
+        harness.wait_for = wait_for
+
+        harness.stop_task(continue_after_stop=True)
+
+        self.assertIsNone(harness.active_task_id)
+        self.assertEqual(
+            [("stop_task", {"task_id": "case-2"})], commands
+        )
+
+    def test_case_cleanup_does_not_reset_payload_after_failed_stop(self):
+        harness = self.make_harness()
+        resets = []
+
+        def stop_task(continue_after_stop=False):
+            self.assertTrue(continue_after_stop)
+            raise RuntimeError("task stop was not confirmed")
+
+        harness.stop_task = stop_task
+        harness.reset_object = lambda: resets.append("payload")
+
+        with self.assertRaisesRegex(RuntimeError, "not confirmed"):
+            harness._cleanup_case({"behavior": "transport"})
+
+        self.assertEqual([], resets)
+
+    def test_fleet_delete_confirms_empty_roster_models_and_monitors(self):
+        harness = self.make_harness()
+        commands = []
+        descriptions = []
+
+        def send(command, parameters=None):
+            commands.append((command, parameters))
+            harness.roster = []
+            harness.model_names = {"world", "transport_object"}
+            harness.cmd_vel_subscribers = {}
+            harness.cmd_velocities = {}
+
+        def wait_for(
+            predicate, _timeout, description, continue_after_stop=False,
+        ):
+            self.assertTrue(continue_after_stop)
+            descriptions.append(description)
+            return predicate()
+
+        harness.send = send
+        harness.wait_for = wait_for
+
+        departed = harness._delete_fleet(continue_after_stop=True)
+
+        self.assertEqual({"tb3_0", "tb3_1", "tb3_2"}, departed)
+        self.assertEqual([("delete_robots", {})], commands)
+        self.assertEqual(
+            ["empty fleet", "Gazebo model deletion", "cmd_vel monitor cleanup"],
+            descriptions,
+        )
+
+    def test_fleet_delete_rejects_a_residual_gazebo_robot(self):
+        harness = self.make_harness()
+
+        def leave_stale_model(_command, _parameters=None):
+            harness.roster.clear()
+            harness.cmd_vel_subscribers.clear()
+            harness.cmd_velocities.clear()
+
+        harness.send = leave_stale_model
+        harness.wait_for = (
+            lambda predicate, _timeout, _description,
+            continue_after_stop=False: predicate()
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "remained in Gazebo"):
+            harness._delete_fleet(continue_after_stop=True)
+
+    def test_final_cleanup_never_deletes_after_unconfirmed_stop(self):
+        harness = self.make_harness()
+        harness.args.delete_after = True
+        deletions = []
+
+        def fail_stop(continue_after_stop=False):
+            self.assertTrue(continue_after_stop)
+            raise RuntimeError("unconfirmed task stop")
+
+        harness.stop_task = fail_stop
+        harness._delete_fleet = lambda continue_after_stop=False: (
+            deletions.append(continue_after_stop)
+        )
+
+        failures = harness._final_cleanup()
+
+        self.assertEqual([], deletions)
+        self.assertEqual(
+            ["task stop failed: unconfirmed task stop"], failures
+        )
+
+    def test_cleanup_failure_is_reported_and_returns_nonzero(self):
+        harness = self.make_harness()
+        harness.roster = []
+        harness.model_names = {"world"}
+        harness.cmd_vel_subscribers = {}
+        harness.cmd_velocities = {}
+        harness.sim_time = 0.0
+        harness.command_pub = types.SimpleNamespace(
+            get_num_connections=lambda: 1
+        )
+        harness.wait_for = (
+            lambda predicate, _timeout, _description,
+            continue_after_stop=False: predicate()
+        )
+        harness._final_cleanup = lambda: [
+            "fleet deletion failed: residual tb3_0"
+        ]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = harness.run([])
+
+        summary_line = next(
+            line for line in output.getvalue().splitlines()
+            if line.startswith("SUMMARY_JSON ")
+        )
+        summary = json.loads(summary_line.split(" ", 1)[1])
+        self.assertEqual(1, exit_code)
+        self.assertFalse(summary["all_passed"])
+        self.assertFalse(summary["cleanup_passed"])
+        self.assertEqual(
+            ["fleet deletion failed: residual tb3_0"],
+            summary["cleanup_failures"],
+        )
+
+    def test_case_cleanup_failure_is_kept_in_the_global_summary(self):
+        harness = self.make_harness()
+        harness.roster = []
+        harness.model_names = {"world"}
+        harness.cmd_vel_subscribers = {}
+        harness.cmd_velocities = {}
+        harness.sim_time = 0.0
+        harness.command_pub = types.SimpleNamespace(
+            get_num_connections=lambda: 1
+        )
+        harness.wait_for = (
+            lambda predicate, _timeout, _description,
+            continue_after_stop=False: predicate()
+        )
+        def run_case(_case):
+            harness.case_cleanup_failures.append(
+                "transport_case: payload reset failed"
+            )
+            return {
+                "scenario": "transport_case",
+                "passed": False,
+                "cleanup_failures": ["payload reset failed"],
+            }
+
+        harness.run_case = run_case
+        harness._final_cleanup = lambda: []
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = harness.run([{"name": "transport_case"}])
+
+        summary_line = next(
+            line for line in output.getvalue().splitlines()
+            if line.startswith("SUMMARY_JSON ")
+        )
+        summary = json.loads(summary_line.split(" ", 1)[1])
+        self.assertEqual(1, exit_code)
+        self.assertFalse(summary["cleanup_passed"])
+        self.assertEqual(
+            ["transport_case: payload reset failed"],
+            summary["cleanup_failures"],
+        )
+
+    def test_case_cleanup_failure_survives_a_later_case_exception(self):
+        harness = self.make_harness()
+        harness.roster = []
+        harness.model_names = {"world"}
+        harness.cmd_vel_subscribers = {}
+        harness.cmd_velocities = {}
+        harness.sim_time = 0.0
+        harness.command_pub = types.SimpleNamespace(
+            get_num_connections=lambda: 1
+        )
+        harness.wait_for = (
+            lambda predicate, _timeout, _description,
+            continue_after_stop=False: predicate()
+        )
+
+        def fail_after_cleanup(_case):
+            harness.case_cleanup_failures.append(
+                "transport_case: payload reset failed"
+            )
+            raise RuntimeError("result serialization failed")
+
+        harness.run_case = fail_after_cleanup
+        harness._final_cleanup = lambda: []
+
+        with self.assertRaisesRegex(RuntimeError, "serialization"):
+            harness.run([{"name": "transport_case"}])
+
+        self.assertEqual(
+            ["transport_case: payload reset failed"],
+            harness.last_cleanup_failures,
         )
 
 

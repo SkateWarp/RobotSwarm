@@ -95,6 +95,7 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
             min_transport_push_duration=0.75,
             min_transport_push_samples=5,
             min_transport_useful_fraction=0.50,
+            min_transport_search_travel=0.05,
             min_transport_rendezvous_travel=0.10,
             min_transport_root_rendezvous_travel=0.03,
             transport_motion_detection_distance=0.01,
@@ -112,6 +113,12 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         self.metrics = LIVE.CaseMetrics(
             self.case, self.robots, 0.0, 0.0, self.args
         )
+
+    def test_production_rtf_gate_is_the_default(self):
+        args = LIVE.build_parser().parse_args([])
+
+        self.assertEqual(2.90, args.min_rtf)
+        self.assertEqual(0.05, args.min_transport_search_travel)
 
     def _status(
         self, sequence, control_time, commands, phase="PUSH",
@@ -426,9 +433,12 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         )
 
     def test_search_motion_window_observes_the_complete_fleet(self):
-        positions = {"tb3_0": (0.0, 0.0), "tb3_1": (0.5, 0.0)}
         twists = {name: _twist(0.03) for name in self.robots}
         for index in range(3):
+            positions = {
+                "tb3_0": (index * 0.03, 0.0),
+                "tb3_1": (0.5 + index * 0.03, 0.0),
+            }
             self.metrics._transport_discovery_motion(
                 positions, twists, {"phase": "SEARCH"}, index * 0.1,
                 index * 0.1,
@@ -442,8 +452,80 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
             [], response["robots_not_observed_moving_during_search"]
         )
         self.assertEqual(
-            [], LIVE.transport_search_motion_failures(response, 2)
+            [], response["robots_below_required_search_travel"]
         )
+        self.assertAlmostEqual(
+            0.06, response["search_path_length_m"]["tb3_0"]
+        )
+        self.assertEqual(
+            [], LIVE.transport_search_motion_failures(
+                response, 2, require_search=True
+            )
+        )
+
+    def test_required_search_rejects_a_token_motion_sample(self):
+        twists = {name: _twist(0.03) for name in self.robots}
+        for index in range(3):
+            positions = {
+                "tb3_0": (index * 0.005, 0.0),
+                "tb3_1": (0.5 + index * 0.005, 0.0),
+            }
+            self.metrics._transport_discovery_motion(
+                positions, twists, {"phase": "SEARCH"}, index * 0.1,
+                index * 0.1,
+            )
+
+        response = self.metrics.report()["transport_discovery_response"]
+        failures = LIVE.transport_search_motion_failures(
+            response, 2, require_search=True
+        )
+
+        self.assertEqual(list(self.robots), response[
+            "robots_below_required_search_travel"
+        ])
+        self.assertEqual(1, len(failures))
+        self.assertIn("sustain enough", failures[0])
+
+    def test_approach_peak_cannot_satisfy_search_simultaneity(self):
+        search_frames = [
+            ((0.00, 0.50), (0.03, 0.00)),
+            ((0.03, 0.50), (0.03, 0.00)),
+            ((0.06, 0.53), (0.00, 0.03)),
+            ((0.06, 0.56), (0.00, 0.03)),
+        ]
+        for index, (x_positions, speeds) in enumerate(search_frames):
+            positions = {
+                "tb3_0": (x_positions[0], 0.0),
+                "tb3_1": (x_positions[1], 0.0),
+            }
+            twists = {
+                robot: _twist(speed)
+                for robot, speed in zip(self.robots, speeds)
+            }
+            self.metrics._transport_discovery_motion(
+                positions, twists, {"phase": "SEARCH"}, index * 0.1,
+                index * 0.1,
+            )
+
+        self.metrics.transport_discovery_notice = {'announced': True}
+        approach_positions = {
+            "tb3_0": (0.07, 0.0), "tb3_1": (0.57, 0.0)
+        }
+        self.metrics._transport_discovery_motion(
+            approach_positions,
+            {name: _twist(0.03) for name in self.robots},
+            {"phase": "APPROACH"}, 0.5, 0.5,
+        )
+
+        response = self.metrics.report()["transport_discovery_response"]
+        failures = LIVE.transport_search_motion_failures(
+            response, 2, require_search=True
+        )
+
+        self.assertEqual(1, response["peak_simultaneous_search_movers"])
+        self.assertEqual(2, response["peak_simultaneous_rendezvous_movers"])
+        self.assertEqual(1, len(failures))
+        self.assertIn("simultaneously", failures[0])
 
     def test_search_gate_is_strict_only_with_a_supported_window(self):
         incomplete = {
@@ -461,6 +543,31 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         self.assertEqual(
             [], LIVE.transport_search_motion_failures(incomplete, 2)
         )
+
+    def test_required_search_rejects_an_unsupported_window(self):
+        response = {
+            "simultaneous_motion_window_supported": False,
+            "search_motion_window_supported": False,
+            "peak_simultaneous_movers": 0,
+            "robots_not_observed_moving_during_search": list(self.robots),
+        }
+
+        failures = LIVE.transport_search_motion_failures(
+            response, len(self.robots), require_search=True
+        )
+
+        self.assertEqual(1, len(failures))
+        self.assertIn("active search", failures[0])
+
+    def test_every_transport_scenario_starts_outside_initial_sensor_range(self):
+        cases = [
+            case for case in LIVE.SCENARIOS
+            if case["behavior"] == "transport"
+        ]
+
+        self.assertEqual([1, 3, 4, 10], [case["count"] for case in cases])
+        self.assertTrue(all(case.get("require_search") is True for case in cases))
+        self.assertTrue(all(case.get("object_start") == (-3.5, -3.0) for case in cases))
 
     def _contact_report(self):
         return {

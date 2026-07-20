@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import math
 import pathlib
 import sys
@@ -518,6 +519,21 @@ class FleetManagerSpawnTests(unittest.TestCase):
 
 
 class FleetManagerDeleteTests(unittest.TestCase):
+    def test_delete_result_echoes_the_optional_request_id(self):
+        manager = make_manager()
+        manager.delete_result_pub = Publisher()
+        manager.delete_robots = lambda _robot_ids: 0
+
+        manager._on_delete_command(String(data=json.dumps({
+            "all": True,
+            "request_id": "cleanup-42",
+        })))
+
+        result = json.loads(manager.delete_result_pub.messages[-1].data)
+        self.assertEqual("cleanup-42", result["request_id"])
+        self.assertEqual(0, result["deleted_count"])
+        self.assertEqual([], result["remaining_robot_ids"])
+
     @staticmethod
     def manager_with_robots(count=2):
         manager = make_manager()

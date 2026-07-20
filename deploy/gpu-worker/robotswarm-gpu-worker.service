@@ -9,6 +9,7 @@ EnvironmentFile=%h/.config/robotswarm/gpu-worker-identity.env
 EnvironmentFile=%h/.local/share/robotswarm-gpu-worker/current/gpu-worker-release.env
 WorkingDirectory=%h/.local/share/robotswarm-gpu-worker/current
 ExecStartPre=/usr/bin/env docker info
+ExecStartPre=/usr/bin/python3 -c "import socket; socket.if_nameindex()"
 ExecStart=%h/.local/share/robotswarm-gpu-worker/current/SwarmWorker
 Restart=always
 RestartSec=10
@@ -21,7 +22,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 LockPersonality=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Gazebo Classic calls getifaddrs through AF_NETLINK before creating its GUI.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=default.target

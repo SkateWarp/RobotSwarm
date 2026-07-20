@@ -7,6 +7,9 @@ const useGeneralAppStyle = () => {
         "& .FusePageSimple-header": {
             minHeight: 72,
             height: 72,
+            color: theme.palette.text.primary,
+            background: theme.palette.background.paper,
+            borderBottom: `1px solid ${theme.palette.divider}`,
             [theme.breakpoints.up("lg")]: {
                 minHeight: 72,
                 height: 72,

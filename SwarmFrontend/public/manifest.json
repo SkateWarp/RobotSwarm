@@ -1,15 +1,19 @@
 {
-  "short_name": "Fill Click",
-  "name": "Fill Click",
+  "short_name": "RobotSwarm",
+  "name": "RobotSwarm · Control multi-robot",
+  "description": "Control y supervisión de simulaciones TurtleBot3 con ROS y Gazebo.",
   "icons": [
     {
-      "src": "logo.png",
-      "sizes": "64x64 32x32 24x24 16x16",
-      "type": "image/x-icon"
+      "src": "robotswarm-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
     }
   ],
-  "start_url": "./index.html",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "theme_color": "#000000",
-  "background_color": "#ffffff"
+  "theme_color": "#0f172a",
+  "background_color": "#f8fafc",
+  "lang": "es"
 }

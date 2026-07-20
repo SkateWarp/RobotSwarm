@@ -887,6 +887,8 @@ class FleetManager:
             self.delete_result_pub.publish(String(data=json.dumps(result)))
             return
 
+        request_id = str(data.get('request_id') or '')
+
         if data.get('all', False):
             ids = None  # means "all"
         else:
@@ -898,7 +900,10 @@ class FleetManager:
         result = {
             "success": deleted > 0,
             "deleted_count": deleted,
+            "remaining_robot_ids": self.get_robot_names(),
         }
+        if request_id:
+            result['request_id'] = request_id
         self.delete_result_pub.publish(String(data=json.dumps(result)))
 
     # ------------------------------------------------------------------

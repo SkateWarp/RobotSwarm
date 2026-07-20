@@ -37,13 +37,18 @@ const AccountsTable = ({ columns, data, onRowClick }) => {
     };
 
     return (
-        <div className="flex flex-col w-full min-h-full border-1 rounded-12 overflow-hidden">
+        <div className="flex flex-col w-full min-h-full border-1 rounded-8 overflow-hidden">
             <GeneralTable
+                tableAriaLabel="Usuarios"
                 getTableProps={getTableProps}
                 headerGroups={headerGroups}
                 page={page}
                 prepareRow={prepareRow}
                 onRowClick={onRowClick}
+                getRowAriaLabel={(row) =>
+                    `Editar usuario ${row.values.fullName || row.original.name || "sin nombre"}`
+                }
+                rowAriaHasPopup="dialog"
                 pagination={pagination}
             />
 

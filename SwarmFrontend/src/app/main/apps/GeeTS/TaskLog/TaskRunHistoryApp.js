@@ -28,6 +28,7 @@ import {
 } from "@mui/material";
 import { Close, Refresh, Visibility } from "@mui/icons-material";
 import SimulationSessionService from "../../../../../services/SimulationSessionService";
+import PageHeading from "../../../../shared-components/PageHeading";
 
 const TYPE_LABELS = {
     FollowLeader: "Seguir al líder",
@@ -163,35 +164,18 @@ function TaskRunHistoryApp() {
 
     return (
         <Box data-testid="task-history-page" sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
-            <Paper
-                elevation={0}
-                sx={{
-                    p: { xs: 2, md: 3 },
-                    mb: 3,
-                    color: "common.white",
-                    borderRadius: 3,
-                    background: "linear-gradient(135deg, #172554 0%, #1d4ed8 58%, #0891b2 100%)",
-                }}
-            >
-                <Box className="flex items-start justify-between" sx={{ gap: 2, flexWrap: "wrap" }}>
-                    <Box>
-                        <Typography component="h1" variant="h5" sx={{ fontWeight: 700 }}>
-                            Historial de tareas ROS
-                        </Typography>
-                        <Typography variant="body2" sx={{ mt: 0.75, color: "rgba(255,255,255,.82)" }}>
-                            Resultados persistentes de las tareas ejecutadas desde el centro de control.
-                        </Typography>
-                        <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
-                            {summary}
-                        </Typography>
-                    </Box>
-                    <Button variant="contained" color="inherit" onClick={() => navigate("/apps/GTS/realtime")}>
-                        Abrir control de simulación
+            <PageHeading
+                title="Historial de tareas"
+                description="Resultados persistentes de las tareas ejecutadas en ROS y Gazebo."
+                meta={summary}
+                actions={
+                    <Button variant="contained" onClick={() => navigate("/apps/GTS/realtime")}>
+                        Abrir Control
                     </Button>
-                </Box>
-            </Paper>
+                }
+            />
 
-            <Paper elevation={1} sx={{ p: 2, mb: 2, borderRadius: 2 }}>
+            <Paper elevation={0} variant="outlined" sx={{ p: 2, mb: 2 }}>
                 <Box className="flex items-center" sx={{ gap: 2, flexWrap: "wrap" }}>
                     <FormControl size="small" sx={{ minWidth: 220 }}>
                         <InputLabel id="history-type-label">Tipo de tarea</InputLabel>
@@ -266,7 +250,7 @@ function TaskRunHistoryApp() {
                 </Alert>
             )}
 
-            <Paper elevation={2} sx={{ overflow: "hidden", borderRadius: 2 }}>
+            <Paper elevation={0} variant="outlined" sx={{ overflow: "hidden" }}>
                 {loading && (
                     <Box
                         className="flex items-center justify-center"
