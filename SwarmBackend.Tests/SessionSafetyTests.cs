@@ -121,6 +121,59 @@ public sealed class SessionSafetyTests
     }
 
     [Fact]
+    public async Task TaskCreationRetriesShortSerializationConflicts()
+    {
+        var attempts = 0;
+        var resets = 0;
+
+        var result = await SessionControlRoute.RetryTaskSerializationFailures(
+            () =>
+            {
+                attempts++;
+                return attempts < 3
+                    ? Task.FromException<IResult>(SerializationFailure())
+                    : Task.FromResult(Results.Accepted() as IResult);
+            },
+            () => resets++,
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status202Accepted, await StatusCode(result));
+        Assert.Equal(3, attempts);
+        Assert.Equal(2, resets);
+    }
+
+    [Fact]
+    public async Task TaskCreationReturnsConflictAfterRepeatedSerializationFailures()
+    {
+        var attempts = 0;
+
+        var result = await SessionControlRoute.RetryTaskSerializationFailures(
+            () =>
+            {
+                attempts++;
+                return Task.FromException<IResult>(SerializationFailure());
+            },
+            () => { },
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status409Conflict, await StatusCode(result));
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public async Task TaskCreationHonoursCancellationAfterASerializationFailure()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            SessionControlRoute.RetryTaskSerializationFailures(
+                () => Task.FromException<IResult>(SerializationFailure()),
+                () => { },
+                cancellation.Token));
+    }
+
+    [Fact]
     public void SerializationFailureIsFoundInsideDatabaseUpdateWrappers()
     {
         var wrapped = new InvalidOperationException(

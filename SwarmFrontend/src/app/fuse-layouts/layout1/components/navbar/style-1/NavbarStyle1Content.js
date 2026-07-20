@@ -1,15 +1,13 @@
 import FuseScrollbars from '@fuse/core/FuseScrollbars';
-import { styled, useTheme } from '@mui/material/styles';
+import { styled } from '@mui/material/styles';
 import AppBar from '@mui/material/AppBar';
-// import Logo from 'app/fuse-layouts/shared-components/Logo';
 import NavbarToggleButton from 'app/fuse-layouts/shared-components/NavbarToggleButton';
 import Navigation from 'app/fuse-layouts/shared-components/Navigation';
-// import UserNavbarHeader from 'app/fuse-layouts/shared-components/UserNavbarHeader';
 import clsx from 'clsx';
 import { memo } from 'react';
 
 const Root = styled('div')(({ theme }) => ({
-  backgroundColor: '#AF0303',//theme.palette.background.default,
+  backgroundColor: theme.palette.background.default,
   color: theme.palette.text.primary,
   '& ::-webkit-scrollbar-thumb': {
     boxShadow: `inset 0 0 0 20px ${
@@ -36,8 +34,6 @@ const StyledContent = styled(FuseScrollbars)(({ theme }) => ({
 }));
 
 function NavbarStyle1Content(props) {
-  const theme = useTheme();
-
   return (
     <Root className={clsx('flex flex-auto flex-col overflow-hidden h-full', props.className)}>
       <AppBar
@@ -45,16 +41,10 @@ function NavbarStyle1Content(props) {
         position="static"
         className="flex flex-row items-center shrink h-48 md:h-64 min-h-48 md:min-h-64 px-12 shadow-0"
       >
-        {/*<div className="flex flex-1 mx-4">
-          <Logo />
-        </div>*/}
-
         <NavbarToggleButton className="w-40 h-40 p-0" />
       </AppBar>
 
       <StyledContent option={{ suppressScrollX: true, wheelPropagation: false }}>
-        {/*<UserNavbarHeader />*/}
-
         <Navigation layout="vertical" />
       </StyledContent>
     </Root>

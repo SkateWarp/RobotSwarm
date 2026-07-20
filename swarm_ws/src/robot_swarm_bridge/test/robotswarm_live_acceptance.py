@@ -84,15 +84,21 @@ SCENARIOS = [
              mode="square", radius=1.6, duration=150, required_laps=1),
     scenario("follow_figure8_n10", "follow", 10, "line",
              mode="figure8", radius=1.5, duration=240, required_laps=1),
+    # Keep the payload outside initial sensor range in every transport case.
+    # This makes search, finder notification and fleet rendezvous observable
+    # instead of accepting a controller that starts directly in PUSH.
     scenario("transport_grf_n1", "transport", 1, "grid",
-             target=(-0.8, -3.0), min_object_travel=0.55, timeout=100),
+             object_start=(-3.5, -3.0), target=(-3.5, -4.0),
+             min_object_travel=0.55, timeout=220, require_search=True),
     scenario("transport_grf_n3", "transport", 3, "line",
-             target=(-0.8, -3.0), min_object_travel=0.55, timeout=90),
+             object_start=(-3.5, -3.0), target=(-3.5, -4.0),
+             min_object_travel=0.55, timeout=190, require_search=True),
     scenario("transport_grf_n4", "transport", 4, "circle",
-             target=(-0.8, -3.0), min_object_travel=0.55, timeout=80),
+             object_start=(-3.5, -3.0), target=(-3.5, -4.0),
+             min_object_travel=0.55, timeout=180, require_search=True),
     scenario("transport_grf_n10", "transport", 10, "grid",
              object_start=(-3.5, -3.0), target=(-3.5, -4.0),
-             min_object_travel=0.55, timeout=220),
+             min_object_travel=0.55, timeout=220, require_search=True),
 ]
 
 SMOKE_NAMES = {
@@ -324,26 +330,46 @@ def transport_role_metadata(status):
     return roles
 
 
-def transport_search_motion_failures(response, robot_count):
-    """Return search/rendezvous failures only when enough frames were seen."""
+def transport_search_motion_failures(
+    response, robot_count, require_search=False,
+):
+    """Validate fleet motion, optionally requiring a real SEARCH window."""
     failures = []
+    search_supported = bool(response.get("search_motion_window_supported"))
+    if require_search and not search_supported:
+        failures.append(
+            "active search was not observed for the required minimum motion "
+            "window"
+        )
     if (
-        response.get("simultaneous_motion_window_supported")
+        search_supported
         and int(response.get("peak_simultaneous_movers", 0) or 0)
         < robot_count
     ):
         failures.append(
             "the complete fleet was never observed moving simultaneously "
-            "during search or rendezvous"
+            "during active search"
         )
     missing_search = response.get(
         "robots_not_observed_moving_during_search", []
     )
-    if response.get("search_motion_window_supported") and missing_search:
+    if search_supported and missing_search:
         failures.append(
             "robots were not observed participating in active search: "
             + ", ".join(missing_search)
         )
+    if require_search and search_supported:
+        if "robots_below_required_search_travel" not in response:
+            failures.append("per-robot active-search travel was not measured")
+        else:
+            below_required = response.get(
+                "robots_below_required_search_travel", []
+            )
+            if below_required:
+                failures.append(
+                    "robots did not sustain enough active-search travel: "
+                    + ", ".join(below_required)
+                )
     return failures
 
 
@@ -691,9 +717,14 @@ class CaseMetrics:
         self.transport_discovery_first_motion_sim = {}
         self.transport_discovery_first_motion_wall = {}
         self.transport_peak_simultaneous_movers = set()
+        self.transport_peak_rendezvous_movers = set()
         self.transport_search_motion_samples = 0
         self.transport_rendezvous_motion_samples = 0
         self.transport_search_movers = set()
+        self.transport_search_last_positions = {}
+        self.transport_search_travel = {
+            name: 0.0 for name in robot_ids
+        }
 
     def _observe_transport_discovery_status(self, status):
         """Remember who received the payload notice and their assigned role."""
@@ -801,10 +832,19 @@ class CaseMetrics:
         if phase == "SEARCH":
             if not motion_frame_complete:
                 return
+            for robot in self.robot_ids:
+                position = robot_positions[robot]
+                previous = self.transport_search_last_positions.get(robot)
+                if previous is not None:
+                    self.transport_search_travel[robot] += math.hypot(
+                        position[0] - previous[0],
+                        position[1] - previous[1],
+                    )
+                self.transport_search_last_positions[robot] = position
             self.transport_search_motion_samples += 1
             self.transport_search_movers.update(movers)
             if len(movers) > len(self.transport_peak_simultaneous_movers):
-                self.transport_peak_simultaneous_movers = movers
+                self.transport_peak_simultaneous_movers = set(movers)
             return
 
         if self.transport_discovery_notice is None:
@@ -849,9 +889,9 @@ class CaseMetrics:
 
         if (
             motion_frame_complete
-            and len(movers) > len(self.transport_peak_simultaneous_movers)
+            and len(movers) > len(self.transport_peak_rendezvous_movers)
         ):
-            self.transport_peak_simultaneous_movers = movers
+            self.transport_peak_rendezvous_movers = set(movers)
 
     def _update_push_streak(self, robot, pushing, sample_time):
         start = self.current_push_streak_start[robot]
@@ -2019,6 +2059,17 @@ class CaseMetrics:
                 notice_recipients - self.transport_discovery_acknowledged,
                 key=robot_sort_key,
             )
+        minimum_search_travel = max(
+            0.0, self.args.min_transport_search_travel
+        )
+        search_travel = {
+            robot: self.transport_search_travel.get(robot, 0.0)
+            for robot in sorted(self.robot_ids, key=robot_sort_key)
+        }
+        below_required_search_travel = [
+            robot for robot, travel in search_travel.items()
+            if travel < minimum_search_travel
+        ]
         discovery_response = {
             "notice_observed": bool(self.transport_discovery_notice),
             "event_id": discovery.get("event_id"),
@@ -2050,8 +2101,10 @@ class CaseMetrics:
                 self.transport_rendezvous_motion_samples
             ),
             "simultaneous_motion_window_supported": (
-                self.transport_search_motion_samples
-                + self.transport_rendezvous_motion_samples >= 3
+                self.transport_search_motion_samples >= 3
+            ),
+            "simultaneous_search_motion_window_supported": (
+                self.transport_search_motion_samples >= 3
             ),
             "search_motion_window_supported": (
                 self.transport_search_motion_samples >= 3
@@ -2063,6 +2116,16 @@ class CaseMetrics:
                 self.robot_ids - self.transport_search_movers,
                 key=robot_sort_key,
             ),
+            "minimum_search_path_length_m": rounded(
+                minimum_search_travel
+            ),
+            "search_path_length_m": {
+                robot: rounded(travel)
+                for robot, travel in search_travel.items()
+            },
+            "robots_below_required_search_travel": (
+                below_required_search_travel
+            ),
             "minimum_rendezvous_path_length_m": rounded(
                 self.args.min_transport_rendezvous_travel
             ),
@@ -2070,6 +2133,9 @@ class CaseMetrics:
                 self.args.min_transport_root_rendezvous_travel
             ),
             "peak_simultaneous_movers": len(
+                self.transport_peak_simultaneous_movers
+            ),
+            "peak_simultaneous_search_movers": len(
                 self.transport_peak_simultaneous_movers
             ),
             "peak_simultaneous_mover_names": sorted(
@@ -2080,6 +2146,13 @@ class CaseMetrics:
                 len(self.transport_peak_simultaneous_movers)
                 / len(self.robot_ids)
                 if self.robot_ids else 0.0
+            ),
+            "peak_simultaneous_rendezvous_movers": len(
+                self.transport_peak_rendezvous_movers
+            ),
+            "peak_simultaneous_rendezvous_mover_names": sorted(
+                self.transport_peak_rendezvous_movers,
+                key=robot_sort_key,
             ),
             "robots_below_required_travel": below_required_travel,
             "notified_robots_below_required_travel": (
@@ -2360,6 +2433,8 @@ class AcceptanceHarness:
         self.active_task_id = None
         self.last_metrics_sim = None
         self.stop_requested = False
+        self.case_cleanup_failures = []
+        self.last_cleanup_failures = []
 
         self.arena_half_size = float(
             rospy.get_param("/fleet_manager/arena_size", 10.0)
@@ -2572,9 +2647,14 @@ class AcceptanceHarness:
         payload = {"command": command, "parameters": parameters or {}}
         self.command_pub.publish(String(data=json.dumps(payload)))
 
-    def wait_for(self, predicate, timeout, description):
+    def wait_for(
+        self, predicate, timeout, description, continue_after_stop=False,
+    ):
         deadline = time.monotonic() + timeout
-        while not rospy.is_shutdown() and not self.stop_requested:
+        while (
+            not rospy.is_shutdown()
+            and (continue_after_stop or not self.stop_requested)
+        ):
             with self.lock:
                 if predicate():
                     return True
@@ -2584,19 +2664,105 @@ class AcceptanceHarness:
             time.sleep(0.1)
         return False
 
-    def stop_task(self):
+    def stop_task(self, continue_after_stop=False):
         with self.lock:
-            task_id = self.active_task_id or self.swarm_task.get("task_id")
-            task_status = self.swarm_task.get("status")
-        if not task_id or task_status == "idle":
+            active_task_id = str(self.active_task_id or "")
+            status_task_id = str(self.swarm_task.get("task_id") or "")
+            task_id = active_task_id or status_task_id
+            task_status = str(
+                self.swarm_task.get("status") or "idle"
+            ).lower()
+
+        if not task_id:
+            if task_status != "idle":
+                raise RuntimeError(
+                    "active swarm task has no task_id for correlated cleanup"
+                )
             return
+        if task_status in TERMINAL_STATES and status_task_id == task_id:
+            with self.lock:
+                self.active_task_id = None
+            return
+
         self.send("stop_task", {"task_id": task_id})
-        self.wait_for(
-            lambda: (self.swarm_task.get("task_id") == task_id and
-                     self.swarm_task.get("status") in TERMINAL_STATES),
+        stopped = self.wait_for(
+            lambda: (
+                str(self.swarm_task.get("task_id") or "") == task_id
+                and str(self.swarm_task.get("status") or "").lower()
+                in TERMINAL_STATES
+            ),
             4.0, "task stop",
+            continue_after_stop=continue_after_stop,
         )
-        self.active_task_id = None
+        if not stopped:
+            raise RuntimeError(
+                "task {} did not confirm a correlated stop".format(task_id)
+            )
+        with self.lock:
+            self.active_task_id = None
+
+    def _robot_model_names(self):
+        return {
+            name for name in self.model_names
+            if ROBOT_RE.fullmatch(str(name))
+        }
+
+    def _delete_fleet(self, continue_after_stop=False):
+        """Delete the fleet and prove its Gazebo and monitor state is gone."""
+        with self.lock:
+            departed = set(self.roster) | self._robot_model_names()
+
+        self.send("delete_robots", {})
+        if not self.wait_for(
+            lambda: not self.roster,
+            30.0,
+            "empty fleet",
+            continue_after_stop=continue_after_stop,
+        ):
+            raise RuntimeError("fleet deletion did not finish")
+        if not self.wait_for(
+            lambda: not self._robot_model_names(),
+            8.0,
+            "Gazebo model deletion",
+            continue_after_stop=continue_after_stop,
+        ):
+            raise RuntimeError(
+                "robot models remained in Gazebo after fleet deletion"
+            )
+        if not self.wait_for(
+            lambda: not self.cmd_vel_subscribers and not self.cmd_velocities,
+            3.0,
+            "cmd_vel monitor cleanup",
+            continue_after_stop=continue_after_stop,
+        ):
+            raise RuntimeError(
+                "cmd_vel monitors remained after fleet deletion"
+            )
+        return departed
+
+    def _cleanup_case(self, case):
+        """Stop the exact case before restoring any shared Gazebo state."""
+        self.stop_task(continue_after_stop=True)
+        if case["behavior"] == "transport":
+            self.reset_object()
+
+    def _final_cleanup(self):
+        """Finish task and optional fleet cleanup without hiding a failure."""
+        failures = []
+        try:
+            self.stop_task(continue_after_stop=True)
+        except Exception as exc:
+            failures.append("task stop failed: " + str(exc))
+            return failures
+
+        if not self.args.delete_after:
+            return failures
+
+        try:
+            self._delete_fleet(continue_after_stop=True)
+        except Exception as exc:
+            failures.append("fleet deletion failed: " + str(exc))
+        return failures
 
     def reset_object(self, position=None):
         rospy.wait_for_service("/gazebo/set_model_state", timeout=10.0)
@@ -2621,30 +2787,7 @@ class AcceptanceHarness:
         self, count, pattern, reset_payload=False, payload_position=None,
     ):
         self.stop_task()
-        with self.lock:
-            old_robots = set(self.roster)
-        self.send("delete_robots", {})
-        if not self.wait_for(lambda: len(self.roster) == 0, 30.0, "empty fleet"):
-            raise RuntimeError("fleet deletion did not finish")
-        if not self.wait_for(
-            lambda: not (old_robots & self.model_names),
-            8.0,
-            "Gazebo model deletion",
-        ):
-            raise RuntimeError(
-                "departed robot models remained in Gazebo after deletion"
-            )
-        if not self.wait_for(
-            lambda: not (
-                old_robots.intersection(self.cmd_vel_subscribers)
-                or old_robots.intersection(self.cmd_velocities)
-            ),
-            3.0,
-            "departed cmd_vel monitor cleanup",
-        ):
-            raise RuntimeError(
-                "departed cmd_vel monitors remained after fleet deletion"
-            )
+        old_robots = self._delete_fleet()
 
         with self.lock:
             self.last_reset_cleanup = {
@@ -2711,7 +2854,10 @@ class AcceptanceHarness:
         self.log("starting {} ({} robots, {} spawn)".format(
             case["name"], case["count"], case["pattern"]
         ))
-        task_id = "accept-{}-{}".format(
+        requested_task_id = str(
+            getattr(self.args, "task_id", "") or ""
+        ).strip()
+        task_id = requested_task_id or "accept-{}-{}".format(
             case["name"], uuid.uuid4().hex[:8]
         )
         result = {
@@ -2722,6 +2868,7 @@ class AcceptanceHarness:
             "task_id": task_id,
             "passed": False,
             "failures": [],
+            "cleanup_failures": [],
             "warnings": [],
         }
         required_follow_laps = max(1, int(case.get("required_laps", 1)))
@@ -3175,10 +3322,16 @@ class AcceptanceHarness:
                     "rendezvous_moving_speed_mps": (
                         self.args.transport_rendezvous_moving_speed
                     ),
-                    "minimum_simultaneous_search_or_rendezvous_movers": (
+                    "minimum_simultaneous_active_search_movers": (
                         case["count"]
                     ),
                     "minimum_motion_window_samples_for_gate": 3,
+                    "minimum_active_search_path_length_per_robot_m": (
+                        self.args.min_transport_search_travel
+                    ),
+                    "active_search_required": bool(
+                        case.get("require_search", False)
+                    ),
                     "maximum_time_to_first_all_useful_batch_wall_s": (
                         self.args.max_transport_first_all_useful_wall_time
                     ),
@@ -3224,7 +3377,9 @@ class AcceptanceHarness:
                     )
                 result["failures"].extend(
                     transport_search_motion_failures(
-                        response, case["count"]
+                        response,
+                        case["count"],
+                        require_search=case.get("require_search", False),
                     )
                 )
                 minimum_chain_distance = metric_report[
@@ -3429,11 +3584,17 @@ class AcceptanceHarness:
                 if self.active_collision_robot_ids:
                     self._finish_collision_attribution(0)
             try:
-                self.stop_task()
-                if case["behavior"] == "transport":
-                    self.reset_object()
+                self._cleanup_case(case)
             except Exception as exc:
-                result["failures"].append("cleanup failed: " + str(exc))
+                cleanup_failure = str(exc)
+                result["cleanup_failures"].append(cleanup_failure)
+                with self.lock:
+                    self.case_cleanup_failures.append(
+                        "{}: {}".format(case["name"], cleanup_failure)
+                    )
+                result["failures"].append(
+                    "cleanup failed: " + cleanup_failure
+                )
             result["passed"] = not result["failures"]
 
         print("RESULT_JSON " + json.dumps(
@@ -3442,31 +3603,52 @@ class AcceptanceHarness:
         return result
 
     def run(self, cases):
-        if not self.wait_for(lambda: self.command_pub.get_num_connections() > 0,
-                             10.0, "/swarm/commands subscriber"):
-            raise RuntimeError("task orchestrator is not connected")
-        if not self.wait_for(lambda: self.sim_time is not None and bool(self.model_names),
-                             10.0, "Gazebo telemetry"):
-            raise RuntimeError("/clock or /gazebo/model_states is unavailable")
         results = []
-        for case in cases:
-            if self.stop_requested:
-                break
-            results.append(self.run_case(case))
-        if self.args.delete_after:
-            self.stop_task()
-            self.send("delete_robots", {})
-            self.wait_for(lambda: len(self.roster) == 0, 30.0, "final fleet deletion")
+        with self.lock:
+            self.case_cleanup_failures = []
+        try:
+            if not self.wait_for(
+                lambda: self.command_pub.get_num_connections() > 0,
+                10.0,
+                "/swarm/commands subscriber",
+            ):
+                raise RuntimeError("task orchestrator is not connected")
+            if not self.wait_for(
+                lambda: self.sim_time is not None and bool(self.model_names),
+                10.0,
+                "Gazebo telemetry",
+            ):
+                raise RuntimeError(
+                    "/clock or /gazebo/model_states is unavailable"
+                )
+            for case in cases:
+                if self.stop_requested:
+                    break
+                results.append(self.run_case(case))
+        finally:
+            with self.lock:
+                case_cleanup_failures = list(self.case_cleanup_failures)
+            self.last_cleanup_failures = (
+                case_cleanup_failures + self._final_cleanup()
+            )
+
         passed = sum(1 for result in results if result["passed"])
+        cleanup_passed = not self.last_cleanup_failures
         final = {
             "selected": len(cases),
             "executed": len(results),
             "passed": passed,
             "failed": len(results) - passed,
-            "all_passed": len(results) == len(cases) and passed == len(cases),
+            "all_passed": (
+                len(results) == len(cases)
+                and passed == len(cases)
+                and cleanup_passed
+            ),
             "failed_scenarios": [
                 result["scenario"] for result in results if not result["passed"]
             ],
+            "cleanup_passed": cleanup_passed,
+            "cleanup_failures": list(self.last_cleanup_failures),
         }
         print("SUMMARY_JSON " + json.dumps(
             final, sort_keys=True, separators=(",", ":")
@@ -3500,8 +3682,15 @@ def build_parser():
                         choices=["smoke", "quick", "formations", "follow", "transport", "full"])
     parser.add_argument("--scenario", action="append",
                         help="run a named scenario; repeat to build a custom matrix")
+    parser.add_argument(
+        "--task-id",
+        help=(
+            "use an explicit correlated task id; requires exactly one "
+            "selected scenario"
+        ),
+    )
     parser.add_argument("--list", action="store_true", help="list scenario names and exit")
-    parser.add_argument("--min-rtf", type=float, default=2.70)
+    parser.add_argument("--min-rtf", type=float, default=2.90)
     parser.add_argument("--min-center-distance", type=float, default=0.24)
     parser.add_argument(
         "--min-obstacle-clearance", type=float, default=0.13,
@@ -3602,6 +3791,13 @@ def build_parser():
         help="minimum goal-distance reduction divided by payload path length",
     )
     parser.add_argument(
+        "--min-transport-search-travel", type=float, default=0.05,
+        help=(
+            "minimum ground-truth path length each robot must cover during "
+            "active SEARCH"
+        ),
+    )
+    parser.add_argument(
         "--min-transport-rendezvous-travel", type=float, default=0.10,
         help=(
             "minimum post-notice path length each notified robot must travel "
@@ -3625,7 +3821,8 @@ def build_parser():
     parser.add_argument(
         "--transport-rendezvous-moving-speed", type=float, default=0.02,
         help=(
-            "ground-truth speed used to count simultaneous rendezvous movers"
+            "ground-truth speed used to count simultaneous search and "
+            "rendezvous movers"
         ),
     )
     parser.add_argument(
@@ -3654,6 +3851,8 @@ def main():
         cases = choose_cases(args)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.task_id and len(cases) != 1:
+        parser.error("--task-id requires exactly one selected scenario")
 
     rospy.init_node("robotswarm_live_acceptance", anonymous=True,
                     disable_signals=True)
@@ -3667,15 +3866,20 @@ def main():
     try:
         return harness.run(cases)
     except Exception as exc:
+        cleanup_failures = list(getattr(
+            harness, "last_cleanup_failures", []
+        ))
         print("SUMMARY_JSON " + json.dumps({
             "selected": len(cases), "executed": 0, "passed": 0,
             "failed": len(cases), "all_passed": False,
             "harness_error": "{}: {}".format(type(exc).__name__, exc),
+            "cleanup_passed": not cleanup_failures,
+            "cleanup_failures": cleanup_failures,
         }, sort_keys=True, separators=(",", ":")), flush=True)
         return 2
     finally:
         try:
-            harness.stop_task()
+            harness.stop_task(continue_after_stop=True)
         except Exception:
             pass
 

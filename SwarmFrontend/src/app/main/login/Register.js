@@ -1,28 +1,37 @@
-import { motion } from "framer-motion";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import Icon from "@mui/material/Icon";
 import Typography from "@mui/material/Typography";
 import clsx from "clsx";
 import { makeStyles } from "@mui/styles";
-import { darken } from "@mui/material/styles";
-import { LOGO } from "../../constants/constants";
 import JWTRegisterTab from "./tabs/JWTRegisterTab";
 
 const useStyles = makeStyles((theme) => ({
     root: {
-        background: `linear-gradient(to left, ${theme.palette.primary.dark} 0%, ${darken(
-            theme.palette.primary.dark,
-            0.5
-        )} 100%)`,
-        color: theme.palette.primary.contrastText,
+        backgroundColor: theme.palette.background.default,
+        color: theme.palette.text.primary,
     },
-    leftSection: {},
-    rightSection: {
-        background: `linear-gradient(to right, ${theme.palette.primary.dark} 0%, ${darken(
-            theme.palette.primary.dark,
-            0.5
-        )} 100%)`,
-        color: theme.palette.primary.contrastText,
+    card: {
+        border: `1px solid ${theme.palette.divider}`,
+        borderRadius: 8,
+        boxShadow: "none",
+    },
+    brand: {
+        alignItems: "center",
+        display: "flex",
+        gap: 12,
+        marginBottom: 20,
+    },
+    brandIcon: {
+        alignItems: "center",
+        border: `1px solid ${theme.palette.divider}`,
+        borderRadius: 6,
+        color: theme.palette.primary.main,
+        display: "flex",
+        fontSize: 26,
+        height: 44,
+        justifyContent: "center",
+        width: 44,
     },
 }));
 
@@ -33,32 +42,33 @@ function Register() {
         <div
             className={clsx(classes.root, "flex flex-col flex-auto items-center justify-center p-16 sm:p-32")}
         >
-            <div className="flex flex-col items-center justify-center w-full">
-                <motion.div initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }}>
-                    <Card className="w-full max-w-384">
-                        <CardContent className="flex flex-col items-center justify-center p-16 sm:p-24 md:p-32">
-                            <img className="w-128 m-32" src={LOGO} alt="logo" />
+            <main className="w-full" style={{ maxWidth: 420 }}>
+                <header className={classes.brand}>
+                    <div className={classes.brandIcon} aria-hidden="true">
+                        <Icon fontSize="inherit">device_hub</Icon>
+                    </div>
+                    <div>
+                        <Typography component="h1" variant="h5" className="font-semibold">
+                            RobotSwarm
+                        </Typography>
+                        <Typography color="textSecondary" variant="body2">
+                            Administración de acceso
+                        </Typography>
+                    </div>
+                </header>
 
-                            <Typography variant="h6" className="mt-16 mb-24 font-oswald text-18 sm:text-24">
-                                Registro
-                            </Typography>
-                            <JWTRegisterTab />
-                            <div className="w-1/3 mt-32">
-                                <a className="" href="https://www.alternard.com">
-                                    <img src="assets/images/logos/logo.png" alt="logo" />
-                                </a>
-                            </div>
-                            <Typography
-                                variant="caption"
-                                className="mt-16"
-                                style={{ fontSize: "12px", color: "#999999" }}
-                            >
-                                © RobotSwarm 2022 all rights reserved.
-                            </Typography>
-                        </CardContent>
-                    </Card>
-                </motion.div>
-            </div>
+                <Card className={clsx(classes.card, "w-full")} variant="outlined">
+                    <CardContent className="p-24 sm:p-32">
+                        <Typography component="h2" variant="h6" className="font-semibold mb-8">
+                            Crear cuenta
+                        </Typography>
+                        <Typography color="textSecondary" variant="body2" className="mb-24">
+                            Registre las credenciales y el rol que utilizará la cuenta.
+                        </Typography>
+                        <JWTRegisterTab />
+                    </CardContent>
+                </Card>
+            </main>
         </div>
     );
 }

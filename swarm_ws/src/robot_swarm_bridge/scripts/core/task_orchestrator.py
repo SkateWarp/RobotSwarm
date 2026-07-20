@@ -268,10 +268,13 @@ class TaskOrchestrator:
     def _handle_delete_robots(self, params):
         robot_ids = params.get('robot_ids', [])
         if robot_ids:
-            cmd = json.dumps({"robot_ids": robot_ids})
+            command = {"robot_ids": robot_ids}
         else:
-            cmd = json.dumps({"all": True})
-        self.fleet_delete_pub.publish(String(data=cmd))
+            command = {"all": True}
+        request_id = str(params.get('request_id') or '')
+        if request_id:
+            command['request_id'] = request_id
+        self.fleet_delete_pub.publish(String(data=json.dumps(command)))
         rospy.loginfo(f"Sent delete command: {robot_ids if robot_ids else 'ALL'}")
 
     @staticmethod

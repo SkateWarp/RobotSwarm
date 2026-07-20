@@ -1,14 +1,8 @@
-.MuiOutlinedInput-input {
-    padding: 18.5px 10px!important;
-}
 .w-320 {
     width: 30rem
 }
 .w-120 {
     width: 12rem
-}
-.MuiTableBody-root .MuiIconButton-root {
-    padding: 0px;
 }
 .h-384 {
     height: 38.4rem
@@ -25,9 +19,6 @@
 }
 .w-52 {
     width: 52%;
-}
-.font-oswald {
-    font-family: 'Oswald', sans-serif;
 }
 .machineTitle{
     font-size: 12em;
@@ -76,13 +67,4 @@
 }
 table.simple tbody tr td {
     padding: 4px 4px;
-}
-
-.MuiButton-root {
-    text-transform: uppercase;
-    font-family: 'Lato', sans-serif;
-}
-.MuiTypography-root {
-    font-family: 'Lato', sans-serif;
-    text-transform: uppercase;
 }

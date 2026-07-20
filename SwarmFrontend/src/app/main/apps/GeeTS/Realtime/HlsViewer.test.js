@@ -719,6 +719,9 @@ describe("viewer fullscreen", () => {
             ReactDOM.render(<HlsViewer url="" token="" expiresAt="2099-01-01T00:00:00Z" />, host);
         });
         const viewer = host.querySelector('[data-testid="private-viewer"]');
+        expect(host.querySelector('[data-testid="viewer-status-live"]').textContent).toContain(
+            "Estado del visor"
+        );
         viewer.requestFullscreen = jest.fn(() => {
             fullscreenElement = viewer;
             return Promise.resolve();

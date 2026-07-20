@@ -18,9 +18,9 @@ evidence, is available in
 
 | Layer | Current responsibility | Repository status |
 | --- | --- | --- |
-| React frontend | User-owned session, fleet and task controls; live status; private HLS scene player | PR #100 merge `baba2c1` integrated and published by Cloudflare |
-| .NET backend | Authentication, ownership checks, session queue, worker commands, task outcomes, viewer leases and deployment drain leases | PR #100 merge `baba2c1` deployed and publicly healthy |
-| .NET GPU worker | Isolated Docker session lifecycle, ROS command bridge, heartbeats, immutable image selection and viewer-publisher supervision | PR #100 code integrated; deployment rolled back safely to `62a136a` after the headless `xprop` preflight defect in I-063 |
+| React frontend | User-owned session, fleet and task controls; live status; private HLS scene player | PR #101 merge `538ba066` published by Cloudflare; current accessibility/acceptance markers are local candidate changes |
+| .NET backend | Authentication, ownership checks, session queue, worker commands, task outcomes, viewer leases and deployment drain leases | PR #101 merge `538ba066` deployed and healthy; internal task-serialization retry is in the local candidate |
+| .NET GPU worker | Isolated Docker session lifecycle, ROS command bridge, heartbeats, immutable image selection and viewer-publisher supervision | PR #101 merge `538ba066` active; AF_NETLINK sandbox correction is in the local candidate |
 | ROS Noetic and Gazebo | Dynamic TurtleBot3 Burger fleet, safety control, task orchestration and three scalable behaviours | Implemented and exercised in visible simulation |
 | MediaMTX and viewer helper | Private X display and `gzclient` per lease, H.264/RTSP publishing and internal low-latency HLS origin | Implemented; gates active only inside the supervised commissioning window |
 
@@ -30,15 +30,14 @@ commands, the worker translates those commands into the private ROS namespace,
 and ROS reports fleet and task state through the worker hub. A browser is not
 given Docker, ROS, Gazebo, VNC, or MediaMTX administrative access.
 
-The current control-plane revision is merge
-`baba2c1fb4bc73dcd96254a7ab63a16175e6bce9` from PR #100. Its PR and `main`
-CI runs passed, Cloudflare published the frontend, and the backend deployment
-finished healthy. The GPU workflow passed its tests, ROS image build and NVIDIA
-smoke, but its final host probe depended incorrectly on an ambient `DISPLAY`
-for `xprop -version`. Rollback restored worker release `62a136a` and scheduling
-resumed. I-063 records the small headless preflight hotfix; public-browser
-acceptance remains pending until that hotfix is integrated and the worker uses
-the same exact revision as the backend.
+The current deployed revision is merge
+`538ba0660c3a070cd600d1b224dc89ec1dd1dbe7` from PR #101. Its PR and `main` CI,
+Cloudflare publication, backend workflow and one GPU workflow passed. Frontend,
+backend and worker therefore use one exact revision. Public acceptance then
+found that the worker's systemd sandbox omitted AF_NETLINK and that two valid
+task starts could surface a PostgreSQL serialization conflict. Both fixes are
+implemented and locally tested, but are not yet deployed; the release remains
+open until the candidate passes one new CI/deployment/acceptance cycle.
 
 ## Implemented components
 
@@ -58,6 +57,13 @@ The package under `swarm_ws/src/robot_swarm_bridge` contains:
   RViz configuration; and
 - unit and live-acceptance probes for algorithms, physics, cleanup, GUI
   rendering, safety clearance, search notification, and payload transport.
+
+The live probes use correlated task and delete identifiers. They stop the exact
+task before mutating shared Gazebo state, reject partial fleet deletion, verify
+an empty roster and no residual TurtleBot models or velocity monitors, and
+propagate cleanup failures into the final nonzero result. This is acceptance
+instrumentation: the same conditions still have to be observed on the deployed
+GPU revision.
 
 ### Scalable behaviours
 
@@ -133,18 +139,23 @@ heredadas o no mostraban el estado real del plano de control:
   Gazebo, el contenedor o la red de la sesión.
 - **Usuarios:** la navegación GTS y el encabezado administrativo utilizan el
   nombre visible «Usuarios», conservando el CRUD y la autorización de
-  administrador existentes.
+  administrador existentes. La acción «Crear usuario» queda en el encabezado
+  y el contenido ya no reserva una barra lateral vacía.
+- **Criterio visual común:** Control, Historial, Plantillas, Robots, Grupos y
+  Usuarios comparten tipografía, capitalización, encabezados, radios, bordes y
+  foco visible. Se retiraron los banners de gradiente y las animaciones
+  ornamentales; el inventario de Robots usa una tabla y las tarjetas quedan
+  reservadas para membresías de Grupos, donde sí expresan una relación.
 
-Una ejecución focal local, sin consumir minutos de GitHub Actions, aprobó
-31/31 pruebas de backend, 19/19 del worker y 39/39 de frontend para este delta.
-El lint focal y la compilación de producción de las nuevas pantallas
-administrativas también aprobaron. Después de ese corte, las suites locales integrales de
-backend (213/213), worker (121/121) y ROS (362/362), además del auxiliar del
-publicador, aprobaron sobre el árbol actual. Frontend aprobó 132/132 pruebas en
-22 suites, el lint de todos los archivos modificados y una compilación de
-producción. PR #100 y su repetición sobre `main` aprobaron después las mismas
-capas. Estos resultados automatizados todavía no sustituyen la aceptación
-visible posterior al despliegue coordinado del worker.
+El corte integral histórico aprobó backend 213/213, worker 121/121, ROS 362/362
+y frontend 132/132. El candidato posterior a la aceptación aprobó backend
+216/216 y ROS 391/391; los contratos ejecutables aprobaron API 8/8, visor 10/10 y
+secciones 14/14. Un recorrido público con Chrome normal aprobó Historial para
+User, el menú reducido, 403 en dos endpoints Admin y la redirección de las cuatro
+rutas restringidas, con limpieza completa. Sobre el árbol local completo
+aprobaron worker 121/121, frontend 141/141 en 28 suites, el lint de todos los
+archivos frontend modificados y el build de producción. Falta publicar el único
+PR final y repetir la aceptación sobre su SHA desplegado.
 
 ### Private browser viewer
 
@@ -169,16 +180,17 @@ ICE/TURN is no longer a prerequisite for accepting the HLS path.
 
 The stock Burger model has no supported camera sensor, so the honest current
 viewer capability is `Scene`. `RobotCamera` requests are rejected. Publishing
-and HLS proxying are protected gates. They are active on the last compatible
-backend release for the supervised commissioning window, but that state does
-not count as production acceptance until the worker runs the same post-hotfix
-revision as the control plane.
+and HLS proxying are protected gates. They are active in the supervised
+commissioning window. With a temporary AF_NETLINK diagnostic override, two
+sessions produced independent HLS playlists and enforced token isolation. That
+observation proves I-064's cause but is not final acceptance; the versioned unit
+must be deployed and the override removed first.
 
-PR #100 also adds an explicit, owner-scoped viewer close.
+PR #100 also added an explicit, owner-scoped viewer close.
 Revocation is idempotent and fenced against a replaced lease. The worker keeps
 a short tombstone so a delayed start cannot revive a viewer that was already
-closed. This behavior has automated regression coverage; operational proof is
-pending because the GPU worker rolled back before activation.
+closed. Automated coverage exists; the final two-browser run must still close
+and reopen one viewer while its ROS task continues.
 
 ### Deployment and host hardening
 
@@ -227,10 +239,10 @@ final public rollout:
 - Production maintenance ports were checked after hardening: VNC and
   websockify listen on loopback. The viewer gates were off during the initial
   baseline and later enabled together for the supervised commissioning window.
-- The PR #100 management pages are present in the public Cloudflare bundle and
-  its backend is deployed. No claim is made yet that `StopViewer` or the runtime
-  robot monitor has been exercised through the public browser with the final
-  worker.
+- The management pages are present in the public Cloudflare bundle. The User
+  role has exercised Historial and real backend denial for administrative
+  endpoints. The Admin traversal and `StopViewer` lifecycle require the final
+  candidate deployment.
 
 Raw measurements, screenshots, incident analysis, and the distinction between
 negative and accepted runs are recorded in the
@@ -238,25 +250,25 @@ negative and accepted runs are recorded in the
 
 ## Work that remains before declaring the release complete
 
-1. Publish the focused I-063 hotfix after its headless regression, real
-   `/usr/bin/xprop` dependency probe, publisher suite, deployment/rollback suite
-   and independent review have passed locally.
-2. Let CI and the serialized backend workflow deploy the resulting exact merge
-   SHA, then dispatch the GPU worker once for that same revision. Do not rerun
-   the already diagnosed failed workflow from `baba2c1`.
-3. Verify worker health, `StopViewer` capability negotiation, immutable image
-   identity, NVIDIA rendering and zero residual sessions after activation.
-4. Run two simultaneous, independently authenticated browser sessions with
+1. Publish the single reviewed I-064–I-070 candidate in one PR and use one
+   normal CI run. After merge, let Cloudflare and the
+   backend deploy the exact SHA, then dispatch the GPU worker exactly once.
+2. Remove the diagnostic systemd override and verify the installed versioned
+   unit, worker health, immutable image identity and zero residual sessions.
+3. Run two simultaneous, independently authenticated browser sessions with
    different fleets/tasks and prove distinct displays and streams, cross-user
    denial, lease expiry, independent stop/cleanup, visible FPS/real-time factor,
    and terminal task outcomes.
-5. Repeat the representative formation, leader-following, normal transport and
-   loaded-payload gates on the deployed revision.
+4. Run the Admin section traversal, then restore and recheck the User role.
+5. Repeat the representative formation, leader-following, N=1/3/4/10 transport
+   and loaded-payload+GRF gates on the deployed revision. Pair the loaded run
+   with NVIDIA ≥45 FPS and RTF ≥2.90 preflight evidence.
 6. Capture the new History, Templates, Robots, Groups, Runtime monitor, Viewer
    close and Users pages only after that public rollout; sanitize and hash the
    real images.
-7. Remove temporary accounts and sessions, finish the Spanish report, and keep
-   the rollback tags until the release has remained healthy.
+7. Remove temporary roles, tokens, accounts, sessions and profiles, finish the
+   Spanish report, and keep the rollback tags until the release has remained
+   healthy.
 
 Until these steps finish, “implemented” must not be read as “final production
 acceptance passed”.
@@ -276,8 +288,8 @@ acceptance passed”.
 - Persistent robots and administrator groups are inventory metadata. They do
   not select the exact runtime identities inside a simulation session; the
   worker roster is the authoritative source for live ROS/Gazebo instances.
-- The PR #100 checks and local hotfix regressions are not a substitute for the
-  pending post-hotfix GPU deployment and public acceptance.
+- The deployed PR #101 checks and the local I-064–I-070 regressions are not a
+  substitute for the pending candidate deployment and public acceptance.
 
 ## Current documentation
 

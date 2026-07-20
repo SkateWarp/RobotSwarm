@@ -1,5 +1,5 @@
 const config = {
-  title: 'Fill Click',
+  title: 'RobotSwarm',
   defaults: {
     mode: 'fullwidth',
     scroll: 'content',
@@ -15,7 +15,7 @@ const config = {
       style: 'fixed',
     },
     footer: {
-      display: true,
+      display: false,
       style: 'fixed',
     },
     leftSidePanel: {

@@ -1,20 +1,15 @@
 import withReducer from "app/store/withReducer";
-import { useEffect, useRef } from "react";
+import { Box } from "@mui/material";
+import { useEffect } from "react";
 import { useDispatch } from "react-redux";
 import reducer from "./store";
-import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAppStyle";
 import { getTaskTemplates } from "./store/leafTypeConfigSlice";
 import LeafTypesConfigList from "./LeafTypeConfigList";
 import LeafTypesConfigDialog from "./LeafTypeConfigDialog";
-import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHeader";
-
-// The shared helper builds a styled component; it does not use React state.
-// eslint-disable-next-line react-hooks/rules-of-hooks
-const Root = useGeneralAppStyle();
+import PageHeading from "../../../../shared-components/PageHeading";
 
 function LeafTypesConfigApp() {
     const dispatch = useDispatch();
-    const pageLayout = useRef(null);
 
     useEffect(() => {
         dispatch(getTaskTemplates());
@@ -22,19 +17,16 @@ function LeafTypesConfigApp() {
 
     return (
         <>
-            <Root
-                header={
-                    <SimpleGeneralHeader
-                        pageLayout={pageLayout}
-                        headerName="PLANTILLAS DE TAREAS"
-                        iconType="add_task"
-                        hasSidebar={false}
-                    />
-                }
-                content={<LeafTypesConfigList />}
-                ref={pageLayout}
-                innerScroll
-            />
+            <Box
+                data-testid="task-templates-page"
+                sx={{ p: { xs: 2, md: 3 }, width: "100%", maxWidth: 1600, mx: "auto" }}
+            >
+                <PageHeading
+                    title="Plantillas de tareas"
+                    description="Catálogo administrativo de algoritmos y parámetros reutilizables."
+                />
+                <LeafTypesConfigList />
+            </Box>
             <LeafTypesConfigDialog />
         </>
     );

@@ -14,6 +14,7 @@ from gazebo_gui_preflight import (
     REPORT_SOURCE,
     RTF_SOURCE,
     active_gpu_description,
+    build_parser,
     renderer_description,
     validate_report,
 )
@@ -55,6 +56,12 @@ def good_report():
 
 
 class GazeboGuiPreflightTests(unittest.TestCase):
+    def test_production_performance_gates_are_the_defaults(self):
+        args = build_parser().parse_args([])
+
+        self.assertEqual(45.0, args.min_render_fps)
+        self.assertEqual(2.90, args.min_real_time_factor)
+
     def test_accepts_visible_nvidia_client_and_keeps_fps_separate_from_rtf(self):
         report = good_report()
 

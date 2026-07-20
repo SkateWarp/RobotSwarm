@@ -12,9 +12,11 @@ import json
 import math
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -32,6 +34,7 @@ LOADED_MODEL = PACKAGE_DIR / 'models' / 'transport_crate_loaded' / 'model.sdf'
 PRACTICE_WORLD = PACKAGE_DIR / 'worlds' / 'swarm_arena.world'
 MODEL_NAME = 'transport_object'
 ROBOT_RE = re.compile(r'^tb3_(\d+)$')
+TERMINAL_TASK_STATES = {'idle', 'completed', 'failed', 'stopped'}
 
 
 def robot_sort_key(name):
@@ -113,9 +116,15 @@ class LoadProbe:
         self.lock = threading.RLock()
         self.stop_requested = False
         self.roster = []
+        self.roster_generation = 0
         self.models = {}
+        self.model_states_generation = 0
         self.sim_time = None
         self.swarm_task = {}
+        self.swarm_status_generation = 0
+        self.task_status_fresh_for_cleanup = True
+        self.cleanup_task_id = None
+        self.delete_results = {}
         self.command_pub = rospy.Publisher(
             '/swarm/commands', String, queue_size=10
         )
@@ -129,6 +138,10 @@ class LoadProbe:
         rospy.Subscriber('/clock', Clock, self._clock_cb, queue_size=1)
         rospy.Subscriber(
             '/swarm/status', String, self._swarm_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/fleet/delete_result', String,
+            self._delete_result_cb, queue_size=5,
         )
 
         rospy.wait_for_service('/gazebo/delete_model', timeout=10.0)
@@ -148,6 +161,7 @@ class LoadProbe:
         roster = [item.strip('/') for item in msg.data.split(',') if item]
         with self.lock:
             self.roster = roster
+            self.roster_generation += 1
 
     def _models_cb(self, msg):
         with self.lock:
@@ -167,6 +181,7 @@ class LoadProbe:
                 }
                 for name, pose in zip(msg.name, msg.pose)
             }
+            self.model_states_generation += 1
 
     def _clock_cb(self, msg):
         with self.lock:
@@ -179,13 +194,30 @@ class LoadProbe:
             return
         with self.lock:
             self.swarm_task = status.get('task', {})
+            self.swarm_status_generation += 1
+
+    def _delete_result_cb(self, msg):
+        try:
+            result = json.loads(msg.data)
+        except (TypeError, json.JSONDecodeError):
+            return
+        request_id = str(result.get('request_id') or '')
+        if not request_id:
+            return
+        with self.lock:
+            self.delete_results[request_id] = result
 
     def log(self, message):
         print('[load-probe] ' + message, file=sys.stderr, flush=True)
 
-    def wait_for(self, predicate, timeout, description):
+    def wait_for(
+        self, predicate, timeout, description, continue_after_stop=False,
+    ):
         deadline = time.monotonic() + timeout
-        while not rospy.is_shutdown() and not self.stop_requested:
+        while (
+            not rospy.is_shutdown()
+            and (continue_after_stop or not self.stop_requested)
+        ):
             with self.lock:
                 if predicate():
                     return
@@ -339,6 +371,58 @@ class LoadProbe:
         self.wait_sim(0.25)
         return robots
 
+    def stop_active_task(self):
+        """Stop the correlated task before changing its robots or payload."""
+        with self.lock:
+            status_is_fresh = getattr(
+                self, 'task_status_fresh_for_cleanup', True
+            )
+            task_id = str(self.swarm_task.get('task_id') or '')
+            task_status = str(
+                self.swarm_task.get('status') or 'idle'
+            ).lower()
+            expected_task_id = str(
+                getattr(self, 'cleanup_task_id', None) or ''
+            )
+
+        if not status_is_fresh:
+            raise RuntimeError(
+                'no fresh swarm task status was observed after the child run'
+            )
+        if expected_task_id and task_id != expected_task_id:
+            raise RuntimeError(
+                'fresh swarm status did not match child task {}'.format(
+                    expected_task_id
+                )
+            )
+        terminal_states = TERMINAL_TASK_STATES
+        if expected_task_id:
+            terminal_states = TERMINAL_TASK_STATES - {'idle'}
+        if task_status in terminal_states:
+            return
+        if not task_id:
+            raise RuntimeError(
+                'active swarm task has no task_id for correlated cleanup'
+            )
+
+        self.send('stop_task', {'task_id': task_id})
+        self.wait_for(
+            lambda: (
+                str(self.swarm_task.get('task_id') or '') == task_id
+                and str(self.swarm_task.get('status') or '').lower()
+                in TERMINAL_TASK_STATES - {'idle'}
+            ),
+            8.0,
+            'task {} to stop before cleanup'.format(task_id),
+        )
+
+    def robot_model_names(self):
+        with self.lock:
+            return {
+                name for name in self.models
+                if ROBOT_RE.fullmatch(str(name))
+            }
+
     def run_trial(self, count):
         self.log('starting fixed-command trial with {} robot(s)'.format(count))
         self.reset_fleet(count)
@@ -438,13 +522,61 @@ class LoadProbe:
         was_stopped = self.stop_requested
         self.stop_requested = False
         try:
-            self.send('delete_robots')
-            self.wait_for(lambda: not self.roster, 30.0, 'cleanup fleet deletion')
+            # A killed child may leave its ROS task running.  Do not replace
+            # the payload under a live controller: stop the exact task first.
+            self.stop_active_task()
+            delete_request_id = 'load-cleanup-{}'.format(
+                uuid.uuid4().hex[:8]
+            )
+            with self.lock:
+                roster_generation = self.roster_generation
+                model_states_generation = self.model_states_generation
+            self.send('delete_robots', {
+                'request_id': delete_request_id,
+            })
+            self.wait_for(
+                lambda: delete_request_id in self.delete_results,
+                10.0,
+                'correlated fleet delete result',
+            )
+            with self.lock:
+                delete_result = dict(
+                    self.delete_results[delete_request_id]
+                )
+            remaining = delete_result.get('remaining_robot_ids')
+            if not isinstance(remaining, list):
+                raise RuntimeError(
+                    'fleet delete result did not report remaining robots'
+                )
+            remaining = [
+                str(name).strip('/') for name in remaining
+                if str(name).strip('/')
+            ]
+            if remaining:
+                raise RuntimeError(
+                    'fleet delete left active robots: '
+                    + ', '.join(sorted(remaining, key=robot_sort_key))
+                )
+            self.wait_for(
+                lambda: (
+                    self.roster_generation > roster_generation
+                    and not self.roster
+                ),
+                30.0,
+                'post-command cleanup fleet deletion',
+            )
+            self.wait_for(
+                lambda: (
+                    self.model_states_generation > model_states_generation
+                    and not self.robot_model_names()
+                ),
+                8.0,
+                'post-command cleanup Gazebo model deletion',
+            )
+            self.replace_payload(practice_xml)
+            self.cleanup_task_id = None
         finally:
-            try:
-                self.replace_payload(practice_xml)
-            finally:
-                self.stop_requested = was_stopped
+            self.stop_requested = was_stopped
 
 
 def rounded(value):
@@ -509,6 +641,73 @@ def evaluate(single, roots, fleet, args):
     return failures, gain
 
 
+def loaded_grf_command(args, task_id):
+    """Build the child acceptance command while the heavy crate is installed."""
+    runner = Path(__file__).with_name('robotswarm_live_acceptance.py')
+    return [
+        sys.executable,
+        str(runner),
+        '--scenario',
+        'transport_grf_n4',
+        '--min-rtf',
+        str(args.min_rtf),
+        '--task-id',
+        task_id,
+        '--delete-after',
+    ]
+
+
+def run_loaded_grf(probe, args):
+    """Run search, rendezvous and GRF before the practice crate is restored."""
+    task_id = 'loaded-grf-n4-{}'.format(uuid.uuid4().hex[:8])
+    command = loaded_grf_command(args, task_id)
+    probe.log('starting loaded transport_grf_n4 acceptance')
+    process = subprocess.Popen(command)
+    with probe.lock:
+        probe.cleanup_task_id = task_id
+        probe.task_status_fresh_for_cleanup = False
+    interrupt_sent_at = None
+    terminate_sent_at = None
+    while process.poll() is None:
+        if probe.stop_requested and interrupt_sent_at is None:
+            process.send_signal(signal.SIGINT)
+            interrupt_sent_at = time.monotonic()
+        elif (
+            interrupt_sent_at is not None
+            and terminate_sent_at is None
+            and time.monotonic() - interrupt_sent_at >= 20.0
+        ):
+            process.terminate()
+            terminate_sent_at = time.monotonic()
+        elif (
+            terminate_sent_at is not None
+            and time.monotonic() - terminate_sent_at >= 10.0
+        ):
+            process.kill()
+        time.sleep(0.2)
+
+    with probe.lock:
+        status_generation_at_exit = probe.swarm_status_generation
+    probe.wait_for(
+        lambda: (
+            probe.swarm_status_generation > status_generation_at_exit
+            and str(probe.swarm_task.get('task_id') or '') == task_id
+        ),
+        5.0,
+        'fresh status for child task {} after exit'.format(task_id),
+        continue_after_stop=True,
+    )
+    with probe.lock:
+        probe.task_status_fresh_for_cleanup = True
+    return {
+        'scenario': 'transport_grf_n4',
+        'task_id': task_id,
+        'exit_code': process.returncode,
+        'passed': process.returncode == 0,
+        'fresh_cleanup_status_observed': True,
+    }
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
@@ -526,7 +725,15 @@ def build_parser():
     parser.add_argument('--fleet-min-progress', type=float, default=0.20)
     parser.add_argument('--min-robot-progress', type=float, default=0.05)
     parser.add_argument('--minimum-gain', type=float, default=4.0)
-    parser.add_argument('--min-rtf', type=float, default=2.70)
+    parser.add_argument('--min-rtf', type=float, default=2.90)
+    parser.add_argument(
+        '--verify-grf-n4',
+        action='store_true',
+        help=(
+            'after the capacity trials, run the complete N=4 search, notice, '
+            'rendezvous and GRF acceptance while the loaded crate is installed'
+        ),
+    )
     return parser
 
 
@@ -585,6 +792,14 @@ def main():
             'failures': failures,
             'passed': not failures,
         })
+        if args.verify_grf_n4:
+            grf = run_loaded_grf(probe, args)
+            result['loaded_grf_trial'] = grf
+            if not grf['passed']:
+                result['failures'].append(
+                    'loaded transport_grf_n4 acceptance failed with exit code '
+                    + str(grf['exit_code'])
+                )
     except Exception as exc:
         result['failures'].append(
             '{}: {}'.format(type(exc).__name__, exc)

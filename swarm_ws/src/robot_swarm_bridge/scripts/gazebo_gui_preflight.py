@@ -52,8 +52,8 @@ def validate_report(
     report,
     *,
     expected_pid=None,
-    min_render_fps=30.0,
-    min_real_time_factor=2.8,
+    min_render_fps=45.0,
+    min_real_time_factor=2.90,
     gpu_pattern=DEFAULT_GPU_PATTERN,
 ):
     """Return every reason a completed probe cannot be accepted."""
@@ -286,8 +286,8 @@ def build_parser():
     parser.add_argument("--warmup-seconds", type=float, default=2.0)
     parser.add_argument("--sample-seconds", type=float, default=5.0)
     parser.add_argument("--timeout-seconds", type=float, default=25.0)
-    parser.add_argument("--min-render-fps", type=float, default=30.0)
-    parser.add_argument("--min-real-time-factor", type=float, default=2.8)
+    parser.add_argument("--min-render-fps", type=float, default=45.0)
+    parser.add_argument("--min-real-time-factor", type=float, default=2.90)
     parser.add_argument("--gpu-pattern", default=DEFAULT_GPU_PATTERN)
     parser.add_argument("--json", action="store_true", help="also print the full report")
     return parser

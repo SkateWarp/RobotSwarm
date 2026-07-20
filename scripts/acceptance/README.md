@@ -1,10 +1,12 @@
 # Aceptación multiusuario de producción
 
-Estos dos arneses comprueban el flujo público de RobotSwarm sin reutilizar una
+Estos tres arneses comprueban el flujo público de RobotSwarm sin reutilizar una
 sesión histórica. `robotswarm-prod-e2e.py` valida la API, el aislamiento HLS y
 la limpieza de dos cuentas. `robotswarm-visible-e2e.py` repite el recorrido en
 dos ventanas normales de Chrome, con GPU habilitada, interacción real y
-capturas sanitizadas. El segundo arnés no admite modo headless.
+capturas sanitizadas. `robotswarm-sections-e2e.py` recorre las pantallas según
+el rol. Los arneses visibles no admiten modo headless y fijan el origen de las
+credenciales a `https://rs.zerav.la`.
 
 ## Archivos locales requeridos
 
@@ -68,3 +70,62 @@ se considera aprobatorio si la limpieza falla.
 Los programas muestran únicamente mensajes y reportes saneados. No deben
 copiarse a la documentación el archivo de credenciales, la clave de enlace, los
 perfiles del navegador ni las respuestas HTTP crudas.
+
+Si el POST de una sesión termina con un resultado de red incierto, el arnés no
+supone que hubo rollback. Durante `--cleanup-timeout` vuelve a listar la cuenta
+dedicada, recupera todas sus sesiones activas —el preflight ya exigió que no
+existieran ocupantes previos— y las detiene. Una falta total de observabilidad
+o una parada no confirmada hace
+fallar el cleanup; el proceso devuelve código 3 cuando el ensayo ya había
+fallado y tampoco pudo demostrar la limpieza.
+
+## Recorrido de las demás secciones
+
+`robotswarm-sections-e2e.py` es independiente de la prueba ROS y abre una sola
+ventana normal de Chrome. Comprueba Historial con una cuenta User; con una
+cuenta Admin recorre además Plantillas, Robots, Grupos y Usuarios. También abre
+y cancela los diálogos disponibles. La ejecución Admin crea un grupo sin robots
+con un nombre efímero y lo elimina en `finally`; un fallo de esa limpieza hace
+fallar la aceptación.
+
+Cada rol se prueba por separado. Por defecto se reutiliza de forma local la
+cuenta A de `/tmp/robotswarm-e2e-credentials.env`, regular, propiedad del
+operador y con modo `0600`. También puede pasarse `--credentials` con un archivo
+dedicado del mismo modo:
+
+```text
+TEST_EMAIL=<correo-de-la-cuenta>
+TEST_PASSWORD=<contraseña-de-la-cuenta>
+TEST_ROLE=User
+```
+
+La bandera de producción es obligatoria. Para User y Admin se cambia tanto el
+rol esperado como el contenido del archivo anterior:
+
+```bash
+python3 scripts/acceptance/robotswarm-sections-e2e.py \
+  --execute-production \
+  --expected-role User \
+  --deployment-commit <sha-completo> \
+  --profile-root "/mnt/c/Users/<usuario>/AppData/Local/Temp" \
+  --output-dir /tmp/robotswarm-acceptance/sections-user
+
+python3 scripts/acceptance/robotswarm-sections-e2e.py \
+  --execute-production \
+  --expected-role Admin \
+  --deployment-commit <sha-completo> \
+  --profile-root "/mnt/c/Users/<usuario>/AppData/Local/Temp" \
+  --output-dir /tmp/robotswarm-acceptance/sections-admin
+```
+
+El usuario normal debe ver un menú reducido, obtener HTTP 403 desde endpoints
+administrativos reales y ser redirigido fuera de las cuatro rutas restringidas.
+El rol del perfil debe coincidir con el claim del JWT. Para el recorrido Admin,
+cualquier elevación temporal se hace fuera del arnés, revocando refresh tokens;
+al terminar se restaura User, se revocan otra vez y se repite la denegación.
+El grupo efímero solo se elimina si el diálogo contiene exactamente su nombre.
+
+Las capturas y el JSON quedan en `0600`; antes de cada captura se ocultan
+correos, celdas personales, nombres y avatares mostrados por la cuenta, UUID,
+direcciones IP y nombres de worker. El perfil efímero se elimina al salir,
+incluso después de una interrupción.

@@ -37,7 +37,7 @@ container, run:
 ```bash
 rosrun robot_swarm_bridge gazebo_gui_preflight.py \
   --min-render-fps 45 \
-  --min-real-time-factor 2.8 \
+  --min-real-time-factor 2.90 \
   --report /tmp/robotswarm-gui-report.json
 ```
 

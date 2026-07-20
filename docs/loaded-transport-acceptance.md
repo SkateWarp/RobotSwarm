@@ -22,10 +22,22 @@ to run without a `/gazebo_gui` node or while a swarm task is active.
 ```bash
 source /opt/ros/noetic/setup.bash
 source /catkin_ws/devel/setup.bash
+rosrun robot_swarm_bridge gazebo_gui_preflight.py \
+  --min-render-fps 45 \
+  --min-real-time-factor 2.90 \
+  --report /tmp/robotswarm-loaded-gui-preflight.json
 python3 /catkin_ws/src/robot_swarm_bridge/test/robotswarm_payload_load_live.py \
   --fleet-count 4 \
-  --min-rtf 2.90
+  --min-rtf 2.90 \
+  --verify-grf-n4
 ```
+
+The preflight and load probe must use the same ROS/Gazebo master and run back to
+back. Keep both JSON results together. The `/gazebo_gui` ROS node checked by the
+load probe is only a liveness precondition; the preceding preflight is the gate
+that proves a real visible viewport, the NVIDIA renderer, at least 45 rendered
+FPS and physics RTF of at least 2.90. Do not accept a loaded run when that
+preflight is missing or failed.
 
 The probe temporarily replaces `transport_object` with the amber loaded
 crate.  It applies the same 0.16 m/s command to one Burger, to the two direct
@@ -40,16 +52,29 @@ companion behind each one.  It passes only when:
   declared payload-root or companion contact; and
 - all three trials maintain the requested real-time factor.
 
+With `--verify-grf-n4`, the same invocation keeps the loaded crate installed
+long enough to run the normal four-robot acceptance. That second phase starts
+the payload outside initial sensor range and requires SEARCH, finder notice,
+fleet rendezvous and the synchronized GRF push before cleanup.
+
 The final `LOAD_RESULT_JSON` line contains the measured payload and per-robot
 travel.  The probe deletes its robots and restores the normal green practice
 crate even after a failed gate.  An interrupt also sends zero velocity before
 cleanup.
 
-This probe isolates the Gazebo load capacity.  A physical load-sharing claim
-still needs the normal `transport_grf_n4` acceptance case to pass with this
-loaded profile installed, because that second test exercises search,
-notification, rendezvous, role assignment and the GRF controller rather than
-fixed calibration commands.
+Cleanup is intentionally fail-closed. The probe records roster and Gazebo
+generations before issuing `delete_robots`, attaches a unique `request_id` and
+accepts only the matching `/fleet/delete_result` with an empty
+`remaining_robot_ids` list. It then requires a post-command empty roster and no
+`tb3_*` model. The practice crate is not restored if the correlated task does
+not stop, deletion is partial, or either observation is missing. When the GRF
+child has to be interrupted, the parent waits for a fresh status carrying that
+child's explicit task ID and uses a bounded SIGINT→SIGTERM→SIGKILL escalation.
+
+The fixed-command phase isolates Gazebo load capacity. A physical load-sharing
+claim is accepted only when the optional `transport_grf_n4` phase also passes,
+because that phase exercises search, notification, rendezvous, role assignment
+and the GRF controller rather than calibration commands.
 
 ## Historical commissioning observation (not a final gate)
 

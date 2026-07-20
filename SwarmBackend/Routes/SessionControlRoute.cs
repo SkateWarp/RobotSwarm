@@ -15,6 +15,7 @@ namespace SwarmBackend.Routes;
 
 public static class SessionControlRoute
 {
+    private const int MaximumTaskCreateAttempts = 3;
     private const int MaximumViewerLeaseAttempts = 3;
     private const int MaximumViewerStopAttempts = 3;
 
@@ -635,7 +636,33 @@ public static class SessionControlRoute
         return false;
     }
 
-    private static async Task<IResult> CreateTask(
+    private static Task<IResult> CreateTask(
+        Guid id,
+        CreateTaskRunRequest request,
+        HttpContext context,
+        DataContext dataContext,
+        WorkerCommandService commandService,
+        IConfiguration configuration,
+        IHubContext<WorkerHub> workerHub,
+        IHubContext<SessionHub> sessionHub,
+        CancellationToken cancellationToken)
+    {
+        return RetryTaskSerializationFailures(
+            () => CreateTaskAttempt(
+                id,
+                request,
+                context,
+                dataContext,
+                commandService,
+                configuration,
+                workerHub,
+                sessionHub,
+                cancellationToken),
+            dataContext.ChangeTracker.Clear,
+            cancellationToken);
+    }
+
+    private static async Task<IResult> CreateTaskAttempt(
         Guid id,
         CreateTaskRunRequest request,
         HttpContext context,
@@ -797,7 +824,9 @@ public static class SessionControlRoute
                 .SendAsync("TaskUpdated", response.Task, cancellationToken);
             return Results.Accepted($"/api/sessions/{id}/tasks/{task.Id}", response);
         }
-        catch (Exception exception) when (IsCommandConflict(exception))
+        catch (Exception exception) when (
+            IsCommandConflict(exception)
+            && !SimulationSessionRoute.IsSerializationFailure(exception))
         {
             return RetryConflict();
         }
@@ -1417,6 +1446,39 @@ public static class SessionControlRoute
                 resetContext();
                 cancellationToken.ThrowIfCancellationRequested();
                 if (attempt == MaximumViewerLeaseAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(25 * attempt),
+                    cancellationToken);
+            }
+        }
+
+        return RetryConflict();
+    }
+
+    internal static async Task<IResult> RetryTaskSerializationFailures(
+        Func<Task<IResult>> operation,
+        Action resetContext,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaximumTaskCreateAttempts; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception exception)
+                when (SimulationSessionRoute.IsSerializationFailure(exception))
+            {
+                // PostgreSQL may still cancel one of two serializable task
+                // transactions at commit, even for independent sessions. Retry
+                // the cancelled transaction from a clean EF tracking state.
+                resetContext();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (attempt == MaximumTaskCreateAttempts)
                 {
                     break;
                 }

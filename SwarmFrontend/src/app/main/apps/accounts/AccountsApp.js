@@ -1,4 +1,6 @@
 import withReducer from "app/store/withReducer";
+import { Box, Button } from "@mui/material";
+import PersonAddOutlined from "@mui/icons-material/PersonAddOutlined";
 import { useRef } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router-dom";
@@ -8,8 +10,14 @@ import AccountDialog from "./AccountDialog";
 import AccountsList from "./AccountsList";
 import AccountsSidebarContent from "./AccountsSidebarContent";
 import reducer from "./store";
-import { getAccounts, getAccountsByCompany, setAccountsSearchText } from "./store/accountsSlice";
+import {
+    getAccounts,
+    getAccountsByCompany,
+    openNewAccountDialog,
+    setAccountsSearchText,
+} from "./store/accountsSlice";
 import GeneralHeader from "../../../shared-components/GeneralHeader";
+import PageHeading from "../../../shared-components/PageHeading";
 import useGeneralAppStyle from "../../../shared-components/hooks/useGeneralAppStyle";
 import useActualCompanyId from "../../../shared-components/hooks/useActualCompanyId";
 import PanelTempAccountDialog from "./PanelTempAccountDialog";
@@ -41,16 +49,45 @@ function AccountsApp() {
         accountDialog = <GtsAccountDialog />;
     }
 
+    if (isGts) {
+        return (
+            <>
+                <Box
+                    data-testid="accounts-page"
+                    sx={{ p: { xs: 2, md: 3 }, width: "100%", maxWidth: 1600, mx: "auto" }}
+                >
+                    <PageHeading
+                        title="Usuarios"
+                        description="Administre las cuentas autorizadas para operar RobotSwarm."
+                        actions={
+                            <Button
+                                variant="contained"
+                                startIcon={<PersonAddOutlined />}
+                                onClick={() => dispatch(openNewAccountDialog())}
+                            >
+                                Crear usuario
+                            </Button>
+                        }
+                    />
+                    <AccountsList embedded showSearch />
+                </Box>
+                {accountDialog}
+            </>
+        );
+    }
+
     return (
         <>
             <Root
+                data-testid="accounts-page"
                 header={
                     <GeneralHeader
                         searchText={searchText}
                         pageLayout={pageLayout}
-                        headerName={isGts ? "Usuarios" : "Cuentas"}
+                        headerName="Cuentas"
                         handleSearchTextChange={setAccountsSearchText}
                         iconType="account_box"
+                        hasSidebar
                     />
                 }
                 content={<AccountsList />}

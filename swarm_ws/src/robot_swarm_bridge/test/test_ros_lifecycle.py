@@ -444,6 +444,18 @@ class ObstacleAvoidanceSafetyTests(unittest.TestCase):
 
 
 class OrchestratorLifecycleTests(unittest.TestCase):
+    def test_delete_command_forwards_the_optional_request_id(self):
+        orchestrator = make_orchestrator()
+        orchestrator.fleet_delete_pub = FakePublisher()
+
+        orchestrator._handle_delete_robots({
+            "request_id": "cleanup-42",
+        })
+
+        command = json.loads(orchestrator.fleet_delete_pub.messages[-1].data)
+        self.assertTrue(command["all"])
+        self.assertEqual("cleanup-42", command["request_id"])
+
     def test_invalid_task_config_is_correlated_and_never_dispatched(self):
         orchestrator = make_orchestrator(task_id=None)
         orchestrator.current_task_type = None

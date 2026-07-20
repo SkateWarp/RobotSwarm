@@ -97,7 +97,14 @@ jobs:
         run: |
           python3 -m py_compile \
             scripts/acceptance/robotswarm-prod-e2e.py \
-            scripts/acceptance/robotswarm-visible-e2e.py
+            scripts/acceptance/robotswarm-visible-e2e.py \
+            scripts/acceptance/robotswarm-sections-e2e.py \
+            scripts/acceptance/test_prod_acceptance_contract.py \
+            scripts/acceptance/test_visible_acceptance_contract.py \
+            scripts/acceptance/test_sections_acceptance_contract.py
+          python3 scripts/acceptance/test_prod_acceptance_contract.py
+          python3 scripts/acceptance/test_visible_acceptance_contract.py
+          python3 scripts/acceptance/test_sections_acceptance_contract.py
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
@@ -417,11 +424,18 @@ jobs:
       - name: Lint changed frontend surfaces
         run: |
           npm run lint -- --quiet \
+            src/@fuse/default-settings/FuseDefaultSettings.js \
             src/app/auth/Auth.js \
             src/app/constants/constants.js \
             src/app/fuse-configs/navigationGTSConfig.js \
             src/app/fuse-configs/navigationGTSConfig.test.js \
             src/app/fuse-configs/routesConfig.js \
+            src/app/fuse-layouts/layout1/Layout1Config.js \
+            src/app/fuse-layouts/layout1/components/FooterLayout1.js \
+            src/app/fuse-layouts/layout1/components/navbar/style-1/NavbarStyle1Content.js \
+            src/app/fuse-layouts/shared-components/FullScreenToggle.js \
+            src/app/fuse-layouts/shared-components/NavbarToggleButton.js \
+            src/app/fuse-layouts/shared-components/NavbarToggleButton.test.js \
             src/app/main/apps/GeeTS/LeafSorting/LeafSortingAppConfig.js \
             src/app/main/apps/GeeTS/LeafSorting/RobotRegistryApp.js \
             src/app/main/apps/GeeTS/LeafSorting/RobotRegistryApp.test.js \
@@ -429,8 +443,10 @@ jobs:
             src/app/main/apps/GeeTS/LeafSorting/robotRegistryApi.test.js \
             src/app/main/apps/GeeTS/LeafSorting/robotRegistryModel.js \
             src/app/main/apps/GeeTS/LeafSorting/robotRegistryModel.test.js \
+            src/app/main/apps/GeeTS/Dashboard/shifts/ShiftsDashboardApp.js \
             src/app/main/apps/GeeTS/LeafType/LeafTypeAppConfig.js \
             src/app/main/apps/GeeTS/LeafType/LeafTypeConfigApp.js \
+            src/app/main/apps/GeeTS/LeafType/LeafTypeConfigApp.marker.test.js \
             src/app/main/apps/GeeTS/LeafType/LeafTypeConfigDialog.js \
             src/app/main/apps/GeeTS/LeafType/LeafTypeConfigList.js \
             src/app/main/apps/GeeTS/LeafType/store/leafTypeConfigSlice.js \
@@ -446,7 +462,9 @@ jobs:
             src/app/main/apps/GeeTS/Realtime/SimulationWorkspace.js \
             src/app/main/apps/GeeTS/Realtime/SimulationWorkspace.test.js \
             src/app/main/apps/GeeTS/Realtime/SwarmTaskPanel.js \
+            src/app/main/apps/GeeTS/Realtime/SwarmTaskPanel.test.js \
             src/app/main/apps/GeeTS/Realtime/WhepViewer.js \
+            src/app/main/apps/GeeTS/Realtime/WhepViewer.test.js \
             src/app/main/apps/GeeTS/Realtime/transportTaskStatus.js \
             src/app/main/apps/GeeTS/RobotDetail/RobotDetailAppConfig.js \
             src/app/main/apps/GeeTS/RobotGroups/RobotGroupsApp.js \
@@ -461,8 +479,22 @@ jobs:
             src/app/main/apps/GeeTS/TaskLog/TaskRunHistoryApp.js \
             src/app/main/apps/GeeTS/TaskLog/TaskRunHistoryApp.test.js \
             src/app/main/apps/accounts/AccountsApp.js \
+            src/app/main/apps/accounts/AccountsApp.marker.test.js \
             src/app/main/apps/accounts/AccountsAppConfig.js \
             src/app/main/apps/accounts/AccountsList.js \
+            src/app/main/apps/accounts/AccountsTable.js \
+            src/app/main/apps/accounts/AccountsTable.test.js \
+            src/app/main/login/Login.js \
+            src/app/main/login/Register.js \
+            src/app/main/login/tabs/JWTLoginTab.js \
+            src/app/main/login/tabs/JWTRegisterTab.js \
+            src/app/shared-components/GeneralHeader.js \
+            src/app/shared-components/GeneralTable.js \
+            src/app/shared-components/GeneralTable.test.js \
+            src/app/shared-components/PageHeading.js \
+            src/app/shared-components/PageHeading.test.js \
+            src/app/shared-components/SimpleGeneralHeader.js \
+            src/app/shared-components/hooks/useGeneralAppStyle.js \
             src/app/services/jwtService/authTokenUtils.js \
             src/app/services/jwtService/jwtService.js \
             src/services/SimulationSessionService.js \

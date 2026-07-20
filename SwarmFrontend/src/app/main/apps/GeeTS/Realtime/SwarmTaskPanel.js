@@ -261,7 +261,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                 <Box>
                     <Typography variant="h6">Tarea del enjambre</Typography>
                     <Typography variant="body2" color="text.secondary">
-                        3 · Ejecuta una tarea con parámetros verificados
+                        Configure y ejecute una tarea con parámetros verificados.
                     </Typography>
                 </Box>
                 {latestTask && (
@@ -428,9 +428,9 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                             alignItems: "flex-start",
                                             justifyContent: "flex-start",
                                             textAlign: "left",
-                                            border: 2,
+                                            border: 1,
                                             borderColor: selected ? "primary.main" : "divider",
-                                            borderRadius: 2,
+                                            borderRadius: 1,
                                             bgcolor: selected ? "action.selected" : "background.paper",
                                             transition: "border-color 120ms ease, background-color 120ms ease",
                                         }}
@@ -572,7 +572,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                     fullWidth
                                     size="small"
                                     type="number"
-                                    label="Target X"
+                                    label="Destino X (m)"
                                     value={targetX}
                                     inputProps={{ min: -4, max: 4, step: 0.25 }}
                                     onChange={(event) => setTargetX(event.target.value)}
@@ -584,7 +584,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                     fullWidth
                                     size="small"
                                     type="number"
-                                    label="Target Y"
+                                    label="Destino Y (m)"
                                     value={targetY}
                                     inputProps={{ min: -4, max: 4, step: 0.25 }}
                                     onChange={(event) => setTargetY(event.target.value)}
@@ -595,8 +595,8 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                 <TextField
                                     fullWidth
                                     size="small"
-                                    label="Planner"
-                                    value="Coordinated GRF"
+                                    label="Planificador"
+                                    value="GRF coordinado"
                                     disabled
                                     helperText="La flota busca, comunica el hallazgo y converge antes del empuje."
                                 />

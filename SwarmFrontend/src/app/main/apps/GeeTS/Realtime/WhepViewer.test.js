@@ -198,6 +198,9 @@ describe("private WHEP viewer lifecycle", () => {
         });
 
         const viewer = container.querySelector('[data-testid="private-viewer"]');
+        expect(container.querySelector('[data-testid="viewer-status-live"]').textContent).toContain(
+            "Estado del visor"
+        );
         viewer.webkitRequestFullscreen = jest.fn(() => {
             fullscreenElement = viewer;
             document.dispatchEvent(new Event("webkitfullscreenchange"));
