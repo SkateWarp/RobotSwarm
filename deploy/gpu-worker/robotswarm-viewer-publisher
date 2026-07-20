@@ -640,6 +640,21 @@ def base_gzclient_sandbox_command(settings: Settings) -> list[str]:
     ]
 
 
+def verify_linked_dependencies(
+    settings: Settings,
+    executable: Path | str,
+    description: str,
+) -> None:
+    dependencies = run_command(
+        [settings.ldd, str(executable)], check=False
+    )
+    dependency_output = dependencies.stdout + dependencies.stderr
+    if dependencies.returncode != 0 or "not found" in dependency_output:
+        raise PublisherError(
+            f"{description} has unresolved host dependencies"
+        )
+
+
 def validate_viewer_artifacts(settings: Settings) -> None:
     required_paths = (
         (settings.gui_plugin, stat.S_ISREG, "Gazebo GUI plugin"),
@@ -662,12 +677,11 @@ def validate_viewer_artifacts(settings: Settings) -> None:
                 f"required {description} is not a safe owned artifact"
             )
 
-    dependencies = run_command(
-        [settings.ldd, str(settings.gui_plugin)], check=False
+    verify_linked_dependencies(
+        settings,
+        settings.gui_plugin,
+        "Gazebo GUI plugin",
     )
-    dependency_output = dependencies.stdout + dependencies.stderr
-    if dependencies.returncode != 0 or "not found" in dependency_output:
-        raise PublisherError("Gazebo GUI plugin has unresolved host dependencies")
 
     # The server publishes absolute package mesh paths.  Verify that the
     # unprivileged mount namespace can overlay the release-owned ROS share
@@ -687,7 +701,11 @@ def verify_dependencies(settings: Settings) -> str:
     if re.search(r"\bversion\s+11(?:\.|\b)", version_text, re.IGNORECASE) is None:
         raise PublisherError("host gzclient must be Gazebo Classic 11")
     run_command([settings.xwininfo, "-version"])
-    run_command([settings.xprop, "-version"])
+    # xprop opens DISPLAY even for -version.  The Actions runner intentionally
+    # has no ambient desktop after a restart, because every viewer receives a
+    # private Xvfb display later.  Check the binary without coupling deployment
+    # readiness to WSLg or another user's X server.
+    verify_linked_dependencies(settings, settings.xprop, "xprop")
     load_x_test_libraries()
     validate_viewer_artifacts(settings)
     return available_encoder(settings)

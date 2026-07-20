@@ -4,17 +4,17 @@
 
 This is the current target architecture and release plan for the commissioning
 branch. It supersedes the earlier design that treated public WHEP/ICE/TURN and
-a manually confirmed empty GPU worker as prerequisites. Merge `bbc7c46` from
-PR #99 is the integrated, CI-approved base and its frontend is public. The
-management and viewer-lifecycle delta developed after PR #99 remains a local
-candidate with no PR, CI result, deployment, or public screenshots. Neither
-the base nor this delta is considered production-accepted until one exact final
-revision is deployed to the backend and GPU and passes the two-user test.
+a manually confirmed empty GPU worker as prerequisites. PR #100 integrated the
+management and viewer-lifecycle delta as merge `baba2c1`; its PR and `main` CI,
+Cloudflare publication and backend deployment passed. The GPU deployment
+rolled back safely to `62a136a` because its final preflight called `xprop`
+without the private Xvfb display. I-063 contains the focused headless hotfix.
+The release is not production-accepted until one exact post-hotfix revision is
+deployed to backend and GPU and passes the two-user test.
 
-The original backend deployment of the base completed successfully after
-GitHub rotated the expired Actions certificate described in I-053. This base
-rollout did not publish the newer local candidate, and the GPU worker still
-requires the exact final revision after that candidate is integrated.
+The earlier GitHub certificate incident I-053 remains closed. The current
+deployment gap is limited to the GPU host preflight: frontend and backend
+already run `baba2c1`, while the compatible final worker revision is pending.
 
 See the [implementation status](../IMPLEMENTATION_STATUS.md) for that boundary
 and the
@@ -80,7 +80,7 @@ the final integrated regression review, not assumptions delegated to the user.
 
 La auditoría posterior al PR #99 encontró que varias pantallas existían en la
 navegación, pero todavía llamaban rutas heredadas o presentaban acciones que no
-tenían un efecto equivalente en ROS. El candidato local las alinea de la
+tenían un efecto equivalente en ROS. El cambio integrado por PR #100 las alinea de la
 siguiente manera:
 
 | Sección | Fuente y autorización | Función implementada | Límite explícito |
@@ -241,7 +241,7 @@ time and size, and marks media responses private/no-store. On the private origin
 hop it replaces the lease with a separate protected CDN credential, which avoids
 MediaMTX's browser-session cookies without exposing either credential publicly.
 
-The post-PR #99 candidate adds `DELETE` for the exact owner/session/lease and a
+PR #100 adds `DELETE` for the exact owner/session/lease and a
 durable `StopViewer` command. Revocation is committed before notifying the
 worker, drains the matching controller grant, and is idempotent under repeated
 or concurrent close requests. The worker stops only a publisher whose active
@@ -326,24 +326,18 @@ deployment rather than silently enabling a path.
 
 ## Remaining release sequence
 
-1. **Base completed:** preserve the rollback tag and the evidence for PR #99.
-   CI #33 approved its clean PR SHA, CI #34 approved merge
-   `bbc7c4611d6d3284c08da1fd2b713afafe641f40`, and Cloudflare published that
-   frontend.
-2. **Local delta validated:** history, templates, robot registry, robot groups,
-   runtime monitor, `StopViewer` lifecycle and Users navigation pass the local
-   review. Backend 213/213, worker 121/121, ROS 362/362, frontend 132/132,
-   modified-file lint, production build and the publisher helper pass locally.
-   Keep this evidence separate from the already deployed PR #99 frontend.
-3. Publish the stable tree through one consolidated PR
-   and one necessary CI path. Do not spend Actions minutes on speculative or
-   duplicate dispatches. The original `bbc7c46` backend run already established
-   the healthy base after GitHub recovered, but it is not the final candidate
-   after this functional delta.
-4. Deploy the exact resulting merge SHA to the backend; verify health,
-   authorization, migration compatibility, worker registration, drain API and
-   the immutable image label.
-5. Dispatch the GPU workflow for that same SHA and verify the active revision,
+1. **Control plane integrated:** PR #100, its `main` CI, Cloudflare and the
+   backend deployment passed for `baba2c1`. Preserve the rollback tag and those
+   run IDs as evidence.
+2. **GPU failure contained:** workflow `29712833482` passed tests, ROS build and
+   NVIDIA smoke, then rolled back before activation because `xprop -version`
+   required ambient `DISPLAY`; scheduling resumed on release `62a136a`.
+3. Publish only the focused I-063 hotfix after its local and independent review.
+   Do not rerun the known-bad `baba2c1` GPU workflow or create duplicate
+   dispatches.
+4. Deploy the exact hotfix merge SHA to the backend; verify health,
+   authorization, migration compatibility, worker registration and drain API.
+5. Dispatch the GPU workflow once for that same SHA and verify the active revision,
    `StopViewer` capability, image ID, service readiness, zero residual sessions,
    and transport-evidence capability version 1.
 6. Preserve the three already commissioned gates and the local worker identity

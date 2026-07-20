@@ -18,9 +18,9 @@ evidence, is available in
 
 | Layer | Current responsibility | Repository status |
 | --- | --- | --- |
-| React frontend | User-owned session, fleet and task controls; live status; private HLS scene player | PR #99 base integrated and public; post-PR #99 management delta is still local |
-| .NET backend | Authentication, ownership checks, session queue, worker commands, task outcomes, viewer leases and deployment drain leases | PR #99 base integrated; post-PR #99 API delta is still local |
-| .NET GPU worker | Isolated Docker session lifecycle, ROS command bridge, heartbeats, immutable image selection and viewer-publisher supervision | PR #99 base implemented; lease-specific viewer stop delta is still local |
+| React frontend | User-owned session, fleet and task controls; live status; private HLS scene player | PR #100 merge `baba2c1` integrated and published by Cloudflare |
+| .NET backend | Authentication, ownership checks, session queue, worker commands, task outcomes, viewer leases and deployment drain leases | PR #100 merge `baba2c1` deployed and publicly healthy |
+| .NET GPU worker | Isolated Docker session lifecycle, ROS command bridge, heartbeats, immutable image selection and viewer-publisher supervision | PR #100 code integrated; deployment rolled back safely to `62a136a` after the headless `xprop` preflight defect in I-063 |
 | ROS Noetic and Gazebo | Dynamic TurtleBot3 Burger fleet, safety control, task orchestration and three scalable behaviours | Implemented and exercised in visible simulation |
 | MediaMTX and viewer helper | Private X display and `gzclient` per lease, H.264/RTSP publishing and internal low-latency HLS origin | Implemented; gates active only inside the supervised commissioning window |
 
@@ -30,15 +30,15 @@ commands, the worker translates those commands into the private ROS namespace,
 and ROS reports fleet and task state through the worker hub. A browser is not
 given Docker, ROS, Gazebo, VNC, or MediaMTX administrative access.
 
-The integrated base is merge
-`bbc7c4611d6d3284c08da1fd2b713afafe641f40` from PR #99. It passed CI and its
-frontend is public. Work performed after that merge adds the missing web
-management functions described below, but it is still an uncommitted local
-candidate: it has no PR, CI result, deployment, or public-browser evidence.
-The delayed deployment of `bbc7c46` completed after GitHub rotated the expired
-Actions certificate, so the backend now has the integrated base. It still
-cannot be called the final release: the local management/viewer delta has not
-passed PR CI or been deployed to the backend and GPU worker.
+The current control-plane revision is merge
+`baba2c1fb4bc73dcd96254a7ab63a16175e6bce9` from PR #100. Its PR and `main`
+CI runs passed, Cloudflare published the frontend, and the backend deployment
+finished healthy. The GPU workflow passed its tests, ROS image build and NVIDIA
+smoke, but its final host probe depended incorrectly on an ambient `DISPLAY`
+for `xprop -version`. Rollback restored worker release `62a136a` and scheduling
+resumed. I-063 records the small headless preflight hotfix; public-browser
+acceptance remains pending until that hotfix is integrated and the worker uses
+the same exact revision as the backend.
 
 ## Implemented components
 
@@ -102,9 +102,9 @@ Follow-the-leader is intentionally continuous and is not failed merely because
 it remains active without reaching a finite completion value. Finite formation
 and transport tasks are monitored for acceptance and progress.
 
-### Delta local de administración web posterior al PR #99
+### Administración web integrada por el PR #100
 
-El candidato local completa las secciones que todavía dependían de rutas
+El cambio integrado completa las secciones que todavía dependían de rutas
 heredadas o no mostraban el estado real del plano de control:
 
 - **Historial de tareas:** la pantalla consulta `TaskRun`, paginado y filtrado
@@ -142,8 +142,9 @@ administrativas también aprobaron. Después de ese corte, las suites locales in
 backend (213/213), worker (121/121) y ROS (362/362), además del auxiliar del
 publicador, aprobaron sobre el árbol actual. Frontend aprobó 132/132 pruebas en
 22 suites, el lint de todos los archivos modificados y una compilación de
-producción. Ninguno de estos resultados sustituye CI ni la aceptación visible
-posterior al despliegue.
+producción. PR #100 y su repetición sobre `main` aprobaron después las mismas
+capas. Estos resultados automatizados todavía no sustituyen la aceptación
+visible posterior al despliegue coordinado del worker.
 
 ### Private browser viewer
 
@@ -170,14 +171,14 @@ The stock Burger model has no supported camera sensor, so the honest current
 viewer capability is `Scene`. `RobotCamera` requests are rejected. Publishing
 and HLS proxying are protected gates. They are active on the last compatible
 backend release for the supervised commissioning window, but that state does
-not count as production acceptance of either the PR #99 base or the local
-post-PR #99 delta.
+not count as production acceptance until the worker runs the same post-hotfix
+revision as the control plane.
 
-The post-PR #99 candidate also adds an explicit, owner-scoped viewer close.
+PR #100 also adds an explicit, owner-scoped viewer close.
 Revocation is idempotent and fenced against a replaced lease. The worker keeps
 a short tombstone so a delayed start cannot revive a viewer that was already
-closed. This behavior has focused local regression coverage but is not active
-in production yet.
+closed. This behavior has automated regression coverage; operational proof is
+pending because the GPU worker rolled back before activation.
 
 ### Deployment and host hardening
 
@@ -226,9 +227,10 @@ final public rollout:
 - Production maintenance ports were checked after hardening: VNC and
   websockify listen on loopback. The viewer gates were off during the initial
   baseline and later enabled together for the supervised commissioning window.
-- The post-PR #99 management delta passed the focused local checks listed
-  above. No claim is made that its pages, `StopViewer` command, or runtime robot
-  monitor have been exercised against the public deployment.
+- The PR #100 management pages are present in the public Cloudflare bundle and
+  its backend is deployed. No claim is made yet that `StopViewer` or the runtime
+  robot monitor has been exercised through the public browser with the final
+  worker.
 
 Raw measurements, screenshots, incident analysis, and the distinction between
 negative and accepted runs are recorded in the
@@ -236,17 +238,14 @@ negative and accepted runs are recorded in the
 
 ## Work that remains before declaring the release complete
 
-1. Preserve the completed local review of the post-PR #99 delta. Backend
-   213/213, worker 121/121, ROS 362/362, frontend 132/132, modified-file lint,
-   production build and the publisher helper pass on the current tree; repeat
-   any affected check if the code changes again.
-2. Publish that delta through one consolidated PR and CI execution. GitHub
-   already restored the Actions broker affected by I-053 and the original
-   `bbc7c46` deployment completed successfully, but that base is not the final
-   candidate after this functional delta.
-3. Deploy the resulting exact merge SHA first to the backend VM and then to the
-   GPU worker through the automatic drain workflow; verify health, capability
-   negotiation and immutable image identity at both stages.
+1. Publish the focused I-063 hotfix after its headless regression, real
+   `/usr/bin/xprop` dependency probe, publisher suite, deployment/rollback suite
+   and independent review have passed locally.
+2. Let CI and the serialized backend workflow deploy the resulting exact merge
+   SHA, then dispatch the GPU worker once for that same revision. Do not rerun
+   the already diagnosed failed workflow from `baba2c1`.
+3. Verify worker health, `StopViewer` capability negotiation, immutable image
+   identity, NVIDIA rendering and zero residual sessions after activation.
 4. Run two simultaneous, independently authenticated browser sessions with
    different fleets/tasks and prove distinct displays and streams, cross-user
    denial, lease expiry, independent stop/cleanup, visible FPS/real-time factor,
@@ -277,8 +276,8 @@ acceptance passed”.
 - Persistent robots and administrator groups are inventory metadata. They do
   not select the exact runtime identities inside a simulation session; the
   worker roster is the authoritative source for live ROS/Gazebo instances.
-- The focused post-PR #99 checks are not a full regression suite. The local
-  candidate remains subject to review, CI, deployment and public acceptance.
+- The PR #100 checks and local hotfix regressions are not a substitute for the
+  pending post-hotfix GPU deployment and public acceptance.
 
 ## Current documentation
 

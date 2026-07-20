@@ -580,6 +580,10 @@ cat > "$fake_bin/ldd" <<'SH'
 #!/bin/sh
 set -eu
 test "$#" = 1
+if [ "${FAKE_LDD_MISSING_PATH:-}" = "$1" ]; then
+    printf '%s\n' 'libX11.so.6 => not found'
+    exit 0
+fi
 printf '%s\n' 'libgazebo_gui.so.11 => /usr/lib/libgazebo_gui.so.11'
 SH
 
@@ -820,6 +824,11 @@ if "ROBOTSWARM_MEDIA_TOKEN" in os.environ:
 if any(name.lower().startswith("worker__") for name in os.environ):
     raise SystemExit("xprop inherited worker identity settings")
 if sys.argv[1:] == ["-version"]:
+    if (
+        os.environ.get("FAKE_XPROP_REQUIRES_DISPLAY") == "1"
+        and not os.environ.get("DISPLAY")
+    ):
+        raise SystemExit("xprop could not open a display")
     print("xprop 1.2")
     raise SystemExit(0)
 window_id = sys.argv[sys.argv.index("-id") + 1]
@@ -1299,6 +1308,28 @@ probe_output="$(env "${common_environment[@]}" "$publisher" probe \
     --publish-base-url "$publish_base_url")"
 test "$probe_output" = \
     '{"protocolVersion":2,"ready":true,"videoCodec":"H264","sources":["Scene"],"interactive":true}'
+
+headless_probe_output="$(env -u DISPLAY -u XAUTHORITY \
+    FAKE_XPROP_REQUIRES_DISPLAY=1 \
+    "${common_environment[@]}" "$publisher" probe \
+        --protocol-version 2 \
+        --publish-base-url "$publish_base_url")"
+test "$headless_probe_output" = "$probe_output"
+
+if FAKE_LDD_MISSING_PATH="$fake_bin/xprop" \
+    env -u DISPLAY -u XAUTHORITY "${common_environment[@]}" \
+    "$publisher" probe \
+        --protocol-version 2 \
+        --publish-base-url "$publish_base_url" \
+        >"$test_root/missing-xprop-library.out" \
+        2>"$test_root/missing-xprop-library.err"
+then
+    echo "probe accepted xprop with an unresolved host dependency" >&2
+    exit 1
+fi
+test ! -s "$test_root/missing-xprop-library.out"
+grep -Fq "xprop has unresolved host dependencies" \
+    "$test_root/missing-xprop-library.err"
 
 rc255_probe_output="$(FAKE_GZCLIENT_VERSION_RC=255 \
     env "${common_environment[@]}" "$publisher" probe \

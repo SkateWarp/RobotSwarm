@@ -1,0 +1,37 @@
+RobotSwarm GPU deployment evidence (sanitized)
+Captured: 2026-07-20 UTC
+
+Candidate merge SHA: baba2c1fb4bc73dcd96254a7ab63a16175e6bce9
+Workflow: Deploy GPU Swarm Worker
+Run ID: 29712833482
+Job ID: 88259686749
+Final conclusion: failure
+
+Steps 1 through 17: success
+Failed step: Deploy worker and verify readiness
+Failure observed:
+  viewer publisher: required executable '/usr/bin/xprop' returned an error
+  gpu-worker deploy: the viewer helper host-readiness probe failed
+
+Safety result:
+  Resume scheduling: success
+  Previous worker release restored: 62a136a08b4955ea45a58447a87b6518301418fe
+  Worker service after rollback: active/running
+
+Reproduction on the WSL GPU host:
+  /usr/bin/xprop -version with the normal graphical environment: exit 0
+  /usr/bin/xprop -version without DISPLAY/WAYLAND_DISPLAY/XAUTHORITY: exit 1
+  Diagnostic: unable to open display ''
+  /usr/bin/xwininfo -version without those variables: exit 0
+  ldd /usr/bin/xprop without DISPLAY: all linked libraries resolved
+
+Local hotfix verification:
+  headless xprop dependency regression: passed
+  unresolved libX11 regression: passed (rejected as expected)
+  viewer publisher suite: passed
+  GPU deployment and rollback suite: passed
+  real /usr/bin/xprop linked-dependency probe without DISPLAY: passed
+  independent review: P0=0, P1=0, P2=0
+
+No token, credential, account identifier, internal URL or runner environment
+value is included in this evidence file.
