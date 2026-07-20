@@ -293,5 +293,10 @@ public sealed class WorkerHubConnectionTests
         public Task StopSessionAsync(
             Guid sessionId,
             CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<bool> StopLeaseAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken) => Task.FromResult(false);
     }
 }

@@ -1,7 +1,5 @@
-import { lazy } from "react";
+import { Navigate } from "react-router-dom";
 import authRoles from "../../../../auth/authRoles";
-
-const RobotDetailApp = lazy(() => import("./RobotDetailApp"));
 
 const RobotDetailAppConfig = {
     settings: {
@@ -14,7 +12,7 @@ const RobotDetailAppConfig = {
     routes: [
         {
             path: "/apps/GTS/robot/:robotId",
-            element: <RobotDetailApp />,
+            element: <Navigate replace to="/apps/GTS/realtime" />,
         },
     ],
 };

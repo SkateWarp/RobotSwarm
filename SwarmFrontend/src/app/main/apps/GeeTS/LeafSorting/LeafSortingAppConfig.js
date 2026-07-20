@@ -1,7 +1,7 @@
 import { lazy } from "react";
 import authRoles from "../../../../auth/authRoles";
 
-const LeafSortingConfigApp = lazy(() => import("./LeafSortingConfigApp"));
+const RobotRegistryApp = lazy(() => import("./RobotRegistryApp"));
 
 const LeafSortingAppConfig = {
     settings: {
@@ -15,7 +15,7 @@ const LeafSortingAppConfig = {
     routes: [
         {
             path: "/apps/GTS/leafSorting",
-            element: <LeafSortingConfigApp />,
+            element: <RobotRegistryApp />,
         },
     ],
 };

@@ -2,19 +2,19 @@ import authRoles from "../auth/authRoles";
 
 const navigationGTSConfig = [
     {
-        id: "task",
-        title: "Tareas",
+        id: "taskTemplates",
+        title: "Plantillas de tareas",
         type: "item",
         icon: "add_task",
         auth: authRoles.admin,
-        url: "/apps/GTS/leafTypes",
+        url: "/apps/GTS/task-templates",
     },
     {
         id: "taskLogs",
-        title: "Historial de Tareas",
+        title: "Historial de tareas",
         type: "item",
         icon: "history",
-        auth: authRoles.admin,
+        auth: authRoles.user,
         url: "/apps/GTS/taskLogs",
     },
     {
@@ -34,8 +34,16 @@ const navigationGTSConfig = [
         url: "/apps/GTS/leafSorting",
     },
     {
+        id: "robotGroups",
+        title: "Grupos de robots",
+        type: "item",
+        icon: "groups",
+        auth: authRoles.admin,
+        url: "/apps/GTS/robot-groups",
+    },
+    {
         id: "accounts",
-        title: "Cuentas",
+        title: "Usuarios",
         type: "item",
         icon: "account_box",
         auth: authRoles.admin,

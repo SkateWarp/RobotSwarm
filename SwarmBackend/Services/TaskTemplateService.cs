@@ -6,7 +6,8 @@ using SwarmBackend.Models;
 
 namespace SwarmBackend.Services;
 
-public class TaskTemplateService : ITaskTemplateService{
+public class TaskTemplateService : ITaskTemplateService
+{
     private readonly DataContext context;
 
     public TaskTemplateService(DataContext context)
@@ -17,6 +18,7 @@ public class TaskTemplateService : ITaskTemplateService{
     public async Task<IEnumerable<TaskTemplateResponse>> GetAll()
     {
         return await context.TaskTemplates
+            .OrderBy(template => template.Id)
             .Select(x => TaskTemplateResponse.From(x))
             .ToListAsync();
     }
@@ -26,10 +28,11 @@ public class TaskTemplateService : ITaskTemplateService{
         var template = await context.TaskTemplates.FindAsync(id);
         if (template == null)
         {
-            return new Result<TaskTemplateResponse>(new Exception("Tarea no encontrada"));
+            return new Result<TaskTemplateResponse>(new Exception("Plantilla de tarea no encontrada."));
         }
 
-        context.Entry(template).CurrentValues.SetValues(request);
+        template.Name = request.Name;
+        template.TaskType = request.TaskType;
         await context.SaveChangesAsync();
 
         return TaskTemplateResponse.From(template);

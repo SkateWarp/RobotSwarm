@@ -18,6 +18,7 @@ public sealed class WorkerCapabilityBuilderTests
             .ToArray();
 
         Assert.DoesNotContain("SetViewerSource", commandTypes);
+        Assert.DoesNotContain("StopViewer", commandTypes);
         Assert.Empty(capabilities.GetProperty("viewerSources").EnumerateArray());
         Assert.False(
             capabilities.GetProperty("viewerPublisher")
@@ -46,6 +47,7 @@ public sealed class WorkerCapabilityBuilderTests
             .ToArray();
 
         Assert.Contains("SetViewerSource", commandTypes);
+        Assert.Contains("StopViewer", commandTypes);
         Assert.Equal(new[] { "Scene" }, viewerSources);
         Assert.Equal(
             "H264",

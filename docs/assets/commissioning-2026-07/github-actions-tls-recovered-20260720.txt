@@ -1,0 +1,14 @@
+RobotSwarm commissioning - sanitized GitHub Actions recovery observation
+observed_utc=2026-07-20T02:11:09Z
+endpoint=pipelinesghubeus11.actions.githubusercontent.com:443
+sni=pipelinesghubeus11.actions.githubusercontent.com
+subject=CN=*.actions.githubusercontent.com
+issuer=Let's Encrypt R12
+not_before=2026-06-18T23:26:49Z
+not_after=2026-09-16T23:26:48Z
+sha256=0A:F0:56:61:7B:E7:62:1C:CB:DE:05:1F:00:CF:8D:13:57:F1:F7:01:B3:8C:3E:A5:B4:6A:85:11:E5:58:98:FE
+verification_result=valid
+workflow_run=29707925944
+workflow_job=88247868770
+workflow_result=completed_success
+note=The original queued deployment completed without a restart, rerun, dispatch, or TLS bypass.

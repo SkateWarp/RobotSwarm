@@ -190,7 +190,6 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
     const canStart = canControl && !session.isEmergencyStopped && !activeTask;
     const latestProgress = Math.min(1, Math.max(0, Number(latestTask?.progress) || 0));
     const verifiedOutcome = latestTask?.outcomeState;
-    const selectedType = TASK_TYPES.find((item) => item.value === taskType);
     const latestType = TASK_TYPES.find((item) => item.value === latestTask?.type);
     const transportResult = describeTransportResult(latestTask);
 
@@ -328,6 +327,15 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                             {latestTask.error}
                         </Alert>
                     )}
+                    {latestTask.outcomeReason && latestTask.outcomeReason !== latestTask.error && (
+                        <Alert
+                            data-testid="task-outcome-reason"
+                            severity={verifiedOutcome === "Failed" ? "error" : "info"}
+                            sx={{ mt: 2 }}
+                        >
+                            {latestTask.outcomeReason}
+                        </Alert>
+                    )}
                     {transportResult && (
                         <Alert
                             data-testid="transport-phase"
@@ -445,25 +453,6 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                     </Grid>
 
                     <Divider sx={{ my: 2 }} />
-
-                    <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-                        <InputLabel id="task-type-label">Tarea</InputLabel>
-                        <Select
-                            labelId="task-type-label"
-                            value={taskType}
-                            label="Tarea"
-                            onChange={(event) => setTaskType(event.target.value)}
-                        >
-                            {TASK_TYPES.map((item) => (
-                                <MenuItem key={item.value} value={item.value}>
-                                    {item.label}
-                                </MenuItem>
-                            ))}
-                        </Select>
-                        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75 }}>
-                            Tipo seleccionado: {selectedType?.title}
-                        </Typography>
-                    </FormControl>
 
                     {taskType === "FollowLeader" && (
                         <Grid container spacing={2}>

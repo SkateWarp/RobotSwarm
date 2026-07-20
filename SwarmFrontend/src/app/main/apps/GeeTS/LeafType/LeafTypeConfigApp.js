@@ -1,14 +1,14 @@
-/* eslint-disable react-hooks/exhaustive-deps */
 import withReducer from "app/store/withReducer";
 import { useEffect, useRef } from "react";
 import { useDispatch } from "react-redux";
 import reducer from "./store";
 import useGeneralAppStyle from "../../../../shared-components/hooks/useGeneralAppStyle";
-import { getLeafTypes, openNewLeafTypesConfigDialog } from "./store/leafTypeConfigSlice";
+import { getTaskTemplates } from "./store/leafTypeConfigSlice";
 import LeafTypesConfigList from "./LeafTypeConfigList";
 import LeafTypesConfigDialog from "./LeafTypeConfigDialog";
 import SimpleGeneralHeader from "../../../../shared-components/SimpleGeneralHeader";
 
+// The shared helper builds a styled component; it does not use React state.
 // eslint-disable-next-line react-hooks/rules-of-hooks
 const Root = useGeneralAppStyle();
 
@@ -17,8 +17,8 @@ function LeafTypesConfigApp() {
     const pageLayout = useRef(null);
 
     useEffect(() => {
-        dispatch(getLeafTypes());
-    }, []);
+        dispatch(getTaskTemplates());
+    }, [dispatch]);
 
     return (
         <>
@@ -26,14 +26,9 @@ function LeafTypesConfigApp() {
                 header={
                     <SimpleGeneralHeader
                         pageLayout={pageLayout}
-                        headerName="TAREAS"
+                        headerName="PLANTILLAS DE TAREAS"
                         iconType="add_task"
                         hasSidebar={false}
-                        actionButton={{
-                            text: "CREAR",
-                            onClick: () => dispatch(openNewLeafTypesConfigDialog()),
-                            icon: "add"
-                        }}
                     />
                 }
                 content={<LeafTypesConfigList />}

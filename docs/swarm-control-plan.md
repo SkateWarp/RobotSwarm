@@ -4,10 +4,17 @@
 
 This is the current target architecture and release plan for the commissioning
 branch. It supersedes the earlier design that treated public WHEP/ICE/TURN and
-a manually confirmed empty GPU worker as prerequisites. The implementation is
-present, but the feature-gated viewer and new control-plane changes are not
-considered production-accepted until the final two-user test and exact-revision
-deployment finish.
+a manually confirmed empty GPU worker as prerequisites. Merge `bbc7c46` from
+PR #99 is the integrated, CI-approved base and its frontend is public. The
+management and viewer-lifecycle delta developed after PR #99 remains a local
+candidate with no PR, CI result, deployment, or public screenshots. Neither
+the base nor this delta is considered production-accepted until one exact final
+revision is deployed to the backend and GPU and passes the two-user test.
+
+The original backend deployment of the base completed successfully after
+GitHub rotated the expired Actions certificate described in I-053. This base
+rollout did not publish the newer local candidate, and the GPU worker still
+requires the exact final revision after that candidate is integrated.
 
 See the [implementation status](../IMPLEMENTATION_STATUS.md) for that boundary
 and the
@@ -58,14 +65,52 @@ an SSH tunnel. They are not used to give end users a shared screen.
    to ROS.
 6. The worker correlates commands and ROS reports with the backend session and
    task IDs. Fleet and task status return over the worker hub.
-7. Stopping the session removes its viewer publisher, container, private Docker
-   network, task state, and leases without stopping another user's session.
+7. Closing only the viewer revokes its lease, releases held input and stops the
+   exact publisher while keeping ROS, Gazebo, the container and private network
+   alive. Stopping the complete session is a separate, confirmed action that
+   removes all those resources without stopping another user's session.
 
 Worker commands are durable and acknowledged. A system-generated task cancel
 must finish or remain an explicit barrier before the session can accept another
 task; a stale worker report or command envelope must not resurrect a task that
 the control plane already marked terminal. These race conditions are part of
 the final integrated regression review, not assumptions delegated to the user.
+
+## Secciones administrativas y fuente de verdad
+
+La auditoría posterior al PR #99 encontró que varias pantallas existían en la
+navegación, pero todavía llamaban rutas heredadas o presentaban acciones que no
+tenían un efecto equivalente en ROS. El candidato local las alinea de la
+siguiente manera:
+
+| Sección | Fuente y autorización | Función implementada | Límite explícito |
+| --- | --- | --- | --- |
+| Historial de tareas | `TaskRun` de sesiones pertenecientes al usuario autenticado | Lista paginada, filtros por tipo/estado/resultado y detalle de parámetros, resultado, motivo y tiempos | `TaskLog` es un registro global heredado; queda fuera de la navegación y restringido al administrador por compatibilidad/diagnóstico, sin mostrarse como ejecución ROS actual |
+| Plantillas de tareas | Catálogo `TaskTemplate`, rol `Admin` | `GET` para listar y `PUT` para editar nombre y tipo con validación | No se ofrecen crear ni eliminar, porque esas operaciones no existen en el contrato real |
+| Robots | Registro persistente `/Robots`; propietario autenticado y excepción administrativa | Buscar, registrar, editar y desactivar; un administrador ve el inventario activo completo | Un robot público puede consultarse, pero solo su propietario o un administrador puede modificarlo; este registro no es el roster runtime de Gazebo |
+| Grupos de robots | Registro global de administración, rol `Admin` | Crear, editar y eliminar grupos; agregar, quitar o transferir membresía con confirmación | Se retiró `POST /RobotGroups/{id}/tasks`: generaba `TaskLog` y estados, pero no enviaba órdenes a ROS |
+| Robots de esta sesión | Roster informado por el worker para la sesión propiedad del usuario | Estado, rol, namespace, ordinal, última actualización y resumen operativo | No fabrica posición ni velocidad: esos campos no forman parte del contrato actual |
+| Usuarios | CRUD de cuentas existente, rol `Admin` | Navegación y encabezado coherentes bajo el nombre «Usuarios» | No cambia el modelo de roles ni crea permisos nuevos |
+
+Las tareas ROS se inician exclusivamente en Control de simulación. Un grupo
+administrativo puede ayudar a organizar el inventario, pero no selecciona por
+sí mismo las instancias `tb3_*` de una sesión ni sustituye el roster que publica
+el worker.
+
+El mismo espacio de simulación conserva sondeo periódico si SignalR no está
+disponible, muestra esa degradación y reintenta también un fallo del primer
+`start()` con espera exponencial acotada. El usuario puede solicitar una
+reconexión inmediata. Detener la sesión completa abre una confirmación que
+explica que se cancelarán tareas y se liberarán visor, Gazebo, ROS, contenedor y
+red privada.
+
+La validación focal local del delta aprobó 31/31 casos de backend, 19/19 del
+worker y 39/39 de frontend. El lint focal y la compilación de producción de
+Robots y Grupos también aprobaron. Un corte integral posterior aprobó backend
+213/213, worker 121/121, ROS 362/362, frontend 132/132 en 22 suites y el
+auxiliar del publicador. El lint de todos los archivos frontend modificados y
+la compilación de producción también aprobaron. Estos resultados son locales y
+no se presentan como CI ni aceptación del navegador público.
 
 ## Task outcome monitoring
 
@@ -196,6 +241,15 @@ time and size, and marks media responses private/no-store. On the private origin
 hop it replaces the lease with a separate protected CDN credential, which avoids
 MediaMTX's browser-session cookies without exposing either credential publicly.
 
+The post-PR #99 candidate adds `DELETE` for the exact owner/session/lease and a
+durable `StopViewer` command. Revocation is committed before notifying the
+worker, drains the matching controller grant, and is idempotent under repeated
+or concurrent close requests. The worker stops only a publisher whose active
+lease matches the command. A bounded tombstone rejects a delayed start for an
+already revoked lease, while closing an older lease cannot stop a newer
+replacement. The frontend sends `releaseAll` before requesting close and then
+removes the private stream and interaction state.
+
 This HLS route avoids a new public stream hostname, public UDP ports, ICE host
 advertisement, and TURN. It trades those connectivity requirements for somewhat
 higher latency and backend bandwidth. WHEP can remain an optional secondary
@@ -209,11 +263,11 @@ shared WSLg root display or shared VNC desktop does not satisfy user isolation.
 The local host integration test runs two publisher pipelines concurrently with
 different displays, paths, and cleanup. It uses real Xvfb/XTest but controlled
 Docker and `gzclient` test doubles, so it proves the publisher's local isolation
-logic rather than two GPU streams. Production feature gates must remain false
-for general use until two independently authenticated public browser sessions
-also prove playback, cross-user denial, lease expiry, and stop isolation. They
-may be enabled only for a supervised acceptance window and must be disabled
-again if that acceptance is not completed.
+logic rather than two GPU streams. The production gates are currently active
+only for the supervised commissioning window. They do not become a general-use
+approval until two independently authenticated public browser sessions prove
+playback, cross-user denial, lease expiry, and stop isolation; they must be
+disabled together if that acceptance is abandoned or rejected.
 
 ## Deployment drain
 
@@ -272,27 +326,44 @@ deployment rather than silently enabling a path.
 
 ## Remaining release sequence
 
-1. Preserve the current rollback tag and publish the locally reviewed tree;
-   require that exact revision to pass GitHub CI.
-2. Deploy backend/database changes with viewer publishing and HLS proxy gates
-   still false; verify health, migration, worker registration, and drain API.
-3. Dispatch the GPU workflow for that same current `main` SHA and verify the
-   active revision, image ID, service readiness, zero residual sessions, and
-   transport-evidence capability version 1.
-4. Set the protected production variable
-   `REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE=true`, redeploy the same current
-   SHA, and leave the gate enabled after one roster-correlated transport result
-   is accepted. Until this step it remains false for backend-first compatibility.
-5. Enable the local worker publisher identity and the two protected backend
-   viewer gates after the RTSP prerequisite probe succeeds.
-6. Use two separate browser profiles and accounts to run simultaneous sessions
+1. **Base completed:** preserve the rollback tag and the evidence for PR #99.
+   CI #33 approved its clean PR SHA, CI #34 approved merge
+   `bbc7c4611d6d3284c08da1fd2b713afafe641f40`, and Cloudflare published that
+   frontend.
+2. **Local delta validated:** history, templates, robot registry, robot groups,
+   runtime monitor, `StopViewer` lifecycle and Users navigation pass the local
+   review. Backend 213/213, worker 121/121, ROS 362/362, frontend 132/132,
+   modified-file lint, production build and the publisher helper pass locally.
+   Keep this evidence separate from the already deployed PR #99 frontend.
+3. Publish the stable tree through one consolidated PR
+   and one necessary CI path. Do not spend Actions minutes on speculative or
+   duplicate dispatches. The original `bbc7c46` backend run already established
+   the healthy base after GitHub recovered, but it is not the final candidate
+   after this functional delta.
+4. Deploy the exact resulting merge SHA to the backend; verify health,
+   authorization, migration compatibility, worker registration, drain API and
+   the immutable image label.
+5. Dispatch the GPU workflow for that same SHA and verify the active revision,
+   `StopViewer` capability, image ID, service readiness, zero residual sessions,
+   and transport-evidence capability version 1.
+6. Preserve the three already commissioned gates and the local worker identity
+   when activating the final backend/GPU pair; re-check their effective values
+   rather than inferring them from repository defaults.
+7. Use the versioned [production acceptance harnesses](../scripts/acceptance/README.md)
+   with two separate visible browser profiles and accounts to run simultaneous sessions
    with different robot counts/tasks. Verify different displays/streams,
    cross-user `401/403`, token expiry, independent stop, task outcomes, visible
    FPS, and physics real-time factor.
-7. If any isolation or outcome criterion fails, turn both viewer gates off and
+8. Exercise the administrative pages with their correct roles: owner-filtered
+   history for two users, administrator-only templates/groups/users, protected
+   robot mutation and a lease close that leaves the ROS session operating.
+9. If any isolation or outcome criterion fails, turn both viewer gates off and
    use the recorded rollback revision; do not make VNC the user-facing fallback.
-8. Remove temporary test accounts/sessions and complete the commissioning
-   report with the accepted “after” screenshots and final revision.
+10. Repeat representative formation, follow-leader, N=1/3/4/10 transport and
+   loaded-payload cases on the deployed revision, with cleanup between cases.
+11. Remove temporary test accounts/sessions and complete the commissioning
+    report with real, sanitized “after” screenshots for every new section and
+    the exact final revision.
 
 ## Deferred work
 

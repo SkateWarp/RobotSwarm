@@ -23,7 +23,9 @@ public static class WorkerCapabilityBuilder
         ViewerPublisherAvailability viewer)
     {
         var commandTypes = viewer.IsAvailable
-            ? BaseCommandTypes.Append("SetViewerSource").ToArray()
+            ? BaseCommandTypes
+                .Concat(new[] { "SetViewerSource", "StopViewer" })
+                .ToArray()
             : BaseCommandTypes;
         var viewerSources = viewer.IsAvailable
             ? viewer.Sources.Select(source => source.ToString()).ToArray()

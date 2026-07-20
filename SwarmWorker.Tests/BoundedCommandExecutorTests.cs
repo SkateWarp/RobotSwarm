@@ -609,6 +609,11 @@ public sealed class BoundedCommandExecutorTests
 
         public Task ReleaseAllInputsAsync(CancellationToken cancellationToken) =>
             Task.CompletedTask;
+
+        public Task<bool> StopLeaseAsync(
+            Guid sessionId,
+            Guid leaseId,
+            CancellationToken cancellationToken) => Task.FromResult(false);
     }
 
     private sealed class RecordingWorkerCommandHub : IWorkerCommandHub

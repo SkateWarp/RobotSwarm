@@ -1,194 +1,143 @@
-import { yupResolver } from "@hookform/resolvers/yup";
-import DialogContent from "@mui/material/DialogContent";
-import { useCallback, useEffect, useState } from "react";
-import { Controller, useForm } from "react-hook-form";
-import { useDispatch, useSelector } from "react-redux";
-import * as yup from "yup";
-import { AppBar, Dialog, Icon, MenuItem, TextField, Toolbar, Typography } from "@mui/material";
-import * as Actions from "../../../../store/fuse/messageSlice";
-import GeneralDialogActionButtons from "../../../../shared-components/GeneralDialogActionButtons";
 import {
-    addNewLeafType,
-    closeEditLeafTypesConfigDialog,
-    closeNewLeafTypesConfigDialog,
-    updateLeafType,
-} from "./store/leafTypeConfigSlice";
+    Alert,
+    Button,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogTitle,
+    MenuItem,
+    TextField,
+    Typography,
+} from "@mui/material";
+import { useEffect, useMemo, useState } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { showMessage } from "../../../../store/fuse/messageSlice";
+import {
+    TASK_TEMPLATE_NAME_LIMIT,
+    TASK_TEMPLATE_TYPES,
+    normalizeTaskTemplateDraft,
+    normalizeTaskTemplateType,
+    validateTaskTemplateDraft,
+} from "./taskTemplateModel";
+import { closeTaskTemplateDialog, updateTaskTemplate } from "./store/leafTypeConfigSlice";
 
-const defaultValues = {
+const emptyDraft = {
     name: "",
-    description: "",
+    taskType: "",
 };
-
-const schema = yup.object().shape({
-    name: yup.string().required("Debe ingresar un nombre").min(1, "Debe de tener mínimo 1 caracter."),
-});
 
 function LeafTypesConfigDialog() {
     const dispatch = useDispatch();
-    const leafTypesConfigDialog = useSelector(
-        ({ leafTypesConfigApp }) => leafTypesConfigApp.leafTypes.leafTypesConfigDialog
+    const { editDialog, saveError, saving } = useSelector(
+        ({ leafTypesConfigApp }) => leafTypesConfigApp.leafTypes
     );
-
-    const [taskCategories, setTaskCategories] = useState([
-        {
-            id: 0,
-            name: "Ninguno"
-        }, {
-            id: 1,
-            name: "Transporte"
-        },
-        {
-            id: 2,
-            name: "Sigue al líder"
-        },
-        {
-            id: 3,
-            name: "Formación"
-        },
-    ]);
-
-    const {
-        control,
-        reset,
-        handleSubmit,
-        formState: { errors, isValid },
-    } = useForm({
-        mode: "onChange",
-        defaultValues,
-        resolver: yupResolver(schema),
-    });
-
-    const initDialog = useCallback(() => {
-        if (leafTypesConfigDialog.type === "edit" && leafTypesConfigDialog.data) {
-            reset({
-                ...leafTypesConfigDialog.data,
-                taskCategoryId: leafTypesConfigDialog.data.taskType || taskCategories[0].id,
-            });
-        }
-
-        if (leafTypesConfigDialog.type === "new") {
-            reset({
-                ...defaultValues,
-                taskCategoryId: taskCategories[0].id,
-            });
-        }
-    }, [leafTypesConfigDialog.data, leafTypesConfigDialog.type, reset, taskCategories]);
+    const [draft, setDraft] = useState(emptyDraft);
+    const errors = useMemo(() => validateTaskTemplateDraft(draft), [draft]);
+    const isValid = Object.keys(errors).length === 0;
 
     useEffect(() => {
-        if (leafTypesConfigDialog.props.open) {
-            initDialog();
+        if (!editDialog.open || !editDialog.template) {
+            return;
         }
-    }, [leafTypesConfigDialog.props.open, initDialog]);
 
-    function closeComposeDialog() {
-        return leafTypesConfigDialog.type === "edit"
-            ? dispatch(closeEditLeafTypesConfigDialog())
-            : dispatch(closeNewLeafTypesConfigDialog());
-    }
+        setDraft({
+            name: editDialog.template.name || "",
+            taskType: normalizeTaskTemplateType(editDialog.template.taskType) ?? "",
+        });
+    }, [editDialog.open, editDialog.template]);
 
-    function onSubmit(data) {
-        if (leafTypesConfigDialog.type === "new") {
-            dispatch(Actions.showMessage({ message: "Creando..." }));
-            dispatch(addNewLeafType(data));
-        } else {
-            dispatch(Actions.showMessage({ message: "Actualizando..." }));
-            dispatch(updateLeafType({ ...leafTypesConfigDialog.data, ...data }));
+    const closeDialog = () => {
+        if (!saving) {
+            dispatch(closeTaskTemplateDialog());
         }
-        closeComposeDialog();
-    }
+    };
+
+    const submit = async (event) => {
+        event.preventDefault();
+        if (!editDialog.template || !isValid) {
+            return;
+        }
+
+        try {
+            await dispatch(
+                updateTaskTemplate({
+                    id: editDialog.template.id,
+                    ...normalizeTaskTemplateDraft(draft),
+                })
+            ).unwrap();
+            dispatch(showMessage({ message: "Plantilla actualizada.", variant: "success" }));
+            dispatch(closeTaskTemplateDialog());
+        } catch (_error) {
+            // The request error remains visible inside the dialog so the draft is not lost.
+        }
+    };
 
     return (
         <Dialog
-            classes={{
-                paper: "m-24",
-            }}
-            {...leafTypesConfigDialog.props}
-            onClose={closeComposeDialog}
+            aria-labelledby="task-template-dialog-title"
             fullWidth
-            maxWidth="xs"
+            maxWidth="sm"
+            onClose={closeDialog}
+            open={editDialog.open}
         >
-            <AppBar position="static" elevation={0}>
-                <Toolbar className="flex w-full">
-                    <Typography variant="subtitle1" color="inherit">
-                        {leafTypesConfigDialog.type === "new" ? "Nuevo" : "Editar"}
+            <form aria-busy={saving} noValidate onSubmit={submit}>
+                <DialogTitle id="task-template-dialog-title">Editar plantilla de tarea</DialogTitle>
+                <DialogContent className="flex flex-col gap-16 pt-8">
+                    <Typography color="textSecondary" variant="body2">
+                        Los cambios modifican el catálogo compartido de algoritmos. No crean ni eliminan tareas
+                        ejecutadas.
                     </Typography>
-                </Toolbar>
-            </AppBar>
-            <form noValidate onSubmit={handleSubmit(onSubmit)} className="flex flex-col md:overflow-hidden">
-                <DialogContent classes={{ root: "p-24" }}>
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">account_circle</Icon>
-                        </div>
-                        <Controller
-                            control={control}
-                            name="name"
-                            render={({ field }) => (
-                                <TextField
-                                    {...field}
-                                    className="mb-24"
-                                    label="Nombre"
-                                    type="text"
-                                    error={!!errors.name}
-                                    helperText={errors?.name?.message}
-                                    variant="outlined"
-                                    required
-                                    fullWidth
-                                />
-                            )}
-                        />
-                    </div>
 
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">category</Icon>
-                        </div>
-                        <Controller
-                            control={control}
-                            name="description"
-                            render={({ field }) => (
-                                <TextField
-                                    {...field}
-                                    className="mb-24"
-                                    label="Descripción"
-                                    variant="outlined"
-                                    type="text"
-                                    fullWidth
-                                />
-                            )}
-                        />
-                    </div>
+                    {saveError ? (
+                        <Alert severity="error" role="alert">
+                            {saveError}
+                        </Alert>
+                    ) : null}
 
-                    <div className="flex">
-                        <div className="min-w-48 pt-20">
-                            <Icon color="action">category</Icon>
-                        </div>
+                    <TextField
+                        autoFocus
+                        disabled={saving}
+                        error={Boolean(errors.name)}
+                        fullWidth
+                        helperText={errors.name || `${draft.name.trim().length}/${TASK_TEMPLATE_NAME_LIMIT}`}
+                        inputProps={{ maxLength: TASK_TEMPLATE_NAME_LIMIT }}
+                        label="Nombre"
+                        onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+                        required
+                        value={draft.name}
+                    />
 
-                        <Controller
-                            name="taskCategoryId"
-                            control={control}
-                            render={({ field }) => (
-                                <TextField
-                                    {...field}
-                                    autoFocus
-                                    select
-                                    margin="dense"
-                                    label="Categoría"
-                                    className="w-full"
-                                    required
-                                >
-                                    {taskCategories.map((taskCategory) => (
-                                        <MenuItem value={taskCategory.id} key={taskCategory.id}>
-                                            {taskCategory.name}
-                                        </MenuItem>
-                                    ))}
-                                </TextField>
-                            )}
-                        />
-                    </div>
+                    <TextField
+                        disabled={saving}
+                        error={Boolean(errors.taskType)}
+                        fullWidth
+                        helperText={errors.taskType || "Algoritmo asociado a la plantilla."}
+                        label="Tipo de tarea"
+                        onChange={(event) =>
+                            setDraft((current) => ({
+                                ...current,
+                                taskType: event.target.value,
+                            }))
+                        }
+                        required
+                        select
+                        value={draft.taskType}
+                    >
+                        {TASK_TEMPLATE_TYPES.map((option) => (
+                            <MenuItem key={option.value} value={option.value}>
+                                {option.label}
+                            </MenuItem>
+                        ))}
+                    </TextField>
                 </DialogContent>
-
-                <GeneralDialogActionButtons dialogType={leafTypesConfigDialog.type} isValid={isValid} />
+                <DialogActions className="px-24 pb-24">
+                    <Button disabled={saving} onClick={closeDialog}>
+                        Cancelar
+                    </Button>
+                    <Button disabled={saving || !isValid} type="submit" variant="contained">
+                        {saving ? "Guardando…" : "Guardar cambios"}
+                    </Button>
+                </DialogActions>
             </form>
         </Dialog>
     );

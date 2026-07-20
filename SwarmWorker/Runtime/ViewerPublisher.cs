@@ -37,6 +37,11 @@ public sealed record ViewerPublishResult(
     bool Ready,
     string VideoCodec);
 
+public sealed record ViewerStopResult(
+    Guid SessionId,
+    Guid LeaseId,
+    bool Stopped);
+
 public interface IViewerPublisher
 {
     ViewerPublisherAvailability Availability { get; }
@@ -58,6 +63,11 @@ public interface IViewerPublisher
 
     Task ReleaseAllInputsAsync(CancellationToken cancellationToken);
 
+    Task<bool> StopLeaseAsync(
+        Guid sessionId,
+        Guid leaseId,
+        CancellationToken cancellationToken);
+
     Task StopSessionAsync(Guid sessionId, CancellationToken cancellationToken);
 }
 
@@ -70,6 +80,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     private const int NoSuchProcessError = 3;
     private const int MaximumUnexpectedExitRestarts = 3;
     private static readonly TimeSpan InputWriteTimeout = TimeSpan.FromSeconds(2);
+    private readonly record struct ViewerLeaseKey(Guid SessionId, Guid LeaseId);
 
     private sealed class ActivePublisher
     {
@@ -116,6 +127,7 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
     private readonly object _activeGate = new();
     private readonly Dictionary<Guid, ActivePublisher> _active = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sessionGates = new();
+    private readonly ConcurrentDictionary<ViewerLeaseKey, DateTimeOffset> _stoppedLeases = new();
     private static readonly JsonSerializerOptions InputSerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -228,6 +240,16 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
         await sessionGate.WaitAsync(cancellationToken);
         try
         {
+            var now = DateTimeOffset.UtcNow;
+            PruneStoppedLeases(now);
+            if (_stoppedLeases.ContainsKey(new ViewerLeaseKey(
+                    request.SessionId,
+                    request.Command.LeaseId)))
+            {
+                throw new InvalidOperationException(
+                    "The viewer lease was revoked before publishing could start.");
+            }
+
             ActivePublisher? existing;
             lock (_activeGate)
             {
@@ -321,6 +343,60 @@ public sealed class ExternalViewerPublisher : IViewerPublisher, IAsyncDisposable
                     publisher,
                     cancellationToken);
             }
+        }
+        finally
+        {
+            sessionGate.Release();
+        }
+    }
+
+    private void PruneStoppedLeases(DateTimeOffset now)
+    {
+        foreach (var pair in _stoppedLeases)
+        {
+            if (pair.Value <= now)
+            {
+                ((ICollection<KeyValuePair<ViewerLeaseKey, DateTimeOffset>>)_stoppedLeases)
+                    .Remove(pair);
+            }
+        }
+    }
+
+    public async Task<bool> StopLeaseAsync(
+        Guid sessionId,
+        Guid leaseId,
+        CancellationToken cancellationToken)
+    {
+        var sessionGate = SessionGate(sessionId);
+        await sessionGate.WaitAsync(cancellationToken);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            PruneStoppedLeases(now);
+            _stoppedLeases[new ViewerLeaseKey(sessionId, leaseId)] =
+                now + TimeSpan.FromMinutes(_options.MaximumLeaseMinutes + 1);
+
+            ActivePublisher? publisher = null;
+            lock (_activeGate)
+            {
+                if (_active.TryGetValue(sessionId, out var current)
+                    && current.Request.Command.LeaseId == leaseId)
+                {
+                    _active.Remove(sessionId);
+                    current.TryBeginStopping();
+                    publisher = current;
+                }
+            }
+
+            if (publisher is null)
+            {
+                return false;
+            }
+
+            await StopPublisherWithInputGateAsync(
+                publisher,
+                cancellationToken);
+            return true;
         }
         finally
         {

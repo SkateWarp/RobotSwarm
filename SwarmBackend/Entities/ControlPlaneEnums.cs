@@ -71,7 +71,8 @@ public enum WorkerCommandType
     EmergencyStop = 6,
     ResetEmergencyStop = 7,
     StopSession = 8,
-    SetViewerSource = 9
+    SetViewerSource = 9,
+    StopViewer = 10
 }
 
 public enum WorkerCommandState

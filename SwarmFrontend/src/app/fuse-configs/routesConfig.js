@@ -18,6 +18,7 @@ import TaskLogAppConfig from "../main/apps/GeeTS/TaskLog/TaskLogAppConfig";
 import BoothDashboardAppConfigGeeTS from "../main/apps/GeeTS/Dashboard/BoothDashboardAppConfig";
 import LeafSortingAppConfig from "../main/apps/GeeTS/LeafSorting/LeafSortingAppConfig";
 import RobotDetailAppConfig from "../main/apps/GeeTS/RobotDetail/RobotDetailAppConfig";
+import RobotGroupsAppConfig from "../main/apps/GeeTS/RobotGroups/RobotGroupsAppConfig";
 
 const isGtsProject =
     settingsConfig.layout.project === "GTS" || settingsConfig.layout.project === "GTS-swedish";
@@ -38,6 +39,7 @@ const routeConfigs = [
     LeafTypesAppConfig,
     TaskLogAppConfig,
     LeafSortingAppConfig,
+    RobotGroupsAppConfig,
     BoothDashboardAppConfigGeeTS,
     RobotDetailAppConfig,
 ];

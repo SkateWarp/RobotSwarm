@@ -9,6 +9,8 @@ namespace SwarmBackend.Services;
 
 public class RobotGroupService(DataContext context) : IRobotGroupService
 {
+    private const int MaximumNameLength = 80;
+
     public async Task<IEnumerable<RobotGroupResponse>> GetAll()
     {
         var groups = await context.RobotGroups
@@ -35,11 +37,17 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
 
     public async Task<Result<RobotGroupResponse>> Create(RobotGroupRequest request)
     {
+        var validation = await ValidateName(request.Name);
+        if (validation != null)
+        {
+            return new Result<RobotGroupResponse>(validation);
+        }
+
         var group = new RobotGroup
         {
-            Name = request.Name,
-            Description = request.Description,
-            DateCreated = DateTime.Now
+            Name = request.Name.Trim(),
+            Description = CleanDescription(request.Description),
+            DateCreated = DateTime.UtcNow
         };
 
         context.RobotGroups.Add(group);
@@ -56,8 +64,14 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
             return new Result<RobotGroupResponse>(new Exception("Grupo no encontrado"));
         }
 
-        group.Name = request.Name;
-        group.Description = request.Description;
+        var validation = await ValidateName(request.Name, id);
+        if (validation != null)
+        {
+            return new Result<RobotGroupResponse>(validation);
+        }
+
+        group.Name = request.Name.Trim();
+        group.Description = CleanDescription(request.Description);
 
         await context.SaveChangesAsync();
 
@@ -66,16 +80,36 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
 
     public async Task<Result<bool>> Delete(int id)
     {
-        var group = await context.RobotGroups.FindAsync(id);
+        var group = await context.RobotGroups
+            .Include(item => item.Robots)
+            .Include(item => item.TaskLogs)
+            .FirstOrDefaultAsync(item => item.Id == id);
         if (group == null)
         {
             return new Result<bool>(new Exception("Grupo no encontrado"));
         }
 
+        foreach (var robot in group.Robots)
+        {
+            robot.RobotGroupId = null;
+        }
+
+        group.TaskLogs.Clear();
         context.RobotGroups.Remove(group);
         await context.SaveChangesAsync();
 
         return true;
+    }
+
+    public async Task<IEnumerable<RobotResponse>> GetAvailableRobots()
+    {
+        return await context.Robots
+            .AsNoTracking()
+            .Include(robot => robot.Sensors)
+            .Where(robot => robot.Status != RobotStatus.Disabled)
+            .OrderBy(robot => robot.Name)
+            .Select(robot => RobotResponse.From(robot))
+            .ToListAsync();
     }
 
     public async Task<Result<RobotGroupResponse>> AddRobot(int groupId, AddRobotToGroupRequest request)
@@ -95,6 +129,11 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
             return new Result<RobotGroupResponse>(new Exception("Robot no encontrado"));
         }
 
+        if (robot.RobotGroupId == groupId)
+        {
+            return await GetById(groupId);
+        }
+
         if (robot.RobotGroupId != null)
         {
             if (!request.ForceTransfer)
@@ -104,12 +143,8 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
                         "El robot ya pertenece a un grupo. Use ForceTransfer=true para moverlo a este grupo."));
             }
 
-            // If force transfer is true and robot is in a different group, move it
-            if (robot.RobotGroupId != groupId)
-            {
-                robot.RobotGroupId = groupId;
-                await context.SaveChangesAsync();
-            }
+            robot.RobotGroupId = groupId;
+            await context.SaveChangesAsync();
         }
         else
         {
@@ -139,49 +174,6 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
         return await GetById(groupId);
     }
 
-    public async Task<Result<RobotGroupResponse>> AssignTask(int groupId, AssignTaskToGroupRequest request)
-    {
-        var group = await context.RobotGroups
-            .Include(x => x.Robots)
-            .FirstOrDefaultAsync(x => x.Id == groupId);
-
-        if (group == null)
-        {
-            return new Result<RobotGroupResponse>(new Exception("Grupo no encontrado"));
-        }
-
-        if (group.Robots.Count == 0)
-        {
-            return new Result<RobotGroupResponse>(new Exception("El grupo no tiene robots asignados"));
-        }
-
-        var template = await context.TaskTemplates.FindAsync(request.TaskTemplateId);
-        if (template == null)
-        {
-            return new Result<RobotGroupResponse>(new Exception("Plantilla de tarea no encontrada"));
-        }
-
-        foreach (var robot in group.Robots)
-        {
-            var task = new TaskLog
-            {
-
-                Robots = [],
-                TaskTemplateId = request.TaskTemplateId,
-                DateCreated = DateTime.Now,
-                Parameters = System.Text.Json.JsonDocument.Parse(request.Parameters.GetRawText())
-            };
-
-            context.TaskLogs.Add(task);
-
-            robot.Status = RobotStatus.Working;
-        }
-
-        await context.SaveChangesAsync();
-
-        return await GetById(groupId);
-    }
-
     public async Task<Result<RobotGroupStatusResponse>> GetRobotGroupStatus(int robotId)
     {
         var robot = await context.Robots
@@ -198,5 +190,31 @@ public class RobotGroupService(DataContext context) : IRobotGroupService
             GroupId: robot.RobotGroupId,
             GroupName: robot.RobotGroup?.Name
         );
+    }
+
+    private async Task<Exception?> ValidateName(string? name, int? currentGroupId = null)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return new Exception("El nombre del grupo es obligatorio");
+        }
+
+        var normalizedName = name.Trim();
+        if (normalizedName.Length > MaximumNameLength)
+        {
+            return new Exception($"El nombre no puede superar {MaximumNameLength} caracteres");
+        }
+
+        var normalizedForComparison = normalizedName.ToUpper();
+        var alreadyExists = await context.RobotGroups.AnyAsync(group =>
+            group.Id != currentGroupId && group.Name.ToUpper() == normalizedForComparison);
+        return alreadyExists
+            ? new Exception("Ya existe un grupo con ese nombre")
+            : null;
+    }
+
+    private static string? CleanDescription(string? description)
+    {
+        return string.IsNullOrWhiteSpace(description) ? null : description.Trim();
     }
 }

@@ -4,6 +4,12 @@ import { URL } from "app/constants/constants";
 import jwtService from "app/services/jwtService";
 
 const API_URL = URL.replace(/\/+$/, "");
+const VIEWER_CLOSE_TERMINAL_STATES = new Set(["Completed", "Failed", "Cancelled"]);
+
+const pause = (milliseconds) =>
+    new Promise((resolve) => {
+        window.setTimeout(resolve, milliseconds);
+    });
 
 const authHeaders = () => {
     const token = jwtService.getAccessToken();
@@ -83,6 +89,20 @@ const SimulationSessionService = {
         return response.data;
     },
 
+    async listTaskHistory({ offset = 0, limit = 25, type, state, outcome } = {}) {
+        const response = await axios.get(`${API_URL}/api/sessions/tasks/history`, {
+            headers: authHeaders(),
+            params: {
+                offset,
+                limit,
+                ...(type ? { type } : {}),
+                ...(state ? { state } : {}),
+                ...(outcome ? { outcome } : {}),
+            },
+        });
+        return response.data;
+    },
+
     async startTask(sessionId, type, parameters) {
         const response = await axios.post(
             `${API_URL}/api/sessions/${sessionId}/tasks`,
@@ -136,6 +156,64 @@ const SimulationSessionService = {
             headers: authHeaders(),
         });
         return response.data;
+    },
+
+    async closeViewerLease(sessionId, leaseId) {
+        const response = await axios.delete(`${API_URL}/api/sessions/${sessionId}/viewer-lease/${leaseId}`, {
+            headers: authHeaders(),
+        });
+        return {
+            ...response.data,
+            accepted: response.status === 202,
+        };
+    },
+
+    async waitForViewerClose(
+        sessionId,
+        leaseId,
+        { maxAttempts = 8, pollIntervalMs = 1250, sleep = pause } = {}
+    ) {
+        const attempts = Math.max(1, Math.floor(maxAttempts));
+        let lastStatus = null;
+        let lastError = null;
+
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+            try {
+                // Each check depends on the previous result; parallel requests could return out of order.
+                // eslint-disable-next-line no-await-in-loop
+                const response = await axios.get(
+                    `${API_URL}/api/sessions/${sessionId}/viewer-lease/${leaseId}`,
+                    { headers: authHeaders() }
+                );
+                lastStatus = response.data;
+                lastError = null;
+                const state = lastStatus?.closeCommand?.state;
+                if (VIEWER_CLOSE_TERMINAL_STATES.has(state)) {
+                    return {
+                        state,
+                        command: lastStatus.closeCommand,
+                        status: lastStatus,
+                        timedOut: false,
+                    };
+                }
+            } catch (requestError) {
+                lastError = requestError;
+            }
+
+            if (attempt + 1 < attempts) {
+                // Keep the polling rate bounded instead of filling the backend queue.
+                // eslint-disable-next-line no-await-in-loop
+                await sleep(pollIntervalMs);
+            }
+        }
+
+        return {
+            state: "TimedOut",
+            command: lastStatus?.closeCommand || null,
+            status: lastStatus,
+            error: lastError,
+            timedOut: true,
+        };
     },
 
     createRealtimeConnection() {

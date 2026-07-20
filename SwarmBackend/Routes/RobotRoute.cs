@@ -1,5 +1,7 @@
-﻿using Microsoft.AspNetCore.Authorization;
+﻿using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
+using SwarmBackend.Entities;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
 using SwarmBackend.Services;
@@ -38,6 +40,12 @@ public static class RobotRoute
         return accountIdClaim != null ? int.Parse(accountIdClaim.Value) : null;
     }
 
+    private static Role? GetRole(HttpContext context)
+    {
+        var roleClaim = context.User.FindFirst(ClaimTypes.Role);
+        return roleClaim != null && Enum.TryParse<Role>(roleClaim.Value, out var role) ? role : null;
+    }
+
     public static async Task<IResult> Create(RobotRequest request, IRobotService robotService, IHubContext<RobotHub> hubContext, HttpContext context)
     {
         var accountId = GetAccountId(context);
@@ -46,27 +54,28 @@ public static class RobotRoute
             return Results.Unauthorized();
         }
 
-        request = request with { AccountId = accountId };
-        var response = await robotService.Create(request);
-
-        // Send notification using SignalR
-        await hubContext.Clients.All.SendAsync("RobotCreated", response);
-
-        return Results.Ok(response);
+        var response = await robotService.Create(request, accountId.Value);
+        return await response.Match(
+            async robot =>
+            {
+                await hubContext.Clients.All.SendAsync("RobotCreated", robot);
+                return (IResult)Results.Ok(robot);
+            },
+            error => Task.FromResult(BadRequest(error)));
     }
 
     public static async Task<IResult> GetAll(IRobotService robotService, HttpContext context, bool? isPublic = null)
     {
         var accountId = GetAccountId(context);
-        var response = await robotService.GetAll(accountId, isPublic);
+        var response = await robotService.GetAll(accountId, isPublic, GetRole(context));
         return Results.Ok(response);
     }
 
     public static async Task<IResult> GetById(int id, IRobotService robotService, HttpContext context)
     {
         var accountId = GetAccountId(context);
-        var response = await robotService.GetById(id, accountId);
-        return response.Match(Results.Ok, Results.BadRequest);
+        var response = await robotService.GetById(id, accountId, GetRole(context));
+        return response.Match(Results.Ok, BadRequest);
     }
 
     public static async Task<IResult> Update(int id, RobotRequest request, IRobotService robotService, HttpContext context)
@@ -77,8 +86,14 @@ public static class RobotRoute
             return Results.Unauthorized();
         }
 
-        var response = await robotService.Update(id, request, accountId);
-        return response.Match(Results.Ok, Results.BadRequest);
+        var role = GetRole(context);
+        if (!role.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        var response = await robotService.Update(id, request, accountId.Value, role.Value);
+        return response.Match(Results.Ok, BadRequest);
     }
 
     public static async Task<IResult> Cancel(int id, IRobotService service, HttpContext context)
@@ -89,7 +104,18 @@ public static class RobotRoute
             return Results.Unauthorized();
         }
 
-        var response = await service.Cancel(id);
-        return response.Match(Results.Ok, Results.BadRequest);
+        var role = GetRole(context);
+        if (!role.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        var response = await service.Cancel(id, accountId.Value, role.Value);
+        return response.Match(Results.Ok, BadRequest);
+    }
+
+    private static IResult BadRequest(Exception error)
+    {
+        return Results.BadRequest(new { message = error.Message });
     }
 }

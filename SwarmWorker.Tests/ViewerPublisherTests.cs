@@ -149,6 +149,27 @@ public sealed class ViewerPublisherTests
                 await publisher.RefreshAvailabilityAsync(CancellationToken.None);
                 var sessionId = Guid.NewGuid();
                 var sourceId = $"scene-{sessionId:N}";
+                var revokedBeforeStart = new ViewerSourceCommand(
+                    Guid.NewGuid(),
+                    DateTimeOffset.UtcNow.AddMinutes(1),
+                    PublishToken,
+                    ViewerSourceKind.Scene,
+                    null,
+                    sourceId,
+                    $"session/{sessionId:N}/{sourceId}");
+                Assert.False(await publisher.StopLeaseAsync(
+                    sessionId,
+                    revokedBeforeStart.LeaseId,
+                    CancellationToken.None));
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    publisher.PublishAsync(
+                        new ViewerPublishRequest(
+                            sessionId,
+                            "container-1",
+                            SessionResourceNames.Container(sessionId),
+                            revokedBeforeStart),
+                        CancellationToken.None));
+
                 var command = new ViewerSourceCommand(
                     Guid.NewGuid(),
                     DateTimeOffset.UtcNow.AddMinutes(1),
@@ -193,6 +214,33 @@ public sealed class ViewerPublisherTests
                             Guid.NewGuid(),
                             new ViewerInputEvent("keyDown", Code: "KeyW")),
                         CancellationToken.None));
+
+                var replacementCommand = new ViewerSourceCommand(
+                    Guid.NewGuid(),
+                    DateTimeOffset.UtcNow.AddMinutes(1),
+                    PublishToken,
+                    ViewerSourceKind.Scene,
+                    null,
+                    sourceId,
+                    $"session/{sessionId:N}/{sourceId}");
+                await publisher.PublishAsync(
+                    new ViewerPublishRequest(
+                        sessionId,
+                        "container-1",
+                        SessionResourceNames.Container(sessionId),
+                        replacementCommand),
+                    CancellationToken.None);
+
+                Assert.False(await publisher.StopLeaseAsync(
+                    sessionId,
+                    command.LeaseId,
+                    CancellationToken.None));
+                await publisher.SendInputAsync(
+                    new ViewerInputEnvelope(
+                        sessionId,
+                        replacementCommand.LeaseId,
+                        new ViewerInputEvent("releaseAll")),
+                    CancellationToken.None);
 
                 await publisher.StopSessionAsync(sessionId, CancellationToken.None);
                 Assert.Equal(
