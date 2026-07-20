@@ -22,6 +22,7 @@ a205996dbba564115dc972ed3936393e8b103fb3a7315ca77744ccd5794e44eb  ./figura-06-tr
 73a9a6b3a3b5ccbd6adbd7cb04f05dce7aad1cede91ab3d726db9cd0063d7acf  ./figura-10-convergencia-tras-aviso-n10.png
 e20e803ab3c9eff7e630aa3a30c96d6b3274fe267743a51cfafdaa893d2e6ae7  ./github-actions-tls-expired-20260720.txt
 0e4db42b5e06221960513f13095808a85bab5267304ddc04eb39fd13a5c6d89f  ./github-actions-tls-recovered-20260720.txt
+a06cbc3b2412d2acfc75801a2bb87e6a28902a7b040df2a3838d4451517bd4e2  ./gpu-deploy-xprop-headless-20260720.txt
 7c0ef46e96499bb7fbaaa043a9c200fb3b4cf65f5a4cf1f267e82120bbc11982  ./predeploy-validation-summary.txt
 b98074c6f23168fbd8f50d5dd089353d8988904a3946f5860d3ed9202a833b4a  ./smoke-publicador-gpu-local-manifest.sha256
 0b5baba439f97871af79b721360c7ca33708200a53bdb3a44032cdc4437d4ad8  ./smoke-publicador-gpu-local.json
