@@ -186,6 +186,15 @@ public sealed class ViewerLeaseCloseTests
     {
         await using var context = TestDataContext.Create();
         var seeded = await SeedLease(context);
+        context.Accounts.Add(new Account
+        {
+            Id = seeded.Owner.Id + 1,
+            FirstName = "Other",
+            LastName = "Owner",
+            Email = $"viewer-other-{Guid.NewGuid():N}@example.test",
+            Enabled = true
+        });
+        await context.SaveChangesAsync();
         var workerHub = new RecordingHubContext<WorkerHub>();
         var result = await SessionControlRoute.CloseViewerLease(
             seeded.Session.Id,
@@ -348,7 +357,12 @@ public sealed class ViewerLeaseCloseTests
         return new DefaultHttpContext
         {
             User = new ClaimsPrincipal(new ClaimsIdentity(
-                new[] { new Claim("id", accountId.ToString()) },
+                new[]
+                {
+                    new Claim("id", accountId.ToString()),
+                    new Claim(ClaimTypes.Role, Role.User.ToString()),
+                    new Claim("account_version", "0")
+                },
                 "test"))
         };
     }

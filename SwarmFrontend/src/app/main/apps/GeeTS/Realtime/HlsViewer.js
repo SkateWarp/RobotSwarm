@@ -469,6 +469,8 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
     const lastPointerMoveRef = useRef(0);
     const lastPointerPositionRef = useRef({ x: 0.5, y: 0.5 });
     const controlWasActiveRef = useRef(false);
+    const fullscreenEscapeRef = useRef(false);
+    const viewerFullscreenRef = useRef(false);
     const mountedRef = useRef(true);
     const onInputRef = useRef(onInput);
     onInputRef.current = onInput;
@@ -568,6 +570,9 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
     useEffect(() => {
         const updateFullscreenState = () => {
             const active = isViewerFullscreen(containerRef.current);
+            const wasActive = viewerFullscreenRef.current;
+            viewerFullscreenRef.current = active;
+            if (wasActive && !active) releasePressedInputs();
             setIsFullscreen(active);
             if (!active) setFullscreenError("");
         };
@@ -586,7 +591,7 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
             document.removeEventListener("fullscreenerror", showFullscreenError);
             document.removeEventListener("webkitfullscreenerror", showFullscreenError);
         };
-    }, []);
+    }, [releasePressedInputs]);
 
     useEffect(() => {
         if (!url || !token) return undefined;
@@ -833,6 +838,25 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
 
     const keyInput = (type) => (event) => {
         if (!interactionEnabled || !isViewerKeyCode(event.code)) return;
+        const leavesViewerFullscreen = event.code === "Escape" && isViewerFullscreen(containerRef.current);
+        const finishesFullscreenEscape =
+            event.code === "Escape" && type === "keyUp" && fullscreenEscapeRef.current;
+        const repeatsFullscreenEscape =
+            event.code === "Escape"
+            && type === "keyDown"
+            && event.repeat
+            && fullscreenEscapeRef.current;
+        if (repeatsFullscreenEscape) {
+            event.preventDefault();
+            return;
+        }
+        if (leavesViewerFullscreen || finishesFullscreenEscape) {
+            fullscreenEscapeRef.current = type === "keyDown";
+            if (type === "keyDown") releasePressedInputs();
+            else event.preventDefault();
+            return;
+        }
+        if (event.code === "Escape" && type === "keyDown") fullscreenEscapeRef.current = false;
         event.preventDefault();
         if (type === "keyDown") {
             if (event.repeat) return;

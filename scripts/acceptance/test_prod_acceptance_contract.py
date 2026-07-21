@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -81,6 +82,180 @@ def lease():
 
 
 class ProductionAcceptanceContractTests(unittest.TestCase):
+    @staticmethod
+    def race_user(start_status, start_body):
+        user = mock.Mock()
+
+        def call(method, _path, **_kwargs):
+            if method == "POST":
+                return (
+                    DRIVER.HttpResult(start_status, {}, b"", 4),
+                    start_body,
+                )
+            if method == "DELETE":
+                return DRIVER.HttpResult(200, {}, b"", 5), None
+            raise AssertionError(f"unexpected method: {method}")
+
+        user.call.side_effect = call
+        return user
+
+    def test_same_session_race_accepts_a_task_that_commits_before_stop(self):
+        user = self.race_user(
+            202,
+            {
+                "task": {
+                    "id": "6bfaf287-c9e1-4f03-9b41-fbda57c28bb6",
+                }
+            },
+        )
+
+        start_status, stop_status, winner = (
+            DRIVER.race_task_start_with_session_stop(user, "session")
+        )
+
+        self.assertEqual((202, 200, "task_committed_first"), (
+            start_status,
+            stop_status,
+            winner,
+        ))
+        post_call = next(
+            call for call in user.call.call_args_list if call.args[0] == "POST"
+        )
+        self.assertTrue(post_call.kwargs["retry_transient_conflict"])
+        self.assertTrue(post_call.kwargs["idempotent"])
+
+    def test_same_session_race_accepts_stop_winning_with_known_conflict(self):
+        user = self.race_user(
+            409,
+            {"message": "The session cannot start a task in the current state."},
+        )
+
+        result = DRIVER.race_task_start_with_session_stop(user, "session")
+
+        self.assertEqual((409, 200, "stop_committed_first"), result)
+
+    def test_same_session_race_rejects_an_unexplained_conflict(self):
+        user = self.race_user(
+            409,
+            {"code": "serialization_conflict", "retryable": True},
+        )
+
+        with self.assertRaisesRegex(
+            DRIVER.HarnessFailure,
+            "race_task_conflict_unexpected",
+        ):
+            DRIVER.race_task_start_with_session_stop(user, "session")
+
+    def test_retry_conflict_reuses_the_same_idempotency_key(self):
+        report = DRIVER.Report()
+        transport = DRIVER.Transport(report, timeout=1.0)
+        conflict = DRIVER.HttpResult(
+            409,
+            {},
+            json.dumps(
+                {
+                    "code": "serialization_conflict",
+                    "retryable": True,
+                    "message": "Retry the command.",
+                }
+            ).encode(),
+            5,
+        )
+        accepted = DRIVER.HttpResult(202, {}, b"{}", 7)
+
+        with mock.patch.object(
+            transport,
+            "_raw_with_idempotency",
+            side_effect=[conflict, accepted],
+        ) as request, mock.patch.object(DRIVER.time, "sleep") as sleep:
+            result, _ = transport.json_call(
+                "POST",
+                "/api/sessions/example/tasks",
+                actor="user_a",
+                target="tasks_self",
+                name="start_parallel_task",
+                expected={202},
+                payload={"type": "Figure", "parameters": {}},
+                idempotent=True,
+                retry_transient_conflict=True,
+            )
+
+        self.assertEqual(202, result.status)
+        self.assertEqual(2, request.call_count)
+        first_key = request.call_args_list[0].kwargs["idempotency_key"]
+        second_key = request.call_args_list[1].kwargs["idempotency_key"]
+        self.assertEqual(first_key, second_key)
+        self.assertTrue(first_key)
+        sleep.assert_called_once_with(DRIVER.COMMAND_RETRY_DELAYS_SECONDS[0])
+        self.assertEqual(1, len(report.data["idempotency_retries"]))
+
+    def test_retry_conflict_accepts_the_rolling_deploy_message(self):
+        legacy = DRIVER.HttpResult(
+            409,
+            {},
+            json.dumps({"message": DRIVER.RETRY_CONFLICT_MESSAGE}).encode(),
+            5,
+        )
+
+        self.assertTrue(DRIVER.Transport._is_retry_conflict(legacy))
+
+    def test_unrelated_conflict_is_not_retried(self):
+        report = DRIVER.Report()
+        transport = DRIVER.Transport(report, timeout=1.0)
+        conflict = DRIVER.HttpResult(
+            409,
+            {},
+            b'{"message":"The session already has an active task."}',
+            5,
+        )
+
+        with mock.patch.object(
+            transport, "_raw_with_idempotency", return_value=conflict
+        ) as request, mock.patch.object(DRIVER.time, "sleep") as sleep:
+            with self.assertRaises(DRIVER.HarnessFailure):
+                transport.json_call(
+                    "POST",
+                    "/api/sessions/example/tasks",
+                    actor="user_a",
+                    target="tasks_self",
+                    name="start_parallel_task",
+                    expected={202},
+                    payload={"type": "Figure", "parameters": {}},
+                    idempotent=True,
+                    retry_transient_conflict=True,
+                )
+
+        self.assertEqual(1, request.call_count)
+        sleep.assert_not_called()
+
+    def test_other_idempotent_commands_do_not_auto_retry_transient_conflicts(self):
+        report = DRIVER.Report()
+        transport = DRIVER.Transport(report, timeout=1.0)
+        conflict = DRIVER.HttpResult(
+            409,
+            {},
+            b'{"code":"serialization_conflict","retryable":true}',
+            5,
+        )
+
+        with mock.patch.object(
+            transport, "_raw_with_idempotency", return_value=conflict
+        ) as request, mock.patch.object(DRIVER.time, "sleep") as sleep:
+            with self.assertRaises(DRIVER.HarnessFailure):
+                transport.json_call(
+                    "PATCH",
+                    "/api/sessions/example/fleet",
+                    actor="user_a",
+                    target="session_self",
+                    name="update_fleet",
+                    expected={202},
+                    payload={"robotCount": 5},
+                    idempotent=True,
+                )
+
+        self.assertEqual(1, request.call_count)
+        sleep.assert_not_called()
+
     def test_uncertain_creation_is_reconciled_after_a_late_commit(self):
         session_id = "6bfaf287-c9e1-4f03-9b41-fbda57c28bb6"
         listings = [[], [{
@@ -238,6 +413,28 @@ class ProductionAcceptanceContractTests(unittest.TestCase):
 
         self.assertEqual("viewer_playlist_timeout", raised.exception.code)
         self.assertEqual(0, transport.raw_calls)
+
+    def test_fast_figure_uses_recorded_intervals_when_first_poll_misses_running(self):
+        tasks = {
+            "figure": {"id": "figure", "state": "Completed"},
+            "follow": {"id": "follow", "state": "Running"},
+        }
+
+        def read_sample(_barrier, _user, _session_id, task_id):
+            return tasks[task_id]
+
+        with mock.patch.object(DRIVER, "read_task_synchronized", side_effect=read_sample):
+            figure, follow, sampled_together = DRIVER.wait_figure_while_following(
+                {"user_a": mock.Mock(), "user_b": mock.Mock()},
+                {"user_a": "session-a", "user_b": "session-b"},
+                {"user_a": "figure", "user_b": "follow"},
+                1.0,
+                0.01,
+            )
+
+        self.assertEqual("Completed", figure["state"])
+        self.assertEqual("Running", follow["state"])
+        self.assertFalse(sampled_together)
 
 
 if __name__ == "__main__":

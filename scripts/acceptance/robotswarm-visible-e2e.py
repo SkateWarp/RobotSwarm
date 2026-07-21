@@ -60,6 +60,8 @@ DEFAULT_BINDING_KEY = Path("/tmp/robotswarm-e2e-binding.key")
 DEFAULT_API_HOST = "robot.zerav.la"
 POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
 DEFAULT_PORTS = {"A": 9332, "B": 9333}
+SCENE_PIXEL_THRESHOLD = 32
+MIN_SCENE_DIFFERENCE_RATIO = 0.00075
 
 LOGIN_EMAIL = 'input[name="email"]'
 LOGIN_PASSWORD = 'input[name="password"]'
@@ -90,6 +92,22 @@ UI_OUTCOMES = {
     "Cancelado": "Cancelled",
 }
 
+
+def pixel_difference_ratio(
+    left_pixels: Any,
+    right_pixels: Any,
+    threshold: int = SCENE_PIXEL_THRESHOLD,
+) -> float:
+    """Measure structural changes while ignoring small encoder fluctuations."""
+    if len(left_pixels) != len(right_pixels) or len(left_pixels) == 0:
+        raise ValueError("The image samples must have the same non-zero size")
+
+    changed = 0
+    for left, right in zip(left_pixels, right_pixels):
+        if max(abs(int(a) - int(b)) for a, b in zip(left, right)) > threshold:
+            changed += 1
+    return changed / len(left_pixels)
+
 SESSION_SLOT_STATES = {"Queued", "Provisioning", "Ready", "Active", "Paused", "Stopping"}
 
 
@@ -99,6 +117,29 @@ class DriverError(RuntimeError):
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_backend_time(value: Any, field: str) -> dt.datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise DriverError(f"The backend task {field} timestamp is invalid")
+    match = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,7}))?(Z|[+-]\d{2}:\d{2})?",
+        value,
+    )
+    if match is None:
+        raise DriverError(f"The backend task {field} timestamp is invalid")
+    base, fraction, zone = match.groups()
+    microseconds = (fraction or "").ljust(7, "0")[:6]
+    # Npgsql stores these UTC values as timestamp-without-time-zone, so
+    # System.Text.Json legitimately omits the suffix on this response.
+    normalized_zone = "+00:00" if zone in (None, "Z") else zone
+    try:
+        parsed = dt.datetime.fromisoformat(f"{base}.{microseconds}{normalized_zone}")
+    except ValueError as exc:
+        raise DriverError(f"The backend task {field} timestamp is invalid") from exc
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def clean_url(value: str) -> str:
@@ -371,6 +412,11 @@ def run_interruptible_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        # Windows PowerShell can still write localized text in its OEM code page.
+        # The helpers return ASCII JSON, so replacing unrelated bytes keeps that
+        # contract readable without making the capture depend on the host locale.
+        errors="replace",
         start_new_session=True,
     )
 
@@ -622,6 +668,8 @@ class RobotSwarmUi:
         self.stop_event = stop_event
         self.create_requested = False
         self.created_session = False
+        self.started_task_session_id: str | None = None
+        self.started_task_id: str | None = None
 
     def raise_if_interrupted(self) -> None:
         if self.stop_event.is_set():
@@ -688,7 +736,7 @@ class RobotSwarmUi:
     def click_button(self, text: str) -> None:
         point = self.cdp.evaluate(self._text_element_point_expression("button", text))
         if not isinstance(point, dict):
-            raise DriverError(f"Button is missing or disabled: {text}")
+            raise DriverError(f"Button is missing, disabled, or covered: {text}")
         self._mouse_click(float(point["x"]), float(point["y"]))
 
     def _mouse_click(self, x: float, y: float) -> None:
@@ -740,9 +788,44 @@ class RobotSwarmUi:
                     }})()
                 """
                 self.wait_js(selected_expression, 8, f"selected option {option_text}")
+                closed_expression = f"""
+                    (() => {{
+                        const labelId = {json.dumps(label_id)};
+                        const control = [...document.querySelectorAll('[aria-labelledby]')]
+                            .find(item => (item.getAttribute('aria-labelledby') || '')
+                                .split(/\\s+/).includes(labelId));
+                        if (!control || control.getAttribute('aria-expanded') === 'true') return false;
+                        const blocksPointer = element => {{
+                            const style = getComputedStyle(element);
+                            const box = element.getBoundingClientRect();
+                            return style.display !== 'none'
+                                && style.visibility !== 'hidden'
+                                && style.pointerEvents !== 'none'
+                                && box.width > 0
+                                && box.height > 0;
+                        }};
+                        return ![...document.querySelectorAll(
+                            '[role="listbox"], .MuiMenu-root, .MuiPopover-root, '
+                            + '.MuiModal-root, .MuiBackdrop-root'
+                        )].some(blocksPointer);
+                    }})()
+                """
+                self.wait_js(
+                    closed_expression,
+                    8,
+                    f"closed option menu {option_text}",
+                )
                 return
             time.sleep(0.2)
         raise DriverError(f"Material UI option did not open: {option_text}")
+
+    def wait_clickable_button(self, text: str, timeout: float = 8) -> None:
+        expression = self._text_element_point_expression("button", text)
+        self.wait_js(
+            f"Boolean({expression})",
+            timeout,
+            f"uncovered button {text}",
+        )
 
     def select_task_type(self, task_type: str) -> None:
         """Choose one of the task cards exposed as an accessible radio."""
@@ -780,7 +863,11 @@ class RobotSwarmUi:
                 if (!element || element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
                 element.scrollIntoView({{block: 'center'}});
                 const box = element.getBoundingClientRect();
-                return {{x: box.left + box.width / 2, y: box.top + box.height / 2}};
+                const x = box.left + box.width / 2;
+                const y = box.top + box.height / 2;
+                const hit = document.elementFromPoint(x, y);
+                if (!hit || !element.contains(hit)) return false;
+                return {{x, y}};
             }})()
         """
 
@@ -917,12 +1004,12 @@ class RobotSwarmUi:
                     || null;
                 const visibleAlerts = [...document.querySelectorAll('[role="alert"]')]
                     .filter(item => item.offsetParent !== null)
-                    .map(item => (item.textContent || '').replace(/\s+/g, ' ').trim());
+                    .map(item => (item.textContent || '').replace(/\\s+/g, ' ').trim());
                 if (!viewer || !video) return null;
                 const box = viewer.getBoundingClientRect();
                 return {
                     status: (status?.textContent || '').trim(),
-                    fps: (fps?.textContent || '').trim(),
+                    fps: (fps?.getAttribute('aria-label') || fps?.textContent || '').trim(),
                     hlsInteractive: !document.querySelector('[data-testid="whep-fallback-note"]'),
                     controlText: (control?.textContent || '').trim(),
                     controlDisabled: Boolean(control?.disabled),
@@ -949,7 +1036,8 @@ class RobotSwarmUi:
             """
                 (() => {
                     const status = document.querySelector('[data-testid="viewer-status"]')?.textContent.trim();
-                    const fps = document.querySelector('[data-testid="viewer-fps"]')?.textContent.trim() || '';
+                    const fpsChip = document.querySelector('[data-testid="viewer-fps"]');
+                    const fps = (fpsChip?.getAttribute('aria-label') || fpsChip?.textContent || '').trim();
                     const control = document.querySelector('[aria-label="Activar control interactivo"]');
                     return status === 'En vivo' && /^Video \\d+(?:\\.\\d+)? FPS$/.test(fps)
                         && control && !control.disabled
@@ -1089,12 +1177,41 @@ class RobotSwarmUi:
     def _hash_distance(left: str, right: str) -> int:
         return bin(int(left, 16) ^ int(right, 16)).count("1")
 
+    @staticmethod
+    def _scene_difference(left: Path, right: Path) -> float:
+        with Image.open(left) as left_image, Image.open(right) as right_image:
+            left_rgb = left_image.convert("RGB")
+            right_rgb = right_image.convert("RGB")
+            if left_rgb.size != right_rgb.size:
+                raise DriverError("The synchronized private scenes have different dimensions")
+            return pixel_difference_ratio(list(left_rgb.getdata()), list(right_rgb.getdata()))
+
     def _require_control_healthy(self, gesture: str) -> dict[str, Any]:
         time.sleep(0.25)
         state = self.viewer_state()
         if state.get("controlText") != "Control activo" or state.get("alerts"):
             raise DriverError(f"Interactive control became unhealthy after {gesture}")
         return {"dispatched": True, "controlHealthyAfter": True}
+
+    def enable_viewer_control(self) -> None:
+        selector = '[aria-label="Activar control interactivo"]'
+        self.wait_js(
+            f"""
+                (() => {{
+                    const button = document.querySelector({json.dumps(selector)});
+                    return button && !button.disabled
+                        && button.getAttribute('aria-disabled') !== 'true';
+                }})()
+            """,
+            30,
+            "interactive viewer control authorization",
+        )
+        self.click_selector(selector, "interactive viewer control")
+        self.wait_js(
+            "Boolean(document.querySelector('[aria-label=\"Desactivar control interactivo\"]'))",
+            20,
+            "interactive viewer grant",
+        )
 
     def exercise_interaction(self, output_dir: Path, run_id: str, label: str) -> dict[str, Any]:
         before_state = self.require_interactive_hls()
@@ -1120,12 +1237,7 @@ class RobotSwarmUi:
         last_y = 0.0
         gesture_checks: dict[str, dict[str, Any]] = {}
         try:
-            self.click_button("Interactuar")
-            self.wait_js(
-                "document.querySelector('[aria-label=\"Desactivar control interactivo\"]')?.textContent.includes('Control activo')",
-                20,
-                "interactive viewer grant",
-            )
+            self.enable_viewer_control()
             control_enabled = True
             rect = self.video_content_rect()
             start_x = rect["x"] + rect["width"] * 0.42
@@ -1341,20 +1453,80 @@ class RobotSwarmUi:
             ))
         return result
 
+    def _task_start_baseline(self) -> tuple[str, set[str]]:
+        sessions = self._occupying_sessions()
+        if len(sessions) != 1:
+            raise DriverError("Task start requires exactly one owned simulation session")
+        session_id = sessions[0]["id"]
+        tasks = self._task_api_request(session_id)
+        return session_id, {task["id"] for task in tasks}
+
+    def _wait_for_new_task(
+        self,
+        session_id: str,
+        previous_ids: set[str],
+        expected_type: str,
+        timeout: float = 30,
+    ) -> dict[str, Any]:
+        def reconcile(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+            created = [task for task in tasks if task["id"] not in previous_ids]
+            if len(created) > 1:
+                raise DriverError("The UI created more than one task from a single start click")
+            if not created:
+                return None
+            task = created[0]
+            if task.get("type") != expected_type:
+                raise DriverError("The UI created a different task than the one selected")
+            self.started_task_id = task["id"]
+            return {
+                "type": task["type"],
+                "state": task["state"],
+                "observedAt": utc_now(),
+                "verifiedBy": "authenticated-task-list",
+            }
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.raise_if_interrupted()
+            accepted = reconcile(self._task_api_request(session_id))
+            if accepted is not None:
+                return accepted
+            time.sleep(0.2)
+        self.raise_if_interrupted()
+        accepted = reconcile(self._task_api_request(session_id))
+        if accepted is not None:
+            return accepted
+        raise DriverError("The start click did not create a task in the backend")
+
+    def _start_selected_task(
+        self,
+        expected_type: str,
+        start_barrier: threading.Barrier,
+    ) -> tuple[float, dict[str, Any]]:
+        session_id, previous_ids = self._task_start_baseline()
+        self.wait_clickable_button(START_TASK_BUTTON)
+        try:
+            start_barrier.wait(timeout=30)
+        except threading.BrokenBarrierError as exc:
+            raise DriverError(
+                f"Parallel task-start barrier was broken before {expected_type} click"
+            ) from exc
+        click_started = time.monotonic()
+        self.click_button(START_TASK_BUTTON)
+        accepted = self._wait_for_new_task(session_id, previous_ids, expected_type)
+        self.started_task_session_id = session_id
+        return click_started, accepted
+
     def start_figure_triangle(self, start_barrier: threading.Barrier) -> dict[str, Any]:
         self.select_task_type("Figure")
         self.wait_js("Boolean(document.getElementById('formation-type-label'))", 10, "figure controls")
         self.select_option("formation-type-label", "Triángulo")
-        try:
-            start_barrier.wait(timeout=30)
-        except threading.BrokenBarrierError as exc:
-            raise DriverError("Parallel task-start barrier was broken before Figure click") from exc
-        click_started = time.monotonic()
-        self.click_button(START_TASK_BUTTON)
+        click_started, accepted = self._start_selected_task("Figure", start_barrier)
         return {
             "requested": "Figure",
             "parameters": {"formation": "triangle"},
             "clickedAt": utc_now(),
+            "backendAcceptance": accepted,
             "_clickMonotonic": click_started,
         }
 
@@ -1362,16 +1534,12 @@ class RobotSwarmUi:
         self.select_task_type("FollowLeader")
         self.wait_js("Boolean(document.getElementById('leader-mode-label'))", 10, "leader controls")
         self.select_option("leader-mode-label", "Ocho")
-        try:
-            start_barrier.wait(timeout=30)
-        except threading.BrokenBarrierError as exc:
-            raise DriverError("Parallel task-start barrier was broken before FollowLeader click") from exc
-        click_started = time.monotonic()
-        self.click_button(START_TASK_BUTTON)
+        click_started, accepted = self._start_selected_task("FollowLeader", start_barrier)
         return {
             "requested": "FollowLeader",
             "parameters": {"leaderMode": "figure8"},
             "clickedAt": utc_now(),
+            "backendAcceptance": accepted,
             "_clickMonotonic": click_started,
         }
 
@@ -1422,7 +1590,7 @@ class RobotSwarmUi:
     def show_released_session(self) -> dict[str, Any]:
         result = self.cdp.evaluate(f"""
             (() => {{
-                const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
                 const button = [...document.querySelectorAll('button')]
                     .find(item => normalize(item.textContent) === {json.dumps(CREATE_BUTTON)}
                         && item.offsetParent !== null);
@@ -1621,6 +1789,7 @@ class RobotSwarmUi:
                     document.querySelectorAll(
                         'input[type="password"], input[type="email"], input[type="search"], '
                         + 'input[name="email"], input[aria-label="Search"], .email, .username, '
+                        + '[data-sensitive], '
                         + 'button[aria-label="Abrir menú de usuario"] .MuiTypography-root, '
                         + 'button[aria-label="Abrir menú de usuario"] .MuiAvatar-root, '
                         + '.user .avatar'
@@ -1731,6 +1900,108 @@ class RobotSwarmUi:
         if not isinstance(status, int) or status not in accepted:
             raise DriverError("The authenticated session cleanup request failed")
         return response.get("body")
+
+    def _task_api_request(self, session_id: str) -> list[dict[str, Any]]:
+        """Read task state with the browser token while keeping it inside Chrome."""
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            session_id,
+            flags=re.I,
+        ):
+            raise DriverError("The task inventory received an invalid session identifier")
+
+        endpoint = f"https://{DEFAULT_API_HOST}/api/sessions/{session_id}/tasks"
+        response = self.cdp.evaluate(
+            f"""
+                (async () => {{
+                    const token = localStorage.getItem('jwt_access_token');
+                    if (!token) return {{authenticated: false, status: 0, body: null}};
+                    try {{
+                        const response = await fetch({json.dumps(endpoint)}, {{
+                            method: 'GET',
+                            cache: 'no-store',
+                            credentials: 'omit',
+                            headers: {{
+                                Accept: 'application/json',
+                                Authorization: `Bearer ${{token}}`,
+                            }},
+                        }});
+                        let body = null;
+                        try {{
+                            body = await response.json();
+                        }} catch (_) {{
+                            // The status below remains the authoritative failure signal.
+                        }}
+                        return {{authenticated: true, status: response.status, body}};
+                    }} catch (_) {{
+                        return {{authenticated: true, status: 0, body: null}};
+                    }}
+                }})()
+            """,
+            await_promise=True,
+            timeout=30,
+        )
+        if not isinstance(response, dict) or response.get("authenticated") is not True:
+            raise DriverError("The authenticated task inventory is unavailable")
+        if response.get("status") != 200 or not isinstance(response.get("body"), list):
+            raise DriverError("The authenticated task inventory request failed")
+
+        tasks: list[dict[str, Any]] = []
+        for task in response["body"]:
+            if not isinstance(task, dict):
+                raise DriverError("The authenticated task inventory is invalid")
+            task_id = task.get("id")
+            task_type = task.get("type")
+            state = task.get("state")
+            created_at = task.get("createdAt")
+            started_at = task.get("startedAt")
+            completed_at = task.get("completedAt")
+            if (
+                not isinstance(task_id, str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                    task_id,
+                    flags=re.I,
+                )
+                or not isinstance(task_type, str)
+                or not isinstance(state, str)
+                or not isinstance(created_at, str)
+                or (started_at is not None and not isinstance(started_at, str))
+                or (completed_at is not None and not isinstance(completed_at, str))
+            ):
+                raise DriverError("The authenticated task inventory is invalid")
+            tasks.append(
+                {
+                    "id": task_id,
+                    "type": task_type,
+                    "state": state,
+                    "createdAt": created_at,
+                    "startedAt": started_at,
+                    "completedAt": completed_at,
+                }
+            )
+        return tasks
+
+    def started_task_record(self) -> dict[str, Any]:
+        if not self.started_task_session_id or not self.started_task_id:
+            raise DriverError("The visible run has no reconciled task to inspect")
+        task = next(
+            (
+                item
+                for item in self._task_api_request(self.started_task_session_id)
+                if item["id"] == self.started_task_id
+            ),
+            None,
+        )
+        if task is None:
+            raise DriverError("The reconciled task disappeared from the backend inventory")
+        return {
+            "type": task["type"],
+            "state": task["state"],
+            "createdAt": task["createdAt"],
+            "startedAt": task["startedAt"],
+            "completedAt": task["completedAt"],
+        }
 
     @staticmethod
     def _occupies_account_slot(session: Any) -> bool:
@@ -1856,6 +2127,30 @@ def parallel(users: list[UserRun], operation: Callable[[UserRun], Any]) -> dict[
     return results
 
 
+def recorded_task_overlap(records: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    figure = records.get("A", {})
+    follow = records.get("B", {})
+    if figure.get("state") != "Completed" or follow.get("state") != "Running":
+        return None
+    figure_started_value = figure.get("startedAt") or figure.get("createdAt")
+    figure_started = parse_backend_time(figure_started_value, "startedAt")
+    figure_completed = parse_backend_time(figure.get("completedAt"), "completedAt")
+    follow_started = parse_backend_time(follow.get("startedAt"), "startedAt")
+    if figure_started is None or figure_completed is None or follow_started is None:
+        return None
+    overlap_started = max(figure_started, follow_started)
+    if figure_completed <= overlap_started:
+        return None
+    return {
+        "intervalsOverlap": True,
+        "overlapMilliseconds": round((figure_completed - overlap_started).total_seconds() * 1000),
+        "figureStartedAt": figure_started_value,
+        "figureStartBoundary": "startedAt" if figure.get("startedAt") else "createdAt-legacy-fallback",
+        "figureCompletedAt": figure.get("completedAt"),
+        "followStartedAt": follow.get("startedAt"),
+    }
+
+
 def observe_same_round_running(users: list[UserRun], timeout: float = 60) -> dict[str, Any]:
     """Prove overlap by reading both task panels concurrently in one polling round."""
     deadline = time.monotonic() + timeout
@@ -1891,6 +2186,22 @@ def observe_same_round_running(users: list[UserRun], timeout: float = 60) -> dic
                 "users": last,
             }
         if states.get("A") in {"Completed", "Failed", "Cancelled"}:
+            if states.get("A") == "Completed":
+                records = parallel(
+                    users,
+                    lambda user: user.ui.started_task_record(),  # type: ignore[union-attr]
+                )
+                interval = recorded_task_overlap(records)
+                if interval is not None:
+                    for result in last.values():
+                        result.pop("_sampleMidpoint", None)
+                    return {
+                        "provedBy": "persisted backend task intervals after the fast Figure completed",
+                        "sameRound": False,
+                        "intervalOverlap": interval,
+                        "users": last,
+                        "backendTasks": records,
+                    }
             raise DriverError(
                 f"Could not prove concurrent Running states: A reached {states.get('A')} before a shared Running round"
             )
@@ -1913,6 +2224,197 @@ def result_exit_code(failure: BaseException | None, cleanup_passed: bool) -> int
 
 def powershell_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+INTERACTIVE_DESKTOP_PATH = r"WinSta0\Default"
+WINDOWS_INTERACTIVE_DESKTOP_GUARD = r"""
+public static class RobotSwarmInteractiveDesktop {
+    private const uint DESKTOP_READOBJECTS = 0x0001;
+    private const int UOI_NAME = 2;
+    private const int UOI_IO = 6;
+    private const int WTS_CONNECT_STATE = 8;
+    private const int WTS_ACTIVE = 0;
+    private const uint INVALID_SESSION_ID = 0xffffffff;
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
+    [DllImport("kernel32.dll")]
+    private static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern IntPtr GetThreadDesktop(uint threadId);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern IntPtr OpenInputDesktop(
+        uint flags, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint desiredAccess);
+    [DllImport("user32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll", EntryPoint="GetUserObjectInformationW",
+        CharSet=CharSet.Unicode, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserObjectName(
+        IntPtr handle, int index, StringBuilder value, uint length, out uint needed);
+    [DllImport("user32.dll", EntryPoint="GetUserObjectInformationW", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserObjectIo(
+        IntPtr handle, int index, out int value, uint length, out uint needed);
+    [DllImport("wtsapi32.dll", EntryPoint="WTSQuerySessionInformationW",
+        CharSet=CharSet.Unicode, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WTSQuerySessionInformation(
+        IntPtr server, uint sessionId, int informationClass,
+        out IntPtr buffer, out uint bytesReturned);
+    [DllImport("wtsapi32.dll")]
+    private static extern void WTSFreeMemory(IntPtr memory);
+
+    private static InvalidOperationException Failure(string checkpoint, string reason) {
+        return new InvalidOperationException(
+            "Interactive desktop check failed " + checkpoint + ": " + reason);
+    }
+
+    private static string ObjectName(IntPtr handle, string checkpoint, string kind) {
+        StringBuilder value = new StringBuilder(128);
+        uint needed;
+        if (!GetUserObjectName(
+            handle, UOI_NAME, value, (uint)(value.Capacity * sizeof(char)), out needed)) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, "could not read " + kind + " name (Win32 " + error + ")");
+        }
+        return value.ToString();
+    }
+
+    private static void RequireInputObject(
+        IntPtr handle, string checkpoint, string kind) {
+        int receivesInput;
+        uint needed;
+        if (!GetUserObjectIo(handle, UOI_IO, out receivesInput, sizeof(int), out needed)) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, kind + " input state is unavailable (Win32 " + error + ")");
+        }
+        if (receivesInput == 0) {
+            throw Failure(checkpoint, kind + " is not receiving user input");
+        }
+    }
+
+    private static void RequireActiveConsoleSession(string checkpoint) {
+        uint sessionId;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), out sessionId)) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, "process session is unavailable (Win32 " + error + ")");
+        }
+        uint consoleSessionId = WTSGetActiveConsoleSessionId();
+        if (consoleSessionId == INVALID_SESSION_ID || consoleSessionId != sessionId) {
+            throw Failure(checkpoint, "process session is not the active console session");
+        }
+
+        IntPtr buffer;
+        uint bytesReturned;
+        if (!WTSQuerySessionInformation(
+            IntPtr.Zero, sessionId, WTS_CONNECT_STATE, out buffer, out bytesReturned)) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, "session state is unavailable (Win32 " + error + ")");
+        }
+        try {
+            if (buffer == IntPtr.Zero || bytesReturned < sizeof(int)) {
+                throw Failure(checkpoint, "session state response is invalid");
+            }
+            if (Marshal.ReadInt32(buffer) != WTS_ACTIVE) {
+                throw Failure(checkpoint, "console session is not active");
+            }
+        } finally {
+            if (buffer != IntPtr.Zero) {
+                WTSFreeMemory(buffer);
+            }
+        }
+    }
+
+    public static string RequireDefaultInputDesktop(string checkpoint) {
+        RequireActiveConsoleSession(checkpoint);
+        IntPtr station = GetProcessWindowStation();
+        if (station == IntPtr.Zero) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, "window station is unavailable (Win32 " + error + ")");
+        }
+        if (!String.Equals(
+            ObjectName(station, checkpoint, "window station"),
+            "WinSta0",
+            StringComparison.OrdinalIgnoreCase)) {
+            throw Failure(checkpoint, "window station is not interactive");
+        }
+
+        IntPtr threadDesktop = GetThreadDesktop(GetCurrentThreadId());
+        if (threadDesktop == IntPtr.Zero) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, "thread desktop is unavailable (Win32 " + error + ")");
+        }
+        if (!String.Equals(
+            ObjectName(threadDesktop, checkpoint, "thread desktop"),
+            "Default",
+            StringComparison.OrdinalIgnoreCase)) {
+            throw Failure(checkpoint, "thread desktop is not Default");
+        }
+        RequireInputObject(threadDesktop, checkpoint, "thread desktop");
+
+        IntPtr desktop = OpenInputDesktop(0, false, DESKTOP_READOBJECTS);
+        if (desktop == IntPtr.Zero) {
+            int error = Marshal.GetLastWin32Error();
+            throw Failure(checkpoint, "input desktop is unavailable (Win32 " + error + ")");
+        }
+        try {
+            string name = ObjectName(desktop, checkpoint, "input desktop");
+            if (!String.Equals(name, "Default", StringComparison.OrdinalIgnoreCase)) {
+                throw Failure(checkpoint, "input desktop is not Default");
+            }
+            RequireInputObject(desktop, checkpoint, "input desktop");
+        } finally {
+            if (!CloseDesktop(desktop)) {
+                int error = Marshal.GetLastWin32Error();
+                throw Failure(checkpoint, "input desktop handle did not close (Win32 " + error + ")");
+            }
+        }
+        return "WinSta0\\Default";
+    }
+}
+"""
+
+
+def windows_capture_failure(
+    result: subprocess.CompletedProcess[str],
+    fallback: str,
+) -> DriverError:
+    diagnostic = re.sub(r"\s+", " ", (result.stderr or result.stdout or "")).strip()
+    if diagnostic:
+        diagnostic = diagnostic[-400:]
+        return DriverError(f"{fallback} (exit {result.returncode}: {diagnostic})")
+    return DriverError(f"{fallback} (exit {result.returncode})")
+
+
+def windows_capture_evidence(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """Accept only bounded geometry proven on Default before and after capture."""
+    try:
+        line = next(item for item in reversed(result.stdout.splitlines()) if item.strip())
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise ValueError
+        before = payload["interactiveDesktopBefore"]
+        after = payload["interactiveDesktopAfter"]
+        bounds = {name: int(payload[name]) for name in ("x", "y", "width", "height")}
+    except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DriverError("Windows capture returned invalid interactive-desktop evidence") from exc
+    if before != INTERACTIVE_DESKTOP_PATH or after != INTERACTIVE_DESKTOP_PATH:
+        raise DriverError("Windows capture did not remain on the unlocked Default desktop")
+    if bounds["width"] <= 0 or bounds["height"] <= 0:
+        raise DriverError("Windows capture returned invalid screen geometry")
+    return {
+        "bounds": bounds,
+        "interactiveDesktop": {"before": before, "after": after},
+    }
 
 
 def png_details(raw: bytes, filename: str) -> dict[str, Any]:
@@ -2088,6 +2590,8 @@ Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+@@INTERACTIVE_DESKTOP_GUARD@@
 public static class RobotSwarmDesktopCapture {
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
@@ -2121,10 +2625,14 @@ try {
         throw "Could not position Chrome B"
     }
     Start-Sleep -Milliseconds 900
+    $desktopBefore = [RobotSwarmInteractiveDesktop]::RequireDefaultInputDesktop(
+        "before CopyFromScreen")
     $bitmap = New-Object System.Drawing.Bitmap($area.Width, $area.Height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
         $graphics.CopyFromScreen($area.X, $area.Y, 0, 0, $bitmap.Size)
+        $desktopAfter = [RobotSwarmInteractiveDesktop]::RequireDefaultInputDesktop(
+            "after CopyFromScreen")
         $stream = [System.IO.File]::Open(
             $destination,
             [System.IO.FileMode]::Create,
@@ -2145,10 +2653,18 @@ try {
     [RobotSwarmDesktopCapture]::SetWindowPos(
         $windowB[0].MainWindowHandle, $notTopMost, $area.X + $leftWidth, $area.Y, $rightWidth, $area.Height, $show) | Out-Null
 }
-@{x=$area.X; y=$area.Y; width=$area.Width; height=$area.Height} | ConvertTo-Json -Compress
+@{
+    x=$area.X
+    y=$area.Y
+    width=$area.Width
+    height=$area.Height
+    interactiveDesktopBefore=$desktopBefore
+    interactiveDesktopAfter=$desktopAfter
+} | ConvertTo-Json -Compress
 """
         script = (
-            script.replace("@@MARKER_A@@", powershell_quote(markers["A"]))
+            script.replace("@@INTERACTIVE_DESKTOP_GUARD@@", WINDOWS_INTERACTIVE_DESKTOP_GUARD)
+            .replace("@@MARKER_A@@", powershell_quote(markers["A"]))
             .replace("@@MARKER_B@@", powershell_quote(markers["B"]))
             .replace("@@DESTINATION@@", powershell_quote(windows_path(temporary)))
         )
@@ -2158,17 +2674,15 @@ try {
             stop_event=users[0].ui.stop_event,
         )
         if result.returncode != 0:
-            raise DriverError("The owned-window desktop capture failed")
+            raise windows_capture_failure(result, "The owned-window desktop capture failed")
         if not temporary.is_file():
             raise DriverError("PowerShell did not create the desktop screenshot")
+        evidence = windows_capture_evidence(result)
         raw = temporary.read_bytes()
         write_bytes_secure(destination, raw)
         details = png_details(raw, destination.name)
-        try:
-            bounds = json.loads(next(line for line in reversed(result.stdout.splitlines()) if line.strip()))
-            details["desktopBounds"] = bounds
-        except (StopIteration, ValueError):
-            pass
+        details["desktopBounds"] = evidence["bounds"]
+        details["interactiveDesktop"] = evidence["interactiveDesktop"]
         details["ownedWindowsSelected"] = ["A", "B"]
         details["captureMode"] = mode
         details["validationAfterResize"] = capture_validation
@@ -2207,6 +2721,8 @@ Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+@@INTERACTIVE_DESKTOP_GUARD@@
 public static class RobotSwarmOwnedWindowCapture {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
@@ -2220,9 +2736,14 @@ public static class RobotSwarmOwnedWindowCapture {
 }
 '@
 [RobotSwarmOwnedWindowCapture]::SetProcessDPIAware() | Out-Null
-$windows = @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle.Contains($marker)
-})
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+do {
+    $windows = @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle.Contains($marker)
+    })
+    if ($windows.Count -eq 1) { break }
+    Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt $deadline)
 if ($windows.Count -ne 1) { throw "Could not identify the owned fullscreen Chrome window" }
 $window = $windows[0]
 $topMost = [IntPtr](-1)
@@ -2241,10 +2762,14 @@ try {
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
     if ($width -lt 320 -or $height -lt 240) { throw "Owned window bounds are invalid" }
+    $desktopBefore = [RobotSwarmInteractiveDesktop]::RequireDefaultInputDesktop(
+        "before CopyFromScreen")
     $bitmap = New-Object System.Drawing.Bitmap($width, $height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
         $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+        $desktopAfter = [RobotSwarmInteractiveDesktop]::RequireDefaultInputDesktop(
+            "after CopyFromScreen")
         $stream = [System.IO.File]::Open(
             $destination,
             [System.IO.FileMode]::Create,
@@ -2259,14 +2784,22 @@ try {
         $graphics.Dispose()
         $bitmap.Dispose()
     }
-    @{x=$rect.Left; y=$rect.Top; width=$width; height=$height} | ConvertTo-Json -Compress
+    @{
+        x=$rect.Left
+        y=$rect.Top
+        width=$width
+        height=$height
+        interactiveDesktopBefore=$desktopBefore
+        interactiveDesktopAfter=$desktopAfter
+    } | ConvertTo-Json -Compress
 } finally {
     [RobotSwarmOwnedWindowCapture]::SetWindowPos(
         $window.MainWindowHandle, $notTopMost, 0, 0, 0, 0, $flags) | Out-Null
 }
 """
         script = (
-            script.replace("@@MARKER@@", powershell_quote(title_marker))
+            script.replace("@@INTERACTIVE_DESKTOP_GUARD@@", WINDOWS_INTERACTIVE_DESKTOP_GUARD)
+            .replace("@@MARKER@@", powershell_quote(title_marker))
             .replace("@@DESTINATION@@", powershell_quote(windows_path(temporary)))
         )
         result = run_interruptible_process(
@@ -2274,17 +2807,19 @@ try {
             timeout=45,
             stop_event=ui.stop_event,
         )
-        if result.returncode != 0 or not temporary.is_file():
-            raise DriverError("The owned fullscreen Windows capture failed")
+        if result.returncode != 0:
+            raise windows_capture_failure(
+                result,
+                "The owned fullscreen Windows capture failed",
+            )
+        if not temporary.is_file():
+            raise DriverError("The owned fullscreen Windows capture produced no PNG")
+        evidence = windows_capture_evidence(result)
         raw = temporary.read_bytes()
         write_bytes_secure(destination, raw)
         details = png_details(raw, destination.name)
-        try:
-            details["windowBounds"] = json.loads(
-                next(line for line in reversed(result.stdout.splitlines()) if line.strip())
-            )
-        except (StopIteration, ValueError):
-            pass
+        details["windowBounds"] = evidence["bounds"]
+        details["interactiveDesktop"] = evidence["interactiveDesktop"]
         details["ownedWindowSelected"] = ui.chrome.label
         details["humanReviewRequired"] = True
         return details
@@ -2518,14 +3053,6 @@ def main() -> int:
         print("Both isolated sessions are Ready.", flush=True)
 
         parallel(users, lambda user: user.ui.open_viewer(args.viewer_timeout))  # type: ignore[union-attr]
-        interaction = parallel(
-            users,
-            lambda user: user.ui.exercise_interaction(  # type: ignore[union-attr]
-                args.output_dir,
-                run_id,
-                user.label,
-            ),
-        )
         scene_barrier = threading.Barrier(2)
 
         def capture_private_scene(user: UserRun) -> dict[str, Any]:
@@ -2560,9 +3087,14 @@ def main() -> int:
             private_scenes["A"]["clip"]["averageHash"],
             private_scenes["B"]["clip"]["averageHash"],
         )
-        if scene_distance < 8:
+        scene_difference_ratio = RobotSwarmUi._scene_difference(
+            args.output_dir / private_scenes["A"]["clip"]["file"],
+            args.output_dir / private_scenes["B"]["clip"]["file"],
+        )
+        if scene_difference_ratio < MIN_SCENE_DIFFERENCE_RATIO:
             raise DriverError(
-                f"The two private viewer regions were unexpectedly similar (distance {scene_distance})"
+                "The two private viewer regions were unexpectedly similar "
+                f"(changed-pixel ratio {scene_difference_ratio:.6f})"
             )
         report["sceneDistinctness"] = {
             "synchronized": True,
@@ -2571,6 +3103,9 @@ def main() -> int:
             "requestedRosters": {"A": args.robots_a, "B": args.robots_b},
             "differentRequestedRosters": True,
             "averageHashDistance": scene_distance,
+            "changedPixelRatio": round(scene_difference_ratio, 7),
+            "changedPixelThreshold": SCENE_PIXEL_THRESHOLD,
+            "minimumChangedPixelRatio": MIN_SCENE_DIFFERENCE_RATIO,
             "clips": {
                 "A": private_scenes["A"],
                 "B": private_scenes["B"],
@@ -2578,6 +3113,14 @@ def main() -> int:
             "humanReviewRequired": True,
             "requiresApiCrossDenial": True,
         }
+        interaction = parallel(
+            users,
+            lambda user: user.ui.exercise_interaction(  # type: ignore[union-attr]
+                args.output_dir,
+                run_id,
+                user.label,
+            ),
+        )
         for user in users:
             assert user.ui
             fullscreen = user.ui.exercise_fullscreen(

@@ -23,7 +23,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import rospy
@@ -157,8 +157,15 @@ class ObstacleAvoidance:
       4. **Emergency stop**: only triggers at very close range as a safety net.
     """
 
-    def __init__(self, robot_name: str):
+    def __init__(
+        self,
+        robot_name: str,
+        collision_edge_callback: Optional[
+            Callable[[str, Optional[Dict[str, Any]]], None]
+        ] = None,
+    ):
         self.robot_name: str = robot_name
+        self._collision_edge_callback = collision_edge_callback
 
         # ----- tuneable parameters (from param server) --------------------
         # Awareness radius: robot starts gently decelerating here
@@ -1292,6 +1299,7 @@ class ObstacleAvoidance:
         allowed_contact_positions: Optional[
             Iterable[Tuple[float, float]]
         ] = None,
+        collision_context: Optional[Dict[str, Any]] = None,
     ) -> float:
         """Publish filtered threat and physical-contact state together."""
         threat = self.get_threat_level(
@@ -1300,12 +1308,22 @@ class ObstacleAvoidance:
             allowed_contact_position,
             allowed_contact_positions,
         )
+        previous_collision = self._collision_active
         collision = self._update_collision_state(
             ignored_sector_indices,
             lidar_range_mask,
             allowed_contact_position,
             allowed_contact_positions,
         )
+        if collision and not previous_collision:
+            callback = getattr(self, '_collision_edge_callback', None)
+            if callable(callback):
+                context = (
+                    dict(collision_context)
+                    if isinstance(collision_context, dict)
+                    else None
+                )
+                callback(self.robot_name, context)
         if self._threat_pub is not None:
             self._threat_pub.publish(Float32(data=threat))
         if self._collision_pub is not None:
@@ -1356,6 +1374,21 @@ class ObstacleAvoidance:
         self._prev_linear = 0.0
         self._prev_angular = 0.0
 
+    def set_collision_edge_callback(
+        self,
+        callback: Optional[
+            Callable[[str, Optional[Dict[str, Any]]], None]
+        ],
+    ) -> None:
+        """Install the synchronous owner for filtered collision edges.
+
+        The callback runs in the same safety evaluation that changes the
+        collision state.  Behaviour controllers can therefore seal their own
+        task and control-cycle context before ROS schedules the compatibility
+        ``Bool`` subscriber callbacks.
+        """
+        self._collision_edge_callback = callback
+
     def commit_published_command(self, command: 'Twist') -> None:
         """Keep smoothing state equal to the command that reached the robot."""
         try:
@@ -1393,6 +1426,7 @@ class ObstacleAvoidance:
         ] = None,
         soft_steering: bool = True,
         minimum_linear_speed: float = 0.0,
+        collision_context: Optional[Dict[str, Any]] = None,
     ) -> 'Twist':
         """
         High-level wrapper: takes a desired Twist, returns a safe Twist
@@ -1400,7 +1434,9 @@ class ObstacleAvoidance:
         """
         if not self.scan_is_fresh():
             self.reset_motion()
-            self.publish_safety_state()
+            self.publish_safety_state(
+                collision_context=collision_context
+            )
             return Twist()
 
         others = list(getattr(self, '_other_positions', []))
@@ -1492,6 +1528,7 @@ class ObstacleAvoidance:
             ignored_sectors,
             active_lidar_masks,
             allowed_contact_positions=allowed_positions,
+            collision_context=collision_context,
         )
 
         safe = Twist()

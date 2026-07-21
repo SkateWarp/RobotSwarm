@@ -721,6 +721,7 @@ class TransportPayloadMaskIntegrationTests(unittest.TestCase):
         controller.object_avoidance_range = 1.0
         controller.object_lidar_tolerance = 0.04
         controller.object_lidar_closer_tolerance = 0.025
+        controller.object_lidar_docking_closer_tolerance = 0.035
         controller.object_lidar_contact_closer_tolerance = 0.05
         controller.object_yaw = 0.0
         controller.robot_radius = 0.11
@@ -956,6 +957,149 @@ class TransportPayloadMaskIntegrationTests(unittest.TestCase):
             payload_contact_confirmed=True,
         )
         self.assertEqual(0.0, still_closer.linear.x)
+
+    def test_payload_docking_accepts_multiframe_pose_skew_only_in_context(self):
+        avoidance = ObstacleAvoidance('tb3_0')
+        avoidance.max_linear_acceleration = 100.0
+        avoidance.set_position(0.0, 0.0, 0.0)
+        controller = self.make_transport(avoidance)
+
+        scan = LaserScan()
+        scan.range_min = 0.12
+        scan.angle_min = 0.0
+        scan.angle_increment = 0.0
+
+        contact_distance = (
+            controller.object_half_width
+            + controller.robot_forward_contact_extent
+            + controller.transport_contact_slop
+        )
+        staging_distance = contact_distance + 0.25
+        pose_skews = (0.030, 0.032, 0.034, 0.031)
+
+        # Follow a lead through several consecutive docking frames. At 3x
+        # real time, LaserScan can observe the payload 30--34 mm ahead of the
+        # ModelStates pose used for the exact box mask. The allowance follows
+        # the modeled surface; it is not a sector-wide LiDAR exemption.
+        center_distances = np.linspace(
+            min(staging_distance, 0.393), contact_distance, 12
+        )
+        for index, center_distance in enumerate(center_distances):
+            with self.subTest(frame=index, center_distance=center_distance):
+                predicted_surface = (
+                    center_distance
+                    - controller.object_half_width
+                    - avoidance.lidar_offset_x
+                )
+                scan.ranges = [max(
+                    scan.range_min,
+                    predicted_surface - pose_skews[index % len(pose_skews)],
+                )]
+                avoidance._scan_callback(scan)
+                docking = controller._apply_transport_avoidance(
+                    'tb3_0', forward_command(0.012),
+                    (center_distance, 0.0),
+                    payload_docking=True,
+                )
+
+                self.assertGreater(docking.linear.x, 0.0)
+                self.assertEqual(
+                    0.0, avoidance._threat_pub.messages[-1].data
+                )
+
+        # The same skew is not accepted during ordinary motion. Only the
+        # queue-docking caller may request the contextual margin.
+        avoidance.reset_motion()
+        center_distance = 0.393
+        predicted_surface = (
+            center_distance
+            - controller.object_half_width
+            - avoidance.lidar_offset_x
+        )
+        scan.ranges = [predicted_surface - 0.032]
+        avoidance._scan_callback(scan)
+        outside_docking = controller._apply_transport_avoidance(
+            'tb3_0', forward_command(0.012),
+            (center_distance, 0.0),
+        )
+
+        self.assertEqual(0.0, outside_docking.linear.x)
+        self.assertEqual(1.0, avoidance._threat_pub.messages[-1].data)
+
+        # A distinct obstacle 36 mm in front of the modeled payload is still
+        # outside the tightly capped docking mask and triggers the hard stop.
+        avoidance.reset_motion()
+        scan.ranges = [predicted_surface - 0.036]
+        avoidance._scan_callback(scan)
+        blocked = controller._apply_transport_avoidance(
+            'tb3_0', forward_command(0.012),
+            (center_distance, 0.0),
+            payload_docking=True,
+        )
+
+        self.assertEqual(0.0, blocked.linear.x)
+        self.assertEqual(1.0, avoidance._threat_pub.messages[-1].data)
+
+    def test_lateral_payload_roots_keep_docking_near_box_edges(self):
+        contact_distance = 0.20 + 0.038 + 0.005
+        staging_distance = contact_distance + 0.25
+
+        # N=3 uses two payload roots at the inset lane limit and one rear
+        # companion. Exercise both roots at the outer launch-heading limit,
+        # where their forward LDS rays pass closest to the box corners.
+        for lane_y, yaw in ((0.18, 0.08), (-0.18, -0.08)):
+            avoidance = ObstacleAvoidance('tb3_0')
+            avoidance.max_linear_acceleration = 100.0
+            avoidance.set_position(0.0, lane_y, yaw)
+            controller = self.make_transport(avoidance)
+
+            scan = LaserScan()
+            scan.range_min = 0.12
+            scan.angle_min = -0.20
+            scan.angle_increment = 0.01
+
+            for center_distance in np.linspace(
+                staging_distance, contact_distance, 6
+            ):
+                object_position = np.array([center_distance, 0.0])
+                payload_mask = controller._object_lidar_mask(
+                    object_position, object_yaw=0.0
+                )
+                lidar_pose = (
+                    avoidance.lidar_offset_x * math.cos(yaw),
+                    lane_y + avoidance.lidar_offset_x * math.sin(yaw),
+                    yaw,
+                )
+                ranges = []
+                for index in range(41):
+                    beam_angle = scan.angle_min + (
+                        index * scan.angle_increment
+                    )
+                    surface = avoidance._surface_range_for_mask(
+                        beam_angle, payload_mask, lidar_pose
+                    )
+                    ranges.append(
+                        float('inf') if surface is None else max(
+                            scan.range_min, surface - 0.034
+                        )
+                    )
+
+                with self.subTest(
+                    lane_y=lane_y, center_distance=center_distance
+                ):
+                    self.assertTrue(any(math.isfinite(r) for r in ranges))
+                    scan.ranges = ranges
+                    avoidance._scan_callback(scan)
+                    docking = controller._apply_transport_avoidance(
+                        'tb3_0', forward_command(0.012),
+                        object_position, object_yaw=0.0,
+                        payload_docking=True,
+                    )
+
+                    self.assertGreater(docking.linear.x, 0.0)
+                    self.assertEqual(
+                        0.0, avoidance._threat_pub.messages[-1].data
+                    )
 
     def test_rotated_square_surface_is_masked_at_its_true_range(self):
         avoidance = ObstacleAvoidance('tb3_0')

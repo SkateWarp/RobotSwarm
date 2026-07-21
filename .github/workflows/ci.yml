@@ -97,12 +97,24 @@ jobs:
         run: |
           python3 -m py_compile \
             scripts/acceptance/robotswarm-prod-e2e.py \
+            scripts/acceptance/robotswarm-loaded-n4-e2e.py \
+            scripts/acceptance/robotswarm-responsive-e2e.py \
+            scripts/acceptance/robotswarm-ros-matrix-e2e.py \
+            scripts/acceptance/robotswarm-transport-ui-e2e.py \
             scripts/acceptance/robotswarm-visible-e2e.py \
             scripts/acceptance/robotswarm-sections-e2e.py \
             scripts/acceptance/test_prod_acceptance_contract.py \
+            scripts/acceptance/test_loaded_n4_acceptance_contract.py \
+            scripts/acceptance/test_responsive_acceptance_contract.py \
+            scripts/acceptance/test_ros_matrix_acceptance_contract.py \
+            scripts/acceptance/test_transport_ui_acceptance_contract.py \
             scripts/acceptance/test_visible_acceptance_contract.py \
             scripts/acceptance/test_sections_acceptance_contract.py
           python3 scripts/acceptance/test_prod_acceptance_contract.py
+          python3 scripts/acceptance/test_loaded_n4_acceptance_contract.py
+          python3 scripts/acceptance/test_responsive_acceptance_contract.py
+          python3 scripts/acceptance/test_ros_matrix_acceptance_contract.py
+          python3 scripts/acceptance/test_transport_ui_acceptance_contract.py
           python3 scripts/acceptance/test_visible_acceptance_contract.py
           python3 scripts/acceptance/test_sections_acceptance_contract.py
 

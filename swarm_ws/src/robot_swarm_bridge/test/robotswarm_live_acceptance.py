@@ -30,10 +30,34 @@ from std_msgs.msg import String
 ROBOT_RE = re.compile(r"^tb3_\d+$")
 TERMINAL_STATES = {"completed", "failed", "stopped"}
 TRANSPORT_PROGRESS_EPSILON_M = 0.001
+MINIMUM_FORMATION_ACTIVE_SECONDS = 15.0
+TRANSPORT_PHASES = frozenset({
+    "SEARCH", "APPROACH", "PUSH", "DONE", "FAILED",
+})
+TRANSPORT_PHASE_ORDER = {
+    "SEARCH": 0,
+    "APPROACH": 1,
+    "PUSH": 2,
+    "DONE": 3,
+    "FAILED": 3,
+}
+# The payload and complete push chains are docked only after APPROACH has
+# finished.  DONE is included because the transport and aggregate-status
+# publishers are independent; the terminal phase can be observed one callback
+# before the last PUSH collision-state edge.
+TRANSPORT_DOCKING_PHASES = frozenset({"PUSH", "DONE"})
+TRANSPORT_PHASE_TIMEOUT_TOLERANCE_WALL_S = 0.25
+MAXIMUM_TRANSPORT_PHASE_TRANSITIONS = 32
+COLLISION_EVENT_STREAM_VERSION = 1
+MAXIMUM_COLLISION_EVENT_HISTORY = 128
+COLLISION_TASK_TYPES = frozenset({
+    "follow_leader", "formation", "transport",
+})
 RESULT_BEHAVIOR_STATUS_KEYS = (
     "task_id", "state", "phase", "setup_phase", "active", "paused",
     "formation_type", "leader_mode", "movement_mode", "robot_count",
-    "maximum_position_error", "settled_for", "follow_distance",
+    "maximum_position_error", "settled_for", "stale_odometry",
+    "waiting_for_odometry", "follow_distance",
     "trace_length", "chain_ready", "requested_radius", "effective_radius",
     "path_t", "path_relocated", "planning_wall_s", "leader_speed_scale",
     "path_period_s", "path_progress_laps", "current_lap_progress",
@@ -41,8 +65,12 @@ RESULT_BEHAVIOR_STATUS_KEYS = (
     "grf_mcmc_iterations", "engagement_complete",
     "synchronized_push_started", "error", "control_sequence",
     "control_sim_time", "control_commands", "batch_publish_span_s",
-    "push_reference_speed", "push_arbitration", "route_robot",
-    "route_kind", "route_complete", "assembly_routes", "discovery",
+    "push_reference_speed", "push_arbitration", "object_pos", "target_pos",
+    "progress", "object_z", "route_robot",
+    "route_kind", "route_complete", "queue_docking_started",
+    "queue_settling", "approach_stage", "rendezvous_ready_count",
+    "compression_progress", "searching_robot_count", "route_target",
+    "assembly_routes", "discovery",
     "robot_assignments", "useful_contributor_count",
     "useful_contributor_ids", "current_useful_pusher_count",
     "current_useful_pusher_ids", "all_pusher_proof_minimum_speed",
@@ -87,15 +115,48 @@ SCENARIOS = [
     # Keep the payload outside initial sensor range in every transport case.
     # This makes search, finder notification and fleet rendezvous observable
     # instead of accepting a controller that starts directly in PUSH.
+    # The visible N=1 coverage pass took 209.2 wall seconds and APPROACH 6.1.
+    # Its first healthy PUSH advanced 0.4129 m in 35.3 seconds, which projects
+    # the 0.50 m contract to about 42.7 seconds.  A 55-second PUSH budget keeps
+    # useful margin without weakening the progress gate.  The three phase
+    # budgets total 320 seconds; the five extra hard-cap seconds cover their
+    # 0.25-second edge tolerances and status-observation jitter.
     scenario("transport_grf_n1", "transport", 1, "grid",
              object_start=(-3.5, -3.0), target=(-3.5, -4.0),
-             min_object_travel=0.55, timeout=220, require_search=True),
+             min_object_travel=0.55, timeout=325, require_search=True,
+             phase_timeouts={"SEARCH": 245.0, "APPROACH": 20.0,
+                             "PUSH": 55.0}),
+    # Exercise the smallest collaborative fleet explicitly.  Until this case
+    # has its own measured phase baseline, keep the established N=1 hard cap
+    # and let the acceptance evidence, rather than a guessed split, describe
+    # how long search, rendezvous and pushing take.
+    scenario("transport_grf_n2", "transport", 2, "line",
+             object_start=(-3.5, -3.0), target=(-3.5, -4.0),
+             min_object_travel=0.55, timeout=325, require_search=True),
+    # Visible N=3 runs at RTF 2.996 spent about 92 seconds searching.  Assembly
+    # varied from 79.8 seconds to just over 100 seconds; the slower run reached
+    # its last staging point and was still turning into alignment at the old
+    # edge.  Keep independent phase limits so extra time cannot conceal a
+    # stuck search or rendezvous.  The five remaining hard-cap seconds cover
+    # edge tolerance and observation jitter without weakening any physical
+    # acceptance gate.
     scenario("transport_grf_n3", "transport", 3, "line",
              object_start=(-3.5, -3.0), target=(-3.5, -4.0),
-             min_object_travel=0.55, timeout=190, require_search=True),
+             min_object_travel=0.55, timeout=290, require_search=True,
+             phase_timeouts={"SEARCH": 115.0, "APPROACH": 125.0,
+                             "PUSH": 45.0}),
+    # The 0.75 kg acceptance payload moves much more slowly than the practice
+    # crate.  Its first complete four-robot run completed SEARCH and entered
+    # APPROACH in 39.3 seconds, entered PUSH in 110.4, then advanced 0.2335 m
+    # during 70.0 seconds of synchronized pushing.  That rate projects the
+    # unchanged 0.50 m gate to about 150 seconds of PUSH.  Phase budgets retain
+    # bounded liveness for both payload profiles; the five hard-cap seconds
+    # cover observation jitter.
     scenario("transport_grf_n4", "transport", 4, "circle",
              object_start=(-3.5, -3.0), target=(-3.5, -4.0),
-             min_object_travel=0.55, timeout=180, require_search=True),
+             min_object_travel=0.55, timeout=355, require_search=True,
+             phase_timeouts={"SEARCH": 60.0, "APPROACH": 100.0,
+                             "PUSH": 190.0}),
     scenario("transport_grf_n10", "transport", 10, "grid",
              object_start=(-3.5, -3.0), target=(-3.5, -4.0),
              min_object_travel=0.55, timeout=220, require_search=True),
@@ -263,6 +324,84 @@ def robot_sort_key(name):
     return int(str(name).rsplit("_", 1)[1]) if match else math.inf
 
 
+def formation_active_status_failures(
+    status, task_id, case, robot_ids, maximum_error,
+):
+    """Validate one fresh status sample from the moving-formation window."""
+    failures = []
+    if not isinstance(status, dict):
+        return ["moving formation status was unavailable"]
+    if str(status.get("task_id") or "") != str(task_id or ""):
+        failures.append("moving formation status was not task-correlated")
+    if status.get("state") != "moving":
+        failures.append("moving formation did not remain in moving state")
+    if status.get("movement_mode") != "moving":
+        failures.append("moving formation status reported a different mode")
+    if status.get("paused") is not False:
+        failures.append("moving formation status was paused")
+    if status.get("error"):
+        failures.append("moving formation status reported an error")
+    if status.get("stale_odometry") or status.get("waiting_for_odometry"):
+        failures.append("moving formation did not retain complete odometry")
+
+    expected_shape = str(case.get("shape") or "").strip().lower()
+    reported_shape = str(
+        status.get("formation_type") or ""
+    ).strip().lower()
+    if reported_shape != expected_shape:
+        failures.append("moving formation status reported a different shape")
+    try:
+        reported_count = int(status.get("robot_count"))
+    except (TypeError, ValueError):
+        reported_count = None
+    if reported_count != int(case.get("count", 0)):
+        failures.append("moving formation status did not cover the fleet")
+
+    assignments = status.get("robot_assignments")
+    assignment_names = set()
+    if isinstance(assignments, dict):
+        assignment_names = {
+            clean_robot_name(name) for name in assignments
+        }
+        assignment_names.discard(None)
+    if assignment_names != set(robot_ids):
+        failures.append("moving formation assignments were incomplete")
+
+    reported_error = finite_number(status.get("maximum_position_error"))
+    if reported_error is None:
+        failures.append("moving formation omitted its position error")
+    elif reported_error > maximum_error:
+        failures.append("moving formation position error exceeded the limit")
+    return failures
+
+
+def validate_formation_active_selection(seconds, cases):
+    """Keep the optional matrix window explicit and bounded."""
+    try:
+        active_seconds = float(seconds)
+    except (TypeError, ValueError):
+        raise ValueError("--formation-active-seconds must be a number")
+    if not math.isfinite(active_seconds):
+        raise ValueError("--formation-active-seconds must be finite")
+    if active_seconds < 0.0:
+        raise ValueError("--formation-active-seconds cannot be negative")
+    if 0.0 < active_seconds < MINIMUM_FORMATION_ACTIVE_SECONDS:
+        raise ValueError(
+            "--formation-active-seconds must be zero or at least {:.0f}".format(
+                MINIMUM_FORMATION_ACTIVE_SECONDS
+            )
+        )
+    if active_seconds > 120.0:
+        raise ValueError("--formation-active-seconds cannot exceed 120")
+    if active_seconds and (
+        len(cases) != 1 or cases[0]["behavior"] != "formation"
+    ):
+        raise ValueError(
+            "--formation-active-seconds requires exactly one formation scenario"
+        )
+    return active_seconds
+
+
 def transport_role_metadata(status):
     """Normalize current and older transport role-status layouts."""
     if not isinstance(status, dict):
@@ -373,15 +512,16 @@ def transport_search_motion_failures(
     return failures
 
 
-def classify_contact_episodes(behavior, collision_delta, metrics, args):
-    """Separate required transport docking from unsafe contact episodes.
+def classify_contact_episodes(
+    behavior, collision_delta, metrics, args, collision_attribution=None,
+):
+    """Classify the filtered safety-contact counter without relabelling it.
 
-    The swarm collision counter is intentionally broad: it counts each
-    robot's transition into geometric contact.  That is useful for formation
-    and follow tasks, but transport asks roots to touch the payload and chain
-    members to touch their declared predecessor.  Gazebo ground truth lets the
-    acceptance runner check whether a counter increase happened alongside
-    only those declared contacts or alongside an actual clearance violation.
+    ObstacleAvoidance removes the payload and declared chain neighbours from
+    this signal before it is published.  Required docking is proved separately
+    by payload/predecessor contact samples and ground-truth geometry.  A rise
+    in this already-filtered counter is therefore unexpected in every phase;
+    final docking evidence must never turn it back into an allowed contact.
     """
     try:
         raw_delta = max(0, int(collision_delta))
@@ -470,47 +610,62 @@ def classify_contact_episodes(behavior, collision_delta, metrics, args):
     ] is None:
         missing_geometry.append("minimum_boundary_clearance_m")
 
+    attribution = (
+        collision_attribution
+        if isinstance(collision_attribution, dict) else {}
+    )
+    temporal_attribution_complete = (
+        raw_delta == 0
+        or bool(attribution.get("temporal_attribution_complete"))
+    )
+    try:
+        pre_docking_delta = max(
+            0, int(attribution.get("pre_docking_episode_count", 0) or 0)
+        )
+    except (TypeError, ValueError):
+        pre_docking_delta = 0
+    # A sampled early edge is authoritative negative evidence even when
+    # packet loss prevents complete attribution of the aggregate counter.
+    # Clamp it to the authoritative delta so diagnostics remain additive.
+    pre_docking_delta = min(raw_delta, pre_docking_delta)
+
     if raw_delta == 0:
         classification = "none"
-        reasons = ["the raw contact counter did not increase"]
-    elif behavior != "transport":
-        classification = "unexpected_contact"
-        reasons = [
-            "{} does not require physical docking".format(behavior)
-        ]
-    elif not participation or missing_expected_contact_robots:
-        classification = "unexpected_contact"
-        reasons = [
-            "declared payload/chain contact was not proven for the full fleet"
-        ]
-    elif crossed_limits:
-        classification = "unexpected_contact"
-        reasons = ["ground-truth clearance crossed a safety limit"]
-    elif missing_geometry:
-        classification = "unexpected_contact"
-        reasons = [
-            "ground-truth clearance telemetry was incomplete"
-        ]
+        reasons = ["the filtered safety-contact counter did not increase"]
     else:
-        classification = "expected_transport_docking"
+        classification = "unexpected_contact"
         reasons = [
-            "every robot had declared payload or predecessor contact",
-            "no unexpected ground-truth clearance limit was crossed",
+            "the safety-contact signal already excludes declared payload "
+            "and chain docking",
         ]
+        if behavior != "transport":
+            reasons.append(
+                "{} does not require physical docking".format(behavior)
+            )
+        if not temporal_attribution_complete:
+            reasons.append(
+                "not every aggregate episode had a correlated sealed event"
+            )
+        if pre_docking_delta:
+            reasons.append(
+                "at least one episode was observed before the docking window"
+            )
+        if crossed_limits:
+            reasons.append("ground-truth clearance crossed a safety limit")
+        if missing_geometry:
+            reasons.append("ground-truth clearance telemetry was incomplete")
 
-    expected_delta = (
-        raw_delta if classification == "expected_transport_docking" else 0
-    )
-    unexpected_delta = (
-        raw_delta if classification == "unexpected_contact" else 0
-    )
+    expected_delta = 0
+    unexpected_delta = raw_delta
     return {
         "raw_collision_count_delta": raw_delta,
         "counter_metric": "per_robot_geometric_contact_episodes",
-        "classification_basis": (
-            "aggregate_ground_truth_and_declared_transport_contacts"
-        ),
+        "classification_basis": "filtered_safety_contact_counter",
         "classification_is_inferred": True,
+        "temporal_attribution_used": bool(attribution),
+        "temporal_attribution_complete": temporal_attribution_complete,
+        "pre_docking_episode_count": pre_docking_delta,
+        "transport_docking_phases": sorted(TRANSPORT_DOCKING_PHASES),
         "classification": classification,
         "classified_expected_contact_count_delta": expected_delta,
         "classified_unexpected_contact_count_delta": unexpected_delta,
@@ -530,14 +685,15 @@ def classify_contact_episodes(behavior, collision_delta, metrics, args):
 
 def collision_attribution_report(
     aggregate_delta, episode_counts, status_samples, missing_robot_ids,
+    episode_records=None, protocol_errors=None, duplicate_event_count=0,
+    baseline_sequence=None, last_sequence=None,
 ):
-    """Corroborate aggregate episodes with sampled per-robot status edges.
+    """Corroborate the aggregate counter with sealed collision events.
 
-    ``/swarm/status`` exposes each robot's current collision boolean, while
-    the authoritative counter is aggregate.  A rising-edge attribution is
-    exact enough to report only when every status sample covered the complete
-    case roster and the observed edge count agrees with the aggregate delta.
-    Otherwise the per-robot list remains a useful lower-bound diagnostic.
+    The producer records task identity and transport phase under the same lock
+    that increments the counter.  Any stream discontinuity or correlation
+    error makes attribution incomplete, so docking cannot excuse the raw
+    aggregate delta.
     """
     aggregate = max(0, int(aggregate_delta or 0))
     counts = {
@@ -550,10 +706,74 @@ def collision_attribution_report(
     observed = sum(counts.values())
     missing = sorted(set(missing_robot_ids or ()), key=robot_sort_key)
     samples = max(0, int(status_samples or 0))
-    matched = samples > 0 and not missing and observed == aggregate
+    errors = [
+        str(error) for error in (protocol_errors or ()) if str(error)
+    ]
+    matched = (
+        samples > 0
+        and not missing
+        and not errors
+        and observed == aggregate
+    )
+    records = []
+    phase_counts = {}
+    pre_docking_count = 0
+    docking_count = 0
+    for item in episode_records or ():
+        if not isinstance(item, dict):
+            continue
+        robot = clean_robot_name(item.get("robot_id"))
+        phase = str(item.get("phase") or "UNOBSERVED").strip().upper()
+        if phase not in TRANSPORT_PHASES:
+            phase = "UNOBSERVED"
+        docking_window_open = bool(item.get("docking_window_open"))
+        if docking_window_open and phase not in TRANSPORT_DOCKING_PHASES:
+            # Never trust a caller-provided boolean that contradicts the
+            # phase recorded at the same edge.
+            docking_window_open = False
+        record = {
+            "robot_id": robot or str(item.get("robot_id") or "unknown"),
+            "phase": phase,
+            "docking_window_open": docking_window_open,
+        }
+        sequence = item.get("sequence")
+        if isinstance(sequence, int) and not isinstance(sequence, bool):
+            record["sequence"] = sequence
+        for key in ("task_id", "task_type"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                record[key] = value
+        source_id = item.get("source_id")
+        if isinstance(source_id, str) and source_id:
+            record["source_id"] = source_id
+        for key in ("source_sequence", "source_control_sequence"):
+            value = item.get(key)
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+            ):
+                record[key] = value
+        for key in (
+            "wall_elapsed_s", "sim_elapsed_s",
+            "observed_wall_elapsed_s", "observed_sim_elapsed_s",
+            "source_wall_elapsed_s", "source_sim_elapsed_s",
+            "source_wall_time", "source_sim_time",
+        ):
+            value = finite_number(item.get(key))
+            if value is not None:
+                record[key] = rounded(value)
+        records.append(record)
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        if docking_window_open:
+            docking_count += 1
+        else:
+            pre_docking_count += 1
 
-    if samples == 0:
-        reason = "no correlated per-robot collision status was sampled"
+    if errors:
+        reason = "sealed collision event stream failed validation"
+    elif samples == 0:
+        reason = "no sealed collision event stream was sampled"
     elif missing:
         reason = "some correlated status samples omitted case robots"
     elif observed != aggregate:
@@ -563,21 +783,36 @@ def collision_attribution_report(
         )
     else:
         reason = (
-            "complete-roster rising edges matched the authoritative "
-            "aggregate episode delta"
+            "sealed rising edges matched the authoritative aggregate "
+            "episode delta"
         )
 
     return {
-        "source": "/swarm/status robots[].collision rising edges",
+        "source": "/swarm/status collision_events.events sealed rising edges",
+        "event_stream_version": COLLISION_EVENT_STREAM_VERSION,
         "aggregate_collision_count_delta": aggregate,
         "correlated_status_samples": samples,
         "observed_episode_count": observed,
         "episode_count_by_robot": counts,
+        "episode_count_by_phase": {
+            phase: phase_counts[phase] for phase in sorted(phase_counts)
+        },
+        "episode_records": records,
+        "pre_docking_episode_count": pre_docking_count,
+        "docking_window_episode_count": docking_count,
+        "transport_docking_phases": sorted(TRANSPORT_DOCKING_PHASES),
+        "temporal_attribution_complete": (
+            matched and len(records) == aggregate
+        ),
         "robots_with_observed_episodes": list(counts),
         "missing_robot_ids": missing,
         "aggregate_count_matched": observed == aggregate,
         "attribution_corroborated": matched,
         "unattributed_episode_count": max(0, aggregate - observed),
+        "protocol_errors": errors,
+        "duplicate_event_count": max(0, int(duplicate_event_count or 0)),
+        "baseline_sequence": baseline_sequence,
+        "last_sequence": last_sequence,
         "reason": reason,
     }
 
@@ -2416,6 +2651,12 @@ class AcceptanceHarness:
         self.emergency_stop = False
         self.collision_count = 0
         self.behavior_status = {"formation": {}, "follow": {}, "transport": {}}
+        self.behavior_status_sequences = {
+            "formation": 0, "follow": 0, "transport": 0,
+        }
+        self.behavior_status_wall_times = {
+            "formation": None, "follow": None, "transport": None,
+        }
         self.sim_time = None
         self.model_names = set()
         self.cmd_velocities = {}
@@ -2423,15 +2664,33 @@ class AcceptanceHarness:
         self.cmd_vel_subscriber_tokens = {}
         self.next_cmd_vel_subscriber_token = 0
         self.robot_collision_active = {}
+        self.collision_event_stream_seen = False
+        self.collision_event_last_sequence = 0
         self.active_collision_robot_ids = set()
-        self.active_collision_previous = {}
         self.active_collision_episode_counts = {}
+        self.active_collision_episode_records = []
         self.active_collision_status_samples = 0
         self.active_collision_missing_robots = set()
+        self.active_collision_protocol_errors = []
+        self.active_collision_event_fingerprints = {}
+        self.active_collision_duplicate_count = 0
+        self.active_collision_baseline_sequence = 0
+        self.active_collision_next_sequence = 1
+        self.active_collision_expected_task_type = None
+        self.active_collision_source_id = None
+        self.active_collision_source_last_sequence = None
+        self.active_collision_source_last_control_sequence = 0
         self.last_reset_cleanup = {}
         self.active_metrics = None
         self.active_task_id = None
         self.last_metrics_sim = None
+        self.active_case_wall_start = None
+        self.active_case_sim_start = None
+        self.active_transport_phase = None
+        self.active_transport_phase_started_wall = None
+        self.active_transport_phase_error = None
+        self.active_transport_phase_timeline = []
+        self.active_transport_phase_timeline_dropped = 0
         self.stop_requested = False
         self.case_cleanup_failures = []
         self.last_cleanup_failures = []
@@ -2544,53 +2803,373 @@ class AcceptanceHarness:
             self.emergency_stop = bool(status.get("emergency_stop", False))
             self.collision_count = int(status.get("collisions", 0) or 0)
             self.robot_collision_active = collision_states
-            self._observe_collision_status(collision_states)
+            self._observe_collision_events(
+                status.get("collision_events"), self.collision_count
+            )
 
-    def _begin_collision_attribution(self, robot_ids):
-        """Start a per-case rising-edge view of the aggregate counter."""
+    def _begin_collision_attribution(self, robot_ids, task_type=None):
+        """Baseline the sealed event stream for one acceptance case."""
         self.active_collision_robot_ids = set(robot_ids)
-        self.active_collision_previous = {
-            name: bool(self.robot_collision_active.get(name, False))
-            for name in robot_ids
-        }
         self.active_collision_episode_counts = {
             name: 0 for name in robot_ids
         }
+        self.active_collision_episode_records = []
         self.active_collision_status_samples = 0
         self.active_collision_missing_robots = set()
+        self.active_collision_protocol_errors = []
+        self.active_collision_event_fingerprints = {}
+        self.active_collision_duplicate_count = 0
+        self.active_collision_baseline_sequence = max(
+            int(getattr(self, "collision_event_last_sequence", 0) or 0),
+            int(self.collision_count or 0),
+        )
+        self.active_collision_next_sequence = (
+            self.active_collision_baseline_sequence + 1
+        )
+        normalized_type = {
+            "follow": "follow_leader",
+        }.get(task_type, task_type)
+        self.active_collision_expected_task_type = (
+            normalized_type if normalized_type in COLLISION_TASK_TYPES else None
+        )
+        self.active_collision_source_id = None
+        self.active_collision_source_last_sequence = None
+        self.active_collision_source_last_control_sequence = 0
 
-    def _observe_collision_status(self, collision_states):
-        """Record correlated per-robot collision edges under ``self.lock``."""
-        task_id = str(self.swarm_task.get("task_id") or "")
-        if (
-            not self.active_collision_robot_ids
-            or task_id != str(self.active_task_id or "")
-        ):
+    def _collision_protocol_error(self, reason):
+        """Retain a small, de-duplicated set of fail-closed diagnostics."""
+        if reason not in self.active_collision_protocol_errors:
+            if len(self.active_collision_protocol_errors) < 32:
+                self.active_collision_protocol_errors.append(reason)
+
+    @staticmethod
+    def _collision_sequence(value):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    def _observe_collision_events(self, stream, aggregate_count):
+        """Consume the producer's bounded, sealed rising-edge stream."""
+        active = bool(self.active_collision_robot_ids)
+        baseline = getattr(self, "active_collision_baseline_sequence", 0)
+        if not isinstance(stream, dict):
+            if active and aggregate_count > baseline:
+                self._collision_protocol_error(
+                    "collision event stream missing after counter increase"
+                )
             return
 
-        expected = self.active_collision_robot_ids
-        present = expected.intersection(collision_states)
+        version = self._collision_sequence(stream.get("version"))
+        first = self._collision_sequence(stream.get("first_sequence"))
+        last = self._collision_sequence(stream.get("last_sequence"))
+        events = stream.get("events")
+        malformed = (
+            version != COLLISION_EVENT_STREAM_VERSION
+            or first is None
+            or last is None
+            or not isinstance(events, list)
+            or len(events) > MAXIMUM_COLLISION_EVENT_HISTORY
+            or last != aggregate_count
+        )
+        if malformed:
+            if active:
+                self._collision_protocol_error(
+                    "collision event stream metadata is malformed or mismatched"
+                )
+            return
+
+        parsed = []
+        previous_sequence = None
+        for item in events:
+            if not isinstance(item, dict):
+                malformed = True
+                break
+            sequence = self._collision_sequence(item.get("sequence"))
+            if sequence is None or sequence == 0:
+                malformed = True
+                break
+            if previous_sequence is not None and sequence != previous_sequence + 1:
+                malformed = True
+                break
+            previous_sequence = sequence
+            parsed.append((sequence, item))
+
+        expected_first = parsed[0][0] if parsed else last + 1
+        if (
+            malformed
+            or first != expected_first
+            or (parsed and parsed[-1][0] != last)
+        ):
+            if active:
+                self._collision_protocol_error(
+                    "collision event stream has a sequence discontinuity"
+                )
+            return
+
+        previous_last = int(
+            getattr(self, "collision_event_last_sequence", 0) or 0
+        )
+        if (
+            getattr(self, "collision_event_stream_seen", False)
+            and last < previous_last
+        ):
+            if active:
+                self._collision_protocol_error(
+                    "collision event stream sequence regressed"
+                )
+            return
+        self.collision_event_stream_seen = True
+        self.collision_event_last_sequence = last
+        if not active:
+            return
+
         self.active_collision_status_samples += 1
-        self.active_collision_missing_robots.update(expected - present)
-        for name in present:
-            active = bool(collision_states[name])
-            previous = bool(self.active_collision_previous.get(name, False))
-            if active and not previous:
-                self.active_collision_episode_counts[name] += 1
-            self.active_collision_previous[name] = active
+        next_sequence = self.active_collision_next_sequence
+        if first > next_sequence and last >= next_sequence:
+            self._collision_protocol_error(
+                "collision event stream dropped sequence {}".format(
+                    next_sequence
+                )
+            )
+
+        for sequence, item in parsed:
+            if sequence <= baseline:
+                continue
+            task_id = item.get("task_id")
+            task_type = item.get("task_type")
+            name = clean_robot_name(item.get("robot_id"))
+            phase = str(item.get("task_phase") or "").strip().upper()
+            source_id = None
+            source_sequence = None
+            source_control_sequence = None
+            source_sim_time = None
+            source_wall_time = None
+            source_valid = True
+            if task_type == "transport":
+                source_id = item.get("source_id")
+                source_sequence = self._collision_sequence(
+                    item.get("source_sequence")
+                )
+                source_control_sequence = self._collision_sequence(
+                    item.get("source_control_sequence")
+                )
+                raw_source_sim_time = item.get("source_sim_time")
+                raw_source_wall_time = item.get("source_wall_time")
+                source_sim_time = (
+                    None if isinstance(raw_source_sim_time, bool)
+                    else finite_number(raw_source_sim_time)
+                )
+                source_wall_time = (
+                    None if isinstance(raw_source_wall_time, bool)
+                    else finite_number(raw_source_wall_time)
+                )
+                source_valid = (
+                    isinstance(source_id, str)
+                    and bool(source_id)
+                    and len(source_id) <= 128
+                    and source_id.isprintable()
+                    and source_sequence not in (None, 0)
+                    and source_control_sequence not in (None, 0)
+                    and source_sim_time is not None
+                    and source_sim_time >= 0.0
+                    and source_wall_time is not None
+                    and source_wall_time >= 0.0
+                )
+            fingerprint = (
+                item.get("robot_id"), task_id, task_type,
+                item.get("task_phase"), source_id, source_sequence,
+                source_control_sequence, source_sim_time, source_wall_time,
+            )
+            if sequence < self.active_collision_next_sequence:
+                previous = self.active_collision_event_fingerprints.get(
+                    sequence
+                )
+                if previous == fingerprint:
+                    self.active_collision_duplicate_count += 1
+                else:
+                    self._collision_protocol_error(
+                        "collision sequence {} was reused with different data".format(
+                            sequence
+                        )
+                    )
+                continue
+            if sequence > self.active_collision_next_sequence:
+                self._collision_protocol_error(
+                    "collision event stream skipped sequence {}".format(
+                        self.active_collision_next_sequence
+                    )
+                )
+            self.active_collision_next_sequence = sequence + 1
+            if (
+                len(self.active_collision_event_fingerprints)
+                >= MAXIMUM_COLLISION_EVENT_HISTORY
+                or len(self.active_collision_episode_records)
+                >= MAXIMUM_COLLISION_EVENT_HISTORY
+            ):
+                self._collision_protocol_error(
+                    "collision attribution consumer capacity exceeded"
+                )
+                continue
+            self.active_collision_event_fingerprints[sequence] = fingerprint
+
+            if task_id != str(self.active_task_id or ""):
+                self._collision_protocol_error(
+                    "collision event {} belongs to another task".format(sequence)
+                )
+                continue
+            expected_type = self.active_collision_expected_task_type
+            if expected_type is not None and task_type != expected_type:
+                self._collision_protocol_error(
+                    "collision event {} has a mismatched task type".format(sequence)
+                )
+                continue
+            if name not in self.active_collision_robot_ids:
+                self._collision_protocol_error(
+                    "collision event {} names a robot outside the case".format(
+                        sequence
+                    )
+                )
+                continue
+            if task_type == "transport" and phase not in TRANSPORT_PHASES:
+                self._collision_protocol_error(
+                    "collision event {} lacks an authoritative transport phase".format(
+                        sequence
+                    )
+                )
+                phase = "UNOBSERVED"
+            elif task_type != "transport":
+                phase = "UNOBSERVED"
+            if task_type == "transport":
+                if not source_valid:
+                    self._collision_protocol_error(
+                        "collision event {} lacks valid causal source data".format(
+                            sequence
+                        )
+                    )
+                    continue
+                active_source_id = getattr(
+                    self, "active_collision_source_id", None
+                )
+                last_source_sequence = getattr(
+                    self, "active_collision_source_last_sequence", None
+                )
+                last_control_sequence = int(getattr(
+                    self,
+                    "active_collision_source_last_control_sequence",
+                    0,
+                ) or 0)
+                if (
+                    active_source_id is not None
+                    and source_id != active_source_id
+                ):
+                    self._collision_protocol_error(
+                        "transport collision source restarted during the case"
+                    )
+                    continue
+                if (
+                    last_source_sequence is not None
+                    and source_sequence != last_source_sequence + 1
+                ):
+                    self._collision_protocol_error(
+                        "transport collision source sequence is discontinuous"
+                    )
+                    continue
+                if source_control_sequence < last_control_sequence:
+                    self._collision_protocol_error(
+                        "transport collision control sequence regressed"
+                    )
+                    continue
+                self.active_collision_source_id = source_id
+                self.active_collision_source_last_sequence = source_sequence
+                self.active_collision_source_last_control_sequence = (
+                    source_control_sequence
+                )
+
+            self.active_collision_episode_counts[name] += 1
+            observed_wall_elapsed = (
+                max(0.0, time.monotonic() - self.active_case_wall_start)
+                if self.active_case_wall_start is not None else None
+            )
+            observed_sim_elapsed = (
+                max(0.0, self.sim_time - self.active_case_sim_start)
+                if (
+                    self.sim_time is not None
+                    and self.active_case_sim_start is not None
+                ) else None
+            )
+            wall_elapsed = observed_wall_elapsed
+            sim_elapsed = observed_sim_elapsed
+            record = {
+                "sequence": sequence,
+                "robot_id": name,
+                "task_id": task_id,
+                "task_type": task_type,
+                "phase": phase,
+                "docking_window_open": (
+                    phase in TRANSPORT_DOCKING_PHASES
+                ),
+                "wall_elapsed_s": wall_elapsed,
+                "sim_elapsed_s": sim_elapsed,
+                "observed_wall_elapsed_s": observed_wall_elapsed,
+                "observed_sim_elapsed_s": observed_sim_elapsed,
+            }
+            if task_type == "transport":
+                source_wall_elapsed = (
+                    max(0.0, source_wall_time - self.active_case_wall_start)
+                    if self.active_case_wall_start is not None else None
+                )
+                source_sim_elapsed = (
+                    max(0.0, source_sim_time - self.active_case_sim_start)
+                    if self.active_case_sim_start is not None else None
+                )
+                record.update({
+                    "source_id": source_id,
+                    "source_sequence": source_sequence,
+                    "source_control_sequence": source_control_sequence,
+                    "source_sim_time": source_sim_time,
+                    "source_wall_time": source_wall_time,
+                    "source_wall_elapsed_s": source_wall_elapsed,
+                    "source_sim_elapsed_s": source_sim_elapsed,
+                    # Temporal classification uses the edge time, not the
+                    # later /swarm/status subscriber callback.
+                    "wall_elapsed_s": source_wall_elapsed,
+                    "sim_elapsed_s": source_sim_elapsed,
+                })
+            self.active_collision_episode_records.append(record)
 
     def _finish_collision_attribution(self, collision_delta):
+        expected_last = (
+            self.active_collision_baseline_sequence
+            + max(0, int(collision_delta or 0))
+        )
+        observed_last = self.active_collision_next_sequence - 1
+        if observed_last != expected_last:
+            self._collision_protocol_error(
+                "sealed event watermark did not match the aggregate delta"
+            )
         report = collision_attribution_report(
             collision_delta,
             self.active_collision_episode_counts,
             self.active_collision_status_samples,
             self.active_collision_missing_robots,
+            self.active_collision_episode_records,
+            self.active_collision_protocol_errors,
+            self.active_collision_duplicate_count,
+            self.active_collision_baseline_sequence,
+            observed_last,
         )
         self.active_collision_robot_ids = set()
-        self.active_collision_previous = {}
         self.active_collision_episode_counts = {}
+        self.active_collision_episode_records = []
         self.active_collision_status_samples = 0
         self.active_collision_missing_robots = set()
+        self.active_collision_protocol_errors = []
+        self.active_collision_event_fingerprints = {}
+        self.active_collision_duplicate_count = 0
+        self.active_collision_expected_task_type = None
+        self.active_collision_source_id = None
+        self.active_collision_source_last_sequence = None
+        self.active_collision_source_last_control_sequence = 0
         return report
 
     def _behavior_cb(self, name, msg):
@@ -2598,8 +3177,15 @@ class AcceptanceHarness:
             status = json.loads(msg.data)
         except (TypeError, json.JSONDecodeError):
             return
+        if not isinstance(status, dict):
+            return
+        observed_wall = time.monotonic()
         with self.lock:
             self.behavior_status[name] = status
+            self.behavior_status_sequences[name] += 1
+            self.behavior_status_wall_times[name] = observed_wall
+            if name == "transport":
+                self._record_transport_phase(status, observed_wall)
 
     def _clock_cb(self, msg):
         with self.lock:
@@ -2647,6 +3233,81 @@ class AcceptanceHarness:
         payload = {"command": command, "parameters": parameters or {}}
         self.command_pub.publish(String(data=json.dumps(payload)))
 
+    def _record_transport_phase(self, status, observed_wall):
+        """Keep a bounded, task-correlated timeline of phase changes.
+
+        The caller holds ``self.lock``.  Only small scalar fields are retained,
+        so this evidence cannot grow with the status publication rate or carry
+        arbitrary task data into RESULT_JSON.
+        """
+        task_id = str(status.get("task_id") or "")
+        if not task_id or task_id != str(self.active_task_id or ""):
+            return
+        phase = str(status.get("phase") or "").strip().upper()
+        if phase not in TRANSPORT_PHASES:
+            if not self.active_transport_phase_error:
+                self.active_transport_phase_error = (
+                    "unknown transport phase: " + (phase or "<empty>")
+                )
+            return
+        if phase == self.active_transport_phase:
+            return
+
+        previous_phase = self.active_transport_phase
+        if previous_phase is not None and (
+            TRANSPORT_PHASE_ORDER[phase]
+            < TRANSPORT_PHASE_ORDER[previous_phase]
+            or previous_phase in {"DONE", "FAILED"}
+        ):
+            if not self.active_transport_phase_error:
+                self.active_transport_phase_error = (
+                    "transport phase regressed from {} to {}".format(
+                        previous_phase, phase
+                    )
+                )
+            return
+
+        self.active_transport_phase = phase
+        self.active_transport_phase_started_wall = observed_wall
+        wall_start = self.active_case_wall_start
+        sim_start = self.active_case_sim_start
+        wall_elapsed = (
+            max(0.0, observed_wall - wall_start)
+            if wall_start is not None else None
+        )
+        sim_elapsed = None
+        if self.sim_time is not None and sim_start is not None:
+            sim_elapsed = max(0.0, self.sim_time - sim_start)
+        transition = {
+            "phase": phase,
+            "wall_elapsed_s": rounded(wall_elapsed),
+            "sim_elapsed_s": rounded(sim_elapsed),
+            "status_sequence": self.behavior_status_sequences["transport"],
+        }
+        if (
+            len(self.active_transport_phase_timeline)
+            < MAXIMUM_TRANSPORT_PHASE_TRANSITIONS
+        ):
+            self.active_transport_phase_timeline.append(transition)
+        else:
+            self.active_transport_phase_timeline_dropped += 1
+
+    def _transport_timeline_report(self):
+        """Copy the bounded phase history while its task is still active."""
+        with self.lock:
+            return {
+                "wall_clock": "time.monotonic",
+                "simulation_clock": "/clock",
+                "transitions": [
+                    dict(item) for item in self.active_transport_phase_timeline
+                ],
+                "maximum_transitions": MAXIMUM_TRANSPORT_PHASE_TRANSITIONS,
+                "dropped_transitions": (
+                    self.active_transport_phase_timeline_dropped
+                ),
+                "protocol_error": self.active_transport_phase_error,
+            }
+
     def wait_for(
         self, predicate, timeout, description, continue_after_stop=False,
     ):
@@ -2663,6 +3324,98 @@ class AcceptanceHarness:
                 return False
             time.sleep(0.1)
         return False
+
+    def _wait_for_transport_completion(self, case, task_id):
+        """Wait for a terminal task with optional per-phase wall budgets."""
+        started_at = time.monotonic()
+        hard_timeout = max(0.0, float(case["timeout"]))
+        raw_phase_timeouts = case.get("phase_timeouts", {})
+        phase_timeouts = {
+            str(phase).upper(): max(0.0, float(value))
+            for phase, value in raw_phase_timeouts.items()
+            if str(phase).upper() in TRANSPORT_PHASES
+        }
+
+        def response(
+            reason, now, phase=None, phase_elapsed=None,
+            phase_error=None,
+        ):
+            timed_out = reason in {"phase_timeout", "scenario_timeout"}
+            return {
+                "completion_wait_satisfied": reason in {
+                    "task_completed", "task_failed", "task_stopped"
+                },
+                "termination_reason": reason,
+                "timeout_phase": phase if timed_out else None,
+                "completion_wait_elapsed_wall_s": rounded(
+                    max(0.0, now - started_at)
+                ),
+                "completion_wait_timeout_wall_s": rounded(hard_timeout),
+                "timeout_phase_elapsed_wall_s": (
+                    rounded(phase_elapsed) if timed_out else None
+                ),
+                "transport_phase_timeouts_wall_s": {
+                    key: rounded(value)
+                    for key, value in sorted(phase_timeouts.items())
+                },
+                "transport_phase_timeout_tolerance_wall_s": (
+                    TRANSPORT_PHASE_TIMEOUT_TOLERANCE_WALL_S
+                ),
+                "transport_phase_protocol_error": phase_error,
+            }
+
+        while True:
+            now = time.monotonic()
+            with self.lock:
+                task = dict(self.swarm_task)
+                emergency = self.emergency_stop
+                phase = self.active_transport_phase
+                phase_started = self.active_transport_phase_started_wall
+                phase_error = self.active_transport_phase_error
+
+            correlated = str(task.get("task_id") or "") == str(task_id)
+            task_state = str(task.get("status") or "").strip().lower()
+            if emergency:
+                return response("emergency_stop", now, phase)
+            if phase_error:
+                return response(
+                    "phase_protocol_error", now, phase,
+                    phase_error=phase_error,
+                )
+            if correlated and task_state in TERMINAL_STATES:
+                return response("task_" + task_state, now, phase)
+            if rospy.is_shutdown():
+                return response("ros_shutdown", now, phase)
+            if self.stop_requested:
+                return response("stop_requested", now, phase)
+
+            phase_limit = phase_timeouts.get(phase)
+            phase_elapsed = (
+                max(0.0, now - phase_started)
+                if phase_started is not None else None
+            )
+            if (
+                phase_limit is not None
+                and phase_elapsed is not None
+                and phase_elapsed
+                >= phase_limit + TRANSPORT_PHASE_TIMEOUT_TOLERANCE_WALL_S
+            ):
+                self.log(
+                    "timeout waiting for transport {} phase liveness".format(
+                        phase
+                    )
+                )
+                return response(
+                    "phase_timeout", now, phase, phase_elapsed
+                )
+
+            elapsed = max(0.0, now - started_at)
+            if elapsed >= hard_timeout:
+                self.log("timeout waiting for task completion")
+                return response(
+                    "scenario_timeout", now, phase, phase_elapsed
+                )
+            time.sleep(0.05)
 
     def stop_task(self, continue_after_stop=False):
         with self.lock:
@@ -2826,10 +3579,15 @@ class AcceptanceHarness:
     def task_parameters(self, case, task_id):
         common = {"task_id": task_id}
         if case["behavior"] == "formation":
+            active_seconds = float(
+                getattr(self.args, "formation_active_seconds", 0.0) or 0.0
+            )
             common.update({
                 "task_type": "formation",
                 "formation_type": case["shape"],
-                "movement_mode": "static",
+                "movement_mode": (
+                    "moving" if active_seconds > 0.0 else "static"
+                ),
                 "config": {"spacing": case["spacing"]},
             })
         elif case["behavior"] == "follow":
@@ -2872,6 +3630,10 @@ class AcceptanceHarness:
             "warnings": [],
         }
         required_follow_laps = max(1, int(case.get("required_laps", 1)))
+        formation_active_seconds = (
+            float(getattr(self.args, "formation_active_seconds", 0.0) or 0.0)
+            if case["behavior"] == "formation" else 0.0
+        )
         follow_lap_completed = False
         collision_start = 0
         metrics = None
@@ -2885,13 +3647,23 @@ class AcceptanceHarness:
                 robot_ids = list(self.roster)
                 result["pre_spawn_cleanup"] = dict(self.last_reset_cleanup)
                 collision_start = self.collision_count
+                case_wall_start = time.monotonic()
                 metrics = CaseMetrics(
-                    case, robot_ids, self.sim_time, time.monotonic(), self.args
+                    case, robot_ids, self.sim_time, case_wall_start, self.args
                 )
                 self.active_metrics = metrics
                 self.active_task_id = task_id
                 self.last_metrics_sim = None
-                self._begin_collision_attribution(robot_ids)
+                self.active_case_wall_start = case_wall_start
+                self.active_case_sim_start = self.sim_time
+                self.active_transport_phase = None
+                self.active_transport_phase_started_wall = None
+                self.active_transport_phase_error = None
+                self.active_transport_phase_timeline = []
+                self.active_transport_phase_timeline_dropped = 0
+                self._begin_collision_attribution(
+                    robot_ids, case["behavior"]
+                )
 
             self.send("start_task", self.task_parameters(case, task_id))
             started = self.wait_for(
@@ -2902,6 +3674,132 @@ class AcceptanceHarness:
             )
             if not started:
                 result["failures"].append("task did not start")
+                result.update({
+                    "completion_wait_satisfied": False,
+                    "termination_reason": "task_not_started",
+                    "timeout_phase": None,
+                    "completion_wait_elapsed_wall_s": 0.0,
+                    "completion_wait_timeout_wall_s": case["timeout"],
+                    "timeout_phase_elapsed_wall_s": None,
+                })
+            elif case["behavior"] == "formation" and formation_active_seconds:
+                ready = self.wait_for(
+                    lambda: (
+                        self.swarm_task.get("task_id") == task_id
+                        and self.swarm_task.get("status") == "running"
+                        and not formation_active_status_failures(
+                            self.behavior_status["formation"],
+                            task_id,
+                            case,
+                            robot_ids,
+                            self.args.max_formation_error,
+                        )
+                    ),
+                    case["timeout"],
+                    "complete moving formation",
+                )
+                window_started = time.monotonic()
+                fresh_samples = 0
+                last_sequence = None
+                last_fresh_at = window_started
+                window_failure = None
+                if not ready:
+                    result["failures"].append(
+                        "formation did not become complete in moving mode"
+                    )
+                else:
+                    with self.lock:
+                        last_sequence = self.behavior_status_sequences[
+                            "formation"
+                        ]
+                    deadline = window_started + formation_active_seconds
+                    while (
+                        time.monotonic() < deadline
+                        and not self.stop_requested
+                    ):
+                        now = time.monotonic()
+                        with self.lock:
+                            task = dict(self.swarm_task)
+                            status = dict(self.behavior_status["formation"])
+                            sequence = self.behavior_status_sequences[
+                                "formation"
+                            ]
+                            status_at = self.behavior_status_wall_times[
+                                "formation"
+                            ]
+                            emergency = self.emergency_stop
+                            collisions = max(
+                                0, self.collision_count - collision_start
+                            )
+                        if (
+                            task.get("task_id") != task_id
+                            or task.get("status") != "running"
+                        ):
+                            window_failure = (
+                                "moving formation task did not remain running"
+                            )
+                            break
+                        if emergency or collisions:
+                            window_failure = (
+                                "moving formation crossed a live safety gate"
+                            )
+                            break
+                        if sequence != last_sequence:
+                            sample_failures = formation_active_status_failures(
+                                status,
+                                task_id,
+                                case,
+                                robot_ids,
+                                self.args.max_formation_error,
+                            )
+                            if sample_failures:
+                                window_failure = sample_failures[0]
+                                break
+                            fresh_samples += 1
+                            last_sequence = sequence
+                            last_fresh_at = status_at or now
+                        if now - last_fresh_at > 2.0:
+                            window_failure = (
+                                "moving formation status stopped updating"
+                            )
+                            break
+                        time.sleep(0.05)
+
+                    observed_seconds = max(
+                        0.0, time.monotonic() - window_started
+                    )
+                    window_complete = (
+                        window_failure is None
+                        and observed_seconds + 0.001
+                        >= formation_active_seconds
+                        and fresh_samples >= 5
+                    )
+                    result["formation_active_window"] = {
+                        "requested_wall_seconds": formation_active_seconds,
+                        "observed_wall_seconds": rounded(observed_seconds),
+                        "fresh_status_samples": fresh_samples,
+                        "state": "moving",
+                        "complete_fleet_required": True,
+                        "live_safety_signals_monitored": True,
+                        "completed": window_complete,
+                    }
+                    if window_failure:
+                        result["failures"].append(window_failure)
+                    elif observed_seconds + 0.001 < formation_active_seconds:
+                        result["failures"].append(
+                            "moving formation active window was interrupted"
+                        )
+                    elif fresh_samples < 5:
+                        result["failures"].append(
+                            "moving formation produced too few fresh status samples"
+                        )
+                    elif window_complete:
+                        result["task_outcome"] = "running_for_duration"
+                if "task_outcome" not in result:
+                    with self.lock:
+                        result["task_outcome"] = self.swarm_task.get(
+                            "status", "unknown"
+                        )
             elif case["behavior"] == "follow":
                 deadline = time.monotonic() + case["duration"]
                 while time.monotonic() < deadline and not self.stop_requested:
@@ -2931,14 +3829,43 @@ class AcceptanceHarness:
                 result["task_outcome"] = (
                     "running_for_duration" if state == "running" else state
                 )
+            elif case["behavior"] == "transport":
+                result.update(self._wait_for_transport_completion(
+                    case, task_id
+                ))
+                with self.lock:
+                    result["task_outcome"] = self.swarm_task.get(
+                        "status", "unknown"
+                    )
+                result["transport_phase_timeline"] = (
+                    self._transport_timeline_report()
+                )
             else:
-                self.wait_for(
+                completion_started = time.monotonic()
+                completion_wait_satisfied = self.wait_for(
                     lambda: (self.swarm_task.get("task_id") == task_id and
                              self.swarm_task.get("status") in TERMINAL_STATES),
                     case["timeout"], "task completion",
                 )
                 with self.lock:
                     result["task_outcome"] = self.swarm_task.get("status", "unknown")
+                completion_elapsed = max(
+                    0.0, time.monotonic() - completion_started
+                )
+                result.update({
+                    "completion_wait_satisfied": completion_wait_satisfied,
+                    "termination_reason": (
+                        "task_" + str(result["task_outcome"]).lower()
+                        if completion_wait_satisfied
+                        else "scenario_timeout"
+                    ),
+                    "timeout_phase": None,
+                    "completion_wait_elapsed_wall_s": rounded(
+                        completion_elapsed
+                    ),
+                    "completion_wait_timeout_wall_s": case["timeout"],
+                    "timeout_phase_elapsed_wall_s": None,
+                })
 
             with self.lock:
                 final_sim_time = self.sim_time
@@ -2978,7 +3905,8 @@ class AcceptanceHarness:
             result["collision_count_delta"] = collision_delta
             result["collision_episode_attribution"] = collision_attribution
             contact_classification = classify_contact_episodes(
-                case["behavior"], collision_delta, metric_report, self.args
+                case["behavior"], collision_delta, metric_report, self.args,
+                collision_attribution,
             )
             result["contact_episode_classification"] = (
                 contact_classification
@@ -3006,6 +3934,10 @@ class AcceptanceHarness:
                     self.args.acceleration_window
                 ),
                 "maximum_formation_target_error_m": self.args.max_formation_error,
+                "minimum_moving_formation_wall_seconds": (
+                    formation_active_seconds
+                    if formation_active_seconds else None
+                ),
                 "minimum_follow_robot_travel_m": self.args.min_follow_travel,
                 "minimum_follow_completed_laps": (
                     required_follow_laps
@@ -3022,7 +3954,27 @@ class AcceptanceHarness:
 
             if not result.get("task_outcome"):
                 result["task_outcome"] = swarm_task.get("status", "unknown")
-            if case["behavior"] in {"formation", "transport"}:
+            if result.get("termination_reason") == "phase_timeout":
+                result["failures"].append(
+                    "transport {} phase exceeded its liveness budget".format(
+                        result.get("timeout_phase") or "unknown"
+                    )
+                )
+            elif result.get("termination_reason") == "phase_protocol_error":
+                result["failures"].append(
+                    result.get("transport_phase_protocol_error")
+                    or "transport reported an invalid phase transition"
+                )
+            elif result.get("termination_reason") == "scenario_timeout":
+                result["failures"].append(
+                    "task completion exceeded the scenario wall-time budget"
+                )
+            if case["behavior"] == "formation" and formation_active_seconds:
+                if result["task_outcome"] != "running_for_duration":
+                    result["failures"].append(
+                        "moving formation did not remain running for its window"
+                    )
+            elif case["behavior"] in {"formation", "transport"}:
                 if result["task_outcome"] != "completed":
                     result["failures"].append(
                         "task outcome was " + str(result["task_outcome"])
@@ -3098,6 +4050,12 @@ class AcceptanceHarness:
                 )
 
             if case["behavior"] == "formation":
+                expected_movement_mode = (
+                    "moving" if formation_active_seconds else "static"
+                )
+                expected_state = (
+                    "moving" if formation_active_seconds else "formed"
+                )
                 requested_shape = str(case["shape"]).strip().lower()
                 reported_shape = str(
                     behavior.get("formation_type") or ""
@@ -3114,13 +4072,13 @@ class AcceptanceHarness:
                     result["failures"].append(
                         "formation status did not report the requested robot count"
                     )
-                if behavior.get("movement_mode") != "static":
+                if behavior.get("movement_mode") != expected_movement_mode:
                     result["failures"].append(
-                        "formation status did not report static movement mode"
+                        "formation status did not report the requested movement mode"
                     )
-                if behavior.get("state") != "formed":
+                if behavior.get("state") != expected_state:
                     result["failures"].append(
-                        "formation status did not reach formed"
+                        "formation status did not reach the requested state"
                     )
                 reported_assignments = behavior.get("robot_assignments")
                 assignment_names = set()
@@ -3580,6 +4538,13 @@ class AcceptanceHarness:
                     metrics.finish(final_sim_time, time.monotonic())
                     result["metrics"] = metrics.report()
         finally:
+            if (
+                case["behavior"] == "transport"
+                and "transport_phase_timeline" not in result
+            ):
+                result["transport_phase_timeline"] = (
+                    self._transport_timeline_report()
+                )
             with self.lock:
                 if self.active_collision_robot_ids:
                     self._finish_collision_attribution(0)
@@ -3687,6 +4652,15 @@ def build_parser():
         help=(
             "use an explicit correlated task id; requires exactly one "
             "selected scenario"
+        ),
+    )
+    parser.add_argument(
+        "--formation-active-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "run one selected formation in moving mode for a bounded active "
+            "window; zero keeps the normal static acceptance behavior"
         ),
     )
     parser.add_argument("--list", action="store_true", help="list scenario names and exit")
@@ -3853,6 +4827,12 @@ def main():
         parser.error(str(exc))
     if args.task_id and len(cases) != 1:
         parser.error("--task-id requires exactly one selected scenario")
+    try:
+        args.formation_active_seconds = validate_formation_active_selection(
+            args.formation_active_seconds, cases
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     rospy.init_node("robotswarm_live_acceptance", anonymous=True,
                     disable_signals=True)

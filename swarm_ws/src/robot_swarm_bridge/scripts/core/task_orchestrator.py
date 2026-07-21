@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from enum import Enum
 from datetime import datetime
 
@@ -44,6 +45,16 @@ FORMATION_SHAPES = {
     'triangle', 'square', 'circle', 'line', 'v', 'v_formation', 'diamond',
 }
 FORMATION_LETTERS = set('ABCDEFGHIJKLMNOPRSTUVWXYZ')
+TRANSPORT_PHASES = {'SEARCH', 'APPROACH', 'PUSH', 'DONE', 'FAILED'}
+COLLISION_EVENT_HISTORY_LIMIT = 128
+TRANSPORT_COLLISION_SOURCE_VERSION = 2
+TRANSPORT_COLLISION_SOURCE_HISTORY_LIMIT = 128
+COLLISION_EVENT_TEXT_LIMITS = {
+    'robot_id': 64,
+    'task_id': 128,
+    'task_type': 32,
+    'task_phase': 32,
+}
 
 
 class TaskOrchestrator:
@@ -79,6 +90,11 @@ class TaskOrchestrator:
         self.robot_count = 0
         self.emergency_stop_active = False
         self.collision_count = 0
+        self.collision_event_sequence = 0
+        self.collision_events = deque(
+            maxlen=COLLISION_EVENT_HISTORY_LIMIT
+        )
+        self._reset_transport_collision_consumer_locked()
         self.safety_status_timeout = max(
             0.2,
             float(rospy.get_param('~safety_status_timeout', 1.0)),
@@ -483,6 +499,13 @@ class TaskOrchestrator:
             if self.current_task_type is not None and not retry_undispatched:
                 self._handle_stop_task({}, force=True)
 
+            # A new task starts a fresh delivery window.  Keep the global
+            # watermark monotonic, but do not retransmit another task's event
+            # payload throughout this task's lifetime.
+            if not retry_undispatched:
+                self.collision_events.clear()
+                self._reset_transport_collision_consumer_locked()
+
             self.current_task_id = task_id
             self.current_task_type = task_type
             self.current_task_config = start_config
@@ -837,6 +860,16 @@ class TaskOrchestrator:
                     pass
 
             if task_type == 'transport':
+                collision_error = (
+                    self._consume_transport_collision_stream_locked(
+                        status, status_task_id
+                    )
+                )
+                if collision_error is not None:
+                    self._fail_current_task(
+                        status_task_id, collision_error
+                    )
+                    return
                 self.task_result = self._transport_result(
                     status, status_task_id
                 )
@@ -1107,8 +1140,332 @@ class TaskOrchestrator:
                 self.robots[robot_id]['last_collision_at'] = (
                     self._control_clock()
                 )
-                if active and not previous:
+                if (
+                    active
+                    and not previous
+                    and self.current_task_type != 'transport'
+                ):
                     self.collision_count += 1
+                    self.collision_event_sequence += 1
+                    self.collision_events.append(
+                        self._sealed_collision_event_locked(robot_id)
+                    )
+
+    def _reset_transport_collision_consumer_locked(self):
+        """Forget delivery state while retaining the global event watermark."""
+        self.transport_collision_source_id = None
+        self.transport_collision_source_task_id = None
+        self.transport_collision_source_task_start = None
+        self.transport_collision_source_watermark = None
+        self.transport_collision_source_next_sequence = None
+        self.transport_collision_source_last_control_sequence = 0
+        self.transport_collision_source_fingerprints = {}
+
+    def _ensure_transport_collision_consumer_locked(self):
+        """Support focused fixtures constructed without ``__init__``."""
+        if not hasattr(self, 'transport_collision_source_fingerprints'):
+            self._reset_transport_collision_consumer_locked()
+
+    @staticmethod
+    def _transport_source_integer(value, minimum=0):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if value >= minimum else None
+
+    @staticmethod
+    def _transport_source_number(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) and value >= 0.0 else None
+
+    def _consume_transport_collision_stream_locked(
+        self, status, expected_task_id
+    ):
+        """Validate and copy the transport-owned causal collision stream.
+
+        ``/collision_state`` remains the live compatibility state, but its
+        asynchronous callback cannot authoritatively label a transport phase.
+        Only this source stream advances the aggregate counter for transport.
+        Every validation error fails the task closed before a terminal status
+        can be accepted.
+        """
+        self._ensure_transport_collision_consumer_locked()
+        stream = status.get('collision_events')
+        if not isinstance(stream, dict):
+            return 'Transport collision event stream is missing'
+
+        version = self._transport_source_integer(stream.get('version'), 1)
+        source_id = stream.get('source_id')
+        stream_task_id = stream.get('task_id')
+        task_start = self._transport_source_integer(
+            stream.get('task_start_sequence')
+        )
+        history_limit = self._transport_source_integer(
+            stream.get('history_limit'), 1
+        )
+        first_sequence = self._transport_source_integer(
+            stream.get('first_sequence'), 1
+        )
+        last_sequence = self._transport_source_integer(
+            stream.get('last_sequence')
+        )
+        watermark = self._transport_source_integer(
+            stream.get('watermark')
+        )
+        events = stream.get('events')
+        errors = stream.get('protocol_errors')
+        terminal = stream.get('terminal')
+        valid = stream.get('valid')
+
+        if version != TRANSPORT_COLLISION_SOURCE_VERSION:
+            return 'Transport collision event stream version is unsupported'
+        if (
+            not isinstance(source_id, str)
+            or not source_id
+            or len(source_id) > 128
+            or not source_id.isprintable()
+        ):
+            return 'Transport collision source identity is invalid'
+        if stream_task_id != expected_task_id:
+            return 'Transport collision stream belongs to another task'
+        if (
+            task_start is None
+            or history_limit is None
+            or history_limit > TRANSPORT_COLLISION_SOURCE_HISTORY_LIMIT
+            or first_sequence is None
+            or last_sequence is None
+            or watermark is None
+            or last_sequence != watermark
+            or watermark < task_start
+        ):
+            return 'Transport collision event stream metadata is invalid'
+        if (
+            not isinstance(events, list)
+            or len(events) > history_limit
+            or not isinstance(errors, list)
+            or any(not isinstance(error, str) for error in errors)
+            or errors
+            or valid is not True
+            or not isinstance(terminal, bool)
+        ):
+            return 'Transport collision event stream reported a source error'
+
+        phase = status.get('phase')
+        phase_is_terminal = phase in ('DONE', 'FAILED')
+        if terminal != phase_is_terminal:
+            return 'Transport collision terminal marker is inconsistent'
+        if phase_is_terminal:
+            terminal_watermark = self._transport_source_integer(
+                stream.get('terminal_watermark')
+            )
+            if terminal_watermark != watermark:
+                return 'Transport terminal collision watermark is incomplete'
+
+        parsed = []
+        previous_source_sequence = None
+        previous_control_sequence = None
+        for event in events:
+            if not isinstance(event, dict) or event.get('valid') is not True:
+                return 'Transport collision event is malformed'
+            sequence = self._transport_source_integer(
+                event.get('sequence'), 1
+            )
+            source_sequence = self._transport_source_integer(
+                event.get('source_sequence'), 1
+            )
+            control_sequence = self._transport_source_integer(
+                event.get('control_sequence'), 1
+            )
+            sim_time = self._transport_source_number(
+                event.get('sim_time')
+            )
+            wall_time = self._transport_source_number(
+                event.get('wall_time')
+            )
+            robot_id = self._collision_event_text(
+                event.get('robot_id'), 'robot_id'
+            )
+            task_id = self._collision_event_text(
+                event.get('task_id'), 'task_id'
+            )
+            task_type = self._collision_event_text(
+                event.get('task_type'), 'task_type'
+            )
+            task_phase = self._collision_event_text(
+                event.get('task_phase'), 'task_phase'
+            )
+            if (
+                sequence is None
+                or source_sequence != sequence
+                or control_sequence is None
+                or sim_time is None
+                or wall_time is None
+                or event.get('source_id') != source_id
+                or task_id != expected_task_id
+                or task_type != 'transport'
+                or task_phase not in TRANSPORT_PHASES
+                or robot_id not in self.robots
+            ):
+                return 'Transport collision event has invalid causal data'
+            if (
+                previous_source_sequence is not None
+                and sequence != previous_source_sequence + 1
+            ):
+                return 'Transport collision source history is discontinuous'
+            if (
+                previous_control_sequence is not None
+                and control_sequence < previous_control_sequence
+            ):
+                return 'Transport collision control sequence regressed'
+            previous_source_sequence = sequence
+            previous_control_sequence = control_sequence
+            fingerprint = (
+                source_id, robot_id, task_id, task_type, task_phase,
+                control_sequence, sim_time, wall_time,
+            )
+            parsed.append((sequence, fingerprint, {
+                'robot_id': robot_id,
+                'task_id': task_id,
+                'task_type': task_type,
+                'task_phase': task_phase,
+                'source_id': source_id,
+                'source_sequence': sequence,
+                'source_control_sequence': control_sequence,
+                'source_sim_time': sim_time,
+                'source_wall_time': wall_time,
+            }))
+
+        expected_first = parsed[0][0] if parsed else watermark + 1
+        if (
+            first_sequence != expected_first
+            or (parsed and parsed[-1][0] != watermark)
+        ):
+            return 'Transport collision source watermark is discontinuous'
+
+        if self.transport_collision_source_id is None:
+            current_source_id = source_id
+            current_task_id = expected_task_id
+            current_task_start = task_start
+            previous_watermark = task_start
+            next_sequence = task_start + 1
+            last_control_sequence = 0
+            fingerprints = {}
+        else:
+            if source_id != self.transport_collision_source_id:
+                return 'Transport collision source restarted during the task'
+            if (
+                expected_task_id != self.transport_collision_source_task_id
+                or task_start != self.transport_collision_source_task_start
+            ):
+                return 'Transport collision source task window changed'
+            current_source_id = self.transport_collision_source_id
+            current_task_id = self.transport_collision_source_task_id
+            current_task_start = self.transport_collision_source_task_start
+            previous_watermark = self.transport_collision_source_watermark
+            next_sequence = self.transport_collision_source_next_sequence
+            last_control_sequence = (
+                self.transport_collision_source_last_control_sequence
+            )
+            fingerprints = dict(
+                self.transport_collision_source_fingerprints
+            )
+
+        if watermark < previous_watermark:
+            return 'Transport collision source watermark regressed'
+        if first_sequence > next_sequence and watermark >= next_sequence:
+            return 'Transport collision source dropped an event'
+
+        new_events = []
+        for sequence, fingerprint, copied_event in parsed:
+            if sequence < next_sequence:
+                previous = fingerprints.get(sequence)
+                if previous is not None and previous != fingerprint:
+                    return 'Transport collision source reused a sequence'
+                continue
+            if sequence > next_sequence:
+                return 'Transport collision source skipped an event'
+            control_sequence = copied_event['source_control_sequence']
+            if control_sequence < last_control_sequence:
+                return 'Transport collision control sequence regressed'
+            fingerprints[sequence] = fingerprint
+            next_sequence = sequence + 1
+            last_control_sequence = control_sequence
+            new_events.append(copied_event)
+
+        if next_sequence != watermark + 1:
+            return 'Transport collision source watermark has an event gap'
+
+        for copied_event in new_events:
+            self.collision_count += 1
+            self.collision_event_sequence += 1
+            copied_event['sequence'] = self.collision_event_sequence
+            self.collision_events.append(copied_event)
+
+        if len(fingerprints) > TRANSPORT_COLLISION_SOURCE_HISTORY_LIMIT:
+            retained = sorted(fingerprints)[
+                -TRANSPORT_COLLISION_SOURCE_HISTORY_LIMIT:
+            ]
+            fingerprints = {
+                sequence: fingerprints[sequence]
+                for sequence in retained
+            }
+
+        self.transport_collision_source_id = current_source_id
+        self.transport_collision_source_task_id = current_task_id
+        self.transport_collision_source_task_start = current_task_start
+        self.transport_collision_source_watermark = watermark
+        self.transport_collision_source_next_sequence = next_sequence
+        self.transport_collision_source_last_control_sequence = (
+            last_control_sequence
+        )
+        self.transport_collision_source_fingerprints = fingerprints
+        return None
+
+    @staticmethod
+    def _collision_event_text(value, field):
+        """Return a compact printable event value, or ``None`` if unsafe."""
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        limit = COLLISION_EVENT_TEXT_LIMITS[field]
+        if not value or len(value) > limit or not value.isprintable():
+            return None
+        return value
+
+    def _sealed_collision_event_locked(self, robot_id):
+        """Capture task identity and authoritative phase at the contact edge."""
+        task_type = self._collision_event_text(
+            self.current_task_type, 'task_type'
+        )
+        task_phase = None
+        if task_type == 'transport':
+            task_result = self.task_result
+            transport_result = (
+                task_result.get('transport')
+                if isinstance(task_result, dict) else None
+            )
+            candidate = (
+                transport_result.get('phase')
+                if isinstance(transport_result, dict) else None
+            )
+            if isinstance(candidate, str):
+                candidate = candidate.strip().upper()
+                if candidate in TRANSPORT_PHASES:
+                    task_phase = candidate
+
+        return {
+            'sequence': self.collision_event_sequence,
+            'robot_id': self._collision_event_text(robot_id, 'robot_id'),
+            'task_id': self._collision_event_text(
+                self.current_task_id, 'task_id'
+            ),
+            'task_type': task_type,
+            'task_phase': task_phase,
+        }
 
     def _scan_cb(self, robot_id, msg):
         with self.task_lock:
@@ -1247,6 +1604,10 @@ class TaskOrchestrator:
             robot_count = self.robot_count
             emergency_stop_active = self.emergency_stop_active
             collision_count = self.collision_count
+            collision_event_sequence = self.collision_event_sequence
+            collision_events = [
+                dict(event) for event in self.collision_events
+            ]
             heartbeat_seen = self.control_heartbeat_seen
             last_heartbeat = self.last_control_heartbeat
             watchdog_tripped = self.control_watchdog_tripped
@@ -1294,6 +1655,15 @@ class TaskOrchestrator:
             'emergency_stop': emergency_stop_active,
             'collisions': collision_count,
             'collision_metric': 'per_robot_geometric_contact_episodes',
+            'collision_events': {
+                'version': 1,
+                'first_sequence': (
+                    collision_events[0]['sequence']
+                    if collision_events else collision_event_sequence + 1
+                ),
+                'last_sequence': collision_event_sequence,
+                'events': collision_events,
+            },
             'safety': {
                 'stale': bool(stale_robot_ids),
                 'stale_robot_ids': stale_robot_ids,

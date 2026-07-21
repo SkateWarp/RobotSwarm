@@ -1,4 +1,5 @@
-﻿using SwarmBackend.Entities;
+﻿using LanguageExt.Common;
+using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
 using SwarmBackend.Interfaces;
 using SwarmBackend.Models;
@@ -20,10 +21,13 @@ public static class AccountRoute
            .RequireRateLimiting(AbuseProtection.RegistrationPolicy)
            .Produces(StatusCodes.Status403Forbidden)
            .Produces(StatusCodes.Status429TooManyRequests)
+           .ProducesValidationProblem()
            .Produces<AccountResponse>();
 
         group.MapPost("/admin", CreateByAdmin)
             .RequireAuthorization(policy => policy.RequireRole(Role.Admin.ToString()))
+            .Produces(StatusCodes.Status401Unauthorized)
+            .ProducesValidationProblem()
             .Produces<AccountResponse>();
 
         group.MapPost("/refreshToken", RefreshToken)
@@ -39,14 +43,19 @@ public static class AccountRoute
 
         group.MapPut("/{accountId}", Update)
             .RequireAuthorization()
+            .Produces(StatusCodes.Status401Unauthorized)
+            .ProducesValidationProblem()
             .Produces<AccountResponse>();
 
         group.MapPatch("/{accountId}", Patch)
             .RequireAuthorization()
+            .Produces(StatusCodes.Status401Unauthorized)
+            .ProducesValidationProblem()
             .Produces<AccountResponse>();
 
         group.MapDelete("/{accountId}", Delete)
             .RequireAuthorization()
+            .Produces(StatusCodes.Status401Unauthorized)
             .Produces<bool>();
         return group;
     }
@@ -82,7 +91,15 @@ public static class AccountRoute
                 detail: "Ask an administrator to create the account.");
         }
 
-        var response = await accountService.Create(request);
+        if (!AccountRequestValidator.TryNormalize(
+                request,
+                out var normalized,
+                out var errors))
+        {
+            return Results.ValidationProblem(errors);
+        }
+
+        var response = await accountService.Create(normalized);
         return response.Match(Results.Ok, Results.BadRequest);
     }
 
@@ -96,8 +113,15 @@ public static class AccountRoute
 
     public static async Task<IResult> CreateByAdmin(
         AdminCreateAccountRequest request,
-        IAccountService accountService)
+        IAccountService accountService,
+        HttpContext context)
     {
+        var actorAccountId = GetAccountId(context);
+        if (!actorAccountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
         if (!Enum.IsDefined(request.Role))
         {
             return Results.ValidationProblem(new Dictionary<string, string[]>
@@ -111,8 +135,21 @@ public static class AccountRoute
             request.LastName,
             request.Email,
             request.Password);
-        var response = await accountService.Create(accountRequest, request.Role);
-        return response.Match(Results.Ok, Results.BadRequest);
+        if (!AccountRequestValidator.TryNormalize(
+                accountRequest,
+                out var normalized,
+                out var errors))
+        {
+            return Results.ValidationProblem(errors);
+        }
+
+        var response = await accountService.CreateAuthorized(
+            actorAccountId.Value,
+            context.User,
+            normalized,
+            request.Role,
+            context.RequestAborted);
+        return AuthorizedResult(response, Results.Ok);
     }
 
     public static async Task<IResult> RefreshToken(RefreshTokenRequest request, IAccountService accountService)
@@ -173,8 +210,21 @@ public static class AccountRoute
             return Results.Forbid();
         }
 
-        var response = await accountService.Update(accountId, request);
-        return response.Match(Results.Ok, Results.BadRequest);
+        if (!AccountRequestValidator.TryNormalize(
+                request,
+                out var normalized,
+                out var errors))
+        {
+            return Results.ValidationProblem(errors);
+        }
+
+        var response = await accountService.UpdateAuthorized(
+            currentAccountId.Value,
+            context.User,
+            accountId,
+            normalized,
+            context.RequestAborted);
+        return AuthorizedResult(response, Results.Ok);
     }
 
     public static async Task<IResult> Patch(
@@ -208,8 +258,21 @@ public static class AccountRoute
             });
         }
 
-        var response = await accountService.Update(accountId, request);
-        return response.Match(Results.Ok, Results.BadRequest);
+        if (!AccountRequestValidator.TryNormalize(
+                request,
+                out var normalized,
+                out var errors))
+        {
+            return Results.ValidationProblem(errors);
+        }
+
+        var response = await accountService.UpdateAuthorized(
+            currentAccountId.Value,
+            context.User,
+            accountId,
+            normalized,
+            context.RequestAborted);
+        return AuthorizedResult(response, Results.Ok);
     }
 
     public static async Task<IResult> Delete(
@@ -229,7 +292,24 @@ public static class AccountRoute
             return Results.Forbid();
         }
 
-        var response = await accountService.Delete(accountId);
-        return response ? Results.Ok() : Results.BadRequest();
+        var response = await accountService.DeleteAuthorized(
+            currentAccountId.Value,
+            context.User,
+            accountId,
+            context.RequestAborted);
+        return AuthorizedResult(
+            response,
+            deleted => deleted ? Results.Ok() : Results.BadRequest());
+    }
+
+    private static IResult AuthorizedResult<T>(
+        Result<T> result,
+        Func<T, IResult> success)
+    {
+        return result.Match(
+            success,
+            error => error is UnauthorizedAccessException
+                ? Results.Unauthorized()
+                : Results.BadRequest(error));
     }
 }

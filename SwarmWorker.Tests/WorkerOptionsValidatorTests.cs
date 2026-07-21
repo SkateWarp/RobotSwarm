@@ -5,6 +5,27 @@ namespace SwarmWorker.Tests;
 public sealed class WorkerOptionsValidatorTests
 {
     [Fact]
+    public void ViewerPublisherHasEnoughTimeToReportStartup()
+    {
+        var options = new ViewerPublisherOptions();
+
+        Assert.Equal(50, options.StartupTimeoutSeconds);
+    }
+
+    [Theory]
+    [InlineData(95, true)]
+    [InlineData(121, false)]
+    public void ViewerWorkerBudgetCanStayAboveTheHelperBudget(int seconds, bool accepted)
+    {
+        var options = ValidOptions();
+        options.Viewer.StartupTimeoutSeconds = seconds;
+
+        var result = new WorkerOptionsValidator().Validate(null, options);
+
+        Assert.Equal(accepted, result.Succeeded);
+    }
+
+    [Fact]
     public void ViewerDisabledDoesNotRequirePublisherSettings()
     {
         var options = ValidOptions();

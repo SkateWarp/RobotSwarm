@@ -105,14 +105,14 @@ SECTIONS = (
 )
 
 MENU_LABELS = (
-    "Plantillas de tareas",
-    "Historial de tareas",
-    "Control de simulación",
+    "Plantillas",
+    "Historial",
+    "Control",
     "Robots",
-    "Grupos de robots",
+    "Grupos",
     "Usuarios",
 )
-USER_MENU = {"Historial de tareas", "Control de simulación"}
+USER_MENU = {"Historial", "Control"}
 ADMIN_MENU = set(MENU_LABELS)
 ADMIN_ENDPOINTS = {
     "taskTemplates": "https://robot.zerav.la/TaskTemplate",
@@ -348,7 +348,7 @@ class SectionsUi(VISIBLE.RobotSwarmUi):
         expression = f"""
             (() => {{
                 const wanted = {json.dumps(MENU_LABELS)};
-                const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
                 const labels = [...document.querySelectorAll(
                     '.fuse-list-item-text-primary, nav a, #fuse-navbar a, #fuse-navbar-side-panel a'
                 )].map(item => normalize(item.textContent));
@@ -481,7 +481,7 @@ class SectionsUi(VISIBLE.RobotSwarmUi):
                     const hasUuid = /(?:^|[^0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?=$|[^0-9a-f])/i.test(value);
                     const hasIpv4 = /(?:^|[^0-9])(?:[0-9]{1,3}[.]){3}[0-9]{1,3}(?=$|[^0-9])/.test(value);
                     const hasIpv6 = /(?:^|[^0-9a-f:])(?:(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}|[0-9a-f:]*::[0-9a-f:]*)(?=$|[^0-9a-f:])/i.test(value);
-                    const hasWorker = /(?:worker|trabajador|host)\s*(?:[:#=-]\s*)?[A-Za-z0-9][A-Za-z0-9._-]+/i.test(value);
+                    const hasWorker = /(?:worker|trabajador|host)\\s*(?:[:#=-]\\s*)?[A-Za-z0-9][A-Za-z0-9._-]+/i.test(value);
                     if (hasEmail || hasUuid || hasIpv4 || hasIpv6 || hasWorker) hide(walker.currentNode.parentElement);
                 }
 

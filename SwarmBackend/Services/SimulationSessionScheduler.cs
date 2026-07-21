@@ -28,18 +28,11 @@ public class SimulationSessionScheduler(
             {
                 await Schedule(stoppingToken);
             }
-            catch (PostgresException exception)
-                when (exception.SqlState == PostgresErrorCodes.SerializationFailure)
+            catch (Exception exception) when (IsExpectedConcurrency(exception))
             {
-                logger.LogDebug("Concurrent scheduler transaction detected; retrying on the next tick.");
-            }
-            catch (DbUpdateException exception)
-                when (exception.InnerException is PostgresException
-                {
-                    SqlState: PostgresErrorCodes.SerializationFailure
-                })
-            {
-                logger.LogDebug("Concurrent scheduler update detected; retrying on the next tick.");
+                logger.LogDebug(
+                    exception,
+                    "Concurrent scheduler update detected; retrying on the next tick.");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -59,6 +52,22 @@ public class SimulationSessionScheduler(
                 break;
             }
         }
+    }
+
+    internal static bool IsExpectedConcurrency(Exception exception)
+    {
+        return exception is DbUpdateConcurrencyException
+            or PostgresException
+        {
+            SqlState: PostgresErrorCodes.SerializationFailure
+        }
+            or DbUpdateException
+        {
+            InnerException: PostgresException
+            {
+                SqlState: PostgresErrorCodes.SerializationFailure
+            }
+        };
     }
 
     private async Task Schedule(CancellationToken cancellationToken)

@@ -12,13 +12,21 @@ const route = (config, path) => config.routes.find((item) => item.path === path)
 
 describe("GTS section navigation", () => {
     it("exposes every active management section at its real route", () => {
+        expect(navigationGTSConfig.map((item) => item.title)).toEqual([
+            "Control",
+            "Historial",
+            "Plantillas",
+            "Robots",
+            "Grupos",
+            "Usuarios",
+        ]);
         expect(navigationItem("taskTemplates")).toMatchObject({
-            title: "Plantillas de tareas",
+            title: "Plantillas",
             url: "/apps/GTS/task-templates",
             auth: authRoles.admin,
         });
         expect(navigationItem("taskLogs")).toMatchObject({
-            title: "Historial de tareas",
+            title: "Historial",
             url: "/apps/GTS/taskLogs",
             auth: authRoles.user,
         });
@@ -28,7 +36,7 @@ describe("GTS section navigation", () => {
             auth: authRoles.admin,
         });
         expect(navigationItem("robotGroups")).toMatchObject({
-            title: "Grupos de robots",
+            title: "Grupos",
             url: "/apps/GTS/robot-groups",
             auth: authRoles.admin,
         });

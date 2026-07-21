@@ -1,4 +1,3 @@
-using System.Net.Mail;
 using Microsoft.EntityFrameworkCore;
 using SwarmBackend.Entities;
 
@@ -12,7 +11,7 @@ public static class AdminBootstrapper
         ILogger logger,
         CancellationToken cancellationToken = default)
     {
-        var email = configuration["BootstrapAdmin:Email"]?.Trim();
+        var email = configuration["BootstrapAdmin:Email"];
         var password = configuration["BootstrapAdmin:Password"];
         if (string.IsNullOrWhiteSpace(email) && string.IsNullOrWhiteSpace(password))
         {
@@ -25,8 +24,9 @@ public static class AdminBootstrapper
                 "BootstrapAdmin:Email and BootstrapAdmin:Password must be configured together.");
         }
 
-        if (!MailAddress.TryCreate(email, out var address)
-            || !address.Address.Equals(email, StringComparison.OrdinalIgnoreCase))
+        if (!AccountRequestValidator.TryCanonicalizeEmail(
+                email,
+                out var normalizedEmail))
         {
             throw new InvalidOperationException("BootstrapAdmin:Email is not a valid email address.");
         }
@@ -44,10 +44,21 @@ public static class AdminBootstrapper
             return;
         }
 
-        var normalizedEmail = address.Address.ToLowerInvariant();
-        var existingAccount = await dataContext.Accounts.SingleOrDefaultAsync(
-            account => account.Email.ToLower() == normalizedEmail,
-            cancellationToken);
+        Account? existingAccount;
+        if (dataContext.Database.ProviderName
+            == "Npgsql.EntityFrameworkCore.PostgreSQL")
+        {
+            existingAccount = await dataContext.Accounts.SingleOrDefaultAsync(
+                account => account.NormalizedEmail == normalizedEmail,
+                cancellationToken);
+        }
+        else
+        {
+            var accounts = await dataContext.Accounts.ToListAsync(cancellationToken);
+            existingAccount = accounts.SingleOrDefault(account =>
+                AccountRequestValidator.CanonicalEmail(account.Email)
+                    == normalizedEmail);
+        }
         if (existingAccount != null)
         {
             if (existingAccount.Role != Role.Admin)

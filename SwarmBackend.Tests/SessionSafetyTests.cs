@@ -15,6 +15,19 @@ namespace SwarmBackend.Tests;
 public sealed class SessionSafetyTests
 {
     [Fact]
+    public void SessionRevisionIsConfiguredAsConcurrencyToken()
+    {
+        using var dataContext = TestDataContext.Create();
+
+        var revision = dataContext.Model
+            .FindEntityType(typeof(SimulationSession))!
+            .FindProperty(nameof(SimulationSession.Revision));
+
+        Assert.NotNull(revision);
+        Assert.True(revision!.IsConcurrencyToken);
+    }
+
+    [Fact]
     public async Task SessionCreationRetriesShortSerializationConflicts()
     {
         var attempts = 0;
@@ -65,6 +78,43 @@ public sealed class SessionSafetyTests
                 () => Task.FromException<IResult>(SerializationFailure()),
                 () => { },
                 cancellation.Token));
+    }
+
+    [Fact]
+    public async Task SessionDeletionRetriesSerializationFailure()
+    {
+        var attempts = 0;
+        var resets = 0;
+
+        var result = await SimulationSessionRoute.RetryDeleteSerializationFailures(
+            () =>
+            {
+                attempts++;
+                return attempts == 1
+                    ? Task.FromException<IResult>(SerializationFailure())
+                    : Task.FromResult(Results.Ok() as IResult);
+            },
+            () => resets++,
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status200OK, await StatusCode(result));
+        Assert.Equal(2, attempts);
+        Assert.Equal(1, resets);
+    }
+
+    [Fact]
+    public async Task SessionDeletionReturnsRetryableConflictInsteadOfServerError()
+    {
+        var result = await SimulationSessionRoute.RetryDeleteSerializationFailures(
+            () => Task.FromException<IResult>(SerializationFailure()),
+            () => { },
+            CancellationToken.None);
+
+        var response = await JsonResponse(result);
+        Assert.Equal(StatusCodes.Status409Conflict, response.StatusCode);
+        using var body = JsonDocument.Parse(response.Body);
+        Assert.Equal("serialization_conflict", body.RootElement.GetProperty("code").GetString());
+        Assert.True(body.RootElement.GetProperty("retryable").GetBoolean());
     }
 
     [Fact]
@@ -156,8 +206,12 @@ public sealed class SessionSafetyTests
             () => { },
             CancellationToken.None);
 
-        Assert.Equal(StatusCodes.Status409Conflict, await StatusCode(result));
+        var response = await JsonResponse(result);
+        Assert.Equal(StatusCodes.Status409Conflict, response.StatusCode);
         Assert.Equal(3, attempts);
+        using var body = JsonDocument.Parse(response.Body);
+        Assert.Equal("serialization_conflict", body.RootElement.GetProperty("code").GetString());
+        Assert.True(body.RootElement.GetProperty("retryable").GetBoolean());
     }
 
     [Fact]
@@ -199,6 +253,30 @@ public sealed class SessionSafetyTests
                     PostgresErrorCodes.UniqueViolation)));
 
         Assert.False(SimulationSessionRoute.IsSerializationFailure(wrapped));
+    }
+
+    [Fact]
+    public void DirectTerminalTaskUsesTheCompletedStartCommandAsItsStartBoundary()
+    {
+        var created = new DateTime(2026, 7, 20, 11, 0, 0, DateTimeKind.Utc);
+        var accepted = created.AddSeconds(4);
+        var task = new TaskRun { CreatedAt = created };
+        task.Commands.Add(new WorkerCommand
+        {
+            Type = WorkerCommandType.StartTask,
+            Sequence = 1,
+            CreatedAt = created,
+            CompletedAt = accepted
+        });
+        task.Commands.Add(new WorkerCommand
+        {
+            Type = WorkerCommandType.CancelTask,
+            Sequence = 2,
+            CreatedAt = created.AddSeconds(8),
+            CompletedAt = created.AddSeconds(9)
+        });
+
+        Assert.Equal(accepted, WorkerHub.InferTaskStartedAt(task));
     }
 
     [Theory]
@@ -244,6 +322,98 @@ public sealed class SessionSafetyTests
 
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, await StatusCode(result));
         Assert.Equal(1, dataContext.SimulationSessions.Count());
+    }
+
+    [Fact]
+    public async Task SessionCreationRejectsDisabledAccount()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var owner = Account(1, "disabled@example.test");
+        owner.Enabled = false;
+        dataContext.Accounts.Add(owner);
+        await dataContext.SaveChangesAsync();
+
+        var result = await SimulationSessionRoute.Create(
+            new CreateSimulationSessionRequest(1),
+            dataContext,
+            Configuration(),
+            HttpContext(owner.Id),
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await StatusCode(result));
+        Assert.Empty(dataContext.SimulationSessions);
+    }
+
+    [Fact]
+    public async Task SessionCreationRejectsAStaleAccountVersion()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var owner = Account(1, "changed@example.test");
+        owner.Updated = new DateTime(2026, 7, 20, 15, 0, 0, DateTimeKind.Utc);
+        dataContext.Accounts.Add(owner);
+        await dataContext.SaveChangesAsync();
+
+        var result = await SimulationSessionRoute.Create(
+            new CreateSimulationSessionRequest(1),
+            dataContext,
+            Configuration(),
+            HttpContext(owner.Id, accountVersion: 0),
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await StatusCode(result));
+        Assert.Empty(dataContext.SimulationSessions);
+    }
+
+    [Fact]
+    public async Task SessionCreationRejectsAStaleRoleClaim()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var owner = Account(1, "role-changed@example.test");
+        dataContext.Accounts.Add(owner);
+        await dataContext.SaveChangesAsync();
+
+        var result = await SimulationSessionRoute.Create(
+            new CreateSimulationSessionRequest(1),
+            dataContext,
+            Configuration(),
+            HttpContext(owner.Id, role: Role.Admin),
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await StatusCode(result));
+        Assert.Empty(dataContext.SimulationSessions);
+    }
+
+    [Fact]
+    public void CommandCompletionClassifiesOnlyPersistenceConflictsAsRetryable()
+    {
+        Assert.True(WorkerHub.IsCommandCompletionConflict(
+            new DbUpdateConcurrencyException()));
+        Assert.True(WorkerHub.IsCommandCompletionConflict(
+            SerializationFailure()));
+        Assert.False(WorkerHub.IsCommandCompletionConflict(
+            new InvalidOperationException("physical command failure")));
+    }
+
+    [Fact]
+    public void SchedulerClassifiesRevisionAndSerializationConflictsAsExpected()
+    {
+        Assert.True(SimulationSessionScheduler.IsExpectedConcurrency(
+            new DbUpdateConcurrencyException()));
+        Assert.True(SimulationSessionScheduler.IsExpectedConcurrency(
+            SerializationFailure()));
+        Assert.False(SimulationSessionScheduler.IsExpectedConcurrency(
+            new InvalidOperationException("scheduler configuration failure")));
+    }
+
+    [Fact]
+    public void HeartbeatClassifiesOnlySafePersistenceRetries()
+    {
+        Assert.True(WorkerHub.IsHeartbeatPersistenceConflict(
+            new DbUpdateConcurrencyException()));
+        Assert.True(WorkerHub.IsHeartbeatPersistenceConflict(
+            SerializationFailure()));
+        Assert.False(WorkerHub.IsHeartbeatPersistenceConflict(
+            new InvalidOperationException("worker authentication failure")));
     }
 
     [Fact]
@@ -800,12 +970,20 @@ public sealed class SessionSafetyTests
         };
     }
 
-    private static DefaultHttpContext HttpContext(int accountId)
+    private static DefaultHttpContext HttpContext(
+        int accountId,
+        Role role = Role.User,
+        long accountVersion = 0)
     {
         return new DefaultHttpContext
         {
             User = new ClaimsPrincipal(new ClaimsIdentity(
-                new[] { new Claim("id", accountId.ToString()) },
+                new[]
+                {
+                    new Claim("id", accountId.ToString()),
+                    new Claim(ClaimTypes.Role, role.ToString()),
+                    new Claim("account_version", accountVersion.ToString())
+                },
                 "test"))
         };
     }
@@ -828,5 +1006,20 @@ public sealed class SessionSafetyTests
         };
         await result.ExecuteAsync(context);
         return context.Response.StatusCode;
+    }
+
+    private static async Task<(int StatusCode, string Body)> JsonResponse(IResult result)
+    {
+        var context = new DefaultHttpContext
+        {
+            RequestServices = new ServiceCollection()
+                .AddLogging()
+                .BuildServiceProvider(),
+            Response = { Body = new MemoryStream() }
+        };
+        await result.ExecuteAsync(context);
+        context.Response.Body.Position = 0;
+        using var reader = new StreamReader(context.Response.Body);
+        return (context.Response.StatusCode, await reader.ReadToEndAsync());
     }
 }

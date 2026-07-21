@@ -328,6 +328,63 @@ def lifecycle_payload(task_id):
     return String(data=json.dumps({"task_id": task_id}))
 
 
+def transport_collision_event(
+    sequence,
+    task_id="task-a",
+    phase="APPROACH",
+    source_id="transport-source-a",
+    control_sequence=1,
+):
+    return {
+        "sequence": sequence,
+        "source_sequence": sequence,
+        "source_id": source_id,
+        "robot_id": "tb3_0",
+        "task_id": task_id,
+        "task_type": "transport",
+        "task_phase": phase,
+        "control_sequence": control_sequence,
+        "sim_time": float(control_sequence),
+        "wall_time": float(control_sequence),
+        "valid": True,
+    }
+
+
+def transport_collision_stream(
+    task_id="task-a",
+    phase="APPROACH",
+    events=(),
+    source_id="transport-source-a",
+    task_start_sequence=0,
+    watermark=None,
+):
+    events = list(events)
+    if watermark is None:
+        watermark = (
+            events[-1]["sequence"] if events else task_start_sequence
+        )
+    terminal = phase in ("DONE", "FAILED")
+    stream = {
+        "version": 2,
+        "source_id": source_id,
+        "task_id": task_id,
+        "task_start_sequence": task_start_sequence,
+        "history_limit": 128,
+        "first_sequence": (
+            events[0]["sequence"] if events else watermark + 1
+        ),
+        "last_sequence": watermark,
+        "watermark": watermark,
+        "terminal": terminal,
+        "valid": True,
+        "protocol_errors": [],
+        "events": events,
+    }
+    if terminal:
+        stream["terminal_watermark"] = watermark
+    return stream
+
+
 def make_orchestrator(task_id="task-a"):
     orchestrator = ROS["orchestrator"].TaskOrchestrator.__new__(
         ROS["orchestrator"].TaskOrchestrator
@@ -366,6 +423,10 @@ def make_orchestrator(task_id="task-a"):
     orchestrator.robot_sensor_data = {"tb3_0": {}}
     orchestrator.robot_count = 1
     orchestrator.collision_count = 0
+    orchestrator.collision_event_sequence = 0
+    orchestrator.collision_events = ROS["orchestrator"].deque(
+        maxlen=ROS["orchestrator"].COLLISION_EVENT_HISTORY_LIMIT
+    )
     orchestrator.safety_status_timeout = 1.0
     orchestrator.emergency_stop_pub = FakePublisher()
     orchestrator.odom_subs = {"tb3_0": FakeSubscriber()}
@@ -512,6 +573,144 @@ class OrchestratorLifecycleTests(unittest.TestCase):
         orchestrator._collision_cb("tb3_0", Bool(data=True))
         self.assertEqual(2, orchestrator.collision_count)
 
+    def test_transport_source_keeps_edge_phase_before_delayed_callback(self):
+        task_id = "transport-1"
+        controller = ROS["transport"].CollaborativeTransport.__new__(
+            ROS["transport"].CollaborativeTransport
+        )
+        controller.robot_namespaces = ["tb3_0"]
+        controller._ensure_transport_collision_stream()
+        controller._begin_transport_collision_stream(task_id)
+
+        avoidance = ROS["obstacle"].ObstacleAvoidance(
+            "tb3_0",
+            collision_edge_callback=(
+                controller._record_transport_collision_edge
+            ),
+        )
+        avoidance.sector_min = [avoidance.max_valid_range] * 8
+        avoidance.sector_min[0] = 0.10
+        avoidance.publish_safety_state(collision_context={
+            "task_id": task_id,
+            "task_phase": "APPROACH",
+            "control_sequence": 17,
+            "sim_time": 4.2,
+            "wall_time": 8.4,
+        })
+
+        # The behavior advances before either the Bool or status subscriber is
+        # scheduled. The source event must retain the phase of the OA edge.
+        source_stream = controller._transport_collision_stream_snapshot(
+            task_id, terminal=False
+        )
+        orchestrator = make_orchestrator(task_id)
+        orchestrator.current_task_type = "transport"
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator._collision_cb("tb3_0", Bool(data=True))
+        self.assertEqual(0, orchestrator.collision_count)
+        orchestrator._behavior_status_callback(
+            "transport",
+            String(data=json.dumps({
+                "task_id": task_id,
+                "phase": "PUSH",
+                "collision_events": source_stream,
+            })),
+        )
+
+        status = orchestrator._build_status()
+        event = status["collision_events"]["events"][0]
+        self.assertEqual("APPROACH", event["task_phase"])
+        self.assertEqual(17, event["source_control_sequence"])
+        self.assertEqual(1, status["collisions"])
+        self.assertEqual(
+            "PUSH", status["task"]["result"]["transport"]["phase"]
+        )
+
+        terminal_stream = controller._transport_collision_stream_snapshot(
+            task_id, terminal=True
+        )
+        self.assertEqual(
+            terminal_stream["watermark"],
+            terminal_stream["terminal_watermark"],
+        )
+        orchestrator._behavior_status_callback(
+            "transport",
+            String(data=json.dumps({
+                "task_id": task_id,
+                "phase": "DONE",
+                "collision_events": terminal_stream,
+            })),
+        )
+        self.assertEqual(
+            ROS["orchestrator"].TaskState.COMPLETED,
+            orchestrator.task_state,
+        )
+        self.assertEqual(1, orchestrator.collision_count)
+
+    def test_collision_event_history_is_bounded_and_contiguous(self):
+        orchestrator = make_orchestrator()
+        limit = ROS["orchestrator"].COLLISION_EVENT_HISTORY_LIMIT
+
+        for _ in range(limit + 3):
+            orchestrator._collision_cb("tb3_0", Bool(data=True))
+            orchestrator._collision_cb("tb3_0", Bool(data=False))
+
+        stream = orchestrator._build_status()["collision_events"]
+        self.assertEqual(limit, len(stream["events"]))
+        self.assertEqual(4, stream["first_sequence"])
+        self.assertEqual(limit + 3, stream["last_sequence"])
+        self.assertEqual(
+            list(range(4, limit + 4)),
+            [event["sequence"] for event in stream["events"]],
+        )
+
+    def test_transport_collision_source_gap_fails_closed(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "transport"
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        event = transport_collision_event(2)
+
+        orchestrator._behavior_status_callback(
+            "transport",
+            String(data=json.dumps({
+                "task_id": "task-a",
+                "phase": "APPROACH",
+                "collision_events": transport_collision_stream(
+                    events=[event], watermark=2
+                ),
+            })),
+        )
+
+        self.assertEqual(
+            ROS["orchestrator"].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertIn("dropped", orchestrator.task_error)
+        self.assertEqual(0, orchestrator.collision_count)
+
+    def test_transport_collision_source_restart_fails_closed(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "transport"
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+
+        for source_id in ("transport-source-a", "transport-source-b"):
+            orchestrator._behavior_status_callback(
+                "transport",
+                String(data=json.dumps({
+                    "task_id": "task-a",
+                    "phase": "SEARCH",
+                    "collision_events": transport_collision_stream(
+                        phase="SEARCH", source_id=source_id
+                    ),
+                })),
+            )
+
+        self.assertEqual(
+            ROS["orchestrator"].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertIn("restarted", orchestrator.task_error)
+
     def test_inactive_safety_feed_expires_from_status(self):
         orchestrator = make_orchestrator()
         clock = [10.0]
@@ -603,6 +802,9 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "task_id": "task-a",
                 "phase": "FAILED",
                 "error": "Transport payload left the supported floor plane",
+                "collision_events": transport_collision_stream(
+                    phase="FAILED"
+                ),
             })),
         )
 
@@ -631,6 +833,7 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": True,
                 "useful_contributor_count": 3,
                 "useful_contributor_ids": ["tb3_2", "tb3_0", "tb3_1"],
+                "collision_events": transport_collision_stream(),
                 "discovery": {
                     "event": "payload_found",
                     "event_id": "task-a:payload-found",
@@ -684,6 +887,9 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "useful_contributor_count": True,
                 "useful_contributor_ids": ["tb3_0"],
                 "control_commands": {"tb3_0": {"linear": 0.1}},
+                "collision_events": transport_collision_stream(
+                    phase="PUSH"
+                ),
             })),
         )
 
@@ -719,6 +925,7 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "task_id": "task-a",
                 "phase": "APPROACH",
                 "searching_robot_count": 0,
+                "collision_events": transport_collision_stream(),
                 "discovery": {
                     "event": "payload_found",
                     "event_id": "old-task:payload-found",
@@ -744,6 +951,15 @@ class OrchestratorLifecycleTests(unittest.TestCase):
         orchestrator.task_result = {
             "transport": {"phase": "APPROACH"},
         }
+        orchestrator.collision_count = 7
+        orchestrator.collision_event_sequence = 7
+        orchestrator.collision_events.append({
+            "sequence": 7,
+            "robot_id": "tb3_0",
+            "task_id": "previous-task",
+            "task_type": "transport",
+            "task_phase": "APPROACH",
+        })
 
         with mock.patch.object(ROS["orchestrator"].time, "sleep"):
             orchestrator._handle_start_task({
@@ -752,6 +968,10 @@ class OrchestratorLifecycleTests(unittest.TestCase):
             })
 
         self.assertIsNone(orchestrator.task_result)
+        stream = orchestrator._build_status()["collision_events"]
+        self.assertEqual(7, stream["last_sequence"])
+        self.assertEqual(8, stream["first_sequence"])
+        self.assertEqual([], stream["events"])
 
     def test_invalid_follow_path_status_fails_the_correlated_task(self):
         orchestrator = make_orchestrator()
@@ -1574,6 +1794,16 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(
             0.018,
             controller.transport_contact_closing_speed,
+        )
+        self.assertAlmostEqual(
+            0.025, controller.object_lidar_closer_tolerance
+        )
+        self.assertAlmostEqual(
+            0.035, controller.object_lidar_docking_closer_tolerance
+        )
+        self.assertLess(
+            controller.object_lidar_docking_closer_tolerance,
+            controller.object_lidar_contact_closer_tolerance,
         )
         self.assertAlmostEqual(
             0.025,
@@ -5854,6 +6084,10 @@ class BehaviorLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(0.0, published["tb3_0"].linear.x)
         self.assertEqual(0.0, published["tb3_1"].linear.x)
+        self.assertFalse(controller.transport_queue_docking_started)
+        self.assertEqual(
+            10.0, controller.transport_queue_settle_started_at
+        )
 
         with mock.patch.object(
             ROS["transport"].rospy, "get_time", return_value=10.4,
@@ -5864,6 +6098,10 @@ class BehaviorLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(0.0, published["tb3_0"].linear.x)
         self.assertEqual(0.0, published["tb3_1"].linear.x)
+        self.assertFalse(controller.transport_queue_docking_started)
+        self.assertEqual(
+            10.0, controller.transport_queue_settle_started_at
+        )
 
         controller.robot_velocities = {
             namespace: np.array([0.003, 0.0])
@@ -5879,6 +6117,9 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(0.012, published["tb3_0"].linear.x)
         self.assertAlmostEqual(0.012, published["tb3_1"].linear.x)
         self.assertTrue(controller.transport_queue_docking_started)
+        self.assertIsNone(controller.transport_queue_settle_started_at)
+        self.assertTrue(avoidance_calls["tb3_0"]["payload_docking"])
+        self.assertNotIn("payload_docking", avoidance_calls["tb3_1"])
 
         avoidance_limits["tb3_1"] = 0.006
         controller._engage_push_chains(
@@ -7422,6 +7663,11 @@ class BehaviorLifecycleTests(unittest.TestCase):
         status = json.loads(controller.status_pub.messages[0].data)
         self.assertEqual("task-old", status["task_id"])
         self.assertEqual("DONE", status["phase"])
+        self.assertTrue(status["collision_events"]["terminal"])
+        self.assertEqual(
+            status["collision_events"]["watermark"],
+            status["collision_events"]["terminal_watermark"],
+        )
         self.assertEqual(
             {
                 "waypoint_index": 0,
@@ -7505,6 +7751,42 @@ class BehaviorLifecycleTests(unittest.TestCase):
             assignment["notice_received"]
             for assignment in regrouping["robot_assignments"].values()
         ))
+
+    def test_transport_status_exposes_queue_docking_lifecycle(self):
+        controller = self._transport_search_controller(1)
+        controller.target_x = 2.0
+        controller.target_y = 1.0
+        controller._active_planner = "grf"
+        controller._active_grf_iterations = 0
+        controller.status_pub = FakePublisher()
+        controller.transport_queue_docking_started = False
+        controller.transport_queue_settle_started_at = None
+
+        def publish_queue_status():
+            controller._publish_status(
+                ROS["transport"].TransportPhase.PUSH
+            )
+            return json.loads(controller.status_pub.messages[-1].data)
+
+        waiting = publish_queue_status()
+        self.assertFalse(waiting["queue_settling"])
+        self.assertFalse(waiting["queue_docking_started"])
+
+        controller.transport_queue_settle_started_at = 10.0
+        settling = publish_queue_status()
+        self.assertTrue(settling["queue_settling"])
+        self.assertFalse(settling["queue_docking_started"])
+
+        controller.transport_queue_settle_started_at = None
+        controller.transport_queue_docking_started = True
+        docking = publish_queue_status()
+        self.assertFalse(docking["queue_settling"])
+        self.assertTrue(docking["queue_docking_started"])
+
+        controller._stop_callback(lifecycle_payload("search-task"))
+        stopped = publish_queue_status()
+        self.assertFalse(stopped["queue_settling"])
+        self.assertFalse(stopped["queue_docking_started"])
 
     def test_transport_coordinated_speed_scales_with_chain_depth(self):
         controller = ROS["transport"].CollaborativeTransport.__new__(

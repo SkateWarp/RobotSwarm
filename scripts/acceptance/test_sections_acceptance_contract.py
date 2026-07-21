@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import sys
 import tempfile
 import types
@@ -14,6 +15,10 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("robotswarm-sections-e2e.py")
+NAVIGATION_SOURCE = (
+    SCRIPT.parents[2]
+    / "SwarmFrontend/src/app/fuse-configs/navigationGTSConfig.js"
+)
 
 
 def load_harness():
@@ -175,8 +180,8 @@ class SectionsAcceptanceContractTests(unittest.TestCase):
         user = HARNESS.expected_menu_presence("User")
         admin = HARNESS.expected_menu_presence("Admin")
 
-        self.assertTrue(user["Historial de tareas"])
-        self.assertTrue(user["Control de simulación"])
+        self.assertTrue(user["Historial"])
+        self.assertTrue(user["Control"])
         self.assertFalse(user["Usuarios"])
         self.assertTrue(all(admin.values()))
         self.assertEqual(HARNESS.validate_menu_presence("User", user), user)
@@ -185,6 +190,41 @@ class SectionsAcceptanceContractTests(unittest.TestCase):
         wrong["Robots"] = True
         with self.assertRaises(HARNESS.DriverError):
             HARNESS.validate_menu_presence("User", wrong)
+
+    def test_menu_contract_matches_frontend_navigation(self):
+        source = NAVIGATION_SOURCE.read_text(encoding="utf-8")
+        entries = re.findall(
+            r'id:\s*"([^"]+)".*?title:\s*"([^"]+)".*?'
+            r'auth:\s*authRoles\.(\w+).*?url:\s*"([^"]+)"',
+            source,
+            flags=re.DOTALL,
+        )
+
+        self.assertEqual(
+            entries,
+            [
+                ("realtime", "Control", "user", "/apps/GTS/realtime"),
+                ("taskLogs", "Historial", "user", "/apps/GTS/taskLogs"),
+                (
+                    "taskTemplates",
+                    "Plantillas",
+                    "admin",
+                    "/apps/GTS/task-templates",
+                ),
+                ("leafSorting", "Robots", "admin", "/apps/GTS/leafSorting"),
+                (
+                    "robotGroups",
+                    "Grupos",
+                    "admin",
+                    "/apps/GTS/robot-groups",
+                ),
+                ("accounts", "Usuarios", "admin", "/apps/accounts"),
+            ],
+        )
+        self.assertEqual(
+            set(HARNESS.MENU_LABELS),
+            {title for _, title, _, _ in entries},
+        )
 
     def test_backend_admin_endpoints_follow_the_real_role_policy(self):
         user = {key: 403 for key in HARNESS.ADMIN_ENDPOINTS}

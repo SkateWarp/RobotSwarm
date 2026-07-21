@@ -38,6 +38,28 @@ public class DataContext : DbContext
         modelBuilder.HasPostgresEnum<SensorTypeEnum>();
         modelBuilder.HasPostgresEnum<TaskTypeEnum>();
 
+        if (Database.ProviderName == "Npgsql.EntityFrameworkCore.PostgreSQL")
+        {
+            modelBuilder.Entity<Account>(entity =>
+            {
+                entity.Property(account => account.NormalizedEmail)
+                    .HasComputedColumnSql(
+                        AccountRequestValidator.CanonicalEmailSql,
+                        stored: true);
+                entity.HasIndex(account => account.NormalizedEmail)
+                    .IsUnique();
+                entity.ToTable(table => table.HasCheckConstraint(
+                    "CK_Accounts_Email_SupportedFormat",
+                    AccountRequestValidator.SupportedEmailCheckSql));
+            });
+        }
+        else
+        {
+            // In-memory tests do not evaluate database-generated columns. The
+            // service uses the equivalent Email expression for this provider.
+            modelBuilder.Entity<Account>().Ignore(account => account.NormalizedEmail);
+        }
+
         modelBuilder.Entity<TaskTemplate>()
             .HasData(new TaskTemplate[]
             {
@@ -89,6 +111,7 @@ public class DataContext : DbContext
             entity.Property(session => session.ArenaVersion).HasMaxLength(100);
             entity.Property(session => session.WorkerImageVersion).HasMaxLength(200);
             entity.Property(session => session.FailureReason).HasMaxLength(2000);
+            entity.Property(session => session.Revision).IsConcurrencyToken();
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_SimulationSessions_DesiredRobotCount_Positive",
                 "\"DesiredRobotCount\" > 0"));
