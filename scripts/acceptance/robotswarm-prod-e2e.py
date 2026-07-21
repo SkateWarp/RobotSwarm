@@ -37,6 +37,8 @@ CREDENTIALS_PATH = Path("/tmp/robotswarm-e2e-credentials.env")
 BINDING_KEY_PATH = Path("/tmp/robotswarm-e2e-binding.key")
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 POST_STOP_HLS_RESERVE_SECONDS = 10.0
+COMMAND_RETRY_DELAYS_SECONDS = (0.15, 0.35, 0.7)
+RETRY_CONFLICT_MESSAGE = "The session changed concurrently. Retry with the same Idempotency-Key."
 LIVE_STATES = {"Queued", "Provisioning", "Ready", "Active", "Paused", "Stopping"}
 CONTROL_STATES = {"Ready", "Active", "Paused"}
 TERMINAL_TASK_STATES = {"Completed", "Cancelled", "Failed"}
@@ -191,6 +193,12 @@ class Report:
                 "stop_duration_ms": 0,
                 "post_stop_hls_required_margin_seconds": 0,
             },
+            "transaction_race": {
+                "start_status": 0,
+                "stop_status": 0,
+                "winner": "not_run",
+                "session_stopped": False,
+            },
             "cleanup": {
                 "attempted": False,
                 "user_a": "not_created",
@@ -198,6 +206,7 @@ class Report:
                 "complete": False,
             },
             "http_audit": [],
+            "idempotency_retries": [],
             "error": None,
         }
 
@@ -238,6 +247,23 @@ class Report:
             for part in path[:-1]:
                 cursor = cursor[part]
             cursor[path[-1]] = value
+
+    def record_idempotency_retry(
+        self,
+        actor: str,
+        name: str,
+        attempt: int,
+        delay_seconds: float,
+    ) -> None:
+        with self._lock:
+            self.data["idempotency_retries"].append(
+                {
+                    "actor": actor,
+                    "name": name,
+                    "attempt": attempt,
+                    "delay_ms": round(delay_seconds * 1000),
+                }
+            )
 
     def record_creation_attempt(
         self,
@@ -360,6 +386,7 @@ class Transport:
         bearer: str | None = None,
         payload: dict[str, Any] | None = None,
         idempotent: bool = False,
+        retry_transient_conflict: bool = False,
         record: bool = True,
     ) -> tuple[HttpResult, Any]:
         if idempotent:
@@ -369,13 +396,26 @@ class Transport:
             idempotency_key = None
 
         headers_payload = payload
-        result = self._raw_with_idempotency(
-            method,
-            path,
-            bearer=bearer,
-            payload=headers_payload,
-            idempotency_key=idempotency_key,
-        )
+        retry_number = 0
+        while True:
+            result = self._raw_with_idempotency(
+                method,
+                path,
+                bearer=bearer,
+                payload=headers_payload,
+                idempotency_key=idempotency_key,
+            )
+            if (
+                not idempotent
+                or not retry_transient_conflict
+                or retry_number >= len(COMMAND_RETRY_DELAYS_SECONDS)
+                or not self._is_retry_conflict(result)
+            ):
+                break
+            delay = COMMAND_RETRY_DELAYS_SECONDS[retry_number]
+            retry_number += 1
+            self.report.record_idempotency_retry(actor, name, retry_number, delay)
+            time.sleep(delay)
         passed = result.status in expected
         if record:
             self.report.add_http(
@@ -397,6 +437,22 @@ class Transport:
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise HarnessFailure(f"invalid_json_{name}", name) from None
         return result, decoded
+
+    @staticmethod
+    def _is_retry_conflict(result: HttpResult) -> bool:
+        if result.status != 409 or not result.body:
+            return False
+        try:
+            body = json.loads(result.body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(body, dict):
+            return False
+        stable_code = (
+            body.get("code") == "serialization_conflict"
+            and body.get("retryable") is True
+        )
+        return stable_code or body.get("message") == RETRY_CONFLICT_MESSAGE
 
     def _raw_with_idempotency(
         self,
@@ -496,6 +552,7 @@ class AuthenticatedUser:
         expected: set[int],
         payload: dict[str, Any] | None = None,
         idempotent: bool = False,
+        retry_transient_conflict: bool = False,
         record: bool = True,
     ) -> tuple[HttpResult, Any]:
         self.ensure_fresh()
@@ -509,6 +566,7 @@ class AuthenticatedUser:
             bearer=self.jwt_token,
             payload=payload,
             idempotent=idempotent,
+            retry_transient_conflict=retry_transient_conflict,
             record=record,
         )
 
@@ -988,10 +1046,74 @@ def start_task(
         expected={202},
         payload={"type": task_type, "parameters": parameters},
         idempotent=True,
+        retry_transient_conflict=True,
     )
     if not isinstance(command, dict) or not isinstance(command.get("task"), dict):
         raise HarnessFailure("task_command_response_invalid", "task")
     return require_uuid(command["task"], "id", "task"), command["task"]
+
+
+def race_task_start_with_session_stop(
+    user: AuthenticatedUser,
+    session_id: str,
+) -> tuple[int, int, str]:
+    """Compite por la misma fila sin ocultar una respuesta inesperada del API."""
+
+    parameters = {
+        "formation_type": "triangle",
+        "movement_mode": "static",
+        "config": {
+            "formation_type": "triangle",
+            "movement_mode": "static",
+            "spacing": 0.7,
+        },
+    }
+    barrier = threading.Barrier(2)
+
+    def start() -> tuple[HttpResult, Any]:
+        barrier.wait(timeout=10)
+        return user.call(
+            "POST",
+            f"/api/sessions/{session_id}/tasks",
+            target="tasks_self",
+            name="start_task_during_session_stop",
+            expected={202, 409},
+            payload={"type": "Figure", "parameters": parameters},
+            idempotent=True,
+            retry_transient_conflict=True,
+        )
+
+    def stop() -> tuple[HttpResult, Any]:
+        barrier.wait(timeout=10)
+        return user.call(
+            "DELETE",
+            f"/api/sessions/{session_id}",
+            target="session_self",
+            name="stop_session_during_task_start",
+            expected={200},
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        start_future = executor.submit(start)
+        stop_future = executor.submit(stop)
+        start_result, start_body = start_future.result()
+        stop_result, _ = stop_future.result()
+
+    if start_result.status == 202:
+        if not isinstance(start_body, dict) or not isinstance(start_body.get("task"), dict):
+            raise HarnessFailure("race_task_response_invalid", "transaction_race")
+        require_uuid(start_body["task"], "id", "transaction_race")
+        winner = "task_committed_first"
+    else:
+        if (
+            not isinstance(start_body, dict)
+            or start_body.get("message")
+            != "The session cannot start a task in the current state."
+        ):
+            raise HarnessFailure("race_task_conflict_unexpected", "transaction_race")
+        winner = "stop_committed_first"
+
+    return start_result.status, stop_result.status, winner
 
 
 def read_task_synchronized(
@@ -1043,8 +1165,11 @@ def wait_figure_while_following(
                     raise HarnessFailure(
                         "follow_task_not_running_at_figure_completion", "task"
                     )
-                if not both_running_observed:
-                    raise HarnessFailure("parallel_running_overlap_not_observed", "task")
+                # At RTF 3 the short Figure task can finish between the POST
+                # responses and the first synchronized poll. Its recorded
+                # started/completed interval is checked against FollowLeader
+                # below, so a missed transient sample is not treated as a
+                # concurrency failure.
                 return figure, follow, both_running_observed
             time.sleep(min(poll_interval, 0.5))
     raise HarnessFailure("parallel_task_timeout", "task")
@@ -1887,6 +2012,28 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
             raise HarnessFailure("parallel_task_intervals_do_not_overlap", "task_timing")
         report.set_path("task", "user_b", "timing_captured", value=True)
         report.add_check("follow_task_cancelled", "passed")
+
+        safe_progress("compitiendo StartTask y DELETE sobre la misma sesion")
+        start_status, stop_status, winner = race_task_start_with_session_stop(
+            users["user_b"],
+            sessions["user_b"],
+        )
+        report.set_path("transaction_race", "start_status", value=start_status)
+        report.set_path("transaction_race", "stop_status", value=stop_status)
+        report.set_path("transaction_race", "winner", value=winner)
+        raced_session_state = wait_session_stopped(
+            users["user_b"],
+            sessions["user_b"],
+            args.cleanup_timeout,
+            args.poll_interval,
+        )
+        if raced_session_state != "Stopped":
+            raise HarnessFailure("race_session_stop_timeout", "transaction_race")
+        report.set_path("transaction_race", "session_stopped", value=True)
+        report.set_path(
+            "sessions", "user_b", "final_state", value=raced_session_state
+        )
+        report.add_check("same_session_start_stop_serialized", "passed", winner)
     except HarnessFailure as error:
         failure = error
     except (KeyboardInterrupt, concurrent.futures.CancelledError):

@@ -139,10 +139,15 @@ ROBOTSWARM_VIEWER_FRAME_RATE=30
 ROBOTSWARM_VIEWER_BIT_RATE=4M
 ```
 
-The helper's default startup budget is 30 seconds. Keep
-`Worker__Viewer__StartupTimeoutSeconds` at least a few seconds higher, and raise
-both values together if the pinned image needs longer to create its Gazebo
-window. `READY` is never emitted after the helper's own budget expires.
+The render probe gets a 5-second warmup before measuring the scene. The helper's
+default startup budget is 45 seconds, while
+`Worker__Viewer__StartupTimeoutSeconds` defaults to 50 seconds. The extra five
+seconds are normal-startup headroom, not a guaranteed error-reporting window:
+the helper begins its own deadline after initial parsing and dependency checks,
+and stopping child processes can consume additional time. Raise both startup
+values together if the pinned image needs longer to create its Gazebo window.
+`READY` is never emitted after the helper's own budget expires; the worker may
+still report a generic timeout if it has to terminate a slow failure path.
 
 The deployment already installs the helper and points
 `Worker__Viewer__PublisherExecutable` at its absolute, versioned path. Setting

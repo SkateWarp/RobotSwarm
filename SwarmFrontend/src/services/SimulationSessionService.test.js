@@ -4,10 +4,14 @@ import { URL } from "app/constants/constants";
 import jwtService from "app/services/jwtService";
 import SimulationSessionService from "./SimulationSessionService";
 
-describe("SimulationSessionService viewer lifecycle", () => {
+describe("SimulationSessionService commands and viewer lifecycle", () => {
     let mock;
 
     beforeEach(() => {
+        global.window = {
+            crypto: { randomUUID: jest.fn(() => "test-idempotency-key") },
+            setTimeout,
+        };
         mock = new AxiosMockAdapter(axios);
         jest.spyOn(jwtService, "getAccessToken").mockReturnValue("viewer-owner-token");
     });
@@ -15,6 +19,69 @@ describe("SimulationSessionService viewer lifecycle", () => {
     afterEach(() => {
         mock.restore();
         jest.restoreAllMocks();
+        delete global.window;
+    });
+
+    it("retries a transient command conflict with the same idempotency key", async () => {
+        const sessionId = "8c0aa5bf-803b-4eae-a511-31915230a39f";
+        const endpoint = `${URL.replace(/\/+$/, "")}/api/sessions/${sessionId}/tasks`;
+        const keys = [];
+        mock.onPost(endpoint).reply((request) => {
+            keys.push(request.headers["Idempotency-Key"]);
+            if (keys.length === 1) {
+                return [
+                    409,
+                    {
+                        code: "serialization_conflict",
+                        retryable: true,
+                        message: "Retry the command.",
+                    },
+                ];
+            }
+            return [202, { task: { type: "Figure", state: "Queued" } }];
+        });
+
+        await expect(
+            SimulationSessionService.startTask(sessionId, "Figure", {
+                formation_type: "triangle",
+            })
+        ).resolves.toMatchObject({ task: { type: "Figure" } });
+
+        expect(mock.history.post).toHaveLength(2);
+        expect(keys[0]).toBeTruthy();
+        expect(keys[1]).toBe(keys[0]);
+    });
+
+    it("does not retry a semantic command conflict", async () => {
+        const sessionId = "6cb4a95a-b190-4695-a70b-7615e21116bf";
+        const endpoint = `${URL.replace(/\/+$/, "")}/api/sessions/${sessionId}/tasks`;
+        mock.onPost(endpoint).reply(409, {
+            message: "The session already has an active task.",
+        });
+
+        await expect(
+            SimulationSessionService.startTask(sessionId, "Figure", {
+                formation_type: "triangle",
+            })
+        ).rejects.toMatchObject({ response: { status: 409 } });
+
+        expect(mock.history.post).toHaveLength(1);
+    });
+
+    it("does not turn a conflicted fleet command into a second transition", async () => {
+        const sessionId = "6cb4a95a-b190-4695-a70b-7615e21116bf";
+        const endpoint = `${URL.replace(/\/+$/, "")}/api/sessions/${sessionId}/fleet`;
+        mock.onPatch(endpoint).reply(409, {
+            code: "serialization_conflict",
+            retryable: true,
+            message: "Retry the command.",
+        });
+
+        await expect(SimulationSessionService.updateFleet(sessionId, 5)).rejects.toMatchObject({
+            response: { status: 409 },
+        });
+
+        expect(mock.history.patch).toHaveLength(1);
     });
 
     it("revokes the exact viewer lease with the owner bearer token", async () => {

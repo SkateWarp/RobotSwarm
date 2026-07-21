@@ -15,8 +15,11 @@ production-accepted until one exact new revision is deployed to all three
 layers and passes the full browser and ROS matrix.
 
 The earlier GitHub certificate incident I-053 and the `xprop` incident I-063
-remain closed. All deployed components currently run `538ba066`; the current
-gap is the not-yet-published candidate for I-064–I-070, not version skew.
+remain closed. PR #101 proved three-layer alignment at `538ba066` at that
+checkpoint. A later read-only backend preflight reported `1182dec` and
+`Healthy`, but did not inspect all three layers; current cross-layer alignment
+is therefore not asserted. The not-yet-published I-064–I-091 candidate remains
+outside production.
 
 See the [implementation status](../IMPLEMENTATION_STATUS.md) for that boundary
 and the
@@ -78,6 +81,34 @@ task; a stale worker report or command envelope must not resurrect a task that
 the control plane already marked terminal. These race conditions are part of
 the final integrated regression review, not assumptions delegated to the user.
 
+Las mutaciones autenticadas siguen un orden común de exclusión. Los cambios que
+pueden afectar al último administrador habilitado toman primero un advisory
+lock global; después, cada cambio de rol, contraseña, estado o sesión usa el
+lock exclusivo de la cuenta. Las rutas de sesión toman su contraparte compartida
+y solo entonces vuelven a leer `Enabled`, `Role` y `Updated`, que debe coincidir
+con el claim JWT `account_version`. En PostgreSQL, `SELECT ... FOR SHARE` evita
+que una transacción `SERIALIZABLE` utilice el snapshot que fijó antes de esperar:
+el snapshot obsoleto provoca `40001`, se inicia un intento realmente nuevo y el
+principal anterior termina en 401 sin insertar una sesión. El modelo y su
+snapshot conservan además `SimulationSession.Revision` como token de
+concurrencia; el probe de migración no produjo operaciones y dejó el snapshot
+estable.
+
+Una mutación administrativa sobre otra cuenta vuelve a validar también al
+actor, no solo al objetivo. Cuando aplica la regla del último administrador,
+toma primero el lock global; después adquiere la cuenta del actor en modo
+compartido y la del objetivo en modo exclusivo, siempre por identificador para
+evitar invertir el orden entre dos peticiones. La validación del actor ocurre
+después de esos locks. Si su rol Admin, estado o versión fueron revocados
+mientras esperaba, la ruta devuelve 401 y no modifica la cuenta objetivo.
+
+El `heartbeat` encierra la reconciliación terminal, el guardado y el commit en la
+misma transacción. Las sesiones terminales se bloquean en orden antes de cargar
+sus comandos; solo después del commit se publica SignalR. Así, el cleanup de una
+cuenta y la reconciliación del worker comparten una única secuencia
+`StopSession`. Si un `DELETE` de sesión agota sus reintentos acotados, devuelve
+409; ese resultado también queda declarado en Swagger/OpenAPI.
+
 ## Secciones administrativas y fuente de verdad
 
 La auditoría posterior al PR #99 encontró que varias pantallas existían en la
@@ -120,6 +151,42 @@ reducido, los 403 reales del backend y las cuatro redirecciones administrativas,
 con perfil y capturas saneadas. El árbol completo aprobó worker 121/121,
 frontend 141/141 en 28 suites, lint del delta y build de producción. El siguiente
 paso es el único CI del candidato y la aceptación del SHA desplegado.
+
+En el freeze local vigente la suite completa de backend sin PostgreSQL configurado
+aprobó 250 pruebas y omitió las 8 opt-in (258 descubiertas); el filtro ordinario
+confirmó 250/250 y las focales de cuentas 23/23. Las ocho aprobaron 8/8 contra
+PostgreSQL 17.10. También aprobaron worker 124/124, ROS 427/427 y frontend 149/149
+en 28 suites. Los siete arneses offline sumaron 193/193 contratos:
+16+38+13+44+37+30+15. Quedaron en verde la compilación de 14 módulos Python, la
+sintaxis Bash, el lint de 75 archivos frontend, el build de producción y
+`git diff --check`. Estas cifras no sustituyen el único CI ni los recorridos
+sobre el SHA desplegado.
+
+I-088 impide que una fase `SEARCH` declarada sustituya el movimiento observado:
+el smoke web integra la trayectoria de cada robot y exige al menos 0,015 m por
+unidad. La causalidad del contacto tampoco depende ya del `task_lock` ni de dos
+callbacks del orquestador. `ObstacleAvoidance` detecta el flanco filtrado dentro
+de su evaluación y `CollaborativeTransport` sella UUID y secuencia de fuente,
+tarea, fase, secuencia de control y tiempos. El stream v2 viaja, hasta 128
+eventos, dentro del mismo `/transport/status`, incluso en el terminal. El
+orquestador lo valida y copia de manera idempotente; el `Bool` de compatibilidad
+no incrementa el transporte. Reinicios, huecos, regresiones, metadatos inválidos
+o falta de capacidad fallan cerrado.
+
+La carga y los vecinos declarados de la cadena ya están excluidos de ese contador
+por la máscara de seguridad. Todo contacto filtrado restante es inesperado en
+cualquier fase. El atraque se acredita aparte mediante geometría, muestras de
+contacto y GRF. La matriz incluye además N=2 con dos raíces sobre la carga y cero
+compañeros, pero este cierre solo valida su contrato: no existe todavía una
+corrida física N=2.
+
+I-089 alinea el arnés visible con Plantillas, Historial, Control, Robots, Grupos y
+Usuarios y hace que una regresión lea la configuración React real. I-090 traslada
+la política de cuentas al backend para Create/PUT/PATCH y refuerza el correo
+canónico con exclusión ordenada, columna generada e índice único. I-091 fija la
+misma frontera ASCII de seis caracteres en C# y PostgreSQL, añade un `CHECK`
+fail-safe y cubre la equivalencia contra PostgreSQL 17.10. Estas correcciones son
+locales y aún necesitan el despliegue y los recorridos de la sección final.
 
 ## Task outcome monitoring
 
@@ -217,6 +284,72 @@ The repository retains structured raw evidence for the N=10 transport and
 search runs. The wider matrix remains a historical observation until selected
 cases are repeated through the final public deployment.
 
+The current, not-yet-deployed candidate has one newer visible result. The N=1
+transport traversed SEARCH, APPROACH, PUSH, and DONE; the practice crate advanced
+0.5005 m at RTF 2.9964 with one useful pusher, 100% useful contribution, and no
+collisions. The immediately preceding exact-scene GUI probe measured 61.888
+camera FPS and 62.498 post-render callbacks per second on the RTX 3080. This does
+not stand in for a loaded payload or any post-deployment case.
+
+The following visible N=3 candidate run then covered the multi-robot branch.
+`tb3_0` notified both teammates, all three completed rendezvous and physical
+engagement, and the complete roster contributed usefully in roughly 99% of its
+applicable samples. The practice crate advanced approximately 0.5005 m at
+0.9984 directional efficiency, RTF remained about 2.996, and no collisions or
+unexpected contacts were recorded. Its exact-scene GUI probe measured 57.907
+camera FPS and 58.887 post-render callbacks per second. Its wall-time budgets
+are 115 seconds for SEARCH, 125 for APPROACH, and 45 for PUSH under a 290-second
+hard cap; they do not relax the physical completion gates.
+
+El candidato cargado N=4 aportó después una evidencia local más exigente. El
+primer tope de 180 s interrumpió un empuje todavía útil a los 0,2335 m, con 752
+muestras y 4/4 robots contribuyendo; su cronología dio lugar a presupuestos de
+60/100/190 s para `SEARCH`/`APPROACH`/`PUSH`, bajo un tope de 355 s. V10 llegó
+físicamente a `DONE`, pero se rechazó porque su medición de capacidad incluía
+aproximadamente 0,52 s de parada. Los extremos temporales se capturan ahora
+antes de esos comandos y una regresión preserva esa separación.
+
+La repetición v11 aprobó la compuerta local. Los ensayos de uno, dos y cuatro
+robots movieron la carga 0,0070/0,0340/1,0424 m, con ganancia exterior
+148,9143× y RTF 2,9969/2,9962/2,9975. En GRF, `tb3_1` notificó a los tres
+compañeros; 4/4 buscaron, completaron el rendezvous y empujaron mediante dos
+raíces y dos compañeros. La carga avanzó 0,5002 m, las 1598 muestras fueron
+útiles para la flota completa, la eficiencia fue 0,9946 y el RTF exterior
+2,9756. Ground-truth registró un atraque declarado de raíz y el contador filtrado
+no registró contactos de seguridad. Durante
+`PUSH`, la sonda visible midió 58,816/58,831 FPS y RTF 2,996 en la RTX 3080.
+
+La primera validación exterior de v11 supuso erróneamente que cada flota
+reiniciaría sus ordinales en cero. El contrato corregido admite el offset fresco
+del gestor, pero exige namespaces canónicos, bloques contiguos y distintos,
+mapas iguales y asignación monotónica. El arnés vigente aprobó 38/38 e incluye
+una regresión donde la captura durante `PUSH` se rechaza si cualquiera de sus
+dos lecturas HLS queda por debajo de `MATRIX.MINIMUM_BROWSER_VIDEO_FPS`,
+actualmente 27,0.
+La evidencia real anterior y el contrato endurecido aprobaron en sus alcances
+respectivos. El supervisor conserva además el eco dinámico de progreso sin
+rebajar el mínimo físico de 0,50 m. N=4 cargado queda aceptado localmente; su
+repetición postdeploy continúa en la secuencia de liberación siguiente.
+
+Las muestras del mismo task siguen el orden no decreciente `SEARCH` →
+`APPROACH` → `PUSH`; un retorno a una fase anterior invalida la corrida aunque
+masa, roster y progreso parezcan correctos.
+
+La contabilidad de contactos conserva cada episodio desde su flanco ascendente.
+`ObstacleAvoidance` lo detecta en el ciclo de seguridad y transporte publica su
+contexto causal v2 en el mismo status, sin inferir la fase desde una muestra
+posterior. El payload y los vecinos declarados de la cadena ya se excluyen por
+máscara; cualquier incremento que permanezca en el contador filtrado es un
+contacto inesperado en todas las fases. El atraque se demuestra aparte por
+contactos declarados, geometría y GRF. Si el stream no explica por completo el
+incremento agregado, el gate falla cerrado.
+
+El catálogo de matriz añade `transport_grf_n2`. Su contrato exige el roster
+exacto durante `SEARCH` → `APPROACH` → `PUSH` → `DONE`, aviso y rendezvous de
+ambos robots, dos raíces de carga, cero compañeros y dos empujadores útiles. Es
+una regresión instrumental; no amplía la lista histórica de corridas visibles
+ni constituye todavía evidencia física N=2.
+
 For sequential Gazebo cases, the acceptance harness reuses `tb3_0` through
 `tb3_{N-1}`. Between cases it verifies that the fleet roster is empty, departed
 models no longer appear in `/gazebo/model_states`, and per-robot `cmd_vel`
@@ -258,6 +391,13 @@ lease matches the command. A bounded tombstone rejects a delayed start for an
 already revoked lease, while closing an older lease cannot stop a newer
 replacement. The frontend sends `releaseAll` before requesting close and then
 removes the private stream and interaction state.
+
+El cambio de fullscreen también es una frontera de control. Cuando el navegador
+sale por sí mismo, se libera una sola vez toda entrada retenida. `Escape` no se
+envía a Gazebo al abandonar fullscreen; sus repeticiones automáticas se consumen
+mediante `event.repeat`, y una nueva entrada en fullscreen acepta otro Escape
+aunque el `keyup` anterior se haya perdido. La regresión correspondiente forma
+parte de las 149 pruebas frontend vigentes.
 
 This HLS route avoids a new public stream hostname, public UDP ports, ICE host
 advertisement, and TURN. It trades those connectivity requirements for somewhat
@@ -335,7 +475,7 @@ deployment rather than silently enabling a path.
 
 ## Remaining release sequence
 
-1. Commit the reviewed and locally validated I-064–I-070 candidate once, open
+1. Commit the reviewed and locally validated I-064–I-091 candidate once, open
    one PR and use one normal CI run;
    do not rerun successful jobs merely to collect duplicate evidence.
 2. After merge, let Cloudflare and backend deploy the exact merge SHA. Remove
@@ -350,9 +490,10 @@ deployment rather than silently enabling a path.
    the Admin run, revoke refresh tokens at both role transitions, visit
    Historial, Plantillas, Robots, Grupos and Usuarios, delete only the owned
    temporary group, then restore and recheck User denial.
-5. Run every final formation, follow-leader and N=1/3/4/10 transport scenario in
-   fresh sessions. SEARCH must show sustained motion by the whole assigned
-   roster, followed by one notice, rendezvous and complete useful push.
+5. Run every final formation, follow-leader and N=1/2/3/4/10 transport scenario
+   in fresh sessions. The N=2 case is its first physical GRF execution. SEARCH
+   must show sustained motion by the whole assigned roster, followed by one
+   notice, rendezvous and complete useful push.
 6. Pair the loaded-payload+GRF probe with the visible NVIDIA preflight on the
    same Gazebo master. Require at least 45 render FPS and RTF 2.90, then restore
    the practice payload and verify no active task, robot or process remains.

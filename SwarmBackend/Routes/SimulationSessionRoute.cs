@@ -1,5 +1,6 @@
 using System.Data;
 using System.Linq.Expressions;
+using System.Security.Claims;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -13,6 +14,7 @@ namespace SwarmBackend.Routes;
 public static class SimulationSessionRoute
 {
     private const int MaximumCreateAttempts = 3;
+    private const int MaximumDeleteAttempts = 3;
 
     public static RouteGroupBuilder MapSimulationSession(this RouteGroupBuilder group)
     {
@@ -43,7 +45,8 @@ public static class SimulationSessionRoute
         group.MapDelete("/{id:guid}", Delete)
             .Produces<SimulationSessionResponse>()
             .Produces(StatusCodes.Status401Unauthorized)
-            .Produces(StatusCodes.Status404NotFound);
+            .Produces(StatusCodes.Status404NotFound)
+            .Produces(StatusCodes.Status409Conflict);
 
         return group;
     }
@@ -96,6 +99,16 @@ public static class SimulationSessionRoute
                 IsolationLevel.Serializable,
                 cancellationToken)
             : null;
+
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
 
         var hasLiveSession = await dataContext.SimulationSessions
             .AnyAsync(OccupiesAccountSlot(accountId), cancellationToken);
@@ -297,7 +310,7 @@ public static class SimulationSessionRoute
             session.ComputeWorker?.Name));
     }
 
-    private static async Task<IResult> Delete(
+    private static Task<IResult> Delete(
         Guid id,
         DataContext dataContext,
         IHubContext<WorkerHub> workerHub,
@@ -309,18 +322,81 @@ public static class SimulationSessionRoute
         var accountId = GetAccountId(context);
         if (!accountId.HasValue)
         {
+            return Task.FromResult<IResult>(Results.Unauthorized());
+        }
+
+        return RetryDeleteSerializationFailures(
+            () => DeleteAttempt(
+                id,
+                accountId.Value,
+                context.User,
+                dataContext,
+                workerHub,
+                sessionHub,
+                viewerControls,
+                cancellationToken),
+            dataContext.ChangeTracker.Clear,
+            cancellationToken);
+    }
+
+    private static async Task<IResult> DeleteAttempt(
+        Guid id,
+        int accountId,
+        ClaimsPrincipal principal,
+        DataContext dataContext,
+        IHubContext<WorkerHub> workerHub,
+        IHubContext<SessionHub> sessionHub,
+        ViewerControlRegistry viewerControls,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = dataContext.Database.IsRelational()
+            ? await dataContext.Database.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted,
+                cancellationToken)
+            : null;
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            principal,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
             return Results.Unauthorized();
         }
 
-        await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
-            cancellationToken);
-        var session = await dataContext.SimulationSessions
-            .Include(candidate => candidate.ComputeWorker)
-            .Include(candidate => candidate.Commands)
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == id && candidate.AccountId == accountId.Value,
-                cancellationToken);
+        SimulationSession? session;
+        if (dataContext.Database.IsRelational())
+        {
+            // StartTask and Delete must serialize on the same row. Loading the
+            // command history only after this lock also gives sequence numbers
+            // a single, committed order.
+            session = await dataContext.SimulationSessions
+                .FromSqlInterpolated($"""
+                    SELECT *
+                    FROM "SimulationSessions"
+                    WHERE "Id" = {id} AND "AccountId" = {accountId}
+                    FOR UPDATE
+                    """)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (session != null)
+            {
+                await dataContext.Entry(session)
+                    .Reference(candidate => candidate.ComputeWorker)
+                    .LoadAsync(cancellationToken);
+                await dataContext.Entry(session)
+                    .Collection(candidate => candidate.Commands)
+                    .LoadAsync(cancellationToken);
+            }
+        }
+        else
+        {
+            session = await dataContext.SimulationSessions
+                .Include(candidate => candidate.ComputeWorker)
+                .Include(candidate => candidate.Commands)
+                .SingleOrDefaultAsync(
+                    candidate => candidate.Id == id && candidate.AccountId == accountId,
+                    cancellationToken);
+        }
 
         if (session == null)
         {
@@ -371,7 +447,10 @@ public static class SimulationSessionRoute
             try
             {
                 await dataContext.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
+                if (transaction != null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
                 viewerControls.ConfirmSessionRevocation(session.Id, revocationVersion);
                 revocationCommitted = true;
                 await viewerControls.DrainSessionAsync(
@@ -411,6 +490,40 @@ public static class SimulationSessionRoute
             session,
             queuePosition: null,
             computeWorkerName: session.ComputeWorker?.Name));
+    }
+
+    internal static async Task<IResult> RetryDeleteSerializationFailures(
+        Func<Task<IResult>> operation,
+        Action resetContext,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaximumDeleteAttempts; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception exception) when (IsSerializationFailure(exception))
+            {
+                resetContext();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (attempt == MaximumDeleteAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(25 * attempt),
+                    cancellationToken);
+            }
+        }
+
+        return Results.Conflict(new
+        {
+            code = "serialization_conflict",
+            retryable = true,
+            message = "The session changed while it was stopping. Try again."
+        });
     }
 
     private static int? GetAccountId(HttpContext context)

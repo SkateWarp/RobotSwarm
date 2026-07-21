@@ -25,6 +25,8 @@ import json
 import math
 import threading
 import time
+import uuid
+from collections import deque
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
 
@@ -82,6 +84,8 @@ class TransportPhase(Enum):
 DEFAULT_ENGAGEMENT_HOLD_TIME = 0.25
 DEFAULT_COMPRESSION_TRACKING_TOLERANCE = 0.025
 DEFAULT_MODEL_STATES_TIMEOUT_WALL_S = 0.75
+TRANSPORT_COLLISION_EVENT_HISTORY_LIMIT = 128
+TRANSPORT_COLLISION_PROTOCOL_ERROR_LIMIT = 16
 
 
 # ---------------------------------------------------------------------------
@@ -963,6 +967,15 @@ class CollaborativeTransport:
                 )),
             ),
         )
+        self.object_lidar_docking_closer_tolerance = max(
+            self.object_lidar_closer_tolerance,
+            min(
+                0.04,
+                float(rospy.get_param(
+                    '~object_lidar_docking_closer_tolerance', 0.035
+                )),
+            ),
+        )
         self.object_lidar_contact_closer_tolerance = max(
             self.object_lidar_closer_tolerance,
             min(
@@ -1117,6 +1130,19 @@ class CollaborativeTransport:
         # complete cycle from overlapping a lifecycle reset; command_epoch
         # remains the fast cancellation gate for individual Twist publishes.
         self.control_cycle_lock = threading.Lock()
+        self.transport_collision_lock = threading.Lock()
+        self.transport_collision_source_id = uuid.uuid4().hex
+        self.transport_collision_source_sequence = 0
+        self.transport_collision_task_id = None
+        self.transport_collision_task_start_sequence = 0
+        self.transport_collision_events = deque(
+            maxlen=TRANSPORT_COLLISION_EVENT_HISTORY_LIMIT
+        )
+        self.transport_collision_protocol_errors = deque(
+            maxlen=TRANSPORT_COLLISION_PROTOCOL_ERROR_LIMIT
+        )
+        self.transport_safety_control_sequence = 0
+        self.transport_active_safety_context = None
 
         # ---- Robot bookkeeping ----------------------------------------------
         # Populated dynamically from /fleet/robot_list
@@ -1292,8 +1318,14 @@ class CollaborativeTransport:
             self.robot_odom_received_at = {}
         self.robot_odom_received_at[ns] = None
 
-        # Obstacle avoidance (used only in SEARCH / APPROACH)
-        self.avoidance_modules[ns] = ObstacleAvoidance(ns)
+        # Obstacle avoidance owns the filtered physical-contact edge.  Its
+        # callback stays synchronous with this controller's safety pass so the
+        # event cannot inherit a later transport phase from ROS callback
+        # scheduling.
+        self.avoidance_modules[ns] = ObstacleAvoidance(
+            ns,
+            collision_edge_callback=self._record_transport_collision_edge,
+        )
 
         rospy.loginfo("[transport] registered robot %s", ns)
 
@@ -1543,6 +1575,7 @@ class CollaborativeTransport:
             self.object_error = None
             self.failure_reason = None
             self.current_task_id = config.get('task_id')
+            self._begin_transport_collision_stream(self.current_task_id)
             self.is_running = True
             self.is_paused = False
             self.command_epoch += 1
@@ -1683,6 +1716,197 @@ class CollaborativeTransport:
     # ======================================================================
     # Helpers
     # ======================================================================
+
+    def _ensure_transport_collision_stream(self):
+        """Create causal-stream state for ROS-free ``__new__`` fixtures."""
+        if not hasattr(self, 'transport_collision_lock'):
+            self.transport_collision_lock = threading.Lock()
+        if not hasattr(self, 'transport_collision_source_id'):
+            self.transport_collision_source_id = uuid.uuid4().hex
+        if not hasattr(self, 'transport_collision_source_sequence'):
+            self.transport_collision_source_sequence = 0
+        if not hasattr(self, 'transport_collision_task_id'):
+            self.transport_collision_task_id = None
+        if not hasattr(self, 'transport_collision_task_start_sequence'):
+            self.transport_collision_task_start_sequence = int(
+                self.transport_collision_source_sequence
+            )
+        if not hasattr(self, 'transport_collision_events'):
+            self.transport_collision_events = deque(
+                maxlen=TRANSPORT_COLLISION_EVENT_HISTORY_LIMIT
+            )
+        if not hasattr(self, 'transport_collision_protocol_errors'):
+            self.transport_collision_protocol_errors = deque(
+                maxlen=TRANSPORT_COLLISION_PROTOCOL_ERROR_LIMIT
+            )
+        if not hasattr(self, 'transport_safety_control_sequence'):
+            self.transport_safety_control_sequence = 0
+        if not hasattr(self, 'transport_active_safety_context'):
+            self.transport_active_safety_context = None
+
+    def _begin_transport_collision_stream(self, task_id):
+        """Open one bounded event window without resetting its watermark."""
+        self._ensure_transport_collision_stream()
+        with self.transport_collision_lock:
+            self.transport_collision_task_id = (
+                str(task_id) if task_id is not None else None
+            )
+            self.transport_collision_task_start_sequence = int(
+                self.transport_collision_source_sequence
+            )
+            self.transport_collision_events.clear()
+            self.transport_collision_protocol_errors.clear()
+            self.transport_active_safety_context = None
+
+    def _collision_protocol_error_locked(self, reason):
+        reason = str(reason).strip()
+        if (
+            reason
+            and reason not in self.transport_collision_protocol_errors
+        ):
+            self.transport_collision_protocol_errors.append(reason)
+
+    def _transport_collision_context(self):
+        """Return the phase snapshot owned by the current control cycle."""
+        context = getattr(
+            self, 'transport_active_safety_context', None
+        )
+        return dict(context) if isinstance(context, dict) else None
+
+    def _record_transport_collision_edge(self, robot_id, context):
+        """Seal a filtered rising edge at its safety evaluation source."""
+        self._ensure_transport_collision_stream()
+        with self.transport_collision_lock:
+            expected_task_id = self.transport_collision_task_id
+            valid = isinstance(context, dict)
+            if valid:
+                task_id = context.get('task_id')
+                phase = context.get('task_phase')
+                control_sequence = context.get('control_sequence')
+                sim_time = context.get('sim_time')
+                wall_time = context.get('wall_time')
+            else:
+                task_id = None
+                phase = None
+                control_sequence = None
+                sim_time = None
+                wall_time = None
+
+            if not isinstance(robot_id, str) or not robot_id:
+                valid = False
+                self._collision_protocol_error_locked(
+                    'collision edge has no robot identity'
+                )
+            if (
+                expected_task_id is None
+                or task_id != expected_task_id
+            ):
+                valid = False
+                self._collision_protocol_error_locked(
+                    'collision edge is outside the active transport task'
+                )
+            if phase not in {
+                TransportPhase.SEARCH.value,
+                TransportPhase.APPROACH.value,
+                TransportPhase.PUSH.value,
+                TransportPhase.DONE.value,
+                TransportPhase.FAILED.value,
+            }:
+                valid = False
+                self._collision_protocol_error_locked(
+                    'collision edge has no authoritative transport phase'
+                )
+            if (
+                isinstance(control_sequence, bool)
+                or not isinstance(control_sequence, int)
+                or control_sequence <= 0
+            ):
+                valid = False
+                self._collision_protocol_error_locked(
+                    'collision edge has no authoritative control sequence'
+                )
+            for label, value in (
+                ('simulation', sim_time), ('wall', wall_time)
+            ):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or float(value) < 0.0
+                ):
+                    valid = False
+                    self._collision_protocol_error_locked(
+                        'collision edge has no valid {} time'.format(label)
+                    )
+
+            active_robots = set(getattr(self, 'robot_namespaces', ()))
+            if active_robots and robot_id not in active_robots:
+                valid = False
+                self._collision_protocol_error_locked(
+                    'collision edge names a robot outside the active fleet'
+                )
+
+            self.transport_collision_source_sequence += 1
+            source_sequence = self.transport_collision_source_sequence
+            self.transport_collision_events.append({
+                'sequence': source_sequence,
+                'source_sequence': source_sequence,
+                'source_id': self.transport_collision_source_id,
+                'robot_id': robot_id if isinstance(robot_id, str) else None,
+                'task_id': task_id,
+                'task_type': 'transport',
+                'task_phase': phase,
+                'control_sequence': control_sequence,
+                'sim_time': sim_time,
+                'wall_time': wall_time,
+                'valid': valid,
+            })
+
+    def _transport_collision_stream_snapshot(self, task_id, terminal=False):
+        """Copy a bounded, self-validating source stream into one status."""
+        self._ensure_transport_collision_stream()
+        task_id = str(task_id) if task_id is not None else None
+        with self.transport_collision_lock:
+            if self.transport_collision_task_id is None:
+                self.transport_collision_task_id = task_id
+                self.transport_collision_task_start_sequence = int(
+                    self.transport_collision_source_sequence
+                )
+            elif task_id != self.transport_collision_task_id:
+                self._collision_protocol_error_locked(
+                    'collision stream task identity changed before publication'
+                )
+
+            events = [
+                dict(event) for event in self.transport_collision_events
+            ]
+            watermark = int(self.transport_collision_source_sequence)
+            first_sequence = (
+                int(events[0]['sequence'])
+                if events else watermark + 1
+            )
+            errors = list(self.transport_collision_protocol_errors)
+            stream = {
+                'version': 2,
+                'source_id': self.transport_collision_source_id,
+                'task_id': self.transport_collision_task_id,
+                'task_start_sequence': int(
+                    self.transport_collision_task_start_sequence
+                ),
+                'history_limit': TRANSPORT_COLLISION_EVENT_HISTORY_LIMIT,
+                'first_sequence': first_sequence,
+                'last_sequence': watermark,
+                'watermark': watermark,
+                'terminal': bool(terminal),
+                'valid': not errors and all(
+                    event.get('valid') is True for event in events
+                ),
+                'protocol_errors': errors,
+                'events': events,
+            }
+            if terminal:
+                stream['terminal_watermark'] = watermark
+            return stream
 
     @staticmethod
     def _quat_to_yaw(q: Quaternion) -> float:
@@ -5890,22 +6114,25 @@ class CollaborativeTransport:
         return held
 
     def _object_lidar_mask(
-        self, object_pos, contact_confirmed=False, object_yaw=None
+        self, object_pos, contact_confirmed=False, object_yaw=None,
+        closer_tolerance=None,
     ):
         """Describe the payload surface that may be ignored beam by beam."""
         if object_yaw is None:
             object_yaw = getattr(self, 'object_yaw', 0.0)
+        if closer_tolerance is None:
+            closer_tolerance = (
+                self.object_lidar_contact_closer_tolerance
+                if contact_confirmed
+                else self.object_lidar_closer_tolerance
+            )
         return LidarRangeMask(
             center_x=float(object_pos[0]),
             center_y=float(object_pos[1]),
             radius=self.grf_object_radius,
             maximum_center_distance=self.object_avoidance_range,
             tolerance=self.object_lidar_tolerance,
-            closer_tolerance=(
-                self.object_lidar_contact_closer_tolerance
-                if contact_confirmed
-                else self.object_lidar_closer_tolerance
-            ),
+            closer_tolerance=max(0.0, float(closer_tolerance)),
             half_width=self.object_half_width,
             half_height=self.object_half_height,
             yaw=float(object_yaw),
@@ -6008,6 +6235,7 @@ class CollaborativeTransport:
         soft_steering=True,
         object_yaw=None,
         minimum_linear_speed=0.0,
+        payload_docking=False,
     ):
         """Keep normal safety active while allowing deliberate contact."""
 
@@ -6017,8 +6245,29 @@ class CollaborativeTransport:
             return cmd
         lidar_masks = list(additional_lidar_masks)
         if allow_payload_contact:
+            docking_mask_active = (
+                bool(payload_docking)
+                and not payload_contact_confirmed
+                and float(cmd.linear.x) > 0.0
+            )
+            closer_tolerance = None
+            if docking_mask_active:
+                closer_tolerance = min(
+                    0.04,
+                    max(
+                        self.object_lidar_closer_tolerance,
+                        getattr(
+                            self,
+                            'object_lidar_docking_closer_tolerance',
+                            0.035,
+                        ),
+                    ),
+                )
             lidar_masks.append(self._object_lidar_mask(
-                object_pos, payload_contact_confirmed, object_yaw
+                object_pos,
+                payload_contact_confirmed,
+                object_yaw,
+                closer_tolerance=closer_tolerance,
             ))
             lidar_masks.extend(
                 self._object_lidar_corner_masks(
@@ -6040,6 +6289,7 @@ class CollaborativeTransport:
             ),
             soft_steering=soft_steering,
             minimum_linear_speed=minimum_linear_speed,
+            collision_context=self._transport_collision_context(),
         )
 
     def _legacy_push_step(
@@ -6777,7 +7027,10 @@ class CollaborativeTransport:
             avoidance = avoidance_modules.get(ns)
             if avoidance is not None:
                 requested_angular = cmd.angular.z
-                cmd = avoidance.apply_avoidance(cmd)
+                cmd = avoidance.apply_avoidance(
+                    cmd,
+                    collision_context=self._transport_collision_context(),
+                )
                 if (
                     abs(cmd.linear.x) < 1e-4
                     and abs(cmd.angular.z) < 1e-4
@@ -6795,7 +7048,12 @@ class CollaborativeTransport:
                             if sum(ord(char) for char in ns) % 2 == 0
                             else -0.45
                         )
-                    cmd = avoidance.apply_avoidance(recovery)
+                    cmd = avoidance.apply_avoidance(
+                        recovery,
+                        collision_context=(
+                            self._transport_collision_context()
+                        ),
+                    )
 
             self._publish_command(ns, cmd, expected_epoch)
 
@@ -8861,6 +9119,15 @@ class CollaborativeTransport:
                     repulsion_exempt_namespaces=parallel_contacts,
                     parallel_motion_exempt_namespaces=parallel_contacts,
                     soft_steering=False,
+                    # ModelStates and LaserScan are separate streams. At 3x
+                    # real time their payload surfaces can differ by a few
+                    # centimetres, but only a complete, aligned queue that is
+                    # actively advancing may use the narrow docking margin.
+                    payload_docking=(
+                        docking_started
+                        and queue_advancing
+                        and float(command.linear.x) > 0.0
+                    ),
                     additional_lidar_masks=(
                         self._transport_robot_lidar_masks(
                             body_contacts,
@@ -9246,20 +9513,38 @@ class CollaborativeTransport:
         with self.phase_lock:
             phase = self.phase
 
-        if input_error is not None:
-            self._fail_transport(input_error, expected_epoch)
-        else:
-            self._sync_avoidance_snapshot(positions, yaws)
-            if phase == TransportPhase.SEARCH:
-                self._search_phase(expected_epoch)
-            elif phase == TransportPhase.APPROACH:
-                self._approach_phase(expected_epoch)
-            elif phase == TransportPhase.PUSH:
-                self._push_phase(expected_epoch)
-            elif phase in (TransportPhase.DONE, TransportPhase.FAILED):
-                pass  # remain idle
-            elif phase == TransportPhase.IDLE:
-                pass
+        self._ensure_transport_collision_stream()
+        get_sim_time = getattr(rospy, 'get_time', lambda: 0.0)
+        try:
+            sim_time = float(get_sim_time())
+        except (TypeError, ValueError, OverflowError):
+            sim_time = -1.0
+        self.transport_safety_control_sequence += 1
+        self.transport_active_safety_context = {
+            'task_id': expected_task_id,
+            'task_phase': phase.value,
+            'control_sequence': self.transport_safety_control_sequence,
+            'sim_time': sim_time,
+            'wall_time': time.monotonic(),
+        }
+
+        try:
+            if input_error is not None:
+                self._fail_transport(input_error, expected_epoch)
+            else:
+                self._sync_avoidance_snapshot(positions, yaws)
+                if phase == TransportPhase.SEARCH:
+                    self._search_phase(expected_epoch)
+                elif phase == TransportPhase.APPROACH:
+                    self._approach_phase(expected_epoch)
+                elif phase == TransportPhase.PUSH:
+                    self._push_phase(expected_epoch)
+                elif phase in (TransportPhase.DONE, TransportPhase.FAILED):
+                    pass  # remain idle
+                elif phase == TransportPhase.IDLE:
+                    pass
+        finally:
+            self.transport_active_safety_context = None
 
         with self.phase_lock:
             phase = self.phase
@@ -9529,11 +9814,29 @@ class CollaborativeTransport:
                 self, 'transport_push_hard_stop_sources', ()
             )),
         }
+        queue_docking_started = bool(getattr(
+            self, 'transport_queue_docking_started', False
+        ))
+        queue_settling = (
+            not queue_docking_started
+            and getattr(
+                self, 'transport_queue_settle_started_at', None
+            ) is not None
+        )
 
+        status_task_id = (
+            self.current_task_id if task_id is None else task_id
+        )
         status = {
-            'task_id': self.current_task_id if task_id is None else task_id,
+            'task_id': status_task_id,
             'paused': self.is_paused if paused is None else paused,
             'phase': phase.value,
+            'collision_events': self._transport_collision_stream_snapshot(
+                status_task_id,
+                terminal=phase in (
+                    TransportPhase.DONE, TransportPhase.FAILED
+                ),
+            ),
             'object_pos': {'x': round(obj[0], 3), 'y': round(obj[1], 3)},
             'target_pos': {'x': target[0], 'y': target[1]},
             'distance_to_target': round(dist, 3),
@@ -9596,6 +9899,8 @@ class CollaborativeTransport:
             'route_complete': getattr(
                 self, 'transport_route_complete', False
             ),
+            'queue_docking_started': queue_docking_started,
+            'queue_settling': queue_settling,
             'approach_stage': approach_stage,
             'rendezvous_ready_count': len(
                 rendezvoused & set(self.robot_namespaces)

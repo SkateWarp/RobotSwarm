@@ -22,7 +22,7 @@ public sealed class AbuseProtectionTests
         var service = new AccountService(dataContext, configuration);
 
         var result = await AccountRoute.Create(
-            new AccountRequest("Public", "User", "public@example.test", "password"),
+            new AccountRequest("Public", "User", "public@example.test", "Valid1!a"),
             service,
             configuration);
 
@@ -56,7 +56,7 @@ public sealed class AbuseProtectionTests
         var service = new AccountService(dataContext, configuration);
 
         var result = await AccountRoute.Create(
-            new AccountRequest("Opted", "In", "opted-in@example.test", "password"),
+            new AccountRequest("Opted", "In", "opted-in@example.test", "Valid1!a"),
             service,
             configuration);
 
@@ -73,12 +73,70 @@ public sealed class AbuseProtectionTests
         var service = new AccountService(dataContext, Configuration());
 
         await service.Create(
-            new AccountRequest("Managed", "User", "managed@example.test", "password"),
+            new AccountRequest("Managed", "User", "managed@example.test", "Valid1!a"),
             Role.User);
 
         var account = Assert.Single(dataContext.Accounts);
         Assert.True(account.Enabled);
         Assert.True(account.IsVerified);
+    }
+
+    [Fact]
+    public async Task StaleAdministratorCannotMutateAnotherAccount()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var changedAt = new DateTime(2026, 7, 20, 16, 0, 0, DateTimeKind.Utc);
+        var administrator = new Account
+        {
+            Id = 1,
+            FirstName = "Former",
+            LastName = "Administrator",
+            Email = "former-admin@example.test",
+            PasswordHash = "admin-hash",
+            Enabled = true,
+            Role = Role.User,
+            Updated = changedAt
+        };
+        var target = new Account
+        {
+            Id = 2,
+            FirstName = "Unchanged",
+            LastName = "Target",
+            Email = "target@example.test",
+            PasswordHash = "target-hash",
+            Enabled = true,
+            Role = Role.User
+        };
+        dataContext.Accounts.AddRange(administrator, target);
+        await dataContext.SaveChangesAsync();
+
+        var context = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(new[]
+            {
+                new Claim("id", administrator.Id.ToString()),
+                new Claim(ClaimTypes.Role, Role.Admin.ToString()),
+                new Claim("account_version", "0")
+            }, "test"))
+        };
+        var result = await AccountRoute.Update(
+            target.Id,
+            new AccountRequest(
+                "Changed",
+                "By stale admin",
+                "changed@example.test",
+                "Changed1!"),
+            new AccountService(dataContext, Configuration()),
+            context);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await StatusCode(result));
+        dataContext.ChangeTracker.Clear();
+        var unchanged = await dataContext.Accounts.SingleAsync(account =>
+            account.Id == target.Id);
+        Assert.Equal("Unchanged", unchanged.FirstName);
+        Assert.Equal("Target", unchanged.LastName);
+        Assert.Equal("target@example.test", unchanged.Email);
+        Assert.Equal("target-hash", unchanged.PasswordHash);
     }
 
     [Fact]

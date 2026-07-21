@@ -1048,7 +1048,7 @@ function SimulationWorkspace() {
                                         </Typography>
                                     )}
                                     {activeSession.computeWorkerName && (
-                                        <Typography variant="body2">
+                                        <Typography variant="body2" data-sensitive="worker-identity">
                                             Worker: {activeSession.computeWorkerName}
                                         </Typography>
                                     )}

@@ -171,9 +171,24 @@ public static class SessionControlRoute
         }
 
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
+            IsolationLevel.ReadCommitted,
             cancellationToken);
-        var session = await FindOwnedSession(dataContext, id, accountId, cancellationToken);
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
+
+        var session = await LockOwnedSession(
+            dataContext,
+            id,
+            accountId,
+            loadWorker: true,
+            cancellationToken: cancellationToken);
         if (session == null)
         {
             return Results.NotFound();
@@ -390,9 +405,24 @@ public static class SessionControlRoute
         }
 
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
+            IsolationLevel.ReadCommitted,
             cancellationToken);
-        var session = await FindOwnedSession(dataContext, id, accountId, cancellationToken);
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
+
+        var session = await LockOwnedSession(
+            dataContext,
+            id,
+            accountId,
+            loadWorker: true,
+            cancellationToken: cancellationToken);
         if (session == null)
         {
             return Results.NotFound();
@@ -714,9 +744,24 @@ public static class SessionControlRoute
         }
 
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
+            IsolationLevel.ReadCommitted,
             cancellationToken);
-        var session = await FindOwnedSession(dataContext, id, accountId, cancellationToken);
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
+
+        var session = await LockOwnedSession(
+            dataContext,
+            id,
+            accountId,
+            loadWorker: false,
+            cancellationToken: cancellationToken);
         if (session == null)
         {
             return Results.NotFound();
@@ -763,11 +808,21 @@ public static class SessionControlRoute
         var requiresTransportEvidence = configuration.GetValue(
             "Tasks:RequireCollaborativeTransportEvidence",
             false);
+        ComputeWorker? assignedWorker = null;
         if (taskType == SwarmTaskRunType.CollaborativeTransport
             && requiresTransportEvidence
-            && (session.ComputeWorker == null
-                || !WorkerCapabilities.SupportsCollaborativeTransportEvidence(
-                    session.ComputeWorker)))
+            && session.ComputeWorkerId.HasValue)
+        {
+            assignedWorker = await dataContext.ComputeWorkers
+                .AsNoTracking()
+                .SingleOrDefaultAsync(
+                    worker => worker.Id == session.ComputeWorkerId.Value,
+                    cancellationToken);
+        }
+        if (taskType == SwarmTaskRunType.CollaborativeTransport
+            && requiresTransportEvidence
+            && (assignedWorker == null
+                || !WorkerCapabilities.SupportsCollaborativeTransportEvidence(assignedWorker)))
         {
             return Results.Conflict(new
             {
@@ -920,9 +975,24 @@ public static class SessionControlRoute
         }
 
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
+            IsolationLevel.ReadCommitted,
             cancellationToken);
-        var session = await FindOwnedSession(dataContext, sessionId, accountId, cancellationToken);
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
+
+        var session = await LockOwnedSession(
+            dataContext,
+            sessionId,
+            accountId,
+            loadWorker: true,
+            cancellationToken: cancellationToken);
         if (session == null)
         {
             return Results.NotFound();
@@ -1068,9 +1138,24 @@ public static class SessionControlRoute
         }
 
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
+            IsolationLevel.ReadCommitted,
             cancellationToken);
-        var session = await FindOwnedSession(dataContext, id, accountId, cancellationToken);
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
+
+        var session = await LockOwnedSession(
+            dataContext,
+            id,
+            accountId,
+            loadWorker: true,
+            cancellationToken: cancellationToken);
         if (session == null)
         {
             return Results.NotFound();
@@ -1201,9 +1286,24 @@ public static class SessionControlRoute
         }
 
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable,
+            IsolationLevel.ReadCommitted,
             cancellationToken);
-        var session = await FindOwnedSession(dataContext, id, accountId, cancellationToken);
+        var accountIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            dataContext,
+            accountId,
+            context.User,
+            cancellationToken);
+        if (!accountIsCurrent)
+        {
+            return Results.Unauthorized();
+        }
+
+        var session = await LockOwnedSession(
+            dataContext,
+            id,
+            accountId,
+            loadWorker: true,
+            cancellationToken: cancellationToken);
         if (session == null)
         {
             return Results.NotFound();
@@ -1473,9 +1573,9 @@ public static class SessionControlRoute
             catch (Exception exception)
                 when (SimulationSessionRoute.IsSerializationFailure(exception))
             {
-                // PostgreSQL may still cancel one of two serializable task
-                // transactions at commit, even for independent sessions. Retry
-                // the cancelled transaction from a clean EF tracking state.
+                // Keep compatibility with an older backend during a rolling
+                // deployment and recover from any provider-level 40001 using
+                // a clean EF tracking state.
                 resetContext();
                 cancellationToken.ThrowIfCancellationRequested();
                 if (attempt == MaximumTaskCreateAttempts)
@@ -1534,6 +1634,42 @@ public static class SessionControlRoute
             .SingleOrDefaultAsync(
                 session => session.Id == id && session.AccountId == accountId,
                 cancellationToken);
+    }
+
+    private static async Task<SimulationSession?> LockOwnedSession(
+        DataContext dataContext,
+        Guid id,
+        int accountId,
+        bool loadWorker,
+        CancellationToken cancellationToken)
+    {
+        if (!dataContext.Database.IsRelational())
+        {
+            return await FindOwnedSession(
+                dataContext,
+                id,
+                accountId,
+                cancellationToken);
+        }
+
+        // StartTask invariants belong to one session. Lock that row instead of
+        // reading the worker row that its heartbeat updates continuously.
+        var session = await dataContext.SimulationSessions
+            .FromSqlInterpolated($"""
+                SELECT *
+                FROM "SimulationSessions"
+                WHERE "Id" = {id} AND "AccountId" = {accountId}
+                FOR UPDATE
+                """)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (session != null && loadWorker)
+        {
+            await dataContext.Entry(session)
+                .Reference(candidate => candidate.ComputeWorker)
+                .LoadAsync(cancellationToken);
+        }
+
+        return session;
     }
 
     private static bool CanControl(SimulationSession session)
@@ -1740,6 +1876,8 @@ public static class SessionControlRoute
     {
         return Results.Conflict(new
         {
+            code = "serialization_conflict",
+            retryable = true,
             message = "The session changed concurrently. Retry with the same Idempotency-Key."
         });
     }

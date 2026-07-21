@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 
+import io
+import os
 from pathlib import Path
+import signal
 import sys
+import tempfile
+import textwrap
 import unittest
+from unittest import mock
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -10,12 +16,16 @@ sys.path.insert(0, str(SCRIPTS))
 
 from gazebo_gui_preflight import (
     DEFAULT_GPU_PATTERN,
+    MAXIMUM_GZCLIENT_LOG_BYTES,
     PreflightError,
     REPORT_SOURCE,
     RTF_SOURCE,
+    _append_log_chunk,
+    _signal_owned_process_group,
     active_gpu_description,
     build_parser,
     renderer_description,
+    run_preflight,
     validate_report,
 )
 
@@ -53,6 +63,15 @@ def good_report():
             "real_time_factor": 2.97,
         },
     }
+
+
+def process_is_live(pid):
+    path = Path("/proc") / str(pid) / "stat"
+    try:
+        fields = path.read_text(encoding="ascii").split()
+    except OSError:
+        return False
+    return len(fields) > 2 and fields[2] != "Z"
 
 
 class GazeboGuiPreflightTests(unittest.TestCase):
@@ -136,6 +155,199 @@ class GazeboGuiPreflightTests(unittest.TestCase):
             "D3D12 (NVIDIA GeForce RTX 3080)",
             active_gpu_description(good_report()),
         )
+
+    def test_diagnostic_log_writer_stops_exactly_at_its_limit(self):
+        stream = io.BytesIO()
+        total = _append_log_chunk(stream, b"abcd", 0, maximum=8)
+        total = _append_log_chunk(stream, b"efgh", total, maximum=8)
+        self.assertEqual(8, total)
+        with self.assertRaisesRegex(PreflightError, "1 MiB safety limit"):
+            _append_log_chunk(stream, b"i", total, maximum=8)
+        self.assertEqual(b"abcdefgh", stream.getvalue())
+        self.assertEqual(1024 * 1024, MAXIMUM_GZCLIENT_LOG_BYTES)
+
+    def test_group_signalling_rejects_self_group_and_reused_pid_identity(self):
+        process = mock.Mock()
+        process.pid = os.getpid()
+        process.poll.return_value = None
+        with self.assertRaisesRegex(PreflightError, "unsafe"):
+            _signal_owned_process_group(
+                process, os.getpgrp(), -1, signal.SIGTERM
+            )
+        with self.assertRaisesRegex(PreflightError, "reused"):
+            _signal_owned_process_group(
+                process, os.getpid() + 100000, -1, signal.SIGTERM
+            )
+
+    def test_run_uses_a_private_ephemeral_tmpdir_for_gzclient(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            root_path = Path(root)
+            plugin = root_path / "probe.so"
+            plugin.write_bytes(b"probe")
+            report_path = root_path / "report.json"
+            executable = root_path / "fake-gzclient"
+            report = good_report()
+            source = textwrap.dedent(
+                f"""\
+                #!/usr/bin/env python3
+                import json
+                import os
+                from pathlib import Path
+                import stat
+                import time
+
+                document = {report!r}
+                document['process']['pid'] = os.getpid()
+                private_tmp = Path(os.environ['TMPDIR'])
+                document['test_tmpdir'] = str(private_tmp)
+                document['test_tmpdir_mode'] = stat.S_IMODE(private_tmp.stat().st_mode)
+                Path(os.environ['ROBOTSWARM_GUI_PROBE_REPORT']).write_text(
+                    json.dumps(document), encoding='utf-8'
+                )
+                time.sleep(5)
+                """
+            )
+            executable.write_text(source, encoding="utf-8")
+            executable.chmod(0o700)
+            args = build_parser().parse_args(
+                [
+                    "--gzclient",
+                    str(executable),
+                    "--plugin",
+                    str(plugin),
+                    "--report",
+                    str(report_path),
+                    "--timeout-seconds",
+                    "2",
+                ]
+            )
+            with mock.patch.dict(os.environ, {"DISPLAY": ":99"}, clear=False):
+                observed, _ = run_preflight(args)
+            private_tmp = Path(observed["test_tmpdir"])
+            self.assertEqual(0o700, observed["test_tmpdir_mode"])
+            self.assertFalse(private_tmp.exists())
+
+    def test_run_kills_an_execed_descendant_after_its_leader_exits(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            root_path = Path(root)
+            plugin = root_path / "probe.so"
+            plugin.write_bytes(b"probe")
+            report_path = root_path / "report.json"
+            child_marker = root_path / "child.pid"
+            executable = root_path / "orphaning-gzclient"
+            report = good_report()
+            executable.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env python3
+                    import json
+                    import os
+                    from pathlib import Path
+                    import signal
+                    import sys
+
+                    child = os.fork()
+                    if child == 0:
+                        Path({str(child_marker)!r}).write_text(
+                            str(os.getpid()), encoding='ascii'
+                        )
+                        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                        os.execl(
+                            sys.executable, sys.executable, '-c',
+                            'import time; time.sleep(60)',
+                        )
+                    document = {report!r}
+                    document['process']['pid'] = os.getpid()
+                    Path(os.environ['ROBOTSWARM_GUI_PROBE_REPORT']).write_text(
+                        json.dumps(document), encoding='utf-8'
+                    )
+                    os._exit(0)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            args = build_parser().parse_args(
+                [
+                    "--gzclient",
+                    str(executable),
+                    "--plugin",
+                    str(plugin),
+                    "--report",
+                    str(report_path),
+                    "--timeout-seconds",
+                    "2",
+                ]
+            )
+            with mock.patch.dict(os.environ, {"DISPLAY": ":99"}, clear=False):
+                observed, _ = run_preflight(args)
+            self.assertEqual(1, observed["schema_version"])
+            self.assertTrue(child_marker.is_file())
+            self.assertFalse(process_is_live(int(child_marker.read_text())))
+
+    def test_run_rejects_and_cleans_up_a_flooding_gzclient(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            root_path = Path(root)
+            plugin = root_path / "probe.so"
+            plugin.write_bytes(b"probe")
+            tmpdir_marker = plugin.with_suffix(".tmpdir")
+            child_marker = plugin.with_suffix(".child-pid")
+            executable = root_path / "flooding-gzclient"
+            executable.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import os
+                    from pathlib import Path
+                    import signal
+                    import sys
+                    import time
+
+                    Path(sys.argv[2]).with_suffix('.tmpdir').write_text(
+                        os.environ['TMPDIR'], encoding='utf-8'
+                    )
+                    child = os.fork()
+                    if child == 0:
+                        Path(sys.argv[2]).with_suffix('.child-pid').write_text(
+                            str(os.getpid()), encoding='ascii'
+                        )
+                        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                        os.execl(
+                            sys.executable, sys.executable, '-c',
+                            'import time; time.sleep(60)',
+                        )
+                    deadline = time.monotonic() + 1.0
+                    marker = Path(sys.argv[2]).with_suffix('.child-pid')
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    block = b'x' * 65536
+                    for _ in range(18):
+                        os.write(1, block)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            args = build_parser().parse_args(
+                [
+                    "--gzclient",
+                    str(executable),
+                    "--plugin",
+                    str(plugin),
+                    "--report",
+                    str(root_path / "report.json"),
+                    "--timeout-seconds",
+                    "2",
+                ]
+            )
+            with mock.patch.dict(os.environ, {"DISPLAY": ":99"}, clear=False):
+                with self.assertRaisesRegex(PreflightError, "1 MiB safety limit"):
+                    run_preflight(args)
+            self.assertTrue(tmpdir_marker.is_file())
+            private_tmp = Path(tmpdir_marker.read_text(encoding="utf-8"))
+            self.assertFalse(private_tmp.exists())
+            self.assertTrue(child_marker.is_file())
+            self.assertFalse(process_is_live(int(child_marker.read_text())))
 
 
 if __name__ == "__main__":

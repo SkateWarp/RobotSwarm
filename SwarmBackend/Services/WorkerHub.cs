@@ -107,10 +107,11 @@ public class WorkerHub(
             {
                 return await HeartbeatCore(request);
             }
-            catch (DbUpdateConcurrencyException)
+            catch (Exception exception) when (IsHeartbeatPersistenceConflict(exception))
             {
                 dataContext.ChangeTracker.Clear();
                 logger.LogDebug(
+                    exception,
                     "Worker heartbeat met a concurrent drain transition (attempt {Attempt}).",
                     attempt);
             }
@@ -123,6 +124,11 @@ public class WorkerHub(
     private async Task<WorkerRegistrationResponse> HeartbeatCore(
         WorkerHeartbeatRequest request)
     {
+        await using var transaction = dataContext.Database.IsRelational()
+            ? await dataContext.Database.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted,
+                Context.ConnectionAborted)
+            : null;
         var worker = await GetWorker();
         ApplyWorkerMetadata(worker, request.ImageVersion, request.Capabilities);
 
@@ -144,6 +150,11 @@ public class WorkerHub(
             request.ActiveSessionIds,
             now);
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+        if (transaction != null)
+        {
+            await transaction.CommitAsync(Context.ConnectionAborted);
+        }
+
         foreach (var command in reconciliation.CleanupCommands)
         {
             await sessionHubContext.Clients
@@ -316,6 +327,31 @@ public class WorkerHub(
 
     public async Task CompleteCommand(WorkerCommandCompletionRequest request)
     {
+        for (var attempt = 1; attempt <= MaximumCommandTransitionAttempts; attempt++)
+        {
+            try
+            {
+                await CompleteCommandCore(request);
+                return;
+            }
+            catch (Exception exception) when (IsCommandCompletionConflict(exception))
+            {
+                dataContext.ChangeTracker.Clear();
+                Context.ConnectionAborted.ThrowIfCancellationRequested();
+                logger.LogDebug(
+                    exception,
+                    "Command {CommandId} completion conflicted with session state (attempt {Attempt}).",
+                    request.CommandId,
+                    attempt);
+            }
+        }
+
+        throw new HubException(
+            "The command completion conflicted repeatedly with session state. Retry the report.");
+    }
+
+    private async Task CompleteCommandCore(WorkerCommandCompletionRequest request)
+    {
         await using var transaction = await dataContext.Database.BeginTransactionAsync(
             IsolationLevel.Serializable,
             Context.ConnectionAborted);
@@ -449,6 +485,12 @@ public class WorkerHub(
                     ToSessionResponse(updatedSession),
                     Context.ConnectionAborted);
         }
+    }
+
+    internal static bool IsCommandCompletionConflict(Exception exception)
+    {
+        return exception is DbUpdateConcurrencyException
+            || IsSerializationFailure(exception);
     }
 
     public async Task FailCommand(WorkerCommandFailureRequest request)
@@ -590,7 +632,8 @@ public class WorkerHub(
                 break;
             }
             catch (Exception exception)
-                when (IsSerializationFailure(exception))
+                when (exception is DbUpdateConcurrencyException
+                    || IsSerializationFailure(exception))
             {
                 if (attempt < MaximumFailSafeTransactionAttempts)
                 {
@@ -645,12 +688,19 @@ public class WorkerHub(
     public async Task<SimulationSessionResponse> ReportSessionEvent(SessionEventReport report)
     {
         var workerId = (await GetWorker()).Id;
-        var session = await dataContext.SimulationSessions
-            .Include(candidate => candidate.ComputeWorker)
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == report.SessionId
-                    && candidate.ComputeWorkerId == workerId,
-                Context.ConnectionAborted);
+        await using var transaction = dataContext.Database.IsRelational()
+            ? await dataContext.Database.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted,
+                Context.ConnectionAborted)
+            : null;
+        var session = dataContext.Database.IsRelational()
+            ? await LockAssignedSession(report.SessionId, workerId)
+            : await dataContext.SimulationSessions
+                .Include(candidate => candidate.ComputeWorker)
+                .SingleOrDefaultAsync(
+                    candidate => candidate.Id == report.SessionId
+                        && candidate.ComputeWorkerId == workerId,
+                    Context.ConnectionAborted);
 
         if (session == null)
         {
@@ -705,6 +755,10 @@ public class WorkerHub(
 
             await dataContext.SaveChangesAsync(Context.ConnectionAborted);
         }
+        if (transaction != null)
+        {
+            await transaction.CommitAsync(Context.ConnectionAborted);
+        }
 
         var response = ToSessionResponse(session);
         var group = sessionHubContext.Clients.Group(ControlPlaneGroups.Session(session.Id));
@@ -752,17 +806,45 @@ public class WorkerHub(
     private async Task<TaskRunEventResponse> ReportTaskEventCore(TaskEventReport report)
     {
         var workerId = (await GetWorker()).Id;
-        var task = await dataContext.TaskRuns
-            .Include(candidate => candidate.Commands)
-            .Include(candidate => candidate.SimulationSession)
-            .ThenInclude(session => session.ComputeWorker)
-            .Include(candidate => candidate.SimulationSession)
-            .ThenInclude(session => session.Robots)
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == report.TaskRunId
-                    && candidate.SimulationSessionId == report.SessionId
-                    && candidate.SimulationSession.ComputeWorkerId == workerId,
-                Context.ConnectionAborted);
+        await using var transaction = dataContext.Database.IsRelational()
+            ? await dataContext.Database.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted,
+                Context.ConnectionAborted)
+            : null;
+        TaskRun? task;
+        if (dataContext.Database.IsRelational())
+        {
+            var session = await LockAssignedSession(
+                report.SessionId,
+                workerId,
+                loadRobots: true);
+            task = session == null
+                ? null
+                : await dataContext.TaskRuns
+                    .Include(candidate => candidate.Commands)
+                    .SingleOrDefaultAsync(
+                        candidate => candidate.Id == report.TaskRunId
+                            && candidate.SimulationSessionId == session.Id,
+                        Context.ConnectionAborted);
+            if (task != null)
+            {
+                task.SimulationSession = session!;
+            }
+        }
+        else
+        {
+            task = await dataContext.TaskRuns
+                .Include(candidate => candidate.Commands)
+                .Include(candidate => candidate.SimulationSession)
+                .ThenInclude(session => session.ComputeWorker)
+                .Include(candidate => candidate.SimulationSession)
+                .ThenInclude(session => session.Robots)
+                .SingleOrDefaultAsync(
+                    candidate => candidate.Id == report.TaskRunId
+                        && candidate.SimulationSessionId == report.SessionId
+                        && candidate.SimulationSession.ComputeWorkerId == workerId,
+                    Context.ConnectionAborted);
+        }
 
         if (task == null)
         {
@@ -844,6 +926,7 @@ public class WorkerHub(
 
         if (nextState >= TaskRunState.Completed)
         {
+            task.StartedAt ??= InferTaskStartedAt(task);
             task.CompletedAt ??= now;
             if (nextState == TaskRunState.Completed)
             {
@@ -864,6 +947,10 @@ public class WorkerHub(
 
         var sessionChanged = AlignSessionStateWithTask(task, now);
         await dataContext.SaveChangesAsync(Context.ConnectionAborted);
+        if (transaction != null)
+        {
+            await transaction.CommitAsync(Context.ConnectionAborted);
+        }
 
         var response = ToTaskResponse(task);
         var group = sessionHubContext.Clients.Group(ControlPlaneGroups.Session(task.SimulationSessionId));
@@ -896,6 +983,45 @@ public class WorkerHub(
         }
 
         return workerId;
+    }
+
+    private async Task<SimulationSession?> LockAssignedSession(
+        Guid sessionId,
+        Guid workerId,
+        bool loadRobots = false,
+        bool loadCommands = false)
+    {
+        var session = await dataContext.SimulationSessions
+            .FromSqlInterpolated($"""
+                SELECT *
+                FROM "SimulationSessions"
+                WHERE "Id" = {sessionId} AND "ComputeWorkerId" = {workerId}
+                FOR UPDATE
+                """)
+            .SingleOrDefaultAsync(Context.ConnectionAborted);
+        if (session == null)
+        {
+            return null;
+        }
+
+        await dataContext.Entry(session)
+            .Reference(candidate => candidate.ComputeWorker)
+            .LoadAsync(Context.ConnectionAborted);
+        if (loadRobots)
+        {
+            await dataContext.Entry(session)
+                .Collection(candidate => candidate.Robots)
+                .LoadAsync(Context.ConnectionAborted);
+        }
+
+        if (loadCommands)
+        {
+            await dataContext.Entry(session)
+                .Collection(candidate => candidate.Commands)
+                .LoadAsync(Context.ConnectionAborted);
+        }
+
+        return session;
     }
 
     private static void RemoveActiveConnection(Guid workerId, string connectionId)
@@ -942,27 +1068,49 @@ public class WorkerHub(
             .ToArray();
         var reportedIdSet = reportedIds.ToHashSet();
         var reportIsComplete = activeSessionIds.Count <= 1000;
-        var sessions = await dataContext.SimulationSessions
-            .Include(session => session.ComputeWorker)
-            .Include(session => session.Commands)
-            .Where(session => session.ComputeWorkerId == workerId
-                && (session.State == SimulationSessionState.Failed
-                    || session.State == SimulationSessionState.Expired
-                    || (session.State == SimulationSessionState.Stopped
-                        && (reportedIds.Contains(session.Id)
-                            || (session.Commands.Count(command =>
-                                    command.Type == WorkerCommandType.StopSession)
-                                < MaximumTerminalCleanupAttempts
-                                && (!session.Commands.Any(command =>
-                                        command.Type == WorkerCommandType.StopSession)
-                                    || session.Commands.Any(command =>
-                                        command.Type == WorkerCommandType.StopSession
-                                        && (command.State == WorkerCommandState.Failed
-                                            || command.State == WorkerCommandState.Cancelled)
-                                        && !session.Commands.Any(later =>
-                                            later.Type == WorkerCommandType.StopSession
-                                            && later.Sequence > command.Sequence))))))))
-            .ToListAsync(Context.ConnectionAborted);
+        List<SimulationSession> terminalSessions;
+        if (dataContext.Database.IsRelational())
+        {
+            terminalSessions = await dataContext.SimulationSessions
+                .FromSqlInterpolated($"""
+                    SELECT *
+                    FROM "SimulationSessions"
+                    WHERE "ComputeWorkerId" = {workerId}
+                      AND "State" IN (
+                        {(int)SimulationSessionState.Stopped},
+                        {(int)SimulationSessionState.Failed},
+                        {(int)SimulationSessionState.Expired})
+                    ORDER BY "Id"
+                    FOR UPDATE
+                    """)
+                .ToListAsync(Context.ConnectionAborted);
+            foreach (var session in terminalSessions)
+            {
+                await dataContext.Entry(session)
+                    .Reference(candidate => candidate.ComputeWorker)
+                    .LoadAsync(Context.ConnectionAborted);
+                await dataContext.Entry(session)
+                    .Collection(candidate => candidate.Commands)
+                    .LoadAsync(Context.ConnectionAborted);
+            }
+        }
+        else
+        {
+            terminalSessions = await dataContext.SimulationSessions
+                .Include(session => session.ComputeWorker)
+                .Include(session => session.Commands)
+                .Where(session => session.ComputeWorkerId == workerId
+                    && (session.State == SimulationSessionState.Stopped
+                        || session.State == SimulationSessionState.Failed
+                        || session.State == SimulationSessionState.Expired))
+                .ToListAsync(Context.ConnectionAborted);
+        }
+
+        var sessions = terminalSessions
+            .Where(session => IsTerminalReconciliationCandidate(
+                session,
+                reportedIdSet))
+            .ToList();
 
         var queued = new List<WorkerCommand>();
         var reconciled = new List<SimulationSession>();
@@ -1001,6 +1149,41 @@ public class WorkerHub(
         }
 
         return new HeartbeatReconciliation(queued, reconciled);
+    }
+
+    private static bool IsTerminalReconciliationCandidate(
+        SimulationSession session,
+        HashSet<Guid> reportedSessionIds)
+    {
+        if (session.State is SimulationSessionState.Failed
+            or SimulationSessionState.Expired)
+        {
+            return true;
+        }
+
+        if (session.State != SimulationSessionState.Stopped)
+        {
+            return false;
+        }
+
+        if (reportedSessionIds.Contains(session.Id))
+        {
+            return true;
+        }
+
+        var cleanupCommands = session.Commands
+            .Where(command => command.Type == WorkerCommandType.StopSession)
+            .OrderByDescending(command => command.Sequence)
+            .ToList();
+        if (cleanupCommands.Count >= MaximumTerminalCleanupAttempts)
+        {
+            return false;
+        }
+
+        var latest = cleanupCommands.FirstOrDefault();
+        return latest == null
+            || latest.State is WorkerCommandState.Failed
+                or WorkerCommandState.Cancelled;
     }
 
     private async Task<WorkerCommand> GetOwnedCommand(Guid commandId)
@@ -1142,6 +1325,24 @@ public class WorkerHub(
         }
 
         return value == $"tb3_{ordinal}";
+    }
+
+    internal static DateTime InferTaskStartedAt(TaskRun task)
+    {
+        if (task.StartedAt.HasValue)
+        {
+            return task.StartedAt.Value;
+        }
+
+        var startCommand = task.Commands
+            .Where(command => command.Type == WorkerCommandType.StartTask)
+            .OrderByDescending(command => command.Sequence)
+            .FirstOrDefault();
+        return startCommand?.CompletedAt
+            ?? startCommand?.AcknowledgedAt
+            ?? startCommand?.DispatchedAt
+            ?? startCommand?.CreatedAt
+            ?? task.CreatedAt;
     }
 
     private static bool AlignSessionStateWithTask(TaskRun task, DateTime now)
@@ -1445,15 +1646,36 @@ public class WorkerHub(
     private static bool IsSerializationFailure(Exception exception)
     {
         return exception is PostgresException
-            {
-                SqlState: PostgresErrorCodes.SerializationFailure
-            }
+        {
+            SqlState: PostgresErrorCodes.SerializationFailure
+        }
             || exception is DbUpdateException
             {
                 InnerException: PostgresException
                 {
                     SqlState: PostgresErrorCodes.SerializationFailure
                 }
+            };
+    }
+
+    internal static bool IsHeartbeatPersistenceConflict(Exception exception)
+    {
+        if (exception is DbUpdateConcurrencyException
+            || IsSerializationFailure(exception))
+        {
+            return true;
+        }
+
+        var postgres = exception as PostgresException
+            ?? (exception as DbUpdateException)?.InnerException as PostgresException;
+        return postgres is
+        {
+            SqlState: PostgresErrorCodes.DeadlockDetected
+        }
+            || postgres is
+            {
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: "IX_WorkerCommands_SimulationSessionId_Sequence"
             };
     }
 

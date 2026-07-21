@@ -3,7 +3,7 @@ import authRoles from "../auth/authRoles";
 const navigationGTSConfig = [
     {
         id: "realtime",
-        title: "Control de simulación",
+        title: "Control",
         type: "item",
         icon: "settings_remote",
         auth: authRoles.user,
@@ -11,11 +11,19 @@ const navigationGTSConfig = [
     },
     {
         id: "taskLogs",
-        title: "Historial de tareas",
+        title: "Historial",
         type: "item",
         icon: "history",
         auth: authRoles.user,
         url: "/apps/GTS/taskLogs",
+    },
+    {
+        id: "taskTemplates",
+        title: "Plantillas",
+        type: "item",
+        icon: "add_task",
+        auth: authRoles.admin,
+        url: "/apps/GTS/task-templates",
     },
     {
         id: "leafSorting",
@@ -27,19 +35,11 @@ const navigationGTSConfig = [
     },
     {
         id: "robotGroups",
-        title: "Grupos de robots",
+        title: "Grupos",
         type: "item",
         icon: "groups",
         auth: authRoles.admin,
         url: "/apps/GTS/robot-groups",
-    },
-    {
-        id: "taskTemplates",
-        title: "Plantillas de tareas",
-        type: "item",
-        icon: "add_task",
-        auth: authRoles.admin,
-        url: "/apps/GTS/task-templates",
     },
     {
         id: "accounts",

@@ -5,6 +5,9 @@ import jwtService from "app/services/jwtService";
 
 const API_URL = URL.replace(/\/+$/, "");
 const VIEWER_CLOSE_TERMINAL_STATES = new Set(["Completed", "Failed", "Cancelled"]);
+const COMMAND_RETRY_DELAYS_MS = [150, 350, 700];
+const RETRY_CONFLICT_MESSAGE =
+    "The session changed concurrently. Retry with the same Idempotency-Key.";
 
 const pause = (milliseconds) =>
     new Promise((resolve) => {
@@ -26,11 +29,37 @@ const commandHeaders = () => ({
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
 });
 
+const runCommand = async (request, retryTransientConflict = false) => {
+    const headers = commandHeaders();
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            // A retry must reuse these exact headers so the backend can reconcile a late commit.
+            // eslint-disable-next-line no-await-in-loop
+            return await request(headers);
+        } catch (error) {
+            const response = error?.response?.data;
+            const retryableConflict =
+                response?.code === "serialization_conflict" && response?.retryable === true;
+            const legacyConflict = response?.message === RETRY_CONFLICT_MESSAGE;
+            const canRetry =
+                retryTransientConflict &&
+                attempt < COMMAND_RETRY_DELAYS_MS.length &&
+                error?.response?.status === 409 &&
+                (retryableConflict || legacyConflict);
+            if (!canRetry) throw error;
+            // eslint-disable-next-line no-await-in-loop
+            await pause(COMMAND_RETRY_DELAYS_MS[attempt]);
+        }
+    }
+};
+
 const changeTask = async (sessionId, taskId, action) => {
-    const response = await axios.post(
-        `${API_URL}/api/sessions/${sessionId}/tasks/${taskId}/${action}`,
-        {},
-        { headers: commandHeaders() }
+    const response = await runCommand((headers) =>
+        axios.post(
+            `${API_URL}/api/sessions/${sessionId}/tasks/${taskId}/${action}`,
+            {},
+            { headers }
+        )
     );
     return response.data;
 };
@@ -67,10 +96,8 @@ const SimulationSessionService = {
     },
 
     async updateFleet(sessionId, robotCount) {
-        const response = await axios.patch(
-            `${API_URL}/api/sessions/${sessionId}/fleet`,
-            { robotCount },
-            { headers: commandHeaders() }
+        const response = await runCommand((headers) =>
+            axios.patch(`${API_URL}/api/sessions/${sessionId}/fleet`, { robotCount }, { headers })
         );
         return response.data;
     },
@@ -104,10 +131,9 @@ const SimulationSessionService = {
     },
 
     async startTask(sessionId, type, parameters) {
-        const response = await axios.post(
-            `${API_URL}/api/sessions/${sessionId}/tasks`,
-            { type, parameters },
-            { headers: commandHeaders() }
+        const response = await runCommand((headers) =>
+            axios.post(`${API_URL}/api/sessions/${sessionId}/tasks`, { type, parameters }, { headers }),
+            true
         );
         return response.data;
     },
@@ -125,28 +151,26 @@ const SimulationSessionService = {
     },
 
     async emergencyStop(sessionId) {
-        const response = await axios.post(
-            `${API_URL}/api/sessions/${sessionId}/emergency-stop`,
-            {},
-            { headers: commandHeaders() }
+        const response = await runCommand((headers) =>
+            axios.post(`${API_URL}/api/sessions/${sessionId}/emergency-stop`, {}, { headers })
         );
         return response.data;
     },
 
     async resetEmergencyStop(sessionId) {
-        const response = await axios.post(
-            `${API_URL}/api/sessions/${sessionId}/reset-emergency-stop`,
-            {},
-            { headers: commandHeaders() }
+        const response = await runCommand((headers) =>
+            axios.post(`${API_URL}/api/sessions/${sessionId}/reset-emergency-stop`, {}, { headers })
         );
         return response.data;
     },
 
     async createViewerLease(sessionId, source, robotRuntimeId = null) {
-        const response = await axios.post(
-            `${API_URL}/api/sessions/${sessionId}/viewer-lease`,
-            { source, robotRuntimeId },
-            { headers: commandHeaders() }
+        const response = await runCommand((headers) =>
+            axios.post(
+                `${API_URL}/api/sessions/${sessionId}/viewer-lease`,
+                { source, robotRuntimeId },
+                { headers }
+            )
         );
         return response.data;
     },

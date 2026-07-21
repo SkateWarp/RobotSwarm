@@ -271,7 +271,7 @@ public sealed class WorkerOptionsValidator : IValidateOptions<WorkerOptions>
             errors,
             options.Viewer.StartupTimeoutSeconds,
             2,
-            60,
+            120,
             "Worker:Viewer:StartupTimeoutSeconds");
         ValidateRange(
             errors,
@@ -345,7 +345,7 @@ public sealed class ViewerPublisherOptions
     public string PublisherExecutable { get; set; } = string.Empty;
     public string PublishBaseUrl { get; set; } = string.Empty;
     public int ProbeTimeoutSeconds { get; set; } = 5;
-    public int StartupTimeoutSeconds { get; set; } = 35;
+    public int StartupTimeoutSeconds { get; set; } = 50;
     public int StopTimeoutSeconds { get; set; } = 5;
     public int MaximumLeaseMinutes { get; set; } = 30;
 }

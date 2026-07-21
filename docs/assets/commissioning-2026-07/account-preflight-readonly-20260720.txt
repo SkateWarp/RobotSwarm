@@ -1,0 +1,29 @@
+RobotSwarm - preflight de cuentas en producción, solo lectura
+Fecha: 2026-07-20 (UTC-04:00)
+
+Alcance
+  Consulta no destructiva del servicio y del conjunto de cuentas existente.
+  No se ejecutaron migraciones, escrituras, despliegues ni pruebas de acceso.
+
+Estado observado
+  Revisión abreviada informada por el servicio: 1182dec
+  Salud del backend: Healthy
+  Salida agregada de la consulta final: 9|0|0|0
+  Cuentas contabilizadas: 9
+  Correos legacy fuera del formato ASCII o la longitud admitida: 0
+  Grupos duplicados al normalizar el correo: 0
+  Correos almacenados en forma no canónica: 0
+
+Contrato aplicado en la consulta
+  La forma canónica convierte a minúsculas y elimina en los extremos únicamente
+  espacio, TAB, LF, VT, FF y CR. La comprobación de formato y longitud fue la
+  misma que utiliza el CHECK preparado para la migración.
+
+Tratamiento de datos
+  El artefacto conserva solamente conteos y comprobaciones agregadas. No incluye
+  nombres, correos, identificadores de cuenta, hashes, tokens ni credenciales.
+
+Límite de la evidencia
+  Este preflight caracteriza la base desplegada que ya existía al momento de la
+  consulta. No demuestra que la migración nueva se haya aplicado, que el
+  candidato local esté desplegado ni que la aceptación postdeploy haya concluido.

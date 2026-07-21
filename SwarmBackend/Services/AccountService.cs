@@ -12,7 +12,6 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Text.RegularExpressions;
 using Npgsql;
 using BC = BCrypt.Net.BCrypt;
 
@@ -32,13 +31,14 @@ public class AccountService : IAccountService
 
     public async Task<Result<AuthenticateResponse>> Authenticate(string email, string password, string? ipAddress)
     {
+        var normalizedEmail = AccountRequestValidator.CanonicalEmail(email ?? string.Empty);
         await using var transaction = await _dataContext.Database.BeginTransactionAsync(
             IsolationLevel.Serializable);
         try
         {
-            var account = await _dataContext.Accounts
-                .Where(x => x.Email == email)
-                .FirstOrDefaultAsync();
+            var account = await FindAccountWithEmail(
+                normalizedEmail,
+                CancellationToken.None);
 
             if (account == null)
             {
@@ -80,48 +80,120 @@ public class AccountService : IAccountService
 
     public async Task<Result<AccountResponse>> Create(AccountRequest request)
     {
-        return await Create(request, Role.User);
+        return await CreateStandalone(request, Role.User, CancellationToken.None);
     }
 
     public async Task<Result<AccountResponse>> Create(AccountRequest request, Role role)
     {
-        string emailRegex = @"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$";
+        return await CreateStandalone(request, role, CancellationToken.None);
+    }
 
+    private async Task<Result<AccountResponse>> CreateStandalone(
+        AccountRequest request,
+        Role role,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await _dataContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        await AccountResourceLock.AcquireEmailMutation(
+            _dataContext,
+            cancellationToken);
+
+        var result = await CreateCore(request, role, cancellationToken);
+        if (Succeeded(result))
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        return result;
+    }
+
+    public async Task<Result<AccountResponse>> CreateAuthorized(
+        int actorAccountId,
+        ClaimsPrincipal principal,
+        AccountRequest request,
+        Role role,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await _dataContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        // This overload is used by the administrator-only creation route.
+        // Join the same global order even when the new account is a user.
+        await AccountResourceLock.AcquireAdministratorMutation(
+            _dataContext,
+            cancellationToken);
+        await AccountResourceLock.AcquireEmailMutation(
+            _dataContext,
+            cancellationToken);
+
+        var actorIsCurrent = await AccountResourceLock.AcquireSharedAndValidate(
+            _dataContext,
+            actorAccountId,
+            principal,
+            cancellationToken);
+        if (!actorIsCurrent)
+        {
+            return UnauthorizedMutation<AccountResponse>();
+        }
+
+        var result = await CreateCore(request, role, cancellationToken);
+        if (Succeeded(result))
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+        return result;
+    }
+
+    private async Task<Result<AccountResponse>> CreateCore(
+        AccountRequest request,
+        Role role,
+        CancellationToken cancellationToken)
+    {
         if (!Enum.IsDefined(role))
         {
             return new Result<AccountResponse>(new Exception("Invalid account role."));
         }
 
-        if (string.IsNullOrEmpty(request.Email))
+        if (!AccountRequestValidator.TryNormalize(
+                request,
+                out var normalized,
+                out var errors))
         {
-            return new Result<AccountResponse>(new Exception("Email cannot be empty."));
+            return InvalidAccount(errors);
         }
 
-        if (!Regex.IsMatch(request.Email, emailRegex))
-        {
-            return new Result<AccountResponse>(new Exception("Invalid email format."));
-        }
-
-        var existing = await _dataContext.Accounts.AnyAsync(x => x.Email == request.Email);
+        var existing = await EmailIsInUse(
+            normalized.Email,
+            accountId: null,
+            cancellationToken);
         if (existing)
         {
-            return new Result<AccountResponse>(new Exception("Correo en uso"));
+            return EmailInUse();
         }
 
         var account = new Account
         {
-            Email = request.Email,
+            Email = normalized.Email,
             Created = DateTime.Now,
-            FirstName = request.FirstName,
+            FirstName = normalized.FirstName,
             Enabled = true,
-            LastName = request.LastName,
+            LastName = normalized.LastName,
             Verified = DateTime.Now,
-            PasswordHash = BC.HashPassword(request.Password),
+            PasswordHash = BC.HashPassword(normalized.Password),
             Role = role,
         };
 
         _dataContext.Accounts.Add(account);
-        await _dataContext.SaveChangesAsync();
+        try
+        {
+            await _dataContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsEmailUniqueViolation(exception))
+        {
+            return EmailInUse();
+        }
 
         return AccountResponse.From(account);
     }
@@ -311,18 +383,118 @@ public class AccountService : IAccountService
         return AccountResponse.From(account);
     }
 
-    public async Task<Result<AccountResponse>> Update(int accountId, AccountRequest request)
+    public Task<Result<AccountResponse>> Update(int accountId, AccountRequest request)
     {
+        return UpdateCore(
+            actorAccountId: null,
+            principal: null,
+            accountId,
+            request,
+            CancellationToken.None);
+    }
+
+    public Task<Result<AccountResponse>> UpdateAuthorized(
+        int actorAccountId,
+        ClaimsPrincipal principal,
+        int accountId,
+        AccountRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return UpdateCore(
+            actorAccountId,
+            principal,
+            accountId,
+            request,
+            cancellationToken);
+    }
+
+    private async Task<Result<AccountResponse>> UpdateCore(
+        int? actorAccountId,
+        ClaimsPrincipal? principal,
+        int accountId,
+        AccountRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!AccountRequestValidator.TryNormalize(
+                request,
+                out var normalized,
+                out var errors))
+        {
+            return InvalidAccount(errors);
+        }
+
+        request = normalized;
         await using var transaction = await _dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable);
-        var account = await _dataContext.Accounts
-            .Include(x => x.RefreshTokens)
-            .Where(x => x.Id == accountId)
-            .FirstOrDefaultAsync();
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        if (actorAccountId.HasValue)
+        {
+            if (PrincipalIsAdministrator(principal))
+            {
+                await AccountResourceLock.AcquireAdministratorMutation(
+                    _dataContext,
+                    cancellationToken);
+            }
+        }
+
+        await AccountResourceLock.AcquireEmailMutation(
+            _dataContext,
+            cancellationToken);
+
+        if (actorAccountId.HasValue)
+        {
+            if (principal == null
+                || !await AccountResourceLock.AcquireActorAndTarget(
+                    _dataContext,
+                    actorAccountId.Value,
+                    principal,
+                    accountId,
+                    cancellationToken))
+            {
+                return UnauthorizedMutation<AccountResponse>();
+            }
+        }
+        else
+        {
+            await AccountResourceLock.AcquireExclusive(
+                _dataContext,
+                accountId,
+                cancellationToken);
+        }
+
+        Account? account;
+        if (_dataContext.Database.IsRelational())
+        {
+            account = await _dataContext.Accounts
+                .FromSqlInterpolated($"""
+                    SELECT *
+                    FROM "Accounts"
+                    WHERE "Id" = {accountId}
+                    FOR UPDATE
+                    """)
+                .SingleOrDefaultAsync();
+            if (account != null)
+            {
+                await _dataContext.Entry(account)
+                    .Collection(candidate => candidate.RefreshTokens)
+                    .LoadAsync();
+            }
+        }
+        else
+        {
+            account = await _dataContext.Accounts
+                .Include(candidate => candidate.RefreshTokens)
+                .SingleOrDefaultAsync(candidate => candidate.Id == accountId);
+        }
 
         if (account == null)
         {
             return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        if (await EmailIsInUse(request.Email, accountId, cancellationToken))
+        {
+            return EmailInUse();
         }
 
         account.FirstName = request.FirstName;
@@ -331,27 +503,158 @@ public class AccountService : IAccountService
         account.PasswordHash = BC.HashPassword(request.Password);
         account.Updated = DateTime.UtcNow;
         RevokeRefreshTokens(account, account.Updated.Value);
-        await _dataContext.SaveChangesAsync();
-        await transaction.CommitAsync();
+        try
+        {
+            await _dataContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsEmailUniqueViolation(exception))
+        {
+            return EmailInUse();
+        }
+        await transaction.CommitAsync(cancellationToken);
 
         return AccountResponse.From(account);
     }
 
-    public async Task<Result<AccountResponse>> Update(int accountId, AccountPatchRequest request)
+    public Task<Result<AccountResponse>> Update(int accountId, AccountPatchRequest request)
     {
+        return UpdateCore(
+            actorAccountId: null,
+            principal: null,
+            accountId,
+            request,
+            CancellationToken.None);
+    }
+
+    public Task<Result<AccountResponse>> UpdateAuthorized(
+        int actorAccountId,
+        ClaimsPrincipal principal,
+        int accountId,
+        AccountPatchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return UpdateCore(
+            actorAccountId,
+            principal,
+            accountId,
+            request,
+            cancellationToken);
+    }
+
+    private async Task<Result<AccountResponse>> UpdateCore(
+        int? actorAccountId,
+        ClaimsPrincipal? principal,
+        int accountId,
+        AccountPatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!AccountRequestValidator.TryNormalize(
+                request,
+                out var normalized,
+                out var errors))
+        {
+            return InvalidAccount(errors);
+        }
+
+        request = normalized;
         await using var transaction = await _dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable);
-        var account = await _dataContext.Accounts
-          .Include(x => x.RefreshTokens)
-          .Where(x => x.Id == accountId)
-          .FirstOrDefaultAsync();
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        if (request.Role.HasValue
+            || actorAccountId.HasValue && PrincipalIsAdministrator(principal))
+        {
+            await AccountResourceLock.AcquireAdministratorMutation(
+                _dataContext,
+                cancellationToken);
+        }
+
+        if (request.Email != null)
+        {
+            await AccountResourceLock.AcquireEmailMutation(
+                _dataContext,
+                cancellationToken);
+        }
+
+        if (actorAccountId.HasValue)
+        {
+            if (principal == null
+                || !await AccountResourceLock.AcquireActorAndTarget(
+                    _dataContext,
+                    actorAccountId.Value,
+                    principal,
+                    accountId,
+                    cancellationToken))
+            {
+                return UnauthorizedMutation<AccountResponse>();
+            }
+        }
+        else
+        {
+            await AccountResourceLock.AcquireExclusive(
+                _dataContext,
+                accountId,
+                cancellationToken);
+        }
+
+        Account? account;
+        if (_dataContext.Database.IsRelational())
+        {
+            List<Account> lockedAccounts;
+            if (request.Role.HasValue)
+            {
+                lockedAccounts = await _dataContext.Accounts
+                    .FromSqlInterpolated($"""
+                        SELECT *
+                        FROM "Accounts"
+                        WHERE "Id" = {accountId}
+                           OR ("Enabled" = TRUE AND "Role" = {(int)Role.Admin})
+                        ORDER BY "Id"
+                        FOR UPDATE
+                        """)
+                    .ToListAsync();
+            }
+            else
+            {
+                lockedAccounts = await _dataContext.Accounts
+                    .FromSqlInterpolated($"""
+                        SELECT *
+                        FROM "Accounts"
+                        WHERE "Id" = {accountId}
+                        FOR UPDATE
+                        """)
+                    .ToListAsync();
+            }
+
+            account = lockedAccounts.SingleOrDefault(candidate => candidate.Id == accountId);
+            if (account != null)
+            {
+                await _dataContext.Entry(account)
+                    .Collection(candidate => candidate.RefreshTokens)
+                    .LoadAsync();
+            }
+        }
+        else
+        {
+            account = await _dataContext.Accounts
+                .Include(candidate => candidate.RefreshTokens)
+                .SingleOrDefaultAsync(candidate => candidate.Id == accountId);
+        }
 
         if (account == null)
         {
             return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
         }
 
+        if (request.Email != null
+            && await EmailIsInUse(request.Email, accountId, cancellationToken))
+        {
+            return EmailInUse();
+        }
+
         var securityChanged = request.Password != null
+            || request.Email != null
+                && !AccountRequestValidator.CanonicalEmail(account.Email)
+                    .Equals(request.Email, StringComparison.Ordinal)
             || request.Role.HasValue && request.Role.Value != account.Role;
         if (account.Enabled
             && account.Role == Role.Admin
@@ -380,24 +683,112 @@ public class AccountService : IAccountService
             RevokeRefreshTokens(account, account.Updated.Value);
         }
 
-        await _dataContext.SaveChangesAsync();
-        await transaction.CommitAsync();
+        try
+        {
+            await _dataContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsEmailUniqueViolation(exception))
+        {
+            return EmailInUse();
+        }
+        await transaction.CommitAsync(cancellationToken);
 
         return AccountResponse.From(account);
     }
 
     public async Task<bool> Delete(int accountId)
     {
+        var outcome = await DeleteCore(
+            actorAccountId: null,
+            principal: null,
+            accountId,
+            CancellationToken.None);
+        return outcome.Deleted;
+    }
+
+    public async Task<Result<bool>> DeleteAuthorized(
+        int actorAccountId,
+        ClaimsPrincipal principal,
+        int accountId,
+        CancellationToken cancellationToken = default)
+    {
+        var outcome = await DeleteCore(
+            actorAccountId,
+            principal,
+            accountId,
+            cancellationToken);
+        return outcome.Authorized
+            ? outcome.Deleted
+            : UnauthorizedMutation<bool>();
+    }
+
+    private async Task<(bool Authorized, bool Deleted)> DeleteCore(
+        int? actorAccountId,
+        ClaimsPrincipal? principal,
+        int accountId,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = await _dataContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable);
-        var account = await _dataContext.Accounts
-          .Include(x => x.RefreshTokens)
-          .Where(x => x.Id == accountId)
-          .FirstOrDefaultAsync();
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        await AccountResourceLock.AcquireAdministratorMutation(
+            _dataContext,
+            cancellationToken);
+        if (actorAccountId.HasValue)
+        {
+            if (principal == null
+                || !await AccountResourceLock.AcquireActorAndTarget(
+                    _dataContext,
+                    actorAccountId.Value,
+                    principal,
+                    accountId,
+                    cancellationToken))
+            {
+                return (Authorized: false, Deleted: false);
+            }
+        }
+        else
+        {
+            await AccountResourceLock.AcquireExclusive(
+                _dataContext,
+                accountId,
+                cancellationToken);
+        }
+
+        Account? account;
+        if (_dataContext.Database.IsRelational())
+        {
+            // Lock administrators in a stable order as well as the requested
+            // account. This keeps the last-admin rule intact without making
+            // session cleanup depend on a broad serializable snapshot.
+            var lockedAccounts = await _dataContext.Accounts
+                .FromSqlInterpolated($"""
+                    SELECT *
+                    FROM "Accounts"
+                    WHERE "Id" = {accountId}
+                       OR ("Enabled" = TRUE AND "Role" = {(int)Role.Admin})
+                    ORDER BY "Id"
+                    FOR UPDATE
+                    """)
+                .ToListAsync();
+            account = lockedAccounts.SingleOrDefault(candidate => candidate.Id == accountId);
+            if (account != null)
+            {
+                await _dataContext.Entry(account)
+                    .Collection(candidate => candidate.RefreshTokens)
+                    .LoadAsync();
+            }
+        }
+        else
+        {
+            account = await _dataContext.Accounts
+                .Include(candidate => candidate.RefreshTokens)
+                .SingleOrDefaultAsync(candidate => candidate.Id == accountId);
+        }
 
         if (account == null)
         {
-            return false;
+            return (Authorized: true, Deleted: false);
         }
 
         if (account.Enabled && account.Role == Role.Admin)
@@ -406,7 +797,7 @@ public class AccountService : IAccountService
                 candidate.Enabled && candidate.Role == Role.Admin);
             if (enabledAdminCount <= 1)
             {
-                return false;
+                return (Authorized: true, Deleted: false);
             }
         }
 
@@ -423,13 +814,38 @@ public class AccountService : IAccountService
             lease.RevokedAt = now;
         }
 
-        var sessions = await _dataContext.SimulationSessions
-            .Include(session => session.Commands)
-            .Where(session => session.AccountId == accountId
-                && (session.State < SimulationSessionState.Stopped
-                    || session.State == SimulationSessionState.Failed
-                    || session.State == SimulationSessionState.Expired))
-            .ToListAsync();
+        List<SimulationSession> sessions;
+        if (_dataContext.Database.IsRelational())
+        {
+            sessions = await _dataContext.SimulationSessions
+                .FromSqlInterpolated($"""
+                    SELECT *
+                    FROM "SimulationSessions"
+                    WHERE "AccountId" = {accountId}
+                      AND ("State" < {(int)SimulationSessionState.Stopped}
+                        OR "State" = {(int)SimulationSessionState.Failed}
+                        OR "State" = {(int)SimulationSessionState.Expired})
+                    ORDER BY "Id"
+                    FOR UPDATE
+                    """)
+                .ToListAsync();
+            foreach (var session in sessions)
+            {
+                await _dataContext.Entry(session)
+                    .Collection(candidate => candidate.Commands)
+                    .LoadAsync();
+            }
+        }
+        else
+        {
+            sessions = await _dataContext.SimulationSessions
+                .Include(session => session.Commands)
+                .Where(session => session.AccountId == accountId
+                    && (session.State < SimulationSessionState.Stopped
+                        || session.State == SimulationSessionState.Failed
+                        || session.State == SimulationSessionState.Expired))
+                .ToListAsync();
+        }
         foreach (var session in sessions)
         {
             if (session.State == SimulationSessionState.Queued
@@ -465,8 +881,20 @@ public class AccountService : IAccountService
         }
 
         await _dataContext.SaveChangesAsync();
-        await transaction.CommitAsync();
-        return true;
+        await transaction.CommitAsync(cancellationToken);
+        return (Authorized: true, Deleted: true);
+    }
+
+    private static Result<T> UnauthorizedMutation<T>()
+    {
+        return new Result<T>(new UnauthorizedAccessException(
+            "The account token is no longer active."));
+    }
+
+    private static bool PrincipalIsAdministrator(ClaimsPrincipal? principal)
+    {
+        return principal?.FindFirst(ClaimTypes.Role)?.Value
+            == Role.Admin.ToString();
     }
 
     private static void RevokeRefreshTokens(Account account, DateTime revokedAt)
@@ -476,5 +904,78 @@ public class AccountService : IAccountService
             token.Revoked = revokedAt;
             token.RevokedByIp = "account-security-change";
         }
+    }
+
+    private async Task<Account?> FindAccountWithEmail(
+        string normalizedEmail,
+        CancellationToken cancellationToken)
+    {
+        if (_dataContext.Database.ProviderName
+            == "Npgsql.EntityFrameworkCore.PostgreSQL")
+        {
+            return await _dataContext.Accounts.FirstOrDefaultAsync(account =>
+                account.NormalizedEmail == normalizedEmail,
+                cancellationToken);
+        }
+
+        var accounts = await _dataContext.Accounts.ToListAsync(cancellationToken);
+        return accounts.FirstOrDefault(account =>
+            AccountRequestValidator.CanonicalEmail(account.Email) == normalizedEmail);
+    }
+
+    private async Task<bool> EmailIsInUse(
+        string normalizedEmail,
+        int? accountId,
+        CancellationToken cancellationToken)
+    {
+        if (_dataContext.Database.ProviderName
+            == "Npgsql.EntityFrameworkCore.PostgreSQL")
+        {
+            return await _dataContext.Accounts.AnyAsync(account =>
+                    account.NormalizedEmail == normalizedEmail
+                    && (!accountId.HasValue || account.Id != accountId.Value),
+                cancellationToken);
+        }
+
+        var accounts = await _dataContext.Accounts
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+        return accounts.Any(account =>
+            (!accountId.HasValue || account.Id != accountId.Value)
+            && AccountRequestValidator.CanonicalEmail(account.Email) == normalizedEmail);
+    }
+
+    private static bool Succeeded<T>(Result<T> result)
+    {
+        return result.Match(_ => true, _ => false);
+    }
+
+    private static Result<AccountResponse> InvalidAccount(
+        Dictionary<string, string[]> errors)
+    {
+        var message = errors.Values
+            .SelectMany(messages => messages)
+            .FirstOrDefault() ?? "Los datos de la cuenta no son válidos.";
+        return new Result<AccountResponse>(new Exception(message));
+    }
+
+    private static Result<AccountResponse> EmailInUse()
+    {
+        return new Result<AccountResponse>(new Exception("Correo en uso."));
+    }
+
+    private static bool IsEmailUniqueViolation(Exception exception)
+    {
+        for (var current = exception; current != null; current = current.InnerException)
+        {
+            if (current is PostgresException postgres
+                && postgres.SqlState == PostgresErrorCodes.UniqueViolation
+                && postgres.ConstraintName == "IX_Accounts_NormalizedEmail")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -120,6 +120,62 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
         self.assertEqual(2.90, args.min_rtf)
         self.assertEqual(0.05, args.min_transport_search_travel)
 
+    def test_n1_timeout_has_explicit_phase_liveness_budgets(self):
+        case = next(
+            item for item in LIVE.SCENARIOS
+            if item["name"] == "transport_grf_n1"
+        )
+
+        self.assertEqual(325, case["timeout"])
+        self.assertEqual(
+            {"SEARCH": 245.0, "APPROACH": 20.0, "PUSH": 55.0},
+            case["phase_timeouts"],
+        )
+        self.assertEqual(
+            5.0,
+            case["timeout"] - sum(case["phase_timeouts"].values()),
+        )
+
+    def test_n3_timeout_has_measured_phase_liveness_budgets(self):
+        case = next(
+            item for item in LIVE.SCENARIOS
+            if item["name"] == "transport_grf_n3"
+        )
+
+        self.assertEqual(290, case["timeout"])
+        self.assertEqual(
+            {"SEARCH": 115.0, "APPROACH": 125.0, "PUSH": 45.0},
+            case["phase_timeouts"],
+        )
+        self.assertEqual(
+            5.0,
+            case["timeout"] - sum(case["phase_timeouts"].values()),
+        )
+
+    def test_n4_timeout_covers_the_loaded_payload_without_weakening_liveness(self):
+        case = next(
+            item for item in LIVE.SCENARIOS
+            if item["name"] == "transport_grf_n4"
+        )
+
+        self.assertEqual(355, case["timeout"])
+        self.assertEqual(
+            {"SEARCH": 60.0, "APPROACH": 100.0, "PUSH": 190.0},
+            case["phase_timeouts"],
+        )
+        self.assertEqual(
+            5.0,
+            case["timeout"] - sum(case["phase_timeouts"].values()),
+        )
+
+    def test_transport_result_allowlist_keeps_final_diagnostic_geometry(self):
+        required = {
+            "object_pos", "target_pos", "progress", "object_z",
+            "route_target", "queue_docking_started", "queue_settling",
+        }
+
+        self.assertTrue(required <= set(LIVE.RESULT_BEHAVIOR_STATUS_KEYS))
+
     def _status(
         self, sequence, control_time, commands, phase="PUSH",
         reference_speed=0.015,
@@ -565,7 +621,7 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
             if case["behavior"] == "transport"
         ]
 
-        self.assertEqual([1, 3, 4, 10], [case["count"] for case in cases])
+        self.assertEqual([1, 2, 3, 4, 10], [case["count"] for case in cases])
         self.assertTrue(all(case.get("require_search") is True for case in cases))
         self.assertTrue(all(case.get("object_start") == (-3.5, -3.0) for case in cases))
 
@@ -598,25 +654,87 @@ class TransportAcceptanceMetricsTest(unittest.TestCase):
             },
         }
 
-    def test_transport_docking_does_not_turn_raw_counter_into_failure(self):
+    def test_declared_docking_cannot_relabel_a_filtered_safety_contact(self):
+        attribution = LIVE.collision_attribution_report(
+            1, {"tb3_0": 1}, 8, set(), [{
+                "robot_id": "tb3_0",
+                "phase": "PUSH",
+                "docking_window_open": True,
+            }]
+        )
         classification = LIVE.classify_contact_episodes(
-            "transport", 1, self._contact_report(), self.args
+            "transport", 1, self._contact_report(), self.args, attribution
         )
 
-        self.assertEqual(
-            "expected_transport_docking",
-            classification["classification"],
-        )
+        self.assertEqual("unexpected_contact", classification["classification"])
         self.assertEqual(1, classification["raw_collision_count_delta"])
         self.assertEqual(
-            1,
+            0,
             classification["classified_expected_contact_count_delta"],
         )
         self.assertEqual(
-            0,
+            1,
             classification["classified_unexpected_contact_count_delta"],
         )
-        self.assertFalse(classification["hard_failure"])
+        self.assertTrue(classification["hard_failure"])
+
+    def test_early_collision_is_not_absolved_by_later_valid_docking(self):
+        attribution = LIVE.collision_attribution_report(
+            2, {"tb3_0": 1, "tb3_2": 1}, 10, set(), [
+                {
+                    "robot_id": "tb3_2",
+                    "phase": "APPROACH",
+                    "docking_window_open": False,
+                },
+                {
+                    "robot_id": "tb3_0",
+                    "phase": "PUSH",
+                    "docking_window_open": True,
+                },
+            ]
+        )
+
+        classification = LIVE.classify_contact_episodes(
+            "transport", 2, self._contact_report(), self.args, attribution
+        )
+
+        self.assertEqual(
+            "unexpected_contact", classification["classification"]
+        )
+        self.assertEqual(2, classification[
+            "classified_unexpected_contact_count_delta"
+        ])
+        self.assertEqual(0, classification[
+            "classified_expected_contact_count_delta"
+        ])
+        self.assertTrue(classification["hard_failure"])
+
+    def test_incomplete_temporal_attribution_cannot_be_called_docking(self):
+        attribution = LIVE.collision_attribution_report(
+            2, {"tb3_0": 1}, 10, set(), [{
+                "robot_id": "tb3_0",
+                "phase": "PUSH",
+                "docking_window_open": True,
+            }]
+        )
+
+        classification = LIVE.classify_contact_episodes(
+            "transport", 2, self._contact_report(), self.args, attribution
+        )
+
+        self.assertFalse(classification["temporal_attribution_complete"])
+        self.assertEqual(
+            "unexpected_contact", classification["classification"]
+        )
+        self.assertEqual(
+            2,
+            classification["classified_unexpected_contact_count_delta"],
+        )
+        self.assertEqual(
+            0,
+            classification["classified_expected_contact_count_delta"],
+        )
+        self.assertTrue(classification["hard_failure"])
 
     def test_non_chain_robot_contact_remains_a_hard_failure(self):
         report = self._contact_report()

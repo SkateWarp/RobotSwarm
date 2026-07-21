@@ -107,6 +107,23 @@ class PayloadLoadProbeTests(unittest.TestCase):
 
         self.assertEqual(2.90, args.min_rtf)
         self.assertFalse(args.verify_grf_n4)
+        self.assertFalse(args.external_viewer_verified)
+
+    def test_external_viewer_verification_is_explicit_and_fail_closed(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.command_pub = types.SimpleNamespace(get_num_connections=lambda: 1)
+        probe.sim_time = 1.0
+        probe.models = {'transport_object': {}}
+        probe.swarm_task = {'status': 'idle'}
+        probe.lock = PROBE.threading.RLock()
+        probe.wait_for = lambda predicate, _timeout, description: self.assertTrue(
+            predicate(), description
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'verified external viewer'):
+            probe.ensure_idle_and_visible(False)
+
+        probe.ensure_idle_and_visible(True)
 
     def test_single_robot_layout_is_centered_on_the_crate(self):
         self.assertEqual(
@@ -135,6 +152,101 @@ class PayloadLoadProbeTests(unittest.TestCase):
         self.assertTrue(model_xml.startswith('<sdf version='))
         self.assertNotIn('<pose>', model_xml)
         self.assertIn('<mass>0.75</mass>', model_xml)
+
+    def test_pose_retries_the_brief_post_spawn_service_race(self):
+        class State:
+            def __init__(self):
+                self.pose = types.SimpleNamespace(
+                    position=types.SimpleNamespace(),
+                    orientation=types.SimpleNamespace(),
+                )
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.set_model_state = mock.Mock(side_effect=[
+            types.SimpleNamespace(
+                success=False,
+                status_message='SetModelState: model does not exist',
+            ),
+            types.SimpleNamespace(success=True, status_message=''),
+        ])
+
+        with mock.patch.object(PROBE, 'ModelState', State), mock.patch.object(
+            PROBE.time, 'sleep'
+        ) as sleep:
+            probe.set_pose('transport_object', -0.8, -3.0, 0.1)
+
+        self.assertEqual(2, probe.set_model_state.call_count)
+        sleep.assert_called_once_with(0.05)
+
+    def test_trial_duration_excludes_the_safe_stop_publications(self):
+        class Command:
+            def __init__(self):
+                self.linear = types.SimpleNamespace(x=0.0)
+
+        class Publisher:
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.speeds = []
+                self.unregistered = False
+                self.__class__.instances.append(self)
+
+            def get_num_connections(self):
+                return 1
+
+            def publish(self, command):
+                self.speeds.append(command.linear.x)
+
+            def unregister(self):
+                self.unregistered = True
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.args = types.SimpleNamespace(
+            command_speed=0.16,
+            push_duration=12.0,
+        )
+        probe.lock = PROBE.threading.RLock()
+        probe.stop_requested = False
+        probe.sim_time = 100.0
+        probe.models = {
+            'transport_object': {'position': (0.0, 0.0, 0.1)},
+            'tb3_0': {'position': (-0.315, 0.0, 0.0)},
+        }
+        probe.log = lambda _message: None
+        probe.reset_fleet = lambda _count: None
+        probe.arrange_pushers = lambda: ['tb3_0']
+        probe.wait_for = lambda predicate, _timeout, description: (
+            self.assertTrue(predicate(), description)
+        )
+        wall_time = [0.0]
+
+        def sleep(_seconds):
+            speed = Publisher.instances[0].speeds[-1]
+            if speed > 0.0:
+                probe.sim_time += 6.0
+                wall_time[0] += 2.0
+            else:
+                # Eight zero-command cycles deliberately add 0.5 simulated
+                # seconds. They prove that the returned push duration was
+                # captured before the safe stop sequence.
+                probe.sim_time += 0.0625
+                wall_time[0] += 0.02
+
+        with mock.patch.object(PROBE, 'Twist', Command), mock.patch.object(
+            PROBE.rospy, 'Publisher', Publisher, create=True
+        ), mock.patch.object(
+            PROBE.rospy, 'is_shutdown', return_value=False, create=True
+        ), mock.patch.object(
+            PROBE.time, 'monotonic', side_effect=lambda: wall_time[0]
+        ), mock.patch.object(PROBE.time, 'sleep', side_effect=sleep):
+            result = probe.run_trial(1)
+
+        self.assertEqual(12.0, result['push_duration_sim_s'])
+        self.assertEqual(4.0, result['push_duration_wall_s'])
+        self.assertEqual(3.0, result['real_time_factor'])
+        self.assertEqual(112.5, probe.sim_time)
+        self.assertEqual(8, Publisher.instances[0].speeds.count(0.0))
+        self.assertTrue(Publisher.instances[0].unregistered)
 
     def test_capacity_gate_accepts_resistant_single_and_moving_fleet(self):
         single = self.trial(1, 0.02, {'tb3_0': 0.01})

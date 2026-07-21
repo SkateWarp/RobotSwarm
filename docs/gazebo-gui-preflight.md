@@ -82,6 +82,30 @@ The visible WSL session on the NVIDIA GeForce RTX 3080 passed with a
 rate, and a 2.996 physics real-time factor. The result was measured with the
 window visible; it was not a headless or prerecorded run.
 
+A later probe against the exact one-robot transport scene also used a visible
+`gzclient` and the D3D12 NVIDIA renderer. It measured a 1618x869 viewport,
+61.888 camera FPS, 62.498 post-render callbacks per second, and a 2.997 physics
+RTF. The transport runner that followed on the same server completed at RTF
+2.9964. These two RTF values are kept separate: the first belongs to the GUI
+probe immediately before the task, while the second covers the algorithm run.
+
+The subsequent exact N=3 candidate scene also passed in a visible window. With
+the same 1618x869 viewport and D3D12 NVIDIA GeForce RTX 3080 renderer, it
+measured 57.907 camera FPS, 58.887 post-render callbacks per second, and RTF
+2.996. Its transport runner completed separately at approximately the same RTF,
+with zero collisions.
+
+La corrida local cargada v10 añadió una primera medición superpuesta a `PUSH`,
+pero el conjunto se rechazó porque el intervalo de capacidad incluía la parada
+segura. La repetición v11 corrigió ese defecto y cerró la compuerta local. Su
+sonda concurrente identificó un viewport 1618×869 y D3D12 en la NVIDIA GeForce
+RTX 3080; midió 58,816 FPS de cámara, 58,831 eventos de posrenderizado por
+segundo y RTF 2,996. El GRF correlacionado alcanzó `DONE` a RTF exterior 2,9756,
+con los cuatro robots empujando y cero contactos inesperados. Esta evidencia
+aprueba el rendimiento gráfico local durante el empuje cargado. Todavía no
+sustituye la sonda sobre la revisión desplegada ni demuestra aislamiento de dos
+visores públicos.
+
 This is a local graphics preflight, not a viewer-isolation test. Passing it does
 not prove that separate users have private displays or streams, and it does not
 exercise H.264/NVENC, MediaMTX, WHEP, ICE, or TURN.

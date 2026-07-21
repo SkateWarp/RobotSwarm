@@ -1295,11 +1295,15 @@ loader.exec_module(module)
 os.environ.pop("ROBOTSWARM_VIEWER_DISPLAY_TRANSPORT", None)
 os.environ.pop("ROBOTSWARM_VIEWER_RENDER_RATE", None)
 os.environ.pop("ROBOTSWARM_VIEWER_MIN_RENDER_RATE", None)
+os.environ.pop("ROBOTSWARM_VIEWER_RENDER_WARMUP_SECONDS", None)
+os.environ.pop("ROBOTSWARM_VIEWER_STARTUP_TIMEOUT", None)
 settings = module.Settings.load()
 assert settings.display_transport == "unix"
 assert settings.x_socket_dir == module.Path("/tmp/.X11-unix")
 assert settings.render_rate == 50.0
 assert settings.minimum_render_rate == 45.0
+assert settings.render_warmup_seconds == 5.0
+assert settings.startup_timeout == 45.0
 assert settings.frame_rate == 30
 PY
 

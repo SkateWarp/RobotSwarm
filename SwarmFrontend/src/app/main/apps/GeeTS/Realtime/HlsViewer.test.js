@@ -453,7 +453,7 @@ describe("mounted interactive HLS viewer", () => {
         });
     };
 
-    const renderLiveViewer = async (onInput, expiresAt = "2099-01-01T00:00:00Z") => {
+    const renderConnectedViewer = async (onInput, expiresAt = "2099-01-01T00:00:00Z") => {
         await act(async () => {
             ReactDOM.render(
                 <HlsViewer
@@ -476,6 +476,11 @@ describe("mounted interactive HLS viewer", () => {
         act(() => {
             video.dispatchEvent(new Event("playing"));
         });
+        return video;
+    };
+
+    const renderLiveViewer = async (onInput, expiresAt = "2099-01-01T00:00:00Z") => {
+        const video = await renderConnectedViewer(onInput, expiresAt);
         act(() => {
             host.querySelector('[aria-label="Activar control interactivo"]').click();
         });
@@ -483,13 +488,14 @@ describe("mounted interactive HLS viewer", () => {
         return video;
     };
 
-    const pressKey = (video, type, code) => {
+    const pressKey = (video, type, code, repeat = false) => {
         video.dispatchEvent(
             new KeyboardEvent(type, {
                 bubbles: true,
                 cancelable: true,
                 code,
                 key: code === "KeyW" ? "w" : code,
+                repeat,
             })
         );
     };
@@ -519,6 +525,157 @@ describe("mounted interactive HLS viewer", () => {
         );
         consoleError.mockRestore();
         expect(unexpectedErrors).toEqual([]);
+    });
+
+    it("enables interaction without sending a synthetic viewer input", async () => {
+        const onInput = jest.fn().mockResolvedValue(undefined);
+        await renderConnectedViewer(onInput);
+
+        act(() => {
+            host.querySelector('[aria-label="Activar control interactivo"]').click();
+        });
+        await advance(15);
+
+        expect(host.querySelector('[aria-label="Desactivar control interactivo"]')).not.toBeNull();
+        expect(onInput).not.toHaveBeenCalled();
+    });
+
+    it("sends exactly one global release when active control is disabled", async () => {
+        const onInput = jest.fn().mockResolvedValue(undefined);
+        await renderLiveViewer(onInput);
+
+        act(() => {
+            host.querySelector('[aria-label="Desactivar control interactivo"]').click();
+        });
+        await advance(15);
+
+        expect(onInput.mock.calls).toEqual([[{ type: "releaseAll" }]]);
+        expect(host.querySelector('[aria-label="Activar control interactivo"]')).not.toBeNull();
+    });
+
+    it("uses Escape to leave browser fullscreen without forwarding it to Gazebo", async () => {
+        let fullscreenElement = null;
+        Object.defineProperty(document, "fullscreenElement", {
+            configurable: true,
+            get: () => fullscreenElement,
+        });
+        const onInput = jest.fn().mockResolvedValue(undefined);
+        const video = await renderLiveViewer(onInput);
+        const viewer = host.querySelector('[data-testid="private-viewer"]');
+        viewer.requestFullscreen = jest.fn(() => {
+            fullscreenElement = viewer;
+            document.dispatchEvent(new Event("fullscreenchange"));
+            return Promise.resolve();
+        });
+
+        await act(async () => {
+            host.querySelector('[aria-label="Abrir visor en pantalla completa"]').click();
+            await Promise.resolve();
+        });
+        onInput.mockClear();
+
+        act(() => {
+            pressKey(video, "keydown", "Escape");
+            fullscreenElement = null;
+            document.dispatchEvent(new Event("fullscreenchange"));
+            pressKey(video, "keydown", "Escape", true);
+            pressKey(video, "keyup", "Escape");
+        });
+        await advance(15);
+
+        expect(onInput.mock.calls).toEqual([[{ type: "releaseAll" }]]);
+        expect(onInput).not.toHaveBeenCalledWith({ type: "keyDown", code: "Escape" });
+        expect(onInput).not.toHaveBeenCalledWith({ type: "keyUp", code: "Escape" });
+        expect(host.querySelector('[aria-label="Abrir visor en pantalla completa"]')).not.toBeNull();
+        delete document.fullscreenElement;
+    });
+
+    it("accepts a new fullscreen Escape when the previous keyup was lost", async () => {
+        let fullscreenElement = null;
+        Object.defineProperty(document, "fullscreenElement", {
+            configurable: true,
+            get: () => fullscreenElement,
+        });
+        const onInput = jest.fn().mockResolvedValue(undefined);
+        const video = await renderLiveViewer(onInput);
+        const viewer = host.querySelector('[data-testid="private-viewer"]');
+        viewer.requestFullscreen = jest.fn(() => {
+            fullscreenElement = viewer;
+            document.dispatchEvent(new Event("fullscreenchange"));
+            return Promise.resolve();
+        });
+
+        await act(async () => {
+            host.querySelector('[aria-label="Abrir visor en pantalla completa"]').click();
+            await Promise.resolve();
+        });
+        onInput.mockClear();
+
+        act(() => {
+            pressKey(video, "keydown", "Escape");
+            fullscreenElement = null;
+            document.dispatchEvent(new Event("fullscreenchange"));
+        });
+        await advance(15);
+
+        await act(async () => {
+            host.querySelector('[aria-label="Abrir visor en pantalla completa"]').click();
+            await Promise.resolve();
+        });
+        act(() => {
+            pressKey(video, "keydown", "KeyW");
+        });
+        await advance(15);
+        act(() => {
+            pressKey(video, "keydown", "Escape");
+        });
+        await advance(15);
+
+        expect(onInput.mock.calls).toEqual([
+            [{ type: "releaseAll" }],
+            [{ type: "keyDown", code: "KeyW" }],
+            [{ type: "releaseAll" }],
+        ]);
+        expect(onInput).not.toHaveBeenCalledWith({ type: "keyDown", code: "Escape" });
+        expect(onInput).not.toHaveBeenCalledWith({ type: "keyUp", code: "Escape" });
+        delete document.fullscreenElement;
+    });
+
+    it("releases held input when the browser exits fullscreen on its own", async () => {
+        let fullscreenElement = null;
+        Object.defineProperty(document, "fullscreenElement", {
+            configurable: true,
+            get: () => fullscreenElement,
+        });
+        const onInput = jest.fn().mockResolvedValue(undefined);
+        const video = await renderLiveViewer(onInput);
+        const viewer = host.querySelector('[data-testid="private-viewer"]');
+        viewer.requestFullscreen = jest.fn(() => {
+            fullscreenElement = viewer;
+            document.dispatchEvent(new Event("fullscreenchange"));
+            return Promise.resolve();
+        });
+
+        await act(async () => {
+            host.querySelector('[aria-label="Abrir visor en pantalla completa"]').click();
+            await Promise.resolve();
+        });
+        act(() => {
+            pressKey(video, "keydown", "KeyW");
+        });
+        await advance(15);
+
+        act(() => {
+            fullscreenElement = null;
+            document.dispatchEvent(new Event("fullscreenchange"));
+        });
+        await advance(15);
+
+        expect(onInput.mock.calls.map(([input]) => input.type)).toEqual([
+            "keyDown",
+            "releaseAll",
+        ]);
+        delete document.fullscreenElement;
     });
 
     it("releases a held key when focus leaves the video", async () => {

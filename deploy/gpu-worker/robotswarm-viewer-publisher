@@ -290,7 +290,7 @@ class Settings:
             render_rate=render_rate,
             minimum_render_rate=minimum_render_rate,
             render_warmup_seconds=env_float(
-                "ROBOTSWARM_VIEWER_RENDER_WARMUP_SECONDS", 2.0, 0.5, 30.0
+                "ROBOTSWARM_VIEWER_RENDER_WARMUP_SECONDS", 5.0, 0.5, 30.0
             ),
             render_sample_seconds=env_float(
                 "ROBOTSWARM_VIEWER_RENDER_SAMPLE_SECONDS", 5.0, 1.0, 60.0
@@ -299,7 +299,7 @@ class Settings:
             fill_display=env_bool("ROBOTSWARM_VIEWER_FILL_DISPLAY", True),
             gpu_adapter_name=adapter or None,
             startup_timeout=env_float(
-                "ROBOTSWARM_VIEWER_STARTUP_TIMEOUT", 30.0, 5.0, 90.0
+                "ROBOTSWARM_VIEWER_STARTUP_TIMEOUT", 45.0, 5.0, 90.0
             ),
             settle_seconds=env_float(
                 "ROBOTSWARM_VIEWER_SETTLE_SECONDS", 2.0, 0.1, 10.0

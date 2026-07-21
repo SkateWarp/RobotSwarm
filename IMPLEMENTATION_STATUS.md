@@ -30,14 +30,19 @@ commands, the worker translates those commands into the private ROS namespace,
 and ROS reports fleet and task state through the worker hub. A browser is not
 given Docker, ROS, Gazebo, VNC, or MediaMTX administrative access.
 
-The current deployed revision is merge
-`538ba0660c3a070cd600d1b224dc89ec1dd1dbe7` from PR #101. Its PR and `main` CI,
-Cloudflare publication, backend workflow and one GPU workflow passed. Frontend,
-backend and worker therefore use one exact revision. Public acceptance then
+PR #101 previously deployed merge
+`538ba0660c3a070cd600d1b224dc89ec1dd1dbe7`. Its PR and `main` CI, Cloudflare
+publication, backend workflow and one GPU workflow passed, so the three layers
+were aligned at that checkpoint. The latest read-only backend preflight instead
+reported abbreviated revision `1182dec` and `Healthy`; it did not inspect every
+layer and is not evidence that the local candidate was deployed. Public
+acceptance after the PR #101 checkpoint
 found that the worker's systemd sandbox omitted AF_NETLINK and that two valid
 task starts could surface a PostgreSQL serialization conflict. Both fixes are
-implemented and locally tested, but are not yet deployed; the release remains
-open until the candidate passes one new CI/deployment/acceptance cycle.
+implemented and locally tested. The final local review also tightened account
+and session serialization, held-input release and browser-FPS evidence. None of
+those candidate changes is described as deployed: the release remains open
+until one exact revision passes the new CI/deployment/acceptance cycle.
 
 ## Implemented components
 
@@ -104,6 +109,32 @@ The production-oriented control path includes:
 - a worker-authenticated drain lease tied to the exact Git revision used by the
   GPU deployment workflow.
 
+Account and session mutations now share an explicit lock order. A global
+administrator-set advisory lock protects the last-enabled-administrator rule;
+email-changing flows then take a global email-set lock, followed by account locks
+in account-ID order. These resources order role, email, password, disablement
+and session mutations. The authenticated account is re-read only after the
+shared lock is held and its enabled flag, role and `account_version` claim must
+still agree.
+On PostgreSQL, that read uses `SELECT ... FOR SHARE`: if a `SERIALIZABLE`
+transaction fixed an old snapshot while waiting, PostgreSQL raises `40001` and
+the route performs a real new attempt instead of accepting stale credentials.
+The reproduced stale-snapshot case now returns HTTP 401 and leaves no session.
+Administrative requests that mutate a different account do not rely only on
+the authorization decision made before the handler. When the operation affects
+administrator membership, it first takes the global administrator lock; it
+then acquires the actor account shared and the target account exclusive in
+account-ID order. The actor is validated again while those locks are held. A
+request whose Admin actor was revoked while waiting now returns HTTP 401 and
+leaves the target account unchanged.
+
+Terminal-session reconciliation is part of the worker heartbeat transaction.
+It locks terminal sessions in stable order before loading their commands, and
+commits before SignalR publication. Account cleanup and the heartbeat therefore
+share one causal command sequence rather than competing to insert the same
+`StopSession`. The public OpenAPI/Swagger contract also declares the possible
+HTTP 409 returned by a session `DELETE` after its bounded serialization retries.
+
 Follow-the-leader is intentionally continuous and is not failed merely because
 it remains active without reaching a finite completion value. Finite formation
 and transport tasks are monitored for acceptance and progress.
@@ -157,6 +188,46 @@ aprobaron worker 121/121, frontend 141/141 en 28 suites, el lint de todos los
 archivos frontend modificados y el build de producción. Falta publicar el único
 PR final y repetir la aceptación sobre su SHA desplegado.
 
+El cierre local posterior conserva esas cifras como antecedentes y registra el
+estado vigente por separado. La suite completa de backend sin conexión
+PostgreSQL aprobó 250 pruebas y omitió por diseño las 8 opt-in (258 descubiertas);
+el filtro no-PostgreSQL confirmó 250/250 y las focales de cuentas 23/23. Al
+habilitar PostgreSQL 17.10 aprobaron 8/8; el build backend terminó con cero
+errores y cuatro advertencias heredadas. Worker aprobó 124/124, ROS 427/427 y
+frontend 149/149 en 28 suites, además del lint de 75 archivos y el build de
+producción. Los siete arneses offline aprobaron 193/193 contratos, desglosados
+como 16+38+13+44+37+30+15. También aprobaron `py_compile` sobre 14 módulos, la
+sintaxis Bash y `git diff --check`. Son resultados locales del candidato, no
+evidencia de CI, despliegue ni postdespliegue.
+
+El delta I-088 endurece tres límites de aceptación. El smoke iniciado desde la
+interfaz ya no considera suficiente que la API declare cuatro buscadores: cada
+robot debe recorrer al menos 0,015 m durante `SEARCH`. En ROS,
+`ObstacleAvoidance` detecta el flanco filtrado en el mismo ciclo de seguridad y
+`CollaborativeTransport` sella UUID y secuencia de fuente, tarea, fase, secuencia
+de control y tiempos. El stream v2, acotado a 128 eventos, forma parte del mismo
+`/transport/status`, incluido el terminal. El orquestador lo valida y copia a
+`/swarm/status.collision_events` de forma idempotente; no produce esa causalidad
+y el `Bool` legado no incrementa el contador durante transporte. Reinicios,
+huecos, regresiones, metadatos inválidos o falta de capacidad fallan cerrado.
+Como la máscara ya excluye carga y cadena declarada, todo contacto filtrado que
+permanece es inesperado en cualquier fase; el atraque se prueba aparte con
+geometría, contactos declarados y GRF. La matriz añade `transport_grf_n2`, cuyo
+contrato exige dos raíces sobre la carga y cero compañeros. Ese caso todavía no
+tiene una corrida física N=2.
+
+I-089 corrigió el desfase entre los rótulos del arnés y la navegación real. Las
+seis entradas canónicas son Plantillas, Historial, Control, Robots, Grupos y
+Usuarios, y una regresión comprueba nombre, ruta y rol leyendo
+`navigationGTSConfig.js`. I-090 trasladó al backend la validación de Create, PUT
+y PATCH, la política de contraseña 8–16 y el correo canónico con exclusión
+Admin→correo→cuentas, columna generada e índice único. I-091 eliminó la
+divergencia entre `Trim()` y `btrim()` mediante el mismo conjunto explícito de
+espacio, TAB, LF, VT, FF y CR en C# y PostgreSQL; la migración falla sin cambios
+ante datos históricos no soportados o duplicados. El preflight productivo de
+solo lectura observó `1182dec`, estado `Healthy`, nueve cuentas y cero anomalías
+agregadas, sin registrar PII. No demuestra despliegue del candidato.
+
 ### Private browser viewer
 
 The implemented primary delivery path is:
@@ -189,8 +260,15 @@ must be deployed and the override removed first.
 PR #100 also added an explicit, owner-scoped viewer close.
 Revocation is idempotent and fenced against a replaced lease. The worker keeps
 a short tombstone so a delayed start cannot revive a viewer that was already
-closed. Automated coverage exists; the final two-browser run must still close
-and reopen one viewer while its ROS task continues.
+closed. Leaving native fullscreen releases every held input. `Escape` is kept
+local to the browser, including auto-repeat and the case where its prior key-up
+was lost, so it cannot become a Gazebo key after reopening fullscreen. The
+interaction button only arms the channel; it does not synthesize a Gazebo
+input, and disabling it emits one global release. The
+loaded and matrix harnesses also apply their shared
+`MINIMUM_BROWSER_VIDEO_FPS` threshold (currently 27.0) before accepting a
+capture taken during `PUSH`. Automated coverage exists; the final two-browser
+run must still close and reopen one viewer while its ROS task continues.
 
 ### Deployment and host hardening
 
@@ -230,6 +308,51 @@ final public rollout:
   acknowledgements, useful pushing by all ten robots, 59.14% full-roster
   contribution, 0.5044 m progress, RTF 2.9672, 49.960 visible FPS on the RTX
   3080, and no unexpected contact.
+- The local loaded N=4 v11 gate is accepted. The fixed-command trials moved the
+  0.75 kg payload 0.0070/0.0340/1.0424 m for one/two/four robots, an externally
+  recalculated 148.9143x gain, at RTF 2.9969/2.9962/2.9975. GRF reached
+  `DONE`: `tb3_1` notified three peers, all four searched, rendezvoused and
+  pushed through two payload roots and two companions, and 1,598/1,598 batches
+  were useful. Goal progress was 0.5002 m at 0.9946 efficiency and external RTF
+  2.9756. Ground-truth recorded one declared root docking contact while the
+  filtered safety-contact counter stayed at zero. The concurrent RTX 3080 probe
+  measured 58.816 camera FPS, 58.831
+  post-render callbacks/s and RTF 2.996 in a 1618x869 viewport.
+- The first outer validation of v11 exposed a harness assumption rather than a
+  physical failure: fresh fleet allocations were `tb3_0`, then `tb3_1`–`tb3_2`,
+  then `tb3_3`–`tb3_6`, instead of restarting at zero. The gate now accepts an
+  arbitrary initial offset while requiring canonical `tb3_<n>` names, equal
+  progress/connection maps, contiguous and disjoint blocks, and a monotonic
+  allocation sequence. The subsequent freeze reached 38/38 loaded-harness
+  contracts and includes rejection of a `PUSH` capture below the shared
+  browser-video threshold.
+  Full ROS passed 427/427; frontend passed 149/149 in 28 suites, lint and
+  production build.
+- The current local software freeze passed 250 backend tests with eight
+  PostgreSQL-only cases intentionally skipped in the unconfigured run (258
+  discovered). The non-PostgreSQL filter passed 250/250 and the account-focused
+  group passed 23/23. Those eight opt-in cases passed 8/8 against PostgreSQL
+  17.10; worker passed 124/124. The database
+  model probe produced an empty migration and an unchanged snapshot after
+  preserving `SimulationSession.Revision` as a concurrency token. Across the
+  seven acceptance drivers, 193/193 offline contracts passed
+  (16+38+13+44+37+30+15). The N=2 addition proves the exact two-root,
+  zero-companion contract in the catalog; it is not a physical N=2 run. These
+  are still predeployment results.
+- On 2026-07-21 the frozen candidate re-passed every suite and, additionally,
+  a local rehearsal of the complete CI pipeline: the deployment/rollback guard
+  script, direct execution of the seven harness contracts, Release builds and
+  Release test runs (backend 250/250 plus 8/8 PostgreSQL opt-in, worker
+  124/124), the idempotent `dotnet ef` migrations script including
+  `AddCanonicalAccountEmail`, the production Compose check, the pinned
+  MediaMTX validation (H.264 publish/read, publish-token read denial,
+  cross-path denial, HTTP auth events, and HLS playlist/init/part behind the
+  CDN secret), the viewer-publisher host test, frontend lint/test/build on
+  Node 18, the ROS unittest sweep (427) and the `swarm_ws` image build. A
+  read-only probe of the public backend the same day returned `Healthy`.
+  These remain local rehearsal results on the working tree: they do not
+  replace the required CI run, deployment and public acceptance of one exact
+  committed revision.
 - The local host integration test has run two publisher pipelines concurrently
   with distinct displays, stream paths, runtime directories, and cleanup. It
   uses real Xvfb/XTest with controlled Docker and `gzclient` test doubles, so it
@@ -250,7 +373,7 @@ negative and accepted runs are recorded in the
 
 ## Work that remains before declaring the release complete
 
-1. Publish the single reviewed I-064–I-070 candidate in one PR and use one
+1. Publish the single reviewed I-064–I-091 candidate in one PR and use one
    normal CI run. After merge, let Cloudflare and the
    backend deploy the exact SHA, then dispatch the GPU worker exactly once.
 2. Remove the diagnostic systemd override and verify the installed versioned
@@ -260,8 +383,9 @@ negative and accepted runs are recorded in the
    denial, lease expiry, independent stop/cleanup, visible FPS/real-time factor,
    and terminal task outcomes.
 4. Run the Admin section traversal, then restore and recheck the User role.
-5. Repeat the representative formation, leader-following, N=1/3/4/10 transport
-   and loaded-payload+GRF gates on the deployed revision. Pair the loaded run
+5. Repeat the representative formation, leader-following, N=1/2/3/4/10 transport
+   and loaded-payload+GRF gates on the deployed revision. This includes the
+   first physical N=2 GRF run. Pair the loaded run
    with NVIDIA ≥45 FPS and RTF ≥2.90 preflight evidence.
 6. Capture the new History, Templates, Robots, Groups, Runtime monitor, Viewer
    close and Users pages only after that public rollout; sanitize and hash the
@@ -288,7 +412,7 @@ acceptance passed”.
 - Persistent robots and administrator groups are inventory metadata. They do
   not select the exact runtime identities inside a simulation session; the
   worker roster is the authoritative source for live ROS/Gazebo instances.
-- The deployed PR #101 checks and the local I-064–I-070 regressions are not a
+- The deployed PR #101 checks and the local I-064–I-091 regressions are not a
   substitute for the pending candidate deployment and public acceptance.
 
 ## Current documentation
