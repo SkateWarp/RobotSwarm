@@ -448,9 +448,23 @@ jobs:
           from datetime import datetime, timedelta, timezone
           import json
           import os
+          import re
+
+          def parse_utc_timestamp(value):
+              # The host interpreter can be Python 3.8, whose fromisoformat
+              # accepts only 3- or 6-digit fractional seconds; the backend may
+              # serialize any number of digits.
+              value = value.replace("Z", "+00:00")
+              value = re.sub(
+                  r"\.(\d+)",
+                  lambda m: "." + m.group(1)[:6].ljust(6, "0"),
+                  value,
+                  count=1,
+              )
+              return datetime.fromisoformat(value)
 
           status = json.loads(os.environ["RESPONSE"])
-          expires = datetime.fromisoformat(status["expiresAt"].replace("Z", "+00:00"))
+          expires = parse_utc_timestamp(status["expiresAt"])
           if expires.tzinfo is None:
               # PostgreSQL's timestamp-without-time-zone values are UTC, but an
               # older backend can serialize them without the explicit suffix.
@@ -664,12 +678,26 @@ jobs:
           from datetime import datetime, timezone
           import json
           import os
+          import re
+
+          def parse_utc_timestamp(value):
+              # The host interpreter can be Python 3.8, whose fromisoformat
+              # accepts only 3- or 6-digit fractional seconds; the backend may
+              # serialize any number of digits.
+              value = value.replace("Z", "+00:00")
+              value = re.sub(
+                  r"\.(\d+)",
+                  lambda m: "." + m.group(1)[:6].ljust(6, "0"),
+                  value,
+                  count=1,
+              )
+              return datetime.fromisoformat(value)
 
           status = json.loads(os.environ["STATUS"])
           reported_at = status.get("activeSessionsReportedAt")
           if not reported_at:
               raise SystemExit(1)
-          reported = datetime.fromisoformat(reported_at.replace("Z", "+00:00"))
+          reported = parse_utc_timestamp(reported_at)
           if reported.tzinfo is None:
               reported = reported.replace(tzinfo=timezone.utc)
           else:
@@ -677,9 +705,7 @@ jobs:
 
           baseline_text = os.environ["BASELINE_REPORTED_AT"]
           if baseline_text:
-              baseline = datetime.fromisoformat(
-                  baseline_text.replace("Z", "+00:00")
-              )
+              baseline = parse_utc_timestamp(baseline_text)
               if baseline.tzinfo is None:
                   baseline = baseline.replace(tzinfo=timezone.utc)
               else:
