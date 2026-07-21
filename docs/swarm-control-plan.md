@@ -1,30 +1,25 @@
-# Swarm control plan
+# Plan de control del enjambre
 
-## Document status
+## Estado del documento
 
-This is the current target architecture and release plan for the commissioning
-branch. It supersedes the earlier design that treated public WHEP/ICE/TURN and
-a manually confirmed empty GPU worker as prerequisites. PR #100 integrated the
-management and viewer-lifecycle delta. PR #101 then closed the `xprop` preflight
-failure and deployed merge `538ba066` to Cloudflare, backend and the GPU worker.
-The first two-user acceptance exposed the AF_NETLINK sandbox defect I-064 and a
-serializable task-start race I-065. Those fixes, the visible section harness,
-the stronger SEARCH/load gates, the visual consistency pass I-068 and the
-fail-closed acceptance cleanup I-069/I-070 form the current candidate. It is not
-production-accepted until one exact new revision is deployed to all three
-layers and passes the full browser and ROS matrix.
+Este documento conserva la arquitectura objetivo y la evolución del plan de
+liberación. Las afirmaciones intermedias sobre I-064–I-091 son cortes históricos,
+no el estado vigente. Los PR #102, #103 y #104 integraron posteriormente ese
+trabajo y dejaron `fbef23eaae2b1b1d5be51ad3fa03e0298239289a` alineado en
+frontend, backend, worker e imagen ROS durante la aceptación del 21 de julio.
 
-The earlier GitHub certificate incident I-053 and the `xprop` incident I-063
-remain closed. PR #101 proved three-layer alignment at `538ba066` at that
-checkpoint. A later read-only backend preflight reported `1182dec` and
-`Healthy`, but did not inspect all three layers; current cross-layer alignment
-is therefore not asserted. The not-yet-published I-064–I-091 candidate remains
-outside production.
+La base `fbef23e` aprobó API multiusuario, dos visores privados visibles, el
+recorrido administrativo, cuatro anchos responsive y transporte cargado N=4.
+El árbol local posterior agrega el endurecimiento de los arneses, el parser UTC
+del visor y la garantía causal `Accepted → Running` del worker. Todavía debe
+consolidarse en un único PR, aprobar CI, desplegarse con un único SHA y repetir
+los gates finales. Por tanto, este archivo describe el plan; no declara por sí
+solo una aceptación final.
 
-See the [implementation status](../IMPLEMENTATION_STATUS.md) for that boundary
-and the
-[Spanish commissioning report](informe-comisionamiento-final.md) for the
-chronology, incidents, screenshots, and raw evidence.
+El [estado de implementación](../IMPLEMENTATION_STATUS.md) mantiene la frontera
+vigente y el [informe de comisionamiento](informe-comisionamiento-final.md)
+conserva en español la cronología, los incidentes, las capturas y la evidencia
+estructurada.
 
 ## Target layout
 
@@ -143,16 +138,16 @@ reconexión inmediata. Detener la sesión completa abre una confirmación que
 explica que se cancelarán tareas y se liberarán visor, Gazebo, ROS, contenedor y
 red privada.
 
-La validación histórica del delta aprobó backend 213/213, worker 121/121, ROS
-362/362 y frontend 132/132. El candidato actual ya aprobó backend 216/216 y ROS
+La validación histórica de aquel delta aprobó backend 213/213, worker 121/121,
+ROS 362/362 y frontend 132/132. Un corte posterior aprobó backend 216/216 y ROS
 391/391; sus contratos de aceptación aprobaron API 8/8, visor 10/10 y secciones
 14/14. Además, un Chrome normal comprobó con rol User el Historial, el menú
 reducido, los 403 reales del backend y las cuatro redirecciones administrativas,
 con perfil y capturas saneadas. El árbol completo aprobó worker 121/121,
-frontend 141/141 en 28 suites, lint del delta y build de producción. El siguiente
-paso es el único CI del candidato y la aceptación del SHA desplegado.
+frontend 141/141 en 28 suites, lint del delta y build de producción. Estas cifras
+describen una etapa anterior a los PR #102–#104.
 
-En el freeze local vigente la suite completa de backend sin PostgreSQL configurado
+En el freeze local que precedió a esa integración, la suite completa de backend sin PostgreSQL configurado
 aprobó 250 pruebas y omitió las 8 opt-in (258 descubiertas); el filtro ordinario
 confirmó 250/250 y las focales de cuentas 23/23. Las ocho aprobaron 8/8 contra
 PostgreSQL 17.10. También aprobaron worker 124/124, ROS 427/427 y frontend 149/149
@@ -161,6 +156,12 @@ en 28 suites. Los siete arneses offline sumaron 193/193 contratos:
 sintaxis Bash, el lint de 75 archivos frontend, el build de producción y
 `git diff --check`. Estas cifras no sustituyen el único CI ni los recorridos
 sobre el SHA desplegado.
+
+El corte local vigente del nuevo delta aprobó backend 250/250, con 8 casos
+PostgreSQL opt-in omitidos; frontend 159/159; ROS 429/429; worker 129/129; y
+237/237 contratos de aceptación. Son resultados locales posteriores a
+`fbef23e`: no se atribuyen a esa base ni al futuro SHA antes de que el CI selle
+el commit exacto.
 
 I-088 impide que una fase `SEARCH` declarada sustituya el movimiento observado:
 el smoke web integra la trayectoria de cada robot y exige al menos 0,015 m por
@@ -176,17 +177,18 @@ o falta de capacidad fallan cerrado.
 La carga y los vecinos declarados de la cadena ya están excluidos de ese contador
 por la máscara de seguridad. Todo contacto filtrado restante es inesperado en
 cualquier fase. El atraque se acredita aparte mediante geometría, muestras de
-contacto y GRF. La matriz incluye además N=2 con dos raíces sobre la carga y cero
-compañeros, pero este cierre solo valida su contrato: no existe todavía una
-corrida física N=2.
+contacto y GRF. En aquel corte, la matriz solo validaba el contrato N=2 con dos
+raíces sobre la carga y cero compañeros. I-092 registra la corrida física N=2
+posterior y su límite gráfico; ya no se considera un caso nunca ejecutado.
 
 I-089 alinea el arnés visible con Plantillas, Historial, Control, Robots, Grupos y
 Usuarios y hace que una regresión lea la configuración React real. I-090 traslada
 la política de cuentas al backend para Create/PUT/PATCH y refuerza el correo
 canónico con exclusión ordenada, columna generada e índice único. I-091 fija la
 misma frontera ASCII de seis caracteres en C# y PostgreSQL, añade un `CHECK`
-fail-safe y cubre la equivalencia contra PostgreSQL 17.10. Estas correcciones son
-locales y aún necesitan el despliegue y los recorridos de la sección final.
+fail-safe y cubre la equivalencia contra PostgreSQL 17.10. Estas correcciones se
+integraron mediante los PR #102–#104; las correcciones nuevas I-093–I-105 son las
+que aún necesitan despliegue y los recorridos de la sección final.
 
 ## Task outcome monitoring
 
@@ -322,7 +324,8 @@ no registró contactos de seguridad. Durante
 La primera validación exterior de v11 supuso erróneamente que cada flota
 reiniciaría sus ordinales en cero. El contrato corregido admite el offset fresco
 del gestor, pero exige namespaces canónicos, bloques contiguos y distintos,
-mapas iguales y asignación monotónica. El arnés vigente aprobó 38/38 e incluye
+mapas iguales y asignación monotónica. Aquel arnés aprobó 38/38; el arnés vigente
+aprobó 47/47 e incluye
 una regresión donde la captura durante `PUSH` se rechaza si cualquiera de sus
 dos lecturas HLS queda por debajo de `MATRIX.MINIMUM_BROWSER_VIDEO_FPS`,
 actualmente 27,0.
@@ -473,33 +476,34 @@ GitHub `production` environment. Media/listen addresses and exact boolean viewer
 gates are protected environment variables. Invalid viewer-gate strings fail the
 deployment rather than silently enabling a path.
 
-## Remaining release sequence
+## Secuencia de liberación pendiente
 
-1. Commit the reviewed and locally validated I-064–I-091 candidate once, open
-   one PR and use one normal CI run;
-   do not rerun successful jobs merely to collect duplicate evidence.
-2. After merge, let Cloudflare and backend deploy the exact merge SHA. Remove
-   the temporary AF_NETLINK override before the GPU switch, dispatch the GPU
-   workflow exactly once and verify that the installed unit itself contains
-   AF_NETLINK and the new preflight.
-3. Use the versioned [production acceptance harnesses](../scripts/acceptance/README.md)
-   with two visible Chrome profiles and separate accounts. Require N=3/N=7,
-   different streams, HLS isolation, task overlap, fullscreen/input, independent
-   `Cerrar visor`, peer survival and complete cleanup.
-4. Repeat the User section run, elevate one controlled account to Admin only for
-   the Admin run, revoke refresh tokens at both role transitions, visit
-   Historial, Plantillas, Robots, Grupos and Usuarios, delete only the owned
-   temporary group, then restore and recheck User denial.
-5. Run every final formation, follow-leader and N=1/2/3/4/10 transport scenario
-   in fresh sessions. The N=2 case is its first physical GRF execution. SEARCH
-   must show sustained motion by the whole assigned roster, followed by one
-   notice, rendezvous and complete useful push.
-6. Pair the loaded-payload+GRF probe with the visible NVIDIA preflight on the
-   same Gazebo master. Require at least 45 render FPS and RTF 2.90, then restore
-   the practice payload and verify no active task, robot or process remains.
-7. Remove the diagnostic systemd file, temporary roles/tokens, sessions,
-   profiles and artifacts that contain operational identifiers. Add only
-   sanitized screenshots and checksums to the Spanish commissioning report.
+1. Consolidar I-093–I-105 en una rama nueva nacida de `origin/main`, publicar
+   un único PR y consumir un solo ciclo normal de CI; no repetir jobs aprobados
+   solo para duplicar evidencia.
+2. Después del merge, comprobar que Cloudflare y el backend anuncien el SHA
+   exacto. Despachar el workflow del worker GPU una sola vez y verificar la
+   revisión instalada, la unidad versionada, AF_NETLINK y el preflight NVIDIA.
+3. Usar los [arneses de aceptación productiva](../scripts/acceptance/README.md)
+   con dos perfiles Chrome visibles y cuentas distintas. Exigir rosters N=3/N=7,
+   streams diferentes, aislamiento HLS, tareas solapadas, interacción, fullscreen,
+   cierre independiente del visor, supervivencia del par y limpieza completa.
+4. Repetir User/Admin, visitar Historial, Plantillas, Robots, Grupos y Usuarios,
+   ejercer autorización real, eliminar únicamente el grupo efímero propio y
+   restaurar el rol con revocación de tokens.
+5. Ejecutar en sesiones frescas la matriz final de formaciones, seguimiento y
+   transporte N=1/2/3/4/10. `SEARCH` debe mostrar movimiento sostenido de toda
+   la flota, seguido por aviso del hallazgo, rendezvous y contribución útil de
+   todos los robots al empuje.
+6. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA visible
+   sobre el mismo master Gazebo. Exigir al menos 45 FPS de render y RTF 2,90;
+   luego comprobar que no queden tareas, robots, procesos ni recursos activos.
+7. Repetir el smoke React N=4 y confirmar la secuencia persistida exacta
+   `Accepted → Running → Completed`, además del contador UTC cercano a cinco
+   minutos, los cuatro viewports y la interacción/fullscreen privada.
+8. Retirar roles, tokens, cuentas, sesiones, perfiles y artefactos temporales.
+   Incorporar al informe únicamente capturas saneadas, separadas por SHA y con
+   checksums; conservar la etiqueta de rollback hasta completar la observación.
 
 ## Deferred work
 

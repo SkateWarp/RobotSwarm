@@ -11,6 +11,16 @@ cac6cd46f8eedc850e1379842d1dd942ecd439258c0f4bc930cb17347d13081c  ./datos-transp
 66233812fa2eac3d8c320cd6ba7dc812e3e5847591b3c7fb4378d17d0f7b4a9e  ./datos-transporte-n10/search-probe-feasible.result.json
 a7f61db02ac20cb2f3da430f59423f4705fe57cf203f6c9786f163d90320201e  ./datos-transporte-n10/search-probe-feasible.summary.json
 febc103989da0f90783ecf3d7a4b9d3488a78a7a15694a9c304f28b09e65ee07  ./datos-transporte-n10/source-sha.txt
+4579c14a4020fb2e3527ed3ac18926f7eaf712ef60e641938dd164084903c89a  ./final-fbef23e/carga-n4-antes.png
+7a5be6cb6e57cabfab83a94c340a1920620e5496973822bcbed581dfb079abaa  ./final-fbef23e/carga-n4-durante-push.png
+8ed754cd46172fb904bce79e5729c26c0dabd9de0659a092cc0415a41a4f110a  ./final-fbef23e/carga-n4-reporte.json
+fdfbef8f65b81178508f281130ea1ebf851aa9144bac9665a3024d77cf022206  ./final-fbef23e/contador-utc-antes.png
+bfa2a4b9086fc37d6893b0610fb669d53fcaf3e4708e77e852d0d02d92beac1a  ./final-fbef23e/responsive-1366.png
+59f97f2ff2fae6f1edd588cf4fdef20013fdf383f1125bb371777b1b76c56a22  ./final-fbef23e/responsive-1920.png
+da1137e8d7bc85408119d053358a8152c99fc57058fd01f7cf2c28faa79499ac  ./final-fbef23e/responsive-360.png
+7d22238169fbf5303a1374de85fab15beed453742d746879135338394d75a429  ./final-fbef23e/responsive-768.png
+4e587e4d20d91602daf962f4f43e74b92017a4b3c537907517e06e5914739a74  ./final-fbef23e/responsive-reporte.json
+f8d9e24767c05af89a280f1ef255da789c2a2f33c17ff7cdeb442a5b9a956074  ./final-fbef23e/transporte-ui-carrera-rechazado.json
 3375d99ac1167c653a84d5ca1c286377ada812adf04296af7864fd4f0fd0053b  ./figura-01-frontend-antes.png
 bae24b015675aa3a6ab4b1f09ed93418ccfa004bff9e957f6054dab81fee0b9a  ./figura-02-visor-no-comisionado-antes.png
 a8cb63c867af431b40c8d4cd6d90279766303240a178fd5c8dd50bac33b272bd  ./figura-03-vnc-compartido-antes.png

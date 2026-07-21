@@ -133,6 +133,30 @@ class RobotSwarmGuiProbe : public SystemPlugin
     return path;
   }
 
+  private: static unsigned long long ProcessStartTicks()
+  {
+    std::ifstream input("/proc/self/stat");
+    std::string raw;
+    if (!std::getline(input, raw))
+      return 0;
+
+    const std::string::size_type closingParenthesis = raw.rfind(')');
+    if (closingParenthesis == std::string::npos || closingParenthesis + 2 >= raw.size())
+      return 0;
+
+    // The suffix starts at field 3 (state); Linux starttime is field 22.
+    std::istringstream fields(raw.substr(closingParenthesis + 2));
+    std::string value;
+    for (size_t index = 0; index <= 19; ++index)
+    {
+      if (!(fields >> value))
+        return 0;
+    }
+    char *end = nullptr;
+    const unsigned long long ticks = std::strtoull(value.c_str(), &end, 10);
+    return end != value.c_str() && *end == '\0' ? ticks : 0;
+  }
+
   private: static std::string GlText(const GLenum _name)
   {
     const GLubyte *value = glGetString(_name);
@@ -305,6 +329,7 @@ class RobotSwarmGuiProbe : public SystemPlugin
            << "  \"schema_version\": 1,\n"
            << "  \"process\": {\"pid\": " << getpid()
            << ", \"executable\": " << JsonString(ProcessExecutable())
+           << ", \"start_ticks\": " << ProcessStartTicks()
            << "},\n"
            << "  \"display\": {\"x11\": "
            << JsonString(EnvironmentValue("DISPLAY"))

@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import dataclasses
 import datetime as dt
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -66,9 +68,17 @@ MINIMUM_STARTUP_SCENE_FPS = 45.0
 MINIMUM_REAL_TIME_FACTOR = 2.90
 ACTIVE_PROBE_WARMUP_SECONDS = 2.0
 ACTIVE_PROBE_SAMPLE_SECONDS = 5.0
-ACTIVE_PROBE_TIMEOUT_SECONDS = 25.0
+# The previous active probe exhausted its 25 s budget and took about 28 s
+# including teardown.  Match the publisher's bounded 45 s startup allowance;
+# the 2 s warm-up and 5 s measurement remain unchanged.
+ACTIVE_PROBE_TIMEOUT_SECONDS = 45.0
 ACTIVE_SCENARIO_VIDEO_SECONDS = 5.0
-MATRIX_FORMATION_ACTIVE_SECONDS = 15.0
+MATRIX_FORMATION_ACTIVE_SECONDS = 75.0
+MATRIX_FOLLOW_ACTIVE_SECONDS = 75.0
+ACTIVE_PROBE_TOKEN_ENV = "ROBOTSWARM_ACTIVE_PROBE_TOKEN"
+ACTIVE_PROBE_ATTESTATION_PREFIX = "ROBOTSWARM_GUI_REPORT_ATTESTATION "
+PIDFD_OPEN_SYSCALL_X86_64 = 434
+PIDFD_SEND_SIGNAL_SYSCALL_X86_64 = 424
 TARGET_BROWSER_VIDEO_FPS = 30.0
 MINIMUM_BROWSER_VIDEO_FPS = 27.0
 MAXIMUM_BROWSER_DROPPED_RATIO = 0.10
@@ -186,10 +196,32 @@ class GazeboGuiEvidence:
 
 
 @dataclasses.dataclass(frozen=True)
+class ActiveProbeAttestation:
+    sha256: str
+    process_id: int
+    process_start_ticks: int
+
+
+@dataclasses.dataclass(frozen=True)
+class BoundViewerPublisher:
+    process_path: Path
+    executable: Path
+    environment: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class BoundViewerGzclient:
+    process_path: Path
+    executable: Path
+    environment: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
 class ActiveProbeRuntime:
     command_prefix: tuple[str, ...]
     environment: dict[str, str]
     gzclient: str
+    primary_environment: dict[str, str] | None = None
 
 
 @dataclasses.dataclass
@@ -619,6 +651,13 @@ def build_acceptance_command(
             [
                 "--formation-active-seconds",
                 f"{MATRIX_FORMATION_ACTIVE_SECONDS:.1f}",
+            ]
+        )
+    if SCENARIOS_BY_NAME[scenario].behavior == "follow":
+        command.extend(
+            [
+                "--follow-active-seconds",
+                f"{MATRIX_FOLLOW_ACTIVE_SECONDS:.1f}",
             ]
         )
     return command
@@ -1917,7 +1956,14 @@ class DockerHost:
             if line.startswith("TASK_ACTIVITY_JSON ")
         ]
         if output.returncode != 0 or len(entries) != 1:
-            raise MatrixError("The correlated ROS task was not active during visual sampling")
+            reason = {
+                2: "activity_timeout",
+                3: "task_terminal_before_activity",
+            }.get(output.returncode, "probe_protocol_failure")
+            raise MatrixError(
+                "The correlated ROS task was not active during visual sampling "
+                f"({reason})"
+            )
         try:
             payload = strict_json_loads(entries[0])
         except (json.JSONDecodeError, ValueError) as exc:
@@ -2099,6 +2145,57 @@ def finite_number(value: Any, description: str) -> float:
     return number
 
 
+def classify_active_probe_failure(output: ProcessOutput) -> dict[str, Any]:
+    """Keep a useful failure category without retaining gzclient output."""
+    diagnostic = f"{output.stdout}\n{output.stderr}".lower()
+    categories = (
+        ("timed out waiting for rendered frames", "render_report_timeout"),
+        ("gzclient exited with status", "gzclient_exited_before_report"),
+        ("diagnostic output exceeded", "diagnostic_output_limit"),
+        ("renderer is not the expected gpu", "unexpected_gpu_renderer"),
+        ("rendered fps", "render_fps_below_threshold"),
+        ("post-render frame rate", "post_render_fps_below_threshold"),
+        ("no physics real-time-factor samples", "physics_samples_missing"),
+        ("physics real time factor", "physics_rtf_below_threshold"),
+        ("physics real-time factor", "physics_rtf_below_threshold"),
+        ("active user camera", "active_camera_missing"),
+        ("gui probe plugin does not exist", "probe_plugin_missing"),
+        ("private gzclient tmpdir", "private_runtime_failed"),
+        ("process group", "gzclient_cleanup_failed"),
+    )
+    category = next(
+        (name for marker, name in categories if marker in diagnostic),
+        "unclassified_preflight_failure",
+    )
+    signal_markers = (
+        ("robotswarm gui probe will write", "probe_plugin_loaded"),
+        ("unable to create rendering window", "render_window_creation_failed"),
+        ("failed to create d3d12", "d3d12_initialization_failed"),
+        ("libgl error", "libgl_error"),
+        ("could not initialize opengl", "opengl_initialization_failed"),
+        ("failed to load system plugin", "probe_plugin_load_failed"),
+        ("error loading system plugin", "probe_plugin_load_failed"),
+        ("failed to load plugin", "probe_plugin_load_failed"),
+        ("failed to map segment from shared object", "executable_mount_denied"),
+        ("cannot connect to x server", "x11_connection_failed"),
+        ("unable to connect to x server", "x11_connection_failed"),
+        ("badaccess", "x11_bad_access"),
+        ("badalloc", "x11_bad_allocation"),
+        ("llvmpipe", "software_renderer_seen"),
+        ("segmentation fault", "segmentation_fault"),
+        ("out of memory", "out_of_memory"),
+    )
+    signals = sorted(
+        {name for marker, name in signal_markers if marker in diagnostic}
+    )
+    return {
+        "category": category,
+        "diagnosticSignals": signals,
+        "exitCode": output.returncode,
+        "rawDiagnosticRetained": False,
+    }
+
+
 def validate_ros_evidence(evidence: RosEvidence) -> float:
     summary = evidence.summary
     if (
@@ -2122,6 +2219,147 @@ def validate_ros_evidence(evidence: RosEvidence) -> float:
     if real_time_factor < MINIMUM_REAL_TIME_FACTOR:
         raise MatrixError("The ROS real-time factor is below 2.90")
     return real_time_factor
+
+
+def validate_transport_object_preference(
+    result: dict[str, Any], robot_count: int
+) -> dict[str, Any]:
+    """Prove that every available payload contact is filled before a chain."""
+    if (
+        isinstance(robot_count, bool)
+        or not isinstance(robot_count, int)
+        or robot_count <= 0
+    ):
+        raise MatrixError("The transport object-preference count is invalid")
+
+    expected = {f"tb3_{index}" for index in range(robot_count)}
+    behavior = result.get("behavior_status")
+    metrics = result.get("metrics")
+    assignments = (
+        behavior.get("robot_assignments")
+        if isinstance(behavior, dict) else None
+    )
+    participation = (
+        metrics.get("transport_participation")
+        if isinstance(metrics, dict) else None
+    )
+    if not isinstance(assignments, dict) or set(assignments) != expected:
+        raise MatrixError(
+            "The transport object-preference evidence does not cover the exact roster"
+        )
+    if not isinstance(participation, dict) or set(participation) != expected:
+        raise MatrixError(
+            "The transport contact evidence does not cover the exact roster"
+        )
+
+    roots: set[str] = set()
+    companions: set[str] = set()
+    slots: dict[tuple[int, int], str] = {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for robot in expected:
+        assignment = assignments.get(robot)
+        contact = participation.get(robot)
+        if not isinstance(assignment, dict) or not isinstance(contact, dict):
+            raise MatrixError("A transport assignment is not structured")
+        role = assignment.get("role")
+        chain_index = assignment.get("chain_index")
+        depth = assignment.get("chain_depth", assignment.get("depth"))
+        parent = assignment.get("parent_namespace")
+        if (
+            isinstance(chain_index, bool)
+            or not isinstance(chain_index, int)
+            or chain_index < 0
+            or isinstance(depth, bool)
+            or not isinstance(depth, int)
+            or depth < 0
+        ):
+            raise MatrixError("A transport assignment has invalid chain coordinates")
+        slot = (chain_index, depth)
+        if slot in slots:
+            raise MatrixError("Two transport robots occupy the same chain slot")
+        slots[slot] = robot
+
+        if role == "payload_push":
+            if depth != 0 or parent not in (None, ""):
+                raise MatrixError("A payload root has an invalid predecessor")
+            if contact.get("role") != role or finite_number(
+                contact.get("direct_contact_samples"),
+                "payload-contact sample count",
+            ) <= 0:
+                raise MatrixError(
+                    "A payload root has no measured direct object contact"
+                )
+            if contact.get("declared_parent_namespaces") not in ([], None):
+                raise MatrixError("A payload root declared a robot predecessor")
+            roots.add(robot)
+        elif role == "companion_push":
+            if depth < 1 or parent not in expected or parent == robot:
+                raise MatrixError("A companion pusher has an invalid predecessor")
+            declared_parents = contact.get("declared_parent_namespaces")
+            if (
+                contact.get("role") != role
+                or not isinstance(declared_parents, list)
+                or parent not in declared_parents
+                or finite_number(
+                    contact.get("companion_contact_samples"),
+                    "companion-contact sample count",
+                )
+                <= 0
+            ):
+                raise MatrixError(
+                    "A companion pusher has no measured predecessor contact"
+                )
+            companions.add(robot)
+        else:
+            raise MatrixError("A robot was not assigned a transport-push role")
+        normalized[robot] = {
+            "role": role,
+            "chain_index": chain_index,
+            "depth": depth,
+            "parent": parent,
+        }
+
+    expected_root_count = min(2, robot_count)
+    if len(roots) != expected_root_count or len(companions) != (
+        robot_count - expected_root_count
+    ):
+        raise MatrixError(
+            "Transport did not prefer every available direct payload contact"
+        )
+    if {
+        normalized[robot]["chain_index"] for robot in roots
+    } != set(range(expected_root_count)):
+        raise MatrixError("The payload roots do not occupy the expected push lanes")
+
+    for robot in companions:
+        current = robot
+        visited: set[str] = set()
+        while normalized[current]["role"] == "companion_push":
+            if current in visited:
+                raise MatrixError("A transport companion chain contains a cycle")
+            visited.add(current)
+            parent = normalized[current]["parent"]
+            parent_assignment = normalized[parent]
+            if (
+                parent_assignment["chain_index"]
+                != normalized[current]["chain_index"]
+                or parent_assignment["depth"]
+                != normalized[current]["depth"] - 1
+            ):
+                raise MatrixError("A transport companion chain is not contiguous")
+            current = parent
+        if current not in roots:
+            raise MatrixError("A transport companion chain does not reach the payload")
+
+    return {
+        "exactRoster": True,
+        "objectContactPreference": True,
+        "payloadRootCount": len(roots),
+        "companionPusherCount": len(companions),
+        "expectedPayloadRootCount": expected_root_count,
+        "allRobotsAssigned": True,
+        "allCompanionChainsReachPayload": True,
+    }
 
 
 def validate_transport_n2_contract(result: dict[str, Any]) -> dict[str, Any]:
@@ -2373,6 +2611,7 @@ def load_viewer_startup_evidence(path: Path) -> GazeboGuiEvidence:
 def load_active_probe_evidence(
     path: Path,
     expected_display: str,
+    attestation: ActiveProbeAttestation,
 ) -> GazeboGuiEvidence:
     raw = read_owned_bounded_file(path, MAXIMUM_RENDER_REPORT_BYTES)
     try:
@@ -2381,6 +2620,17 @@ def load_active_probe_evidence(
         raise MatrixError("The active Gazebo GUI report is malformed") from exc
     if not isinstance(document, dict):
         raise MatrixError("The active Gazebo GUI report is not a JSON object")
+    actual_sha256 = hashlib.sha256(raw).hexdigest()
+    process = document.get("process") or {}
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", attestation.sha256)
+        or actual_sha256 != attestation.sha256
+        or process.get("pid") != attestation.process_id
+        or process.get("start_ticks") != attestation.process_start_ticks
+    ):
+        raise MatrixError(
+            "The active Gazebo GUI report is not bound to its live preflight process"
+        )
     evidence = validate_viewer_startup_report(document, raw)
     render = document.get("render_measurement") or {}
     display = document.get("display") or {}
@@ -2393,6 +2643,26 @@ def load_active_probe_evidence(
     if display.get("x11") != expected_display:
         raise MatrixError("The active Gazebo GUI probe used a different private display")
     return evidence
+
+
+def active_probe_attestation(output: ProcessOutput) -> ActiveProbeAttestation:
+    if output.returncode != 0:
+        raise MatrixError("The active Gazebo GUI preflight did not complete")
+    pattern = re.compile(
+        re.escape(ACTIVE_PROBE_ATTESTATION_PREFIX)
+        + r"([0-9a-f]{64}) ([1-9][0-9]*) ([1-9][0-9]*)"
+    )
+    matches = []
+    for line in output.stdout.splitlines():
+        match = pattern.fullmatch(line)
+        if match is not None:
+            matches.append(match.groups())
+        elif line.startswith(ACTIVE_PROBE_ATTESTATION_PREFIX):
+            raise MatrixError("The active Gazebo GUI attestation is malformed")
+    if len(matches) != 1:
+        raise MatrixError("The active Gazebo GUI attestation is missing or ambiguous")
+    digest, process_id, start_ticks = matches[0]
+    return ActiveProbeAttestation(digest, int(process_id), int(start_ticks))
 
 
 def _argument_value(arguments: list[str], name: str) -> str | None:
@@ -2478,12 +2748,12 @@ def parse_process_environment(raw: bytes) -> dict[str, str]:
 def bound_viewer_publisher(
     session_id: uuid.UUID,
     lease_directory: Path,
-) -> tuple[Path, dict[str, str]]:
+) -> BoundViewerPublisher:
     expected_session = str(session_id)
     if not lease_directory.name.startswith("lease-"):
         raise MatrixError("The bound viewer lease directory name is invalid")
     expected_lease = lease_directory.name[len("lease-") :]
-    matches: list[tuple[Path, dict[str, str]]] = []
+    matches: list[BoundViewerPublisher] = []
     for process_path in Path("/proc").glob("[0-9]*"):
         try:
             if process_path.stat().st_uid != os.getuid():
@@ -2517,9 +2787,110 @@ def bound_viewer_publisher(
         publisher = Path(publisher_argument).resolve()
         if not publisher.is_file():
             continue
-        matches.append((publisher, parse_process_environment(raw_environment)))
+        matches.append(
+            BoundViewerPublisher(
+                process_path,
+                publisher,
+                parse_process_environment(raw_environment),
+            )
+        )
     if len(matches) != 1:
         raise MatrixError("The active viewer publisher runtime is ambiguous")
+    return matches[0]
+
+
+def _process_descendants(root: Path) -> list[Path]:
+    pending = [root]
+    visited: set[int] = set()
+    descendants: list[Path] = []
+    while pending:
+        process_path = pending.pop()
+        try:
+            process_id = int(process_path.name)
+        except ValueError:
+            continue
+        if process_id in visited:
+            continue
+        visited.add(process_id)
+        try:
+            children = (
+                process_path / "task" / str(process_id) / "children"
+            ).read_text(encoding="ascii")
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+        if process_path != root:
+            descendants.append(process_path)
+        pending.extend(
+            Path("/proc") / value
+            for value in children.split()
+            if value.isdigit()
+        )
+    return descendants
+
+
+def _namespace_process_ids(process_path: Path) -> set[int]:
+    try:
+        status = (process_path / "status").read_text(encoding="ascii")
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return set()
+    match = re.search(r"^NSpid:\s+([0-9\s]+)$", status, re.MULTILINE)
+    if match is None:
+        return set()
+    return {int(value) for value in match.group(1).split()}
+
+
+def bound_viewer_gzclient(
+    publisher: BoundViewerPublisher,
+    startup: GazeboGuiEvidence,
+) -> BoundViewerGzclient:
+    process = startup.document.get("process")
+    report_pid = process.get("pid") if isinstance(process, dict) else None
+    report_executable = (
+        process.get("executable") if isinstance(process, dict) else None
+    )
+    if isinstance(report_pid, bool) or not isinstance(report_pid, int) or report_pid <= 1:
+        raise MatrixError("The viewer startup report has an invalid process identity")
+    expected_executable = Path(
+        _configured_executable(
+            publisher.environment,
+            "ROBOTSWARM_VIEWER_GZCLIENT",
+            "gzclient",
+        )
+    )
+    if (
+        not isinstance(report_executable, str)
+        or Path(report_executable).resolve() != expected_executable
+    ):
+        raise MatrixError("The startup report executable does not match gzclient")
+    expected_display = str(
+        (startup.document.get("display") or {}).get("x11") or ""
+    )
+    matches: list[BoundViewerGzclient] = []
+    for process_path in _process_descendants(publisher.process_path):
+        try:
+            if process_path.stat().st_uid != os.getuid():
+                continue
+            executable = Path(os.readlink(process_path / "exe")).resolve()
+            if executable != expected_executable:
+                continue
+            process_id = int(process_path.name)
+            if report_pid not in ({process_id} | _namespace_process_ids(process_path)):
+                continue
+            arguments = (process_path / "cmdline").read_bytes().split(b"\0")
+            if b"/viewer/plugin.so" not in arguments:
+                continue
+            environment = parse_process_environment(
+                (process_path / "environ").read_bytes()
+            )
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+        if environment.get("DISPLAY") != expected_display:
+            continue
+        matches.append(
+            BoundViewerGzclient(process_path, executable, environment)
+        )
+    if len(matches) != 1:
+        raise MatrixError("The startup report is not bound to one live viewer gzclient")
     return matches[0]
 
 
@@ -2541,9 +2912,11 @@ def active_probe_runtime(
     container: ContainerHandle,
     startup: GazeboGuiEvidence,
 ) -> ActiveProbeRuntime:
-    publisher, publisher_environment = bound_viewer_publisher(
+    publisher = bound_viewer_publisher(
         session_id, lease_directory
     )
+    primary = bound_viewer_gzclient(publisher, startup)
+    publisher_environment = publisher.environment
     display = str((startup.document.get("display") or {}).get("x11") or "")
     if not re.fullmatch(r":[1-9][0-9]{0,2}(?:\.0)?", display):
         raise MatrixError("The viewer startup report has an invalid private display")
@@ -2564,11 +2937,23 @@ def active_probe_runtime(
         gateway = str(ipaddress.ip_address(container.network_gateway))
     except ValueError as exc:
         raise MatrixError("The active GUI probe has no verified private master") from exc
+    if (
+        primary.environment.get("ROS_MASTER_URI")
+        != f"http://{private_ip}:11311"
+        or primary.environment.get("GAZEBO_MASTER_URI")
+        != f"http://{private_ip}:11345"
+        or primary.environment.get("GZ_IP") != gateway
+        or primary.environment.get("GAZEBO_IP") != gateway
+        or primary.environment.get("XAUTHORITY") != "/viewer/Xauthority"
+    ):
+        raise MatrixError(
+            "The primary viewer is not bound to the verified session masters"
+        )
 
     asset_root = Path(
         publisher_environment.get(
             "ROBOTSWARM_VIEWER_ASSET_ROOT",
-            str(publisher.parent / "robotswarm-viewer-assets"),
+            str(publisher.executable.parent / "robotswarm-viewer-assets"),
         )
     ).resolve()
     ros_share = asset_root / "ros-share"
@@ -2679,12 +3064,26 @@ def active_probe_runtime(
         value = publisher_environment.get(name)
         if value:
             environment[name] = value
+    probe_home = lease_directory / "matrix-active-probe-home"
+    if probe_home.exists() or probe_home.is_symlink():
+        raise MatrixError("The active GUI probe home is not fresh")
+    try:
+        probe_home.mkdir(mode=0o700)
+        probe_home_metadata = probe_home.lstat()
+    except OSError as exc:
+        raise MatrixError("The active GUI probe home could not be created") from exc
+    if (
+        not stat.S_ISDIR(probe_home_metadata.st_mode)
+        or probe_home_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(probe_home_metadata.st_mode) != 0o700
+    ):
+        raise MatrixError("The active GUI probe home is not private")
     environment.update(
         {
             "DISPLAY": display,
             "XAUTHORITY": "/viewer/Xauthority",
-            "HOME": "/viewer/home",
-            "ROS_HOME": "/viewer/home/.ros-matrix-active-probe",
+            "HOME": f"/viewer/{probe_home.name}",
+            "ROS_HOME": f"/viewer/{probe_home.name}/.ros",
             "TMPDIR": "/tmp",
             "TMP": "/tmp",
             "TEMP": "/tmp",
@@ -2700,7 +3099,12 @@ def active_probe_runtime(
     environment.setdefault("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA")
     if not gzclient.startswith("/usr/"):
         raise MatrixError("The active GUI probe gzclient is outside the sandbox runtime")
-    return ActiveProbeRuntime(tuple(prefix), environment, gzclient)
+    return ActiveProbeRuntime(
+        tuple(prefix),
+        environment,
+        gzclient,
+        primary.environment,
+    )
 
 
 def prepare_active_probe_inputs(
@@ -2728,14 +3132,206 @@ def prepare_active_probe_inputs(
     }
 
 
+def create_active_probe_workspace() -> Path:
+    workspace = Path(tempfile.mkdtemp(prefix="robotswarm-matrix-probe-", dir="/tmp"))
+    try:
+        workspace.chmod(0o700)
+        metadata = workspace.lstat()
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            workspace.rmdir()
+        raise MatrixError("The active GUI probe workspace could not be secured") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        with contextlib.suppress(OSError):
+            workspace.rmdir()
+        raise MatrixError("The active GUI probe workspace is not private")
+    return workspace
+
+
+def remove_active_probe_workspace(workspace: Path) -> bool:
+    try:
+        metadata = workspace.lstat()
+    except FileNotFoundError:
+        return True
+    expected_parent = Path("/tmp").resolve()
+    if (
+        workspace.parent.resolve() != expected_parent
+        or not re.fullmatch(r"robotswarm-matrix-probe-[A-Za-z0-9_-]+", workspace.name)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        return False
+    try:
+        children = list(workspace.iterdir())
+        for child in children:
+            child_metadata = child.lstat()
+            if (
+                child.name not in {
+                    "matrix-active-gui-preflight.py",
+                    "matrix-active-gui-probe.so",
+                }
+                or not stat.S_ISREG(child_metadata.st_mode)
+                or child_metadata.st_uid != os.getuid()
+            ):
+                return False
+        for child in children:
+            child.unlink()
+        workspace.rmdir()
+    except OSError:
+        return False
+    return not workspace.exists()
+
+
+def _active_probe_process_identity(process_path: Path, token: str) -> tuple[int, int] | None:
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise MatrixError("The active GUI probe token is invalid")
+    try:
+        process_id = int(process_path.name)
+        if process_id <= 1 or process_id == os.getpid():
+            return None
+        if process_path.stat().st_uid != os.getuid():
+            return None
+        environment = (process_path / "environ").read_bytes().split(b"\0")
+        marker = f"{ACTIVE_PROBE_TOKEN_ENV}={token}".encode("ascii")
+        if marker not in environment:
+            return None
+        raw = (process_path / "stat").read_text(encoding="ascii")
+        fields = raw[raw.rfind(")") + 2 :].split()
+        if fields[0] == "Z":
+            return None
+        start_tick = int(fields[19])
+    except (
+        FileNotFoundError,
+        IndexError,
+        PermissionError,
+        ProcessLookupError,
+        OSError,
+        ValueError,
+    ):
+        return None
+    return process_id, start_tick
+
+
+def active_probe_processes(token: str) -> list[tuple[int, int]]:
+    matches: list[tuple[int, int]] = []
+    for process_path in Path("/proc").glob("[0-9]*"):
+        identity = _active_probe_process_identity(process_path, token)
+        if identity is not None:
+            matches.append(identity)
+    return matches
+
+
+def _x86_64_syscall(number: int, *arguments: Any) -> int:
+    if os.uname().machine != "x86_64":
+        raise OSError(
+            errno.ENOSYS,
+            "pidfd syscalls are not configured for this host",
+        )
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+    result = syscall(ctypes.c_long(number), *arguments)
+    if result == -1:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    return int(result)
+
+
+def _pidfd_open(process_id: int) -> int:
+    return _x86_64_syscall(
+        PIDFD_OPEN_SYSCALL_X86_64,
+        ctypes.c_int(process_id),
+        ctypes.c_uint(0),
+    )
+
+
+def _pidfd_send_signal(descriptor: int, number: int) -> None:
+    _x86_64_syscall(
+        PIDFD_SEND_SIGNAL_SYSCALL_X86_64,
+        ctypes.c_int(descriptor),
+        ctypes.c_int(number),
+        ctypes.c_void_p(),
+        ctypes.c_uint(0),
+    )
+
+
+def _signal_active_probe_process(
+    identity: tuple[int, int], token: str, number: int
+) -> None:
+    process_id, _start_tick = identity
+    try:
+        descriptor = _pidfd_open(process_id)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return
+        raise CleanupError(
+            "The active GUI probe could not be bound to a pidfd"
+        ) from exc
+    try:
+        current = _active_probe_process_identity(
+            Path("/proc") / str(process_id), token
+        )
+        if current != identity:
+            return
+        try:
+            _pidfd_send_signal(descriptor, number)
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return
+            raise CleanupError(
+                "The active GUI probe could not be signalled through its pidfd"
+            ) from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            raise CleanupError("The active GUI probe pidfd could not be closed") from exc
+
+
+def stop_active_probe_processes(token: str, timeout: float = 8.0) -> bool:
+    for identity in active_probe_processes(token):
+        _signal_active_probe_process(identity, token, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not active_probe_processes(token):
+            return True
+        time.sleep(0.05)
+    for identity in active_probe_processes(token):
+        _signal_active_probe_process(identity, token, signal.SIGKILL)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if not active_probe_processes(token):
+            return True
+        time.sleep(0.05)
+    return not active_probe_processes(token)
+
+
 def build_active_probe_command(
     runtime: ActiveProbeRuntime,
     script: Path,
     plugin: Path,
     report: Path,
 ) -> list[str]:
+    sandbox = list(runtime.command_prefix)
+    try:
+        chdir_index = sandbox.index("--chdir")
+    except ValueError as exc:
+        raise MatrixError("The active GUI sandbox has no private working directory") from exc
+    sandbox[chdir_index:chdir_index] = [
+        "--ro-bind",
+        str(script),
+        f"/viewer/{script.name}",
+        "--ro-bind",
+        str(plugin),
+        f"/viewer/{plugin.name}",
+    ]
     return [
-        *runtime.command_prefix,
+        *sandbox,
         "/usr/bin/python3",
         f"/viewer/{script.name}",
         "--gzclient",
@@ -3434,6 +4030,8 @@ def run_one_case(
     }
     session_id: uuid.UUID | None = None
     lease_directory: Path | None = None
+    probe_workspace: Path | None = None
+    probe_token: str | None = None
     interrupted = False
     try:
         if ui._occupying_sessions():
@@ -3491,10 +4089,13 @@ def run_one_case(
             container,
             startup,
         )
+        probe_workspace = create_active_probe_workspace()
+        probe_token = uuid.uuid4().hex
+        runtime.environment[ACTIVE_PROBE_TOKEN_ENV] = probe_token
         probe_script, probe_plugin, probe_input_hashes = prepare_active_probe_inputs(
             docker,
             container,
-            lease_directory,
+            probe_workspace,
         )
         probe_report_path = lease_directory / "matrix-active-gui-report.json"
         if probe_report_path.exists() or probe_report_path.is_symlink():
@@ -3516,6 +4117,8 @@ def run_one_case(
             ui=ui,
             stop_event=stop_event,
         )
+        if active_probe_processes(probe_token):
+            raise CleanupError("The active GUI probe sandbox left a live process")
         ros = parse_ros_protocol(child, scenario)
         safe_result = sanitize_report_value(
             ros.result, (credentials["email"], credentials["password"])
@@ -3544,11 +4147,16 @@ def run_one_case(
             json_evidence_hash(video)
         )
         if probe_output.returncode != 0:
+            case_report["activeScenarioGuiProbeFailure"] = (
+                classify_active_probe_failure(probe_output)
+            )
             raise MatrixError("The official active Gazebo GUI preflight failed")
 
+        probe_attestation = active_probe_attestation(probe_output)
         active_probe = load_active_probe_evidence(
             probe_report_path,
             str((startup.document.get("display") or {}).get("x11") or ""),
+            probe_attestation,
         )
         active_probe_name = (
             case_artifact_prefix(index, scenario)
@@ -3582,10 +4190,16 @@ def run_one_case(
         # Persist the bounded, sanitized protocol before applying pass/fail
         # gates.  A functional failure must keep its useful diagnostics.
         ros_rtf = validate_ros_evidence(ros)
-        if scenario.name == "transport_grf_n2":
-            case_report["transportN2Contract"] = (
-                validate_transport_n2_contract(ros.result)
+        if scenario.behavior == "transport":
+            case_report["transportObjectPreference"] = (
+                validate_transport_object_preference(
+                    ros.result, scenario.robot_count
+                )
             )
+            if scenario.name == "transport_grf_n2":
+                case_report["transportN2Contract"] = (
+                    validate_transport_n2_contract(ros.result)
+                )
         validate_active_overlap(overlap)
         case_report["ros"].update(
             {
@@ -3631,6 +4245,14 @@ def run_one_case(
         )
     finally:
         try:
+            active_probe_process_absent = (
+                probe_token is None or stop_active_probe_processes(probe_token)
+            )
+        except CleanupError:
+            # Session cleanup still has to run when this kernel cannot provide
+            # the only process-safe signalling primitive accepted here.
+            active_probe_process_absent = False
+        try:
             cleanup = cleanup_case(
                 ui,
                 docker,
@@ -3653,6 +4275,20 @@ def run_one_case(
                 ),
             }
         case_report["cleanup"] = cleanup
+        case_report["cleanup"]["activeProbeProcessAbsent"] = (
+            active_probe_process_absent
+        )
+        if not active_probe_process_absent:
+            case_report["cleanup"]["complete"] = False
+        probe_workspace_released = (
+            probe_workspace is None
+            or remove_active_probe_workspace(probe_workspace)
+        )
+        case_report["cleanup"]["probeWorkspaceReleased"] = (
+            probe_workspace_released
+        )
+        if not probe_workspace_released:
+            case_report["cleanup"]["complete"] = False
         case_report["finishedAt"] = utc_now()
         if case_report["hashes"]:
             case_report["hashes"]["evidenceBundleSha256"] = evidence_bundle_hash(

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -34,6 +35,45 @@ def load_driver():
 
 
 DRIVER = load_driver()
+
+
+def preflight_render_report():
+    return {
+        "schema_version": 1,
+        "process": {
+            "pid": 741,
+            "executable": "/usr/bin/gzclient",
+            "start_ticks": 9981,
+        },
+        "display": {"x11": ":120", "wayland": ""},
+        "camera": {
+            "name": "gzclient_camera(0)",
+            "viewport_width": 1280,
+            "viewport_height": 720,
+        },
+        "renderer": {
+            "api": "OpenGL Rendering Subsystem",
+            "device": "D3D12 (NVIDIA GeForce RTX 3080)",
+            "vendor": "Microsoft Corporation",
+            "gl_vendor": "Microsoft Corporation",
+            "gl_renderer": "D3D12 (NVIDIA GeForce RTX 3080)",
+        },
+        "render_measurement": {
+            "source": "gazebo::rendering::Camera::AvgFPS",
+            "warmup_seconds": 2.0,
+            "sample_seconds": 5.0,
+            "samples": 200,
+            "average_fps": 49.5,
+            "post_render_rate_fps": 49.4,
+        },
+        "physics_measurement": {
+            "source": (
+                "gazebo.msgs.WorldStatistics delta(sim_time)/delta(real_time)"
+            ),
+            "samples": 100,
+            "real_time_factor": 2.96,
+        },
+    }
 
 
 def process_is_live(pid):
@@ -353,6 +393,31 @@ class LoadedN4AcceptanceContractTests(unittest.TestCase):
         parsed = DRIVER.parse_args(["--execute-production", *required])
         self.assertEqual("a" * 40, parsed.deployment_commit)
         self.assertEqual(Path("/tmp/credentials"), parsed.credentials)
+        minimum_preflight_timeout = (
+            DRIVER.MATRIX.ACTIVE_PROBE_TIMEOUT_SECONDS
+            + DRIVER.LOADED_PREFLIGHT_HLS_SECONDS
+            + DRIVER.PREFLIGHT_SHUTDOWN_MARGIN_SECONDS
+        )
+        self.assertEqual(55.0, minimum_preflight_timeout)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                DRIVER.parse_args(
+                    [
+                        "--execute-production",
+                        *required,
+                        "--preflight-timeout",
+                        str(minimum_preflight_timeout - 0.1),
+                    ]
+                )
+        boundary = DRIVER.parse_args(
+            [
+                "--execute-production",
+                *required,
+                "--preflight-timeout",
+                str(minimum_preflight_timeout),
+            ]
+        )
+        self.assertEqual(minimum_preflight_timeout, boundary.preflight_timeout)
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 DRIVER.parse_args(
@@ -360,20 +425,33 @@ class LoadedN4AcceptanceContractTests(unittest.TestCase):
                 )
 
     def test_commands_fix_official_preflight_and_loaded_probe_thresholds(self):
+        runtime = DRIVER.ViewerRuntime(
+            command_prefix=("/usr/bin/bwrap", "--chdir", "/viewer", "--"),
+            environment={"HOME": "/viewer/private-home"},
+            gzclient="/usr/bin/gzclient",
+            publisher_render=object(),
+            binding={},
+        )
         preflight = DRIVER.build_preflight_command(
-            "/usr/bin/python3",
+            runtime,
             Path("/private/preflight.py"),
-            Path("/usr/bin/gzclient"),
             Path("/private/probe.so"),
             Path("/private/report.json"),
         )
-        self.assertEqual("/private/preflight.py", preflight[1])
-        self.assertEqual("45", preflight[preflight.index("--min-render-fps") + 1])
+        self.assertIn("/viewer/preflight.py", preflight)
+        self.assertEqual("45.0", preflight[preflight.index("--min-render-fps") + 1])
         self.assertEqual(
             "2.90", preflight[preflight.index("--min-real-time-factor") + 1]
         )
         self.assertEqual("2.0", preflight[preflight.index("--warmup-seconds") + 1])
         self.assertEqual("5.0", preflight[preflight.index("--sample-seconds") + 1])
+        self.assertEqual(
+            "45.0", preflight[preflight.index("--timeout-seconds") + 1]
+        )
+        self.assertIn("/viewer/private-home", runtime.environment.values())
+        self.assertLess(
+            preflight.index("/private/probe.so"), preflight.index("--chdir")
+        )
         self.assertNotIn("--headless", preflight)
         self.assertNotIn("--disable-gpu", preflight)
 
@@ -416,11 +494,34 @@ class LoadedN4AcceptanceContractTests(unittest.TestCase):
         self.assertIn("LOADED_MASS_SAMPLE_JSON", shell)
         self.assertIn("LOADED_GRF_ACTIVE_JSON", shell)
         self.assertIn("LOADED_PUSH_LIVE_JSON", shell)
+        self.assertIn("output_lock = threading.Lock()", shell)
+        self.assertIn("os.write(1, encoded)", shell)
+        self.assertIn("atomic pipe-write limit", shell)
+        self.assertNotIn("print(prefix + json.dumps", shell)
+        self.assertIn("exec 4>&2", shell)
+        self.assertIn("exec 2>/dev/null", shell)
+        self.assertIn('python3 -u - "$monitor_stop" 1>&4 4>&-', shell)
+        self.assertIn("ROBOTSWARM_LIVE_MARKER_FD=3", shell)
+        self.assertIn("--verify-grf-n4 3>&4 4>&-", shell)
+        self.assertIn("os.write(marker_fd, encoded)", shell)
+        self.assertNotIn("stdout is shared with the official probe", shell)
+        self.assertIn("readonly monitor_job='%1'", shell)
+        self.assertIn('if [ -n "$(jobs -p)" ]', shell)
+        self.assertIn('kill -TERM "$monitor_job"', shell)
+        self.assertIn('kill -KILL "$monitor_job"', shell)
+        self.assertIn("monitor_wait_pid=$!", shell)
+        self.assertIn('wait "$monitor_wait_pid"', shell)
+        self.assertNotIn('kill -TERM "$monitor_wait_pid"', shell)
+        self.assertNotIn('kill -KILL "$monitor_wait_pid"', shell)
+        self.assertNotIn("kill -0", shell)
         self.assertIn("/fleet/robot_list", shell)
         self.assertIn("/gazebo/model_states", shell)
         self.assertIn("massSampleAgeSeconds", shell)
         self.assertIn("taskProgress", shell)
-        self.assertNotIn("module.LoadProbe.reset_fleet =", shell)
+        self.assertIn("if not run_trial_refreshes_payload:", shell)
+        self.assertEqual(
+            1, shell.count("module.LoadProbe.reset_fleet =")
+        )
         self.assertNotIn("def reset_exact_fleet", shell)
         self.assertIn(
             "expected_robots = ['tb3_0', 'tb3_1', 'tb3_2', 'tb3_3']",
@@ -553,11 +654,11 @@ def main():
     def test_payload_child_publishes_active_grf_lines_to_the_collector(self):
         document = timed_active(1.0, 1).document
         source = (
-            "import json; print("
+            "import json, sys; print("
             + repr(DRIVER.GRF_ACTIVE_PREFIX)
             + " + json.dumps("
             + repr(document)
-            + "), flush=True)"
+            + "), file=sys.stderr, flush=True)"
         )
         child = DRIVER.start_payload_command([sys.executable, "-c", source])
         child.wait(timeout=5.0, stop_event=None)
@@ -566,6 +667,198 @@ def main():
 
         self.assertEqual(1, len(collector.active))
         self.assertEqual(document["taskId"], collector.active[0].document["taskId"])
+
+    def test_payload_child_keeps_protocol_and_live_markers_on_separate_pipes(self):
+        stdout_marker = timed_active(1.0, 1).document
+        stderr_marker = timed_active(1.0, 2).document
+        official_line = (
+            DRIVER.GRF_ACTIVE_PREFIX
+            + json.dumps(stdout_marker, separators=(",", ":"))
+            + "\n"
+            + "RESULT_JSON "
+            + ("x" * (128 * 1024))
+            + "\n"
+        ).encode("utf-8")
+        live_line = (
+            DRIVER.GRF_ACTIVE_PREFIX
+            + json.dumps(stderr_marker, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        source = r"""
+import os
+import sys
+import threading
+
+official_marker = bytes.fromhex(sys.argv[1])
+live = bytes.fromhex(sys.argv[2])
+
+def write_official():
+    os.write(1, official_marker)
+    os.write(1, b'RESULT_JSON ')
+    for _ in range(128):
+        os.write(1, b'x' * 1024)
+    os.write(1, b'\n')
+
+left = threading.Thread(target=write_official)
+right = threading.Thread(target=os.write, args=(2, live))
+left.start()
+right.start()
+left.join()
+right.join()
+"""
+        child = DRIVER.start_payload_command(
+            [
+                sys.executable,
+                "-c",
+                source,
+                official_line.split(b"RESULT_JSON ", 1)[0].hex(),
+                live_line.hex(),
+            ]
+        )
+        output = child.wait(timeout=10.0, stop_event=None)
+        collector = DRIVER.LiveMarkerCollector()
+        collector.ingest(child)
+
+        self.assertEqual(official_line.decode("utf-8"), output.stdout)
+        self.assertEqual(live_line.decode("utf-8"), output.stderr)
+        self.assertEqual(1, len(collector.active))
+        self.assertEqual(2, collector.active[0].document["sequence"])
+
+    def test_payload_child_rejects_unapproved_marker_channel_data_without_echo(self):
+        child = DRIVER.start_payload_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('private diagnostic', file=sys.stderr, flush=True)",
+            ]
+        )
+        with self.assertRaisesRegex(
+            DRIVER.LoadedGateError, "could not be drained safely"
+        ) as failure:
+            child.wait(timeout=5.0, stop_event=None)
+
+        self.assertNotIn("private diagnostic", str(failure.exception))
+
+    def test_monitor_supervisor_cannot_signal_an_unrelated_numeric_pid(self):
+        foreign = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        try:
+            with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                runtime = Path(temporary) / "monitor-runtime"
+                runtime.mkdir(mode=0o700)
+                script = "\n".join(
+                    (
+                        "monitor_runtime=" + str(runtime),
+                        'monitor_stop="$monitor_runtime/stop"',
+                        "monitor_job=" + str(foreign.pid),
+                        "monitor_wait_pid=" + str(foreign.pid),
+                        "monitor_running=true",
+                        DRIVER.monitor_supervision_shell(),
+                        "stop_monitor",
+                    )
+                )
+                completed = subprocess.run(
+                    ["/bin/bash", "-c", script],
+                    text=True,
+                    capture_output=True,
+                    timeout=5.0,
+                    check=False,
+                )
+
+            self.assertEqual(1, completed.returncode, completed.stderr)
+            self.assertIsNone(foreign.poll())
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(foreign.pid, signal.SIGKILL)
+            foreign.wait(timeout=5.0)
+
+    def test_monitor_supervisor_propagates_an_expected_stop_failure(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            runtime = Path(temporary) / "monitor-runtime"
+            runtime.mkdir(mode=0o700)
+            script = "\n".join(
+                (
+                    "monitor_runtime=" + str(runtime),
+                    'monitor_stop="$monitor_runtime/stop"',
+                    "monitor_job='%1'",
+                    "monitor_wait_pid=",
+                    "monitor_running=false",
+                    DRIVER.monitor_supervision_shell(),
+                    "( while [ ! -f \"$monitor_stop\" ]; do sleep 0.01; done; exit 7 ) &",
+                    "monitor_wait_pid=$!",
+                    "monitor_running=true",
+                    "stop_monitor",
+                )
+            )
+            completed = subprocess.run(
+                ["/bin/bash", "-c", script],
+                text=True,
+                capture_output=True,
+                timeout=5.0,
+                check=False,
+            )
+
+        self.assertEqual(7, completed.returncode, completed.stderr)
+        self.assertFalse(runtime.exists())
+
+    def test_monitor_supervisor_rejects_a_monitor_that_ended_early(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            runtime = Path(temporary) / "monitor-runtime"
+            runtime.mkdir(mode=0o700)
+            script = "\n".join(
+                (
+                    "monitor_runtime=" + str(runtime),
+                    'monitor_stop="$monitor_runtime/stop"',
+                    "monitor_job='%1'",
+                    "monitor_wait_pid=",
+                    "monitor_running=false",
+                    DRIVER.monitor_supervision_shell(),
+                    "( exit 7 ) &",
+                    "monitor_wait_pid=$!",
+                    "monitor_running=true",
+                    "sleep 0.05",
+                    "stop_monitor",
+                )
+            )
+            completed = subprocess.run(
+                ["/bin/bash", "-c", script],
+                text=True,
+                capture_output=True,
+                timeout=5.0,
+                check=False,
+            )
+            self.assertFalse(runtime.exists())
+
+        self.assertNotEqual(0, completed.returncode, completed.stderr)
+
+    def test_loaded_preflight_report_requires_the_direct_child_attestation(self):
+        document = preflight_render_report()
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            report = Path(temporary) / "loaded-gui-report.json"
+            report.write_text(json.dumps(document), encoding="utf-8")
+            report.chmod(0o600)
+            raw = report.read_bytes()
+            attestation = DRIVER.MATRIX.ActiveProbeAttestation(
+                hashlib.sha256(raw).hexdigest(),
+                document["process"]["pid"],
+                document["process"]["start_ticks"],
+            )
+
+            evidence, accepted_raw = DRIVER.validate_preflight_report(
+                report, attestation
+            )
+            self.assertEqual(raw, accepted_raw)
+            self.assertEqual(49.5, evidence.average_fps)
+
+            replay = DRIVER.MATRIX.ActiveProbeAttestation(
+                attestation.sha256,
+                attestation.process_id,
+                attestation.process_start_ticks + 1,
+            )
+            with self.assertRaisesRegex(DRIVER.LoadedGateError, "live process"):
+                DRIVER.validate_preflight_report(report, replay)
 
     def test_protocol_requires_one_ordered_load_grf_summary_and_cleanup_document(self):
         evidence = DRIVER.parse_loaded_protocol(protocol_output())
@@ -827,6 +1120,45 @@ def main():
         with self.assertRaisesRegex(DRIVER.LoadedGateError, "payload root"):
             DRIVER.validate_grf_n4(root_with_robot_parent, passing_summary())
 
+    def test_grf_gate_requires_two_payload_roots_before_companion_chains(self):
+        one_root = passing_grf()
+        one_root["metrics"]["transport_discovery_response"]["robots"]["tb3_1"][
+            "role"
+        ] = "companion_push"
+        one_root["metrics"]["transport_discovery_response"]["robots"]["tb3_1"][
+            "required_pre_push_path_length_m"
+        ] = DRIVER.GRF_MINIMUM_RENDEZVOUS_TRAVEL_M
+        assignment = one_root["metrics"]["transport_participation"]["tb3_1"]
+        assignment.update(
+            {
+                "role": "companion_push",
+                "declared_parent_namespaces": ["tb3_0"],
+                "direct_contact_samples": 0,
+                "companion_contact_samples": 20,
+            }
+        )
+        with self.assertRaisesRegex(DRIVER.LoadedGateError, "exactly two"):
+            DRIVER.validate_grf_n4(one_root, passing_summary())
+
+        three_roots = passing_grf()
+        three_roots["metrics"]["transport_discovery_response"]["robots"]["tb3_2"][
+            "role"
+        ] = "payload_push"
+        three_roots["metrics"]["transport_discovery_response"]["robots"]["tb3_2"][
+            "required_pre_push_path_length_m"
+        ] = DRIVER.GRF_MINIMUM_ROOT_RENDEZVOUS_TRAVEL_M
+        assignment = three_roots["metrics"]["transport_participation"]["tb3_2"]
+        assignment.update(
+            {
+                "role": "payload_push",
+                "declared_parent_namespaces": [],
+                "direct_contact_samples": 20,
+                "companion_contact_samples": 0,
+            }
+        )
+        with self.assertRaisesRegex(DRIVER.LoadedGateError, "exactly two"):
+            DRIVER.validate_grf_n4(three_roots, passing_summary())
+
     def test_grf_gate_rejects_one_noncontributing_or_unconnected_robot(self):
         no_contribution = passing_grf()
         item = no_contribution["metrics"]["transport_participation"]["tb3_3"]
@@ -1033,6 +1365,30 @@ right.join()
         self.assertEqual(128 * 1024, len(output.stdout))
         self.assertEqual(128 * 1024, len(output.stderr))
 
+    def test_bounded_child_applies_private_umask_on_python_38(self):
+        source = """
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text('private', encoding='ascii')
+"""
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            artifact = Path(root) / "child-artifact.txt"
+            child = DRIVER.BoundedChild(
+                [sys.executable, "-c", source, str(artifact)],
+                maximum_output_bytes=64 * 1024,
+                umask=0o077,
+            ).start()
+            output = child.wait(timeout=10.0, stop_event=None)
+
+            self.assertEqual(0, output.returncode)
+            self.assertEqual(0o600, stat.S_IMODE(artifact.stat().st_mode))
+            self.assertEqual("private", artifact.read_text(encoding="ascii"))
+
+        driver_source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn('options["umask"]', driver_source)
+        self.assertIn('umask "$1"; shift; exec "$@"', driver_source)
+
     def test_bounded_child_rejects_and_kills_a_detached_live_descendant(self):
         source = """
 import os
@@ -1068,30 +1424,38 @@ while not marker.exists() and time.monotonic() < deadline:
             self.assertTrue(marker.is_file())
             self.assertFalse(process_is_live(int(marker.read_text())))
 
-    def test_fallback_cleanup_revalidates_pid_identity_and_refuses_self_group(self):
-        plugin = Path("/tmp/private-preflight-probe.so")
-        captured = DRIVER.OwnedPreflightProcess(43210, 100, 43210)
-        reused = DRIVER.OwnedPreflightProcess(43210, 101, 43210)
-        with mock.patch.object(
-            DRIVER, "_read_owned_preflight_process", return_value=reused
-        ), mock.patch.object(DRIVER.os, "kill") as kill:
-            self.assertFalse(
-                DRIVER._signal_owned_preflight_process(
-                    captured, plugin, signal.SIGTERM
-                )
-            )
-            kill.assert_not_called()
-
-        self_group = DRIVER.OwnedPreflightProcess(
-            43210, 100, os.getpgrp()
+    def test_loaded_probe_failure_is_classified_without_raw_output(self):
+        result = {
+            "passed": False,
+            "failures": [
+                "ServiceException: transport_object spawn model failed",
+                "cleanup failed: private detail",
+            ],
+        }
+        output = DRIVER.MATRIX.ProcessOutput(
+            1,
+            "LOAD_RESULT_JSON " + json.dumps(result) + "\n",
+            "LOADED_MASS_SAMPLE_JSON {}\nsecret raw diagnostic",
         )
-        with mock.patch.object(DRIVER.os, "kill") as kill:
-            self.assertFalse(
-                DRIVER._signal_owned_preflight_process(
-                    self_group, plugin, signal.SIGTERM
-                )
-            )
-            kill.assert_not_called()
+        classified = DRIVER.classify_loaded_probe_failure(output)
+        self.assertEqual(1, classified["returnCode"])
+        self.assertEqual(1, classified["structuredLoadResultCount"])
+        self.assertEqual(2, classified["structuredFailureCount"])
+        self.assertEqual(1, classified["liveMarkerCounts"]["mass"])
+        self.assertIn("ros_service_failed", classified["categories"])
+        self.assertIn(
+            "payload_replace_or_visibility_failed", classified["categories"]
+        )
+        self.assertIn("payload_cleanup_failed", classified["categories"])
+        self.assertNotIn("secret", json.dumps(classified))
+
+        supervision = DRIVER.classify_loaded_probe_failure(
+            DRIVER.MATRIX.ProcessOutput(92, "", "private raw diagnostic")
+        )
+        self.assertIn(
+            "live_marker_supervision_failed", supervision["categories"]
+        )
+        self.assertNotIn("private", json.dumps(supervision))
 
     def test_bounded_child_kills_process_group_immediately_on_overflow(self):
         source = """
@@ -1659,6 +2023,30 @@ while True:
             with self.assertRaisesRegex(DRIVER.LoadedGateError, "active loaded-GRF"):
                 DRIVER.LiveMarkerCollector().ingest(Lines(invalid))
 
+    def test_malformed_live_marker_keeps_only_structural_diagnostics(self):
+        class Lines:
+            def pop_lines(self):
+                interleaved = (
+                    DRIVER.GRF_ACTIVE_PREFIX
+                    + json.dumps(timed_active(12.0, 1).document, separators=(",", ":"))
+                    + DRIVER.PAYLOAD_MASS_PREFIX
+                    + "{}"
+                )
+                return [(12.0, interleaved)]
+
+        with self.assertRaises(DRIVER.MalformedLiveMarker) as failure:
+            DRIVER.LiveMarkerCollector().ingest(Lines())
+
+        diagnostic = failure.exception.diagnostic
+        self.assertEqual(DRIVER.GRF_ACTIVE_PREFIX.strip(), diagnostic["marker"])
+        self.assertEqual(
+            [DRIVER.PAYLOAD_MASS_PREFIX.strip()],
+            diagnostic["embeddedKnownPrefixes"],
+        )
+        self.assertRegex(diagnostic["sha256"], r"^[0-9a-f]{64}$")
+        self.assertFalse(diagnostic["rawRetained"])
+        self.assertNotIn("taskId", json.dumps(diagnostic))
+
     def test_active_grf_waits_require_new_time_and_sequence_anchors(self):
         collector = DRIVER.LiveMarkerCollector()
         collector.active.extend(
@@ -1721,13 +2109,24 @@ while True:
         self.assertNotIn('"--headless"', source)
         self.assertNotIn('"--disable-gpu"', source)
         self.assertIn("visible.OwnedChrome", source)
-        self.assertIn("ui.open_viewer", source)
+        request = source.index("ui.request_viewer()")
+        bind = source.index("lease_directory = MATRIX.active_viewer_lease_directory", request)
+        frame = source.index("ui.wait_viewer_frame", bind)
+        self.assertLess(request, bind)
+        self.assertLess(bind, frame)
+        self.assertIn('report["viewerStartupFailure"]', source)
         self.assertIn("umask=0o077", source)
         self.assertIn("regular_private_file(path", source)
         self.assertIn("MATRIX.cleanup_case", source)
         self.assertIn("MATRIX.HostRunLock", source)
         self.assertNotIn(".communicate(", source)
+        self.assertNotIn(".removesuffix(", source)
         self.assertIn("BoundedDockerHost", source)
+        self.assertNotIn("final_viewer = ui.require_interactive_hls()", source)
+        self.assertIn(
+            'report["viewer"]["decodedFpsAfter"] = push_capture.decoded_fps_after',
+            source,
+        )
 
 
 if __name__ == "__main__":

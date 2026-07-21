@@ -6,6 +6,7 @@ import FullscreenRoundedIcon from "@mui/icons-material/FullscreenRounded";
 import MouseRoundedIcon from "@mui/icons-material/MouseRounded";
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import { Alert, Box, Button, Chip, CircularProgress, Tooltip, Typography } from "@mui/material";
+import { parseViewerTimestamp } from "./viewerTimestamp";
 
 export const VIEWER_STARTUP_BUDGET_MS = 30000;
 export const viewerScreenReaderOnlySx = {
@@ -107,7 +108,7 @@ export const configureHlsRequest = (token) => (request) => {
 };
 
 export const leaseSecondsRemaining = (expiresAt, now = Date.now()) => {
-    const expiration = Date.parse(expiresAt);
+    const expiration = parseViewerTimestamp(expiresAt);
     if (!Number.isFinite(expiration)) return null;
     return Math.max(0, Math.ceil((expiration - now) / 1000));
 };
@@ -603,7 +604,7 @@ function HlsViewer({ url, token, expiresAt, onUnavailable, interactiveAvailable,
         let retryCount = 0;
         let mediaRecoveryUsed = false;
         let fallbackUsed = false;
-        const expiration = Date.parse(expiresAt);
+        const expiration = parseViewerTimestamp(expiresAt);
         const retryWindow = createHlsRetryWindow();
         const video = videoRef.current;
 

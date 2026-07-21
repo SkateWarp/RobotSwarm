@@ -1877,15 +1877,18 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
         if stop_wait_budget <= 0:
             raise HarnessFailure("viewer_lease_cannot_cover_stop_budget", "stop_isolation")
 
-        safe_progress("deteniendo la primera sesion y conservando activa la segunda")
-        stop_started = time.monotonic()
-        users["user_a"].call(
-            "DELETE",
-            f"/api/sessions/{sessions['user_a']}",
-            target="session_self",
-            name="stop_user_a_session",
-            expected={200},
+        safe_progress(
+            "compitiendo StartTask y DELETE en la primera sesion, "
+            "sin afectar la segunda"
         )
+        stop_started = time.monotonic()
+        start_status, stop_status, winner = race_task_start_with_session_stop(
+            users["user_a"],
+            sessions["user_a"],
+        )
+        report.set_path("transaction_race", "start_status", value=start_status)
+        report.set_path("transaction_race", "stop_status", value=stop_status)
+        report.set_path("transaction_race", "winner", value=winner)
         stopped_state = wait_session_stopped(
             users["user_a"],
             sessions["user_a"],
@@ -1902,6 +1905,8 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
         if stopped_state != "Stopped":
             raise HarnessFailure("user_a_stop_timeout", "stop_isolation")
         report.set_path("sessions", "user_a", "final_state", value=stopped_state)
+        report.set_path("transaction_race", "session_stopped", value=True)
+        report.add_check("same_session_start_stop_serialized", "passed", winner)
 
         for alias in ("user_a", "user_b"):
             remaining_after_stop = lease_remaining_seconds(leases[alias])
@@ -2013,27 +2018,6 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
         report.set_path("task", "user_b", "timing_captured", value=True)
         report.add_check("follow_task_cancelled", "passed")
 
-        safe_progress("compitiendo StartTask y DELETE sobre la misma sesion")
-        start_status, stop_status, winner = race_task_start_with_session_stop(
-            users["user_b"],
-            sessions["user_b"],
-        )
-        report.set_path("transaction_race", "start_status", value=start_status)
-        report.set_path("transaction_race", "stop_status", value=stop_status)
-        report.set_path("transaction_race", "winner", value=winner)
-        raced_session_state = wait_session_stopped(
-            users["user_b"],
-            sessions["user_b"],
-            args.cleanup_timeout,
-            args.poll_interval,
-        )
-        if raced_session_state != "Stopped":
-            raise HarnessFailure("race_session_stop_timeout", "transaction_race")
-        report.set_path("transaction_race", "session_stopped", value=True)
-        report.set_path(
-            "sessions", "user_b", "final_state", value=raced_session_state
-        )
-        report.add_check("same_session_start_stop_serialized", "passed", winner)
     except HarnessFailure as error:
         failure = error
     except (KeyboardInterrupt, concurrent.futures.CancelledError):

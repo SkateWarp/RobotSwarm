@@ -159,6 +159,12 @@ public sealed class BoundedCommandExecutor : IHostedService
         CancelActiveOperation(sessionId);
     }
 
+    public bool IsStartTaskActive(Guid sessionId)
+    {
+        return _activeOperations.TryGetValue(sessionId, out var operation)
+               && operation.CommandType == "StartTask";
+    }
+
     private async Task ConsumeAsync(int consumerId, CancellationToken cancellationToken)
     {
         await foreach (var command in _commands.Reader.ReadAllAsync(cancellationToken))

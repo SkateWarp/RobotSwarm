@@ -12,6 +12,7 @@ import {
     usePlaybackFps,
     viewerScreenReaderOnlySx,
 } from "./HlsViewer";
+import { parseViewerTimestamp } from "./viewerTimestamp";
 
 const MAX_PUBLISHER_RETRIES = 8;
 
@@ -128,7 +129,7 @@ function WhepViewer({ url, token, expiresAt }) {
         let retryCount = 0;
         let sessionUrl;
         const controller = new AbortController();
-        const expiration = Date.parse(expiresAt);
+        const expiration = parseViewerTimestamp(expiresAt);
 
         const leaseExpired = () => Number.isFinite(expiration) && expiration <= Date.now();
 

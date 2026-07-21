@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,7 @@ REPORT_SOURCE = "gazebo::rendering::Camera::AvgFPS"
 RTF_SOURCE = "gazebo.msgs.WorldStatistics delta(sim_time)/delta(real_time)"
 DEFAULT_GPU_PATTERN = r"(?:nvidia|geforce|rtx)"
 MAXIMUM_GZCLIENT_LOG_BYTES = 1024 * 1024
+REPORT_ATTESTATION_PREFIX = "ROBOTSWARM_GUI_REPORT_ATTESTATION "
 
 
 class PreflightError(RuntimeError):
@@ -56,6 +58,7 @@ def validate_report(
     report,
     *,
     expected_pid=None,
+    expected_start_ticks=None,
     min_render_fps=45.0,
     min_real_time_factor=2.90,
     gpu_pattern=DEFAULT_GPU_PATTERN,
@@ -72,6 +75,11 @@ def validate_report(
         errors.append("report was not produced inside gzclient")
     if expected_pid is not None and process.get("pid") != expected_pid:
         errors.append("report came from a different gzclient process")
+    if (
+        expected_start_ticks is not None
+        and process.get("start_ticks") != expected_start_ticks
+    ):
+        errors.append("report came from a different gzclient process lifetime")
 
     display = report.get("display", {})
     if not display.get("x11") and not display.get("wayland"):
@@ -438,13 +446,15 @@ def run_preflight(args):
             )
 
         try:
-            report = json.loads(report_path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
+            report_raw = report_path.read_bytes()
+            report = json.loads(report_raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PreflightError(f"could not read GUI probe report: {exc}") from exc
 
         errors = validate_report(
             report,
             expected_pid=process.pid,
+            expected_start_ticks=process_identity,
             min_render_fps=args.min_render_fps,
             min_real_time_factor=args.min_real_time_factor,
             gpu_pattern=args.gpu_pattern,
@@ -453,7 +463,7 @@ def run_preflight(args):
             raise PreflightError("; ".join(errors))
         stop_process()
         log_size = _drain_gzclient_output(process.stdout, log_handle, log_size)
-        return report, report_path
+        return report, report_path, hashlib.sha256(report_raw).hexdigest()
     finally:
         stop_process()
         if process is not None and process.stdout is not None:
@@ -500,7 +510,7 @@ def main(argv=None):
             parser.error(f"--{name.replace('_', '-')} must be greater than zero")
 
     try:
-        report, report_path = run_preflight(args)
+        report, report_path, report_sha256 = run_preflight(args)
     except PreflightError as exc:
         print(f"Gazebo GUI preflight failed: {exc}", file=sys.stderr)
         return 1
@@ -508,6 +518,11 @@ def main(argv=None):
     render = report["render_measurement"]
     physics = report["physics_measurement"]
     camera = report["camera"]
+    process = report["process"]
+    print(
+        f"{REPORT_ATTESTATION_PREFIX}{report_sha256} "
+        f"{process['pid']} {process['start_ticks']}"
+    )
     print("Gazebo GUI preflight passed")
     print(f"  renderer: {renderer_description(report)}")
     print(

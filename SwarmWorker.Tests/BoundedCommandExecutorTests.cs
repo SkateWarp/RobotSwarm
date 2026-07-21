@@ -12,6 +12,284 @@ namespace SwarmWorker.Tests;
 
 public sealed class BoundedCommandExecutorTests
 {
+    [Fact]
+    public async Task StartTaskActivityCoversRosPublishUntilAcceptedIsReported()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var taskRunId = Guid.NewGuid();
+        var timeline = new ConcurrentQueue<string>();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                SessionInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(0, string.Empty, string.Empty))
+        {
+            Timeline = timeline
+        };
+        var hub = new RecordingWorkerCommandHub
+        {
+            Timeline = timeline
+        };
+        var options = Options.Create(new WorkerOptions
+        {
+            WorkerId = workerId,
+            SessionImage = "robotswarm/ros-noetic:test",
+            MaxQueuedCommands = 4,
+            MaxParallelCommands = 1,
+            ShutdownDrainSeconds = 5
+        });
+        var sessions = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        var tracker = new TaskStatusTracker();
+        var executor = new BoundedCommandExecutor(
+            new SessionCommandHandler(sessions, options),
+            hub,
+            tracker,
+            options,
+            NullLogger<BoundedCommandExecutor>.Instance);
+        docker.StartTaskGate = () => executor.IsStartTaskActive(sessionId);
+        var command = StartTaskCommand(sessionId, taskRunId);
+
+        await executor.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.True(await executor.EnqueueAsync(command, CancellationToken.None));
+            await WaitUntilAsync(() => hub.CompletedCommands.Any(
+                completion => completion.CommandId == command.Id));
+
+            var taskEvent = Assert.Single(hub.TaskEvents);
+            Assert.Equal(sessionId, taskEvent.SessionId);
+            Assert.Equal(taskRunId, taskEvent.TaskRunId);
+            Assert.Equal("Accepted", taskEvent.State);
+            Assert.Equal(
+                new[] { "docker", "docker", "docker", "task:Accepted" },
+                timeline);
+            Assert.Equal(3, docker.StartTaskGateObservations.Count);
+            Assert.All(docker.StartTaskGateObservations, Assert.True);
+            Assert.Equal("Accepted", Assert.Single(tracker.Snapshot()).LastState);
+            await WaitUntilAsync(() => !executor.IsStartTaskActive(sessionId));
+            Assert.False(executor.IsStartTaskActive(sessionId));
+        }
+        finally
+        {
+            await executor.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task FailedRosPublishDoesNotAcceptTaskAndReleasesPollingGate()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var taskRunId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                SessionInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "ROS publish failed"));
+        var hub = new RecordingWorkerCommandHub();
+        var options = Options.Create(new WorkerOptions
+        {
+            WorkerId = workerId,
+            SessionImage = "robotswarm/ros-noetic:test",
+            MaxQueuedCommands = 4,
+            MaxParallelCommands = 1,
+            ShutdownDrainSeconds = 5
+        });
+        var sessions = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        var tracker = new TaskStatusTracker();
+        var executor = new BoundedCommandExecutor(
+            new SessionCommandHandler(sessions, options),
+            hub,
+            tracker,
+            options,
+            NullLogger<BoundedCommandExecutor>.Instance);
+        docker.StartTaskGate = () => executor.IsStartTaskActive(sessionId);
+        var command = StartTaskCommand(sessionId, taskRunId);
+
+        await executor.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.True(await executor.EnqueueAsync(command, CancellationToken.None));
+            var failure = await hub.WaitForFailureAsync();
+
+            Assert.Equal(command.Id, failure.CommandId);
+            Assert.Empty(hub.TaskEvents);
+            Assert.Equal(3, docker.StartTaskGateObservations.Count);
+            Assert.All(docker.StartTaskGateObservations, Assert.True);
+            await WaitUntilAsync(() => !executor.IsStartTaskActive(sessionId));
+            Assert.False(executor.IsStartTaskActive(sessionId));
+        }
+        finally
+        {
+            await executor.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task AcceptedReportFailureReleasesPollingGateAndFailsCommand()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var taskRunId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                SessionInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(0, string.Empty, string.Empty));
+        var hub = new RecordingWorkerCommandHub
+        {
+            RejectedTaskState = "Accepted"
+        };
+        var options = Options.Create(new WorkerOptions
+        {
+            WorkerId = workerId,
+            SessionImage = "robotswarm/ros-noetic:test",
+            MaxQueuedCommands = 4,
+            MaxParallelCommands = 1,
+            ShutdownDrainSeconds = 5
+        });
+        var sessions = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        var tracker = new TaskStatusTracker();
+        var executor = new BoundedCommandExecutor(
+            new SessionCommandHandler(sessions, options),
+            hub,
+            tracker,
+            options,
+            NullLogger<BoundedCommandExecutor>.Instance);
+        docker.StartTaskGate = () => executor.IsStartTaskActive(sessionId);
+        var command = StartTaskCommand(sessionId, taskRunId);
+
+        await executor.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.True(await executor.EnqueueAsync(command, CancellationToken.None));
+            var failure = await hub.WaitForFailureAsync();
+
+            Assert.Equal(command.Id, failure.CommandId);
+            Assert.Empty(hub.TaskEvents);
+            Assert.Empty(hub.CompletedCommands);
+            Assert.Empty(tracker.Snapshot());
+            Assert.Equal(3, docker.StartTaskGateObservations.Count);
+            Assert.All(docker.StartTaskGateObservations, Assert.True);
+            await WaitUntilAsync(() => !executor.IsStartTaskActive(sessionId));
+        }
+        finally
+        {
+            await executor.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunningReadDuringStartTaskCannotOvertakeAccepted(
+        bool hasPreviousWatermark)
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var taskRunId = Guid.NewGuid();
+        var options = Options.Create(new WorkerOptions
+        {
+            WorkerId = workerId,
+            SessionImage = "robotswarm/ros-noetic:test",
+            MaxQueuedCommands = 4,
+            MaxParallelCommands = 1,
+            ShutdownDrainSeconds = 5,
+            TaskStatusPollIntervalSeconds = 1,
+            TaskProgressReportStep = 0.02
+        });
+        var docker = new CoordinatedTaskRaceDockerCli(
+            workerId,
+            sessionId,
+            taskRunId);
+        var sessions = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        var tracker = new TaskStatusTracker();
+        if (hasPreviousWatermark)
+        {
+            tracker.Record(new TaskEventReport(
+                sessionId,
+                Guid.NewGuid(),
+                "Completed",
+                1,
+                null,
+                null));
+        }
+
+        var hub = new RecordingWorkerCommandHub();
+        var executor = new BoundedCommandExecutor(
+            new SessionCommandHandler(sessions, options),
+            hub,
+            tracker,
+            options,
+            NullLogger<BoundedCommandExecutor>.Instance);
+        var poller = new TaskStatusPoller(
+            sessions,
+            tracker,
+            executor,
+            hub,
+            options,
+            NullLogger<TaskStatusPoller>.Instance);
+        var command = StartTaskCommand(sessionId, taskRunId);
+
+        await executor.StartAsync(CancellationToken.None);
+        try
+        {
+            var inFlightPoll = poller.PollOnceAsync(CancellationToken.None);
+            await docker.WaitForStatusReadAsync();
+
+            Assert.True(await executor.EnqueueAsync(command, CancellationToken.None));
+            await docker.WaitForPublishAsync();
+
+            docker.ReleaseStatusRead();
+            await inFlightPoll;
+            Assert.Empty(hub.TaskEvents);
+
+            docker.ReleasePublish();
+            await WaitUntilAsync(() => hub.CompletedCommands.Any(
+                completion => completion.CommandId == command.Id));
+            await WaitUntilAsync(() => !executor.IsStartTaskActive(sessionId));
+            Assert.Equal(
+                new[] { "Accepted" },
+                hub.TaskEvents.Select(report => report.State));
+
+            await poller.PollOnceAsync(CancellationToken.None);
+
+            Assert.Equal(
+                new[] { "Accepted", "Running" },
+                hub.TaskEvents.Select(report => report.State));
+            Assert.Equal("Running", Assert.Single(tracker.Snapshot()).LastState);
+        }
+        finally
+        {
+            docker.ReleaseStatusRead();
+            docker.ReleasePublish();
+            await executor.StopAsync(CancellationToken.None);
+        }
+    }
+
     [Theory]
     [InlineData(false, true)]
     [InlineData(true, false)]
@@ -491,6 +769,26 @@ public sealed class BoundedCommandExecutorTests
             DateTime.UtcNow);
     }
 
+    private static WorkerCommandEnvelope StartTaskCommand(
+        Guid sessionId,
+        Guid taskRunId)
+    {
+        return new WorkerCommandEnvelope(
+            Guid.NewGuid(),
+            sessionId,
+            "StartTask",
+            $"task-{taskRunId:N}",
+            Guid.NewGuid(),
+            1,
+            JsonSerializer.SerializeToElement(new
+            {
+                taskRunId,
+                taskType = "CollaborativeTransport",
+                parameters = new { target_x = -3.0, target_y = -4.0 }
+            }),
+            DateTime.UtcNow);
+    }
+
     private static string EmergencyStopStatus(bool active)
     {
         var json = JsonSerializer.Serialize(new
@@ -559,12 +857,20 @@ public sealed class BoundedCommandExecutorTests
         }
 
         public ConcurrentQueue<IReadOnlyList<string>> Calls { get; } = new();
+        public ConcurrentQueue<string>? Timeline { get; init; }
+        public Func<bool>? StartTaskGate { get; set; }
+        public ConcurrentQueue<bool> StartTaskGateObservations { get; } = new();
 
         public Task<DockerCommandResult> RunAsync(
             IReadOnlyList<string> arguments,
             CancellationToken cancellationToken,
             TimeSpan? timeout = null)
         {
+            Timeline?.Enqueue("docker");
+            if (StartTaskGate is not null)
+            {
+                StartTaskGateObservations.Enqueue(StartTaskGate());
+            }
             Calls.Enqueue(arguments.ToArray());
             if (_results.Count == 0)
             {
@@ -573,6 +879,99 @@ public sealed class BoundedCommandExecutorTests
 
             return Task.FromResult(_results.Dequeue());
         }
+    }
+
+    private sealed class CoordinatedTaskRaceDockerCli : IDockerCli
+    {
+        private readonly Guid _workerId;
+        private readonly Guid _sessionId;
+        private readonly Guid _taskRunId;
+        private readonly TaskCompletionSource _statusReadStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseStatusRead =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _publishStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releasePublish =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _statusReads;
+
+        public CoordinatedTaskRaceDockerCli(
+            Guid workerId,
+            Guid sessionId,
+            Guid taskRunId)
+        {
+            _workerId = workerId;
+            _sessionId = sessionId;
+            _taskRunId = taskRunId;
+        }
+
+        public async Task<DockerCommandResult> RunAsync(
+            IReadOnlyList<string> arguments,
+            CancellationToken cancellationToken,
+            TimeSpan? timeout = null)
+        {
+            if (arguments.Count > 0 && arguments[0] == "ps")
+            {
+                return new DockerCommandResult(0, "container-1\n", string.Empty);
+            }
+
+            if (arguments.Count > 0 && arguments[0] == "inspect")
+            {
+                return new DockerCommandResult(
+                    0,
+                    SessionInspection(_workerId, _sessionId),
+                    string.Empty);
+            }
+
+            var commandLine = string.Join('\n', arguments);
+            if (commandLine.Contains(
+                    "swarm_worker_status_reader",
+                    StringComparison.Ordinal))
+            {
+                if (Interlocked.Increment(ref _statusReads) == 1)
+                {
+                    _statusReadStarted.TrySetResult();
+                    await _releaseStatusRead.Task.WaitAsync(cancellationToken);
+                }
+
+                var status = JsonSerializer.Serialize(new
+                {
+                    task = new
+                    {
+                        task_id = _taskRunId,
+                        status = "running",
+                        progress = 0.25
+                    }
+                });
+                return new DockerCommandResult(
+                    0,
+                    $"data: {JsonSerializer.Serialize(status)}\n---\n",
+                    string.Empty);
+            }
+
+            if (commandLine.Contains(
+                    "/swarm/commands",
+                    StringComparison.Ordinal))
+            {
+                _publishStarted.TrySetResult();
+                await _releasePublish.Task.WaitAsync(cancellationToken);
+                return new DockerCommandResult(0, string.Empty, string.Empty);
+            }
+
+            throw new InvalidOperationException(
+                $"Unexpected Docker command: {string.Join(' ', arguments)}");
+        }
+
+        public Task WaitForStatusReadAsync() =>
+            _statusReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        public Task WaitForPublishAsync() =>
+            _publishStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        public void ReleaseStatusRead() => _releaseStatusRead.TrySetResult();
+
+        public void ReleasePublish() => _releasePublish.TrySetResult();
     }
 
     private sealed class RecordingViewerPublisher : IViewerPublisher
@@ -648,9 +1047,12 @@ public sealed class BoundedCommandExecutorTests
         public ConcurrentQueue<Guid> RunningCommands { get; } = new();
         public ConcurrentQueue<WorkerCommandCompletionRequest> CompletedCommands { get; } = new();
         public ConcurrentQueue<SessionEventReport> SessionEvents { get; } = new();
+        public ConcurrentQueue<TaskEventReport> TaskEvents { get; } = new();
+        public ConcurrentQueue<string>? Timeline { get; init; }
 
         public bool AcceptAcknowledgement { get; set; } = true;
         public bool AcceptRunningTransition { get; set; } = true;
+        public string? RejectedTaskState { get; init; }
 
         public Task AcknowledgeCommandAsync(
             Guid commandId,
@@ -713,7 +1115,20 @@ public sealed class BoundedCommandExecutorTests
 
         public Task ReportTaskEventAsync(
             TaskEventReport report,
-            CancellationToken cancellationToken) => Task.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            if (report.State.Equals(
+                    RejectedTaskState,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromException(new InvalidOperationException(
+                    $"The backend rejected task state {report.State}."));
+            }
+
+            TaskEvents.Enqueue(report);
+            Timeline?.Enqueue($"task:{report.State}");
+            return Task.CompletedTask;
+        }
 
         public Task<WorkerCommandFailureRequest> WaitForFailureAsync()
         {

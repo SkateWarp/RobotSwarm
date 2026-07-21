@@ -4,9 +4,9 @@
   "description": "Control y supervisión de simulaciones TurtleBot3 con ROS y Gazebo.",
   "icons": [
     {
-      "src": "robotswarm-mark.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "assets/images/logos/logo.png",
+      "sizes": "2360x1640",
+      "type": "image/png",
       "purpose": "any"
     }
   ],

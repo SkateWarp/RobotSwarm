@@ -25,6 +25,7 @@ import PageHeading from "../../../../shared-components/PageHeading";
 import HlsViewer from "./HlsViewer";
 import SwarmTaskPanel from "./SwarmTaskPanel";
 import WhepViewer from "./WhepViewer";
+import { parseViewerTimestamp } from "./viewerTimestamp";
 
 const TERMINAL_STATES = new Set(["Stopped", "Failed", "Expired"]);
 const TERMINAL_TASK_STATES = new Set(["Completed", "Cancelled", "Failed"]);
@@ -59,7 +60,7 @@ export const sessionRobotSummary = (robots) => {
 };
 
 const formatRobotUpdate = (value) => {
-    const date = new Date(value);
+    const date = new Date(parseViewerTimestamp(value));
     if (Number.isNaN(date.getTime())) return "sin actualización";
     return new Intl.DateTimeFormat("es-BO", {
         hour: "2-digit",
@@ -69,7 +70,7 @@ const formatRobotUpdate = (value) => {
 };
 
 const commandTimestamp = (command) => {
-    const value = Date.parse(command?.updatedAt || command?.createdAt);
+    const value = parseViewerTimestamp(command?.updatedAt || command?.createdAt);
     return Number.isFinite(value) ? value : null;
 };
 
@@ -490,7 +491,7 @@ function SimulationWorkspace() {
                 );
                 if (!disposed) {
                     setViewerControlReady(true);
-                    const expiresAt = Date.parse(authorization?.authorizedUntil);
+                    const expiresAt = parseViewerTimestamp(authorization?.authorizedUntil);
                     const renewIn = Number.isFinite(expiresAt)
                         ? Math.max(1000, Math.min(25000, expiresAt - Date.now() - 5000))
                         : 20000;

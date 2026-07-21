@@ -69,6 +69,7 @@ LOADED_READY_TIMEOUT_SECONDS = 120.0
 PREFLIGHT_WARMUP_SECONDS = 2.0
 PREFLIGHT_SAMPLE_SECONDS = 5.0
 LOADED_PREFLIGHT_HLS_SECONDS = 5.0
+PREFLIGHT_SHUTDOWN_MARGIN_SECONDS = 5.0
 
 CAPACITY_SINGLE_MAX_PROGRESS_M = 0.05
 CAPACITY_ROOT_MAX_PROGRESS_M = 0.06
@@ -116,7 +117,6 @@ PUSH_LIVE_PREFIX = "LOADED_PUSH_LIVE_JSON "
 
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 CONTAINER_ID_PATTERN = re.compile(r"\b[0-9a-f]{64}\b", re.IGNORECASE)
-GZCLIENT_PATTERN = re.compile(r"gzclient(?:-[0-9]+(?:\.[0-9]+)*)?")
 EXPECTED_ROBOTS = tuple(f"tb3_{index}" for index in range(EXPECTED_ROBOT_COUNT))
 EXPECTED_ROBOT_SET = frozenset(EXPECTED_ROBOTS)
 ACTIVE_GRF_PHASES = frozenset({"SEARCH", "APPROACH", "PUSH"})
@@ -128,6 +128,44 @@ class LoadedGateError(RuntimeError):
 
 class LoadedCleanupError(LoadedGateError):
     """The harness could not prove removal of everything it allocated."""
+
+
+class LoadedProbeEnded(LoadedGateError):
+    """The official payload probe exited before a required live marker."""
+
+    def __init__(self, description: str, output: Any) -> None:
+        super().__init__(
+            f"The loaded probe ended before {description} "
+            f"(status {output.returncode})"
+        )
+        self.output = output
+
+
+class MalformedLiveMarker(LoadedGateError):
+    """Keep structural evidence for a bad live line without retaining its body."""
+
+    def __init__(self, prefix: str, payload: str) -> None:
+        super().__init__(f"The {prefix.strip()} marker is malformed")
+        encoded = payload.encode("utf-8", errors="replace")
+        stripped = payload.strip()
+        self.diagnostic = {
+            "marker": prefix.strip(),
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "startsWithObject": stripped.startswith("{"),
+            "endsWithObject": stripped.endswith("}"),
+            "embeddedKnownPrefixes": sorted(
+                candidate.strip()
+                for candidate in (
+                    PAYLOAD_READY_PREFIX,
+                    PAYLOAD_MASS_PREFIX,
+                    GRF_ACTIVE_PREFIX,
+                    PUSH_LIVE_PREFIX,
+                )
+                if candidate in payload
+            ),
+            "rawRetained": False,
+        }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -165,17 +203,11 @@ class LoadedProtocol:
 
 @dataclasses.dataclass(frozen=True)
 class ViewerRuntime:
+    command_prefix: tuple[str, ...]
     environment: dict[str, str]
-    gzclient: Path
+    gzclient: str
     publisher_render: Any
     binding: dict[str, bool]
-
-
-@dataclasses.dataclass(frozen=True)
-class OwnedPreflightProcess:
-    pid: int
-    start_tick: int
-    process_group: int
 
 
 def process_identity(pid: int) -> int | None:
@@ -225,15 +257,29 @@ class BoundedChild:
         cwd: Path | None = None,
         umask: int | None = None,
         line_prefixes: Sequence[str] = (),
+        line_streams: Sequence[str] = ("stdout",),
+        strict_line_channel: bool = False,
     ) -> None:
         if maximum_output_bytes <= 0:
             raise ValueError("maximum_output_bytes must be positive")
+        if umask is not None and not 0 <= umask <= 0o777:
+            raise ValueError("umask must be an octal permission mask")
+        if (
+            not line_streams
+            or len(set(line_streams)) != len(line_streams)
+            or set(line_streams) - {"stdout", "stderr"}
+        ):
+            raise ValueError("line_streams must name unique stdout/stderr streams")
+        if strict_line_channel and not line_prefixes:
+            raise ValueError("a strict line channel requires approved prefixes")
         self.arguments = list(arguments)
         self.maximum_output_bytes = maximum_output_bytes
         self.environment = environment
         self.cwd = cwd
         self.umask = umask
         self.line_prefixes = tuple(item.encode("utf-8") for item in line_prefixes)
+        self.line_streams = frozenset(line_streams)
+        self.strict_line_channel = strict_line_channel
         self.process: subprocess.Popen[bytes] | None = None
         self.process_group: int | None = None
         self.process_identity: int | None = None
@@ -264,9 +310,20 @@ class BoundedChild:
             "cwd": str(self.cwd) if self.cwd is not None else None,
             "start_new_session": True,
         }
+        launch_arguments = self.arguments
         if self.umask is not None:
-            options["umask"] = self.umask
-        self.process = subprocess.Popen(self.arguments, **options)
+            # Python 3.8 has no Popen(umask=...).  The fixed shell program
+            # receives every real argument separately and immediately execs it,
+            # so no command text from the child is evaluated by the shell.
+            launch_arguments = [
+                "/bin/sh",
+                "-c",
+                'umask "$1"; shift; exec "$@"',
+                "robotswarm-private-child",
+                f"{self.umask:03o}",
+                *self.arguments,
+            ]
+        self.process = subprocess.Popen(launch_arguments, **options)
         self.process_group = self.process.pid
         try:
             observed_group = os.getpgid(self.process.pid)
@@ -337,7 +394,7 @@ class BoundedChild:
                 if not chunk:
                     break
                 accepted = self._accept(name, chunk)
-                if name == "stdout" and self.line_prefixes and accepted:
+                if name in self.line_streams and self.line_prefixes and accepted:
                     pending.extend(accepted)
                     while b"\n" in pending:
                         raw_line, _, remainder = pending.partition(b"\n")
@@ -349,12 +406,26 @@ class BoundedChild:
                                     raw_line.decode("utf-8", errors="replace"),
                                 )
                             )
+                        elif self.strict_line_channel:
+                            with self._lock:
+                                self._reader_errors.append(
+                                    "dedicated line channel contained unapproved data"
+                                )
+                            self.kill_now()
+                            return
         except (OSError, ValueError) as exc:
             if not self.done.is_set():
                 with self._lock:
                     self._reader_errors.append(type(exc).__name__)
                 self.kill_now()
         finally:
+            if pending and self.strict_line_channel:
+                with self._lock:
+                    self._reader_errors.append(
+                        "dedicated line channel ended with an incomplete line"
+                    )
+                if not self.done.is_set():
+                    self.kill_now()
             with contextlib.suppress(OSError):
                 stream.close()
 
@@ -519,7 +590,7 @@ class LiveMarkerCollector:
         try:
             document = MATRIX.strict_json_loads(payload)
         except (json.JSONDecodeError, ValueError) as exc:
-            raise LoadedGateError(f"The {prefix.strip()} marker is malformed") from exc
+            raise MalformedLiveMarker(prefix, payload) from exc
         if not isinstance(document, dict):
             raise LoadedGateError(f"The {prefix.strip()} marker is not an object")
         return TimedMarker(
@@ -683,10 +754,7 @@ def wait_for_live_marker(
             raise KeyboardInterrupt
         if child.done.is_set():
             output = child.output()
-            raise LoadedGateError(
-                f"The loaded probe ended before {description} "
-                f"(status {output.returncode})"
-            )
+            raise LoadedProbeEnded(description, output)
         time.sleep(0.05)
     with contextlib.suppress(Exception):
         child.stop_gracefully()
@@ -712,6 +780,124 @@ def load_matrix_driver() -> ModuleType:
 
 
 MATRIX = load_matrix_driver()
+
+
+def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
+    protocol_lines = output.stdout.splitlines() if isinstance(output.stdout, str) else []
+    marker_lines = output.stderr.splitlines() if isinstance(output.stderr, str) else []
+    load_documents: list[dict[str, Any]] = []
+    for line in protocol_lines:
+        if not line.startswith("LOAD_RESULT_JSON "):
+            continue
+        try:
+            document = MATRIX.strict_json_loads(
+                line[len("LOAD_RESULT_JSON ") :]
+            )
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(document, dict):
+            load_documents.append(document)
+
+    categories: set[str] = set()
+    if output.returncode == 90:
+        categories.add("bootstrap_environment_failed")
+    elif output.returncode == 91:
+        categories.add("postcheck_failed")
+    elif output.returncode == 92:
+        categories.add("live_marker_supervision_failed")
+    elif output.returncode != 0:
+        categories.add("official_probe_failed")
+
+    failure_count = 0
+    if len(load_documents) == 1:
+        failures = load_documents[0].get("failures")
+        if isinstance(failures, list):
+            failure_count = len(failures)
+            for failure in failures:
+                normalized = str(failure).lower()
+                if "cleanup failed" in normalized:
+                    categories.add("payload_cleanup_failed")
+                if "loaded transport_grf" in normalized:
+                    categories.add("loaded_grf_failed")
+                if "serviceexception" in normalized or "service exception" in normalized:
+                    categories.add("ros_service_failed")
+                if any(
+                    marker in normalized
+                    for marker in (
+                        "replace_payload",
+                        "transport payload",
+                        "transport_object",
+                        "transport object",
+                        "spawn model",
+                        "delete model",
+                    )
+                ):
+                    categories.add("payload_replace_or_visibility_failed")
+                if "runtimeerror" in normalized or "runtime error" in normalized:
+                    categories.add("runtime_failure")
+                specific_failures = (
+                    ("timeout waiting for empty fleet", "fleet_delete_timeout"),
+                    ("old gazebo robot deletion", "gazebo_robot_delete_timeout"),
+                    ("robot roster", "fleet_spawn_roster_timeout"),
+                    ("gazebo robot models", "gazebo_robot_spawn_timeout"),
+                    ("burger cmd_vel subscribers", "robot_command_subscriber_timeout"),
+                    ("could not place", "model_placement_failed"),
+                    ("gazebo telemetry disappeared", "gazebo_telemetry_lost"),
+                    ("gazebo clock is unavailable", "gazebo_clock_unavailable"),
+                    ("could not delete payload", "payload_delete_failed"),
+                    ("could not spawn payload", "payload_spawn_failed"),
+                    ("payload deletion", "payload_delete_timeout"),
+                    ("payload spawn", "payload_spawn_timeout"),
+                    ("swarm task status", "swarm_status_timeout"),
+                    ("commands subscriber", "swarm_command_subscriber_timeout"),
+                    ("gazebo telemetry", "gazebo_telemetry_timeout"),
+                )
+                categories.update(
+                    category
+                    for marker, category in specific_failures
+                    if marker in normalized
+                )
+        if load_documents[0].get("passed") is not False:
+            categories.add("load_result_status_inconsistent")
+    elif not load_documents:
+        categories.add("official_probe_result_missing")
+    else:
+        categories.add("official_probe_result_ambiguous")
+
+    loaded_mass_count = 0
+    practice_mass_count = 0
+    for line in marker_lines:
+        if not line.startswith(PAYLOAD_MASS_PREFIX):
+            continue
+        try:
+            mass_document = MATRIX.strict_json_loads(
+                line[len(PAYLOAD_MASS_PREFIX) :]
+            )
+            mass = float(mass_document.get("payloadMassKg"))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if math.isclose(mass, LOADED_PAYLOAD_MASS_KG, abs_tol=1e-6):
+            loaded_mass_count += 1
+        elif math.isclose(mass, PRACTICE_PAYLOAD_MASS_KG, abs_tol=1e-6):
+            practice_mass_count += 1
+    marker_counts = {
+        "ready": sum(line.startswith(PAYLOAD_READY_PREFIX) for line in marker_lines),
+        "mass": sum(line.startswith(PAYLOAD_MASS_PREFIX) for line in marker_lines),
+        "loadedMass": loaded_mass_count,
+        "practiceMass": practice_mass_count,
+        "activeGrf": sum(
+            line.startswith(GRF_ACTIVE_PREFIX) for line in marker_lines
+        ),
+        "livePush": sum(line.startswith(PUSH_LIVE_PREFIX) for line in marker_lines),
+    }
+    return {
+        "returnCode": int(output.returncode),
+        "categories": sorted(categories),
+        "structuredLoadResultCount": len(load_documents),
+        "structuredFailureCount": failure_count,
+        "liveMarkerCounts": marker_counts,
+        "rawDiagnosticRetained": False,
+    }
 
 
 class BoundedDockerHost(MATRIX.DockerHost):
@@ -1500,6 +1686,10 @@ def validate_grf_n4(result: dict[str, Any], summary: dict[str, Any]) -> dict[str
             raise LoadedGateError("A Burger did not contribute for enough payload progress")
     if not roots or len(roots) + len(companions) != EXPECTED_ROBOT_COUNT:
         raise LoadedGateError("The GRF push did not assign all four Burgers")
+    if len(roots) != 2 or len(companions) != 2:
+        raise LoadedGateError(
+            "The loaded GRF push did not use exactly two payload roots and two companions"
+        )
 
     def reaches_payload(robot: str, visiting: set[str]) -> bool:
         if robot in roots:
@@ -1625,12 +1815,93 @@ def validate_protocol(protocol: LoadedProtocol) -> dict[str, Any]:
     return {"capacity": capacity, "grf": grf, "probeCleanup": cleanup}
 
 
+def monitor_supervision_shell() -> str:
+    """Return the bounded Bash lifecycle for the live-marker monitor job."""
+    return r'''
+cleanup_monitor_runtime() {
+  rm -f -- "$monitor_stop" || return 1
+  rmdir -- "$monitor_runtime" || return 1
+}
+
+monitor_is_running() {
+  [ "$monitor_running" = true ] || return 1
+  [ "$monitor_job" = '%1' ] || return 1
+  jobs -p "$monitor_job" >/dev/null 2>&1
+}
+
+reap_monitor() {
+  monitor_status=0
+  # wait(1) on the PID captured from $! keeps the child's real status even
+  # after Bash has retired the completed jobspec from `jobs` output.
+  wait "$monitor_wait_pid" 2>/dev/null || monitor_status=$?
+  monitor_running=false
+  cleanup_monitor_runtime || return 1
+  return "$monitor_status"
+}
+
+stop_monitor() {
+  if [ "$monitor_running" != true ]; then
+    cleanup_monitor_runtime
+    return
+  fi
+
+  if ! monitor_is_running; then
+    # A monitor that ended before we requested shutdown did not supervise the
+    # complete loaded probe, even when its own exit status happened to be zero.
+    reap_monitor || true
+    return 1
+  fi
+
+  : > "$monitor_stop" || return 1
+  for _attempt in $(seq 1 50); do
+    if ! monitor_is_running; then
+      reap_monitor
+      return
+    fi
+    sleep 0.1
+  done
+
+  # A Bash jobspec is resolved against this shell's child-job table.  It cannot
+  # turn into an unrelated process if the original numeric PID is later reused.
+  kill -TERM "$monitor_job" 2>/dev/null || true
+  for _attempt in $(seq 1 50); do
+    if ! monitor_is_running; then
+      reap_monitor
+      return
+    fi
+    sleep 0.1
+  done
+
+  kill -KILL "$monitor_job" 2>/dev/null || true
+  for _attempt in $(seq 1 50); do
+    if ! monitor_is_running; then
+      reap_monitor
+      return
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+interrupt_loaded_run() {
+  interrupt_status="$1"
+  if ! stop_monitor; then
+    interrupt_status=92
+  fi
+  trap - EXIT
+  exit "$interrupt_status"
+}
+'''.strip()
+
+
 def build_payload_command(docker: str, container_identifier: str) -> list[str]:
     monitor = r'''
 import json
 import math
+import os
 import re
 import signal
+import sys
 import threading
 import time
 
@@ -1641,6 +1912,7 @@ from std_msgs.msg import String
 
 running = True
 state_lock = threading.Lock()
+output_lock = threading.Lock()
 latest_mass = None
 latest_mass_at = None
 mass_sequence = 0
@@ -1649,6 +1921,7 @@ push_sequence = 0
 roster = []
 robot_models = []
 expected_robots = ['tb3_0', 'tb3_1', 'tb3_2', 'tb3_3']
+stop_path = sys.argv[1]
 
 
 def request_stop(_number, _frame):
@@ -1657,9 +1930,19 @@ def request_stop(_number, _frame):
 
 
 def emit(prefix, document):
-    print(prefix + json.dumps(
-        document, sort_keys=True, separators=(',', ':'), allow_nan=False
-    ), flush=True)
+    encoded = (
+        prefix + json.dumps(
+            document, sort_keys=True, separators=(',', ':'), allow_nan=False
+        ) + '\n'
+    ).encode('utf-8')
+    if len(encoded) > 4096:
+        raise RuntimeError('live marker exceeds the atomic pipe-write limit')
+    # This process owns the dedicated live-marker pipe.  One sub-PIPE_BUF write
+    # also keeps callbacks indivisible if two ROS threads emit together.
+    with output_lock:
+        written = os.write(1, encoded)
+    if written != len(encoded):
+        raise RuntimeError('live marker write was incomplete')
 
 
 def roster_callback(message):
@@ -1777,7 +2060,7 @@ rospy.Subscriber('/fleet/robot_list', String, roster_callback, queue_size=5)
 rospy.Subscriber('/gazebo/model_states', ModelStates, models_callback, queue_size=5)
 rospy.wait_for_service('/gazebo/get_link_properties', timeout=20.0)
 properties = rospy.ServiceProxy('/gazebo/get_link_properties', GetLinkProperties)
-while running and not rospy.is_shutdown():
+while running and not rospy.is_shutdown() and not os.path.exists(stop_path):
     try:
         response = properties('transport_object::link')
         if response.success:
@@ -1800,8 +2083,12 @@ while running and not rospy.is_shutdown():
 '''.strip()
     load_shim = r'''
 import importlib.util
+import inspect
 import json
+import math
+import os
 import sys
+import xml.etree.ElementTree as ET
 
 module_path = sys.argv[1]
 official_arguments = sys.argv[2:]
@@ -1812,19 +2099,65 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 original_replace_payload = module.LoadProbe.replace_payload
-replacement_count = 0
+original_reset_fleet = module.LoadProbe.reset_fleet
+deployed_run_trial = getattr(module.LoadProbe, 'run_trial', None)
+run_trial_refreshes_payload = (
+    deployed_run_trial is not None
+    and 'payload_xml' in inspect.signature(deployed_run_trial).parameters
+)
+ready_emitted = False
+loaded_payload_xml = None
+marker_fd_text = os.environ.get('ROBOTSWARM_LIVE_MARKER_FD', '1')
+try:
+    marker_fd = int(marker_fd_text)
+except ValueError:
+    raise RuntimeError('the live-marker file descriptor is invalid')
+if marker_fd not in (1, 3):
+    raise RuntimeError('the live-marker file descriptor is not approved')
+if marker_fd != 1:
+    os.set_inheritable(marker_fd, False)
+
+
+def emit_ready_marker(document):
+    encoded = (
+        'LOADED_PAYLOAD_READY_JSON ' + json.dumps(
+            document, sort_keys=True, separators=(',', ':'), allow_nan=False
+        ) + '\n'
+    ).encode('utf-8')
+    if len(encoded) > 4096:
+        raise RuntimeError('ready marker exceeds the atomic pipe-write limit')
+    written = os.write(marker_fd, encoded)
+    if written != len(encoded):
+        raise RuntimeError('ready marker write was incomplete')
+
+
+def is_loaded_payload(model_xml):
+    try:
+        root = ET.fromstring(model_xml)
+        masses = [float(node.text) for node in root.findall('.//inertial/mass')]
+    except (ET.ParseError, TypeError, ValueError):
+        return False
+    return any(math.isclose(mass, 0.75, abs_tol=1e-9) for mass in masses)
 
 
 def replace_payload_with_ready_marker(probe, model_xml):
-    global replacement_count
+    global loaded_payload_xml, ready_emitted
     result = original_replace_payload(probe, model_xml)
-    replacement_count += 1
-    if replacement_count == 1:
-        print('LOADED_PAYLOAD_READY_JSON ' + json.dumps({
+    if is_loaded_payload(model_xml) and not ready_emitted:
+        loaded_payload_xml = model_xml
+        ready_emitted = True
+        emit_ready_marker({
             'schemaVersion': 1,
             'profile': 'transport_crate_loaded',
             'payloadMassKg': 0.75,
-        }, sort_keys=True, separators=(',', ':'), allow_nan=False), flush=True)
+        })
+    return result
+
+
+def reset_fleet_with_loaded_payload(probe, count):
+    result = original_reset_fleet(probe, count)
+    if loaded_payload_xml is not None:
+        original_replace_payload(probe, loaded_payload_xml)
     return result
 
 
@@ -1856,6 +2189,8 @@ def loaded_grf_command_with_pinned_thresholds(args, task_id):
 
 
 module.LoadProbe.replace_payload = replace_payload_with_ready_marker
+if not run_trial_refreshes_payload:
+    module.LoadProbe.reset_fleet = reset_fleet_with_loaded_payload
 module.loaded_grf_command = loaded_grf_command_with_pinned_thresholds
 sys.argv = [module_path, *official_arguments]
 raise SystemExit(module.main())
@@ -1905,34 +2240,38 @@ print('POST_LOAD_CLEANUP_JSON ' + json.dumps(
 ), flush=True)
 raise SystemExit(0 if report['complete'] else 1)
 '''.strip()
+    supervision = monitor_supervision_shell()
     bootstrap = f'''
+# Keep the official probe protocol on stdout and reserve a separate, bounded
+# Docker stream for live markers.  All ordinary stderr is intentionally dropped;
+# persisted failures are classified from structured output instead of raw logs.
+exec 4>&2
+exec 2>/dev/null
 source /opt/ros/noetic/setup.bash || exit 90
 source /catkin_ws/devel/setup.bash || exit 90
-monitor_pid=''
-stop_monitor() {{
-  if [ -z "$monitor_pid" ]; then
-    return
-  fi
-  kill -TERM "$monitor_pid" 2>/dev/null || true
-  for _attempt in $(seq 1 50); do
-    if ! kill -0 "$monitor_pid" 2>/dev/null; then
-      wait "$monitor_pid" 2>/dev/null || true
-      monitor_pid=''
-      return
-    fi
-    sleep 0.1
-  done
-  kill -KILL "$monitor_pid" 2>/dev/null || true
-  wait "$monitor_pid" 2>/dev/null || true
-  monitor_pid=''
-}}
-trap 'stop_monitor' EXIT INT TERM
-python3 -u - <<'PY_MONITOR' &
+# The monitor must be the only Bash background job, so %1 remains its stable
+# jobspec for the complete lifecycle and cannot fall through to another child.
+if [ -n "$(jobs -p)" ]; then
+  exit 92
+fi
+umask 077
+monitor_runtime=$(mktemp -d /tmp/robotswarm-loaded-monitor.XXXXXX) || exit 92
+monitor_stop="$monitor_runtime/stop"
+readonly monitor_job='%1'
+monitor_wait_pid=
+monitor_running=false
+{supervision}
+trap 'stop_monitor || true' EXIT
+trap 'interrupt_loaded_run 130' INT
+trap 'interrupt_loaded_run 143' TERM
+python3 -u - "$monitor_stop" 1>&4 4>&- <<'PY_MONITOR' &
 {monitor}
 PY_MONITOR
-monitor_pid=$!
+monitor_wait_pid=$!
+readonly monitor_wait_pid
+monitor_running=true
 load_rc=0
-python3 - {DEPLOYED_LOAD_PROBE_PATH} \
+ROBOTSWARM_LIVE_MARKER_FD=3 python3 - {DEPLOYED_LOAD_PROBE_PATH} \
   --fleet-count 4 \
   --command-speed {CAPACITY_COMMAND_SPEED_MPS:.2f} \
   --push-duration {CAPACITY_PUSH_DURATION_SIM_S:.1f} \
@@ -1943,11 +2282,15 @@ python3 - {DEPLOYED_LOAD_PROBE_PATH} \
   --minimum-gain {CAPACITY_MINIMUM_GAIN:.1f} \
   --min-rtf 2.90 \
   --external-viewer-verified \
-  --verify-grf-n4 <<'PY_LOAD' || load_rc=$?
+  --verify-grf-n4 3>&4 4>&- <<'PY_LOAD' || load_rc=$?
 {load_shim}
 PY_LOAD
-stop_monitor
+if ! stop_monitor; then
+  trap - EXIT INT TERM
+  exit 92
+fi
 trap - EXIT INT TERM
+exec 4>&-
 post_rc=0
 python3 - <<'PY' || post_rc=$?
 {postcheck}
@@ -1968,30 +2311,22 @@ exit "$load_rc"
 
 
 def build_preflight_command(
-    python: str,
+    runtime: ViewerRuntime,
     script: Path,
-    gzclient: Path,
     plugin: Path,
     report: Path,
 ) -> list[str]:
-    return [
-        python,
-        str(script),
-        "--gzclient",
-        str(gzclient),
-        "--plugin",
-        str(plugin),
-        "--min-render-fps",
-        f"{MINIMUM_RENDER_FPS:.0f}",
-        "--min-real-time-factor",
-        f"{MINIMUM_REAL_TIME_FACTOR:.2f}",
-        "--warmup-seconds",
-        f"{PREFLIGHT_WARMUP_SECONDS:.1f}",
-        "--sample-seconds",
-        f"{PREFLIGHT_SAMPLE_SECONDS:.1f}",
-        "--report",
-        str(report),
-    ]
+    probe_runtime = MATRIX.ActiveProbeRuntime(
+        runtime.command_prefix,
+        runtime.environment,
+        runtime.gzclient,
+    )
+    return MATRIX.build_active_probe_command(
+        probe_runtime,
+        script,
+        plugin,
+        report,
+    )
 
 
 def _master_endpoint(value: str, expected_port: int) -> ipaddress.IPv4Address:
@@ -2043,25 +2378,6 @@ def validate_master_binding(
     }
 
 
-def parse_environment(raw: bytes) -> dict[str, str]:
-    if not raw or len(raw) > 64 * 1024:
-        raise LoadedGateError("The viewer process environment is unavailable or too large")
-    environment: dict[str, str] = {}
-    for entry in raw.rstrip(b"\0").split(b"\0"):
-        if b"=" not in entry:
-            continue
-        key, value = entry.split(b"=", 1)
-        try:
-            name = key.decode("ascii")
-            text = value.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise LoadedGateError("The viewer process environment is malformed") from exc
-        if name in environment:
-            raise LoadedGateError("The viewer process environment has duplicate keys")
-        environment[name] = text
-    return environment
-
-
 def _container_environment(document: dict[str, Any]) -> dict[str, str]:
     values = (document.get("Config") or {}).get("Env")
     if not isinstance(values, list):
@@ -2106,97 +2422,34 @@ def regular_private_file(path: Path, *, maximum_bytes: int | None = None) -> os.
 
 def viewer_runtime(
     lease_directory: Path,
+    session_id: uuid.UUID,
     docker: Any,
     container: Any,
 ) -> ViewerRuntime:
     publisher_render = MATRIX.load_viewer_startup_evidence(
         lease_directory / "render-report.json"
     )
-    process = publisher_render.document.get("process")
-    if not isinstance(process, dict):
-        raise LoadedGateError("The viewer render report has no process identity")
-    pid = process.get("pid")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
-        raise LoadedGateError("The viewer render report has an invalid process identity")
-    proc = Path("/proc") / str(pid)
-    try:
-        if proc.stat().st_uid != os.getuid():
-            raise LoadedGateError("The viewer gzclient belongs to another user")
-        executable = Path(os.readlink(proc / "exe"))
-        cmdline = (proc / "cmdline").read_bytes()
-        raw_environment = (proc / "environ").read_bytes()
-    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError) as exc:
-        raise LoadedGateError("The active viewer gzclient could not be inspected") from exc
-    if (
-        GZCLIENT_PATTERN.fullmatch(executable.name) is None
-        or b"/viewer/plugin.so" not in cmdline
-    ):
-        raise LoadedGateError("The render report is not bound to the viewer gzclient")
-
-    active_environment = parse_environment(raw_environment)
-    display = str((publisher_render.document.get("display") or {}).get("x11") or "")
-    if not display or active_environment.get("DISPLAY") != display:
-        raise LoadedGateError("The viewer display does not match its render report")
-    xauthority = lease_directory / "Xauthority"
-    regular_private_file(xauthority, maximum_bytes=1024 * 1024)
+    probe_runtime = MATRIX.active_probe_runtime(
+        lease_directory,
+        session_id,
+        container,
+        publisher_render,
+    )
+    if probe_runtime.primary_environment is None:
+        raise LoadedGateError("The primary viewer process was not correlated")
 
     container_document = docker._inspect_one("container", container.identifier)
     binding = validate_master_binding(
         _container_address(container_document),
-        active_environment,
+        probe_runtime.primary_environment,
         _container_environment(container_document),
     )
     binding["viewerLeaseBound"] = True
     binding["privateDisplayBound"] = True
-
-    allowed = {
-        "CMAKE_PREFIX_PATH",
-        "GAZEBO_IP",
-        "GAZEBO_MODEL_DATABASE_URI",
-        "GAZEBO_MODEL_PATH",
-        "GAZEBO_PLUGIN_PATH",
-        "GAZEBO_RESOURCE_PATH",
-        "GZ_IP",
-        "LD_LIBRARY_PATH",
-        "MESA_D3D12_DEFAULT_ADAPTER_NAME",
-        "QT_X11_NO_MITSHM",
-        "XDG_RUNTIME_DIR",
-    }
-    environment = {
-        key: value
-        for key, value in active_environment.items()
-        if key in allowed and value
-    }
-    model_paths = environment.get("GAZEBO_MODEL_PATH")
-    if model_paths:
-        host_model_paths = []
-        for value in model_paths.split(os.pathsep):
-            if value.startswith("/viewer/"):
-                value = str(proc / "root" / value.lstrip("/"))
-            if value and not Path(value).is_dir():
-                raise LoadedGateError("A viewer Gazebo model path is unavailable")
-            host_model_paths.append(value)
-        environment["GAZEBO_MODEL_PATH"] = os.pathsep.join(host_model_paths)
-    environment.update(
-        {
-            "DISPLAY": display,
-            "XAUTHORITY": str(xauthority),
-            "HOME": str(lease_directory / "home"),
-            "ROS_HOME": str(lease_directory / "home" / ".ros-loaded-preflight"),
-            "ROS_MASTER_URI": active_environment["ROS_MASTER_URI"],
-            "GAZEBO_MASTER_URI": active_environment["GAZEBO_MASTER_URI"],
-            "GAZEBO_MODEL_DATABASE_URI": "",
-            "PATH": os.environ.get(
-                "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            ),
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "PYTHONUNBUFFERED": "1",
-        }
-    )
     return ViewerRuntime(
-        environment=environment,
-        gzclient=executable,
+        command_prefix=probe_runtime.command_prefix,
+        environment=probe_runtime.environment,
+        gzclient=probe_runtime.gzclient,
         publisher_render=publisher_render,
         binding=binding,
     )
@@ -2258,6 +2511,8 @@ def start_payload_command(
             GRF_ACTIVE_PREFIX,
             PUSH_LIVE_PREFIX,
         ),
+        line_streams=("stderr",),
+        strict_line_channel=True,
     ).start()
 
 
@@ -2299,111 +2554,6 @@ def wait_for_preflight_under_load(
         raise
 
 
-def preflight_process_absent(document: dict[str, Any], plugin: Path) -> bool:
-    process = document.get("process")
-    if not isinstance(process, dict):
-        return False
-    pid = process.get("pid")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
-        return False
-    proc = Path("/proc") / str(pid)
-    if not proc.exists():
-        return True
-    try:
-        cmdline = (proc / "cmdline").read_bytes().split(b"\0")
-    except (OSError, PermissionError):
-        return False
-    # A reused PID is not our process.  A still-running command carrying the
-    # unique private plugin path is owned by this preflight and is not clean.
-    return str(plugin).encode("utf-8") not in cmdline
-
-
-def _read_owned_preflight_process(
-    process_path: Path, marker: bytes
-) -> OwnedPreflightProcess | None:
-    try:
-        pid = int(process_path.name)
-        if pid <= 1 or pid == os.getpid():
-            return None
-        if process_path.stat().st_uid != os.getuid():
-            return None
-        raw = (process_path / "stat").read_text(encoding="ascii")
-        fields = raw[raw.rfind(")") + 2 :].split()
-        state = fields[0]
-        process_group = int(fields[2])
-        start_tick = int(fields[19])
-        arguments = (process_path / "cmdline").read_bytes().split(b"\0")
-    except (
-        FileNotFoundError,
-        IndexError,
-        PermissionError,
-        ProcessLookupError,
-        OSError,
-        ValueError,
-    ):
-        return None
-    if (
-        state == "Z"
-        or process_group <= 1
-        or process_group == os.getpgrp()
-        or marker not in arguments
-    ):
-        return None
-    return OwnedPreflightProcess(pid, start_tick, process_group)
-
-
-def _owned_preflight_processes(plugin: Path) -> list[OwnedPreflightProcess]:
-    marker = str(plugin).encode("utf-8")
-    matches: list[OwnedPreflightProcess] = []
-    for process_path in Path("/proc").glob("[0-9]*"):
-        identity = _read_owned_preflight_process(process_path, marker)
-        if identity is not None:
-            matches.append(identity)
-    return matches
-
-
-def _signal_owned_preflight_process(
-    process: OwnedPreflightProcess, plugin: Path, number: int
-) -> bool:
-    if (
-        process.pid <= 1
-        or process.pid == os.getpid()
-        or process.process_group <= 1
-        or process.process_group == os.getpgrp()
-    ):
-        return False
-    current = _read_owned_preflight_process(
-        Path("/proc") / str(process.pid), str(plugin).encode("utf-8")
-    )
-    if current != process:
-        return False
-    try:
-        os.kill(process.pid, number)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def stop_owned_preflight_processes(plugin: Path, timeout: float = 8.0) -> bool:
-    """Stop only processes carrying this run's unique private plugin path."""
-    owned = _owned_preflight_processes(plugin)
-    for process in owned:
-        _signal_owned_preflight_process(process, plugin, signal.SIGTERM)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _owned_preflight_processes(plugin):
-            return True
-        time.sleep(0.1)
-    for process in _owned_preflight_processes(plugin):
-        _signal_owned_preflight_process(process, plugin, signal.SIGKILL)
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline:
-        if not _owned_preflight_processes(plugin):
-            return True
-        time.sleep(0.1)
-    return not _owned_preflight_processes(plugin)
-
-
 def remove_private_runtime_files(paths: Iterable[Path]) -> dict[str, bool]:
     result: dict[str, bool] = {}
     for path in paths:
@@ -2441,7 +2591,10 @@ def json_artifact(
     return hashlib.sha256(payload).hexdigest(), len(payload)
 
 
-def validate_preflight_report(path: Path) -> tuple[Any, bytes]:
+def validate_preflight_report(
+    path: Path,
+    attestation: Any,
+) -> tuple[Any, bytes]:
     regular_private_file(path, maximum_bytes=MATRIX.MAXIMUM_RENDER_REPORT_BYTES)
     raw = MATRIX.read_owned_bounded_file(path, MATRIX.MAXIMUM_RENDER_REPORT_BYTES)
     try:
@@ -2451,6 +2604,15 @@ def validate_preflight_report(path: Path) -> tuple[Any, bytes]:
     if not isinstance(document, dict):
         raise LoadedGateError("The official preflight report is not a JSON object")
     try:
+        process = document.get("process") or {}
+        if (
+            hashlib.sha256(raw).hexdigest() != attestation.sha256
+            or process.get("pid") != attestation.process_id
+            or process.get("start_ticks") != attestation.process_start_ticks
+        ):
+            raise LoadedGateError(
+                "The official preflight report is not bound to its live process"
+            )
         evidence = MATRIX.validate_viewer_startup_report(document, raw)
         MATRIX.assert_report_safe(document)
     except Exception as exc:
@@ -3066,6 +3228,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be greater than zero")
+    minimum_preflight_timeout = (
+        MATRIX.ACTIVE_PROBE_TIMEOUT_SECONDS
+        + LOADED_PREFLIGHT_HLS_SECONDS
+        + PREFLIGHT_SHUTDOWN_MARGIN_SECONDS
+    )
+    if args.preflight_timeout < minimum_preflight_timeout:
+        parser.error(
+            "--preflight-timeout must cover the active probe, loaded HLS "
+            f"sampling and shutdown margin (at least {minimum_preflight_timeout:.1f} "
+            "seconds)"
+        )
     return args
 
 
@@ -3127,6 +3300,7 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             "taskRosterClean": False,
             "payloadProcessAbsent": False,
             "preflightFilesRemoved": False,
+            "preflightWorkspaceReleased": False,
             "browserClosed": False,
             "profileRemoved": False,
             "complete": False,
@@ -3154,9 +3328,11 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
     docker = BoundedDockerHost(args.docker, stop_event)
     session_id: uuid.UUID | None = None
     lease_directory: Path | None = None
+    preflight_workspace: Path | None = None
     preflight_script: Path | None = None
     preflight_plugin: Path | None = None
     preflight_report: Path | None = None
+    preflight_token: str | None = None
     preflight_child: BoundedChild | None = None
     payload_child: BoundedChild | None = None
     before_screenshot: dict[str, Any] | None = None
@@ -3170,7 +3346,11 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
         ui = visible.RobotSwarmUi(chrome, expected_origin, stop_event)
         ui.navigate(args.url)
         ui.login(credentials["email"], credentials["password"])
-        report["browser"] = {"visible": True, "product": chrome.product}
+        report["browser"] = {
+            "visible": True,
+            "product": chrome.product,
+            "mediaCapabilities": ui.require_hls_media_capabilities(),
+        }
         if ui._occupying_sessions():
             raise LoadedGateError("Account A already owns an active session")
 
@@ -3183,20 +3363,33 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
         )
         report["container"] = container_evidence
 
-        ui.open_viewer(args.viewer_timeout)
-        initial_viewer = ui.require_interactive_hls()
-        report["viewer"] = {
-            "transport": "HLS",
-            "interactive": True,
-            "decodedFpsBefore": MATRIX.decoded_hls_fps(initial_viewer),
-        }
+        viewer_requested_at = time.monotonic()
+        ui.request_viewer()
         lease_directory = MATRIX.active_viewer_lease_directory(
             args.viewer_runtime_dir,
             session_id,
             timeout=args.viewer_timeout,
             stop_event=stop_event,
         )
-        runtime = viewer_runtime(lease_directory, docker, container)
+        remaining_viewer_timeout = max(
+            0.001,
+            args.viewer_timeout - (time.monotonic() - viewer_requested_at),
+        )
+        try:
+            ui.wait_viewer_frame(remaining_viewer_timeout)
+        except Exception:
+            with contextlib.suppress(Exception):
+                report["viewerStartupFailure"] = ui.viewer_startup_state()
+            raise
+        initial_viewer = ui.require_interactive_hls()
+        report["viewer"] = {
+            "transport": "HLS",
+            "interactive": True,
+            "decodedFpsBefore": MATRIX.decoded_hls_fps(initial_viewer),
+        }
+        runtime = viewer_runtime(lease_directory, session_id, docker, container)
+        preflight_token = uuid.uuid4().hex
+        runtime.environment[MATRIX.ACTIVE_PROBE_TOKEN_ENV] = preflight_token
         report["runtimeBinding"] = runtime.binding
         report["viewer"]["publisherStartupGazebo"] = {
             "averageFps": runtime.publisher_render.average_fps,
@@ -3209,8 +3402,11 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             credentials["password"],
         )
 
-        preflight_script = lease_directory / "loaded-gui-preflight.py"
-        preflight_plugin = lease_directory / "loaded-gui-probe.so"
+        preflight_workspace = MATRIX.create_active_probe_workspace()
+        preflight_script = (
+            preflight_workspace / "matrix-active-gui-preflight.py"
+        )
+        preflight_plugin = preflight_workspace / "matrix-active-gui-probe.so"
         preflight_report = lease_directory / "loaded-gui-report.json"
         copy_deployed_asset(
             docker,
@@ -3230,9 +3426,8 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             raise LoadedGateError("The private preflight report path is already occupied")
 
         preflight_command = build_preflight_command(
-            sys.executable,
+            runtime,
             preflight_script,
-            runtime.gzclient,
             preflight_plugin,
             preflight_report,
         )
@@ -3249,15 +3444,21 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
         if payload_child.started_at is None:
             raise LoadedGateError("The loaded probe has no monotonic start time")
         payload_deadline = payload_child.started_at + args.probe_timeout
-        ready_marker, _barrier_mass = wait_for_loaded_barrier(
-            payload_child,
-            live_markers,
-            stop_event,
-            timeout=min(
-                LOADED_READY_TIMEOUT_SECONDS,
-                max(0.001, payload_deadline - time.monotonic()),
-            ),
-        )
+        try:
+            ready_marker, _barrier_mass = wait_for_loaded_barrier(
+                payload_child,
+                live_markers,
+                stop_event,
+                timeout=min(
+                    LOADED_READY_TIMEOUT_SECONDS,
+                    max(0.001, payload_deadline - time.monotonic()),
+                ),
+            )
+        except LoadedProbeEnded as exc:
+            report["loadedProbeFailure"] = classify_loaded_probe_failure(
+                exc.output
+            )
+            raise
         active_anchor_timestamp = time.monotonic()
         active_anchor_sequence = max(
             (
@@ -3312,7 +3513,14 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             stop_event=stop_event,
         )
         if preflight_output.returncode != 0:
+            report["preflightFailure"] = MATRIX.classify_active_probe_failure(
+                preflight_output
+            )
             raise LoadedGateError("The official visible Gazebo preflight failed")
+        if MATRIX.active_probe_processes(preflight_token):
+            raise LoadedCleanupError(
+                "The visible Gazebo preflight sandbox left a live process"
+            )
         if (
             preflight_child.started_at is None
             or preflight_child.ended_at is None
@@ -3346,16 +3554,18 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
                 post_preflight_mass.document, "post-preflight payload mass"
             ),
         )
+        preflight_attestation = MATRIX.active_probe_attestation(preflight_output)
         official_render, official_render_raw = validate_preflight_report(
-            preflight_report
+            preflight_report,
+            preflight_attestation,
         )
         if (
             (official_render.document.get("display") or {}).get("x11")
             != runtime.environment["DISPLAY"]
         ):
             raise LoadedGateError("The official preflight used a different private display")
-        if not preflight_process_absent(official_render.document, preflight_plugin):
-            raise LoadedCleanupError("The temporary preflight gzclient is still running")
+        if MATRIX.active_probe_processes(preflight_token):
+            raise LoadedCleanupError("The temporary preflight sandbox is still running")
 
         during_screenshot, push_capture = capture_during_loaded_push(
             ui=ui,
@@ -3417,8 +3627,17 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             push_markers=live_markers.push,
         )
 
-        final_viewer = ui.require_interactive_hls()
-        report["viewer"]["decodedFpsAfter"] = MATRIX.decoded_hls_fps(final_viewer)
+        # The production lease intentionally lasts five minutes.  A loaded run can
+        # outlive it after we have already sampled the stream on both sides of the
+        # PUSH screenshot, so do not turn the expected lease expiry into a false
+        # algorithm failure.  Keep the old summary field for report readers, but
+        # tie it to the last sample that was actually taken under load.
+        report["viewer"]["decodedFpsAfter"] = push_capture.decoded_fps_after
+        report["viewer"]["decodedFpsAfterLoadedPushCapture"] = (
+            push_capture.decoded_fps_after
+        )
+        with contextlib.suppress(Exception):
+            report["viewer"]["postTaskLeaseState"] = ui.viewer_state()
         report["viewer"]["loadedPreflightVideo"] = loaded_hls_video
         report["viewer"]["decodedFpsDuringLoadedPush"] = {
             "beforeCapture": push_capture.decoded_fps_before,
@@ -3460,7 +3679,8 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
         report["artifacts"] = {}
         for name, document in artifact_documents.items():
             digest, size = json_artifact(evidence_dir / name, document, secrets)
-            key = name.removesuffix(".json").replace("-", " ").title().replace(" ", "")
+            stem = name[:-5] if name.endswith(".json") else name
+            key = stem.replace("-", " ").title().replace(" ", "")
             hashes[f"{key}Sha256"] = digest
             report["artifacts"][name] = {
                 "file": name,
@@ -3519,6 +3739,10 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
     except Exception as exc:
         report["status"] = "failed"
         failure = clean_failure(exc, secrets)
+        if isinstance(exc, MalformedLiveMarker):
+            report["liveMarkerFailure"] = exc.diagnostic
+        if isinstance(exc, LoadedProbeEnded):
+            report["loadedProbeFailure"] = classify_loaded_probe_failure(exc.output)
     finally:
         bounded_children_stopped = True
         for child in (preflight_child, payload_child):
@@ -3537,8 +3761,8 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
                 bounded_children_stopped = False
         report["cleanup"]["boundedChildProcessesStopped"] = bounded_children_stopped
         preflight_process_clean = (
-            preflight_plugin is None
-            or stop_owned_preflight_processes(preflight_plugin)
+            preflight_token is None
+            or MATRIX.stop_active_probe_processes(preflight_token)
         )
         report["cleanup"]["preflightProcessAbsent"] = preflight_process_clean
         runtime_paths = [
@@ -3549,6 +3773,10 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
         runtime_cleanup = remove_private_runtime_files(runtime_paths)
         report["cleanup"]["preflightFilesRemoved"] = all(runtime_cleanup.values())
         report["cleanup"]["preflightFileCount"] = len(runtime_cleanup)
+        report["cleanup"]["preflightWorkspaceReleased"] = (
+            preflight_workspace is None
+            or MATRIX.remove_active_probe_workspace(preflight_workspace)
+        )
 
         if ui is None:
             for key in (
@@ -3607,6 +3835,10 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             report["cleanup"].get("containerAbsent")
         )
 
+        if ui is not None:
+            with contextlib.suppress(Exception):
+                report.setdefault("browser", {})["clickAudit"] = ui.click_evidence()
+
         if chrome.process is None:
             report["cleanup"]["browserClosed"] = True
             report["cleanup"]["profileRemoved"] = not profile.exists()
@@ -3630,6 +3862,7 @@ def run_loaded_gate(args: argparse.Namespace) -> int:
             "boundedChildProcessesStopped",
             "preflightProcessAbsent",
             "preflightFilesRemoved",
+            "preflightWorkspaceReleased",
             "viewerClosed",
             "sessionStopped",
             "workspaceReleased",

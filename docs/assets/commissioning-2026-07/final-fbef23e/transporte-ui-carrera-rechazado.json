@@ -1,0 +1,123 @@
+{
+  "account": "A",
+  "browser": {
+    "gpuDisabled": false,
+    "headless": false,
+    "product": "Chrome/150.0.7871.129",
+    "visible": true
+  },
+  "captures": [],
+  "cleanup": {
+    "browserExited": true,
+    "cdpPortReleased": true,
+    "complete": true,
+    "containerAbsent": true,
+    "networkAbsent": true,
+    "profileRemoved": true,
+    "rosObserverExited": true,
+    "sessionReleased": true,
+    "viewerCloseCommandTerminal": true,
+    "viewerClosed": true,
+    "viewerLeaseInactive": true,
+    "viewerLeaseRevoked": true,
+    "viewerPublisherAbsent": true,
+    "viewerRuntimeAbsent": true,
+    "workspaceReleased": true
+  },
+  "completedAt": "2026-07-21T22:58:14.792506Z",
+  "container": {
+    "exclusiveNetworkAttachment": true,
+    "imageRevisionMatches": true,
+    "immutableImage": true,
+    "internalNetwork": true,
+    "managedContainer": true,
+    "privateEndpoint": true,
+    "running": true,
+    "workerLabelMatchesPrivateNetwork": true
+  },
+  "deploymentCommit": "fbef23eaae2b1b1d5be51ad3fa03e0298239289a",
+  "failure": "Timed out waiting for persisted task state Accepted",
+  "interrupted": false,
+  "productionExecution": true,
+  "scenario": {
+    "freshSessionRequired": true,
+    "robotCount": 4,
+    "target": {
+      "planner": "grf",
+      "x": -3.0,
+      "y": -4.0
+    },
+    "taskType": "CollaborativeTransport"
+  },
+  "schemaVersion": 1,
+  "session": {
+    "activeRobots": 4,
+    "authoritativeRoster": {
+      "distinctRuntimeIds": 4,
+      "endpointRead": true,
+      "exactCount": 4
+    },
+    "fresh": true,
+    "ready": true,
+    "requestedRobots": 4
+  },
+  "start": {
+    "barrier": {
+      "centerHitTest": true,
+      "enabled": true,
+      "overlayFree": true,
+      "validationClear": true
+    },
+    "clickToRequestCausal": true,
+    "commandType": "StartTask",
+    "delayedRereadStable": true,
+    "fields": [
+      {
+        "constraintsVerified": true,
+        "label": "Destino X (m)",
+        "nativeNumberInput": true,
+        "value": -3.0
+      },
+      {
+        "constraintsVerified": true,
+        "label": "Destino Y (m)",
+        "nativeNumberInput": true,
+        "value": -4.0
+      }
+    ],
+    "gesture": {
+      "contextReplaced": false,
+      "description": "button Iniciar tarea",
+      "fallbackUsed": false,
+      "received": true,
+      "trusted": true
+    },
+    "httpAttempts": 1,
+    "idempotency": {
+      "fingerprint": "12e9301389ae3d87",
+      "rawKeyExported": false,
+      "sameKeyAcrossRetries": true
+    },
+    "initialCommandState": "Pending",
+    "logicalStartCommands": 1,
+    "logicalTaskRuns": 1,
+    "physicalClicks": 1,
+    "retryableSerializationConflicts": 0,
+    "selectedCard": "CollaborativeTransport",
+    "targetAccepted": true,
+    "taskCommandCorrelation": true,
+    "trustedPrimaryClick": true
+  },
+  "startedAt": "2026-07-21T22:56:07.354037Z",
+  "success": false,
+  "viewer": {
+    "activeBeforeTask": true,
+    "decodedFpsBeforeTask": 31.0,
+    "interactive": true,
+    "live": true,
+    "privateLeasePreserved": true,
+    "publisherCommandCompleted": true,
+    "sessionBoundRuntime": true,
+    "transport": "HLS"
+  }
+}
