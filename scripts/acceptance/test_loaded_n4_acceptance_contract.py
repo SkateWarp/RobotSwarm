@@ -1528,6 +1528,40 @@ while not marker.exists() and time.monotonic() < deadline:
         self.assertEqual(1, len(retained_hashes))
         self.assertNotIn("private value", json.dumps(classified))
 
+    def test_stable_payload_placement_timeout_has_an_exact_safe_category(self):
+        message = "RuntimeError: timeout waiting for stable payload placement"
+        output = DRIVER.MATRIX.ProcessOutput(
+            1,
+            "LOAD_RESULT_JSON " + json.dumps({
+                "passed": False,
+                "failures": [message],
+            }) + "\n",
+            "",
+        )
+
+        classified = DRIVER.classify_loaded_probe_failure(output)
+
+        self.assertIn("model_placement_failed", classified["categories"])
+        self.assertEqual(
+            ["model_placement_failed", "runtime_failure"],
+            classified["structuredFailureDiagnostics"][0]["categories"],
+        )
+        self.assertFalse(classified["rawDiagnosticRetained"])
+        self.assertNotIn("stable payload placement", json.dumps(classified))
+
+        changed = DRIVER.classify_loaded_probe_failure(
+            DRIVER.MATRIX.ProcessOutput(
+                1,
+                "LOAD_RESULT_JSON " + json.dumps({
+                    "passed": False,
+                    "failures": [message + ": private detail"],
+                }) + "\n",
+                "",
+            )
+        )
+        self.assertNotIn("model_placement_failed", changed["categories"])
+        self.assertNotIn("private detail", json.dumps(changed))
+
     def test_bounded_child_kills_process_group_immediately_on_overflow(self):
         source = """
 import os

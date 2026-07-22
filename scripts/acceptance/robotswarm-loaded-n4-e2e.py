@@ -786,6 +786,14 @@ MATRIX = load_matrix_driver()
 def _structured_failure_categories(failure: Any) -> list[str]:
     normalized = str(failure).lower()
     categories: set[str] = set()
+    exact_failures = {
+        "runtimeerror: timeout waiting for stable payload placement": (
+            "model_placement_failed"
+        ),
+    }
+    exact_category = exact_failures.get(normalized)
+    if exact_category is not None:
+        categories.add(exact_category)
     if "cleanup failed" in normalized:
         categories.add("payload_cleanup_failed")
     if "loaded transport_grf" in normalized:
