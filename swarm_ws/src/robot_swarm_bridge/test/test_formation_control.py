@@ -264,15 +264,23 @@ def make_controller():
     controller.spacing = 1.0
     controller.centroid_speed = 0.1
     controller.path_radius = 2.5
+    controller.minimum_safe_path_radius = 0.25
+    controller.orbit_sample_step = 0.04
     controller.centroid_path = formation.CentroidPath.CIRCULAR
     controller.centroid_waypoints = []
     controller.centroid_x = 0.0
     controller.centroid_y = 0.0
     controller.centroid_heading = 0.0
+    controller.formation_heading = 0.0
     controller.centroid_time = 99.0
     controller.current_waypoint_idx = 3
     controller.path_center_x = 0.0
     controller.path_center_y = 0.0
+    controller.effective_path_radius = controller.path_radius
+    controller.orbit_path_validated = False
+    controller.orbit_validation_samples = 0
+    controller.orbit_validation_live_models = 0
+    controller.orbit_radius_adapted = False
     controller._initial_formation_acquired = False
     controller._maximum_position_error = 0.0
     controller.control_rate = 20.0
@@ -356,24 +364,21 @@ def make_closed_loop_controller(robot_count, shape, spacing):
 
 
 class FormationAssignmentTests(unittest.TestCase):
-    def test_start_anchors_circular_path_at_the_fleet_centroid(self):
+    def test_start_plans_a_safe_orbit_and_holds_its_entry_pose(self):
         controller = make_controller()
         controller.robot_poses['tb3_0'] = Pose(x=2.0, y=3.0)
         captured = {}
 
-        def capture_assignment(
-            robot_positions,
-            target_positions,
-            previous_slots=None,
-            switch_penalty=0.0,
-        ):
-            captured['targets'] = tuple(target_positions)
-            return [0]
+        original_routes = controller._plan_routes_to_targets
+
+        def capture_routes(snapshot, plan, targets):
+            captured['targets'] = tuple(targets)
+            return original_routes(snapshot, plan, targets)
 
         with mock.patch.object(
-            formation,
-            'minimum_distance_assignment',
-            side_effect=capture_assignment,
+            controller,
+            '_plan_routes_to_targets',
+            side_effect=capture_routes,
         ):
             controller._start_cb(String(data=json.dumps({
                 'task_id': 'task-current',
@@ -382,13 +387,18 @@ class FormationAssignmentTests(unittest.TestCase):
                 'spacing': 1.0,
             })))
 
-        self.assertAlmostEqual(controller.centroid_x, 2.0)
-        self.assertAlmostEqual(controller.centroid_y, 3.0)
-        self.assertAlmostEqual(controller.path_center_x, -0.5)
-        self.assertAlmostEqual(controller.path_center_y, 3.0)
+        self.assertTrue(controller.orbit_path_validated)
         self.assertAlmostEqual(controller.centroid_heading, math.pi / 2.0)
-        self.assertAlmostEqual(captured['targets'][0][0], 2.0)
-        self.assertAlmostEqual(captured['targets'][0][1], 4.0)
+        self.assertAlmostEqual(
+            controller.centroid_x,
+            controller.path_center_x + controller.effective_path_radius,
+        )
+        self.assertAlmostEqual(
+            captured['targets'][0][0], controller.centroid_x + 1.0
+        )
+        self.assertAlmostEqual(
+            captured['targets'][0][1], controller.centroid_y
+        )
 
         assigned_target = captured['targets'][0]
         controller._update_centroid(1.0 / 20.0)
@@ -417,10 +427,11 @@ class FormationAssignmentTests(unittest.TestCase):
         release_solver = threading.Event()
         emergency_finished = threading.Event()
 
-        def blocking_assignment(*args, **kwargs):
+        def blocking_routes(snapshot, plan, targets):
             solver_entered.set()
             release_solver.wait(2.0)
-            return [0]
+            start = snapshot['robot_positions'][0]
+            return [0], {snapshot['robot_ids'][0]: [start, targets[0]]}
 
         start_message = String(data=json.dumps({
             'task_id': 'task-current',
@@ -430,9 +441,9 @@ class FormationAssignmentTests(unittest.TestCase):
         }))
 
         with mock.patch.object(
-            formation,
-            'minimum_distance_assignment',
-            side_effect=blocking_assignment,
+            controller,
+            '_plan_routes_to_targets',
+            side_effect=blocking_routes,
         ):
             start_thread = threading.Thread(
                 target=controller._start_cb, args=(start_message,)
@@ -636,6 +647,29 @@ class FormationAssignmentTests(unittest.TestCase):
         self.assertEqual('unsafe-formation', status['task_id'])
         self.assertEqual('failed', status['state'])
         self.assertIn('collision-free placement', status['error'])
+
+    def test_impossible_moving_orbit_is_rejected_before_motion(self):
+        controller = make_controller()
+        controller.robot_ids = [f'tb3_{index}' for index in range(10)]
+        controller.robot_poses = {
+            robot_id: Pose() for robot_id in controller.robot_ids
+        }
+        controller.robot_yaws = {
+            robot_id: 0.0 for robot_id in controller.robot_ids
+        }
+        controller.formation_type = 'line'
+        controller.spacing = 2.0
+        controller.formation_offsets = controller._compute_formation_positions(
+            'line', 10, 2.0
+        )
+        controller.movement_mode = formation.MovementMode.MOVING
+
+        snapshot = controller._prepare_assignment_locked()
+
+        self.assertFalse(controller._compute_and_commit_assignment(snapshot))
+        self.assertEqual({}, controller.assignments)
+        self.assertFalse(controller.orbit_path_validated)
+        self.assertIn('full orbit', controller.placement_error)
 
 
 class FormationPlacementTests(unittest.TestCase):
@@ -955,6 +989,14 @@ class FormationConvergenceTests(unittest.TestCase):
         (9, 'diamond', 0.55),
         (10, 'S', 0.55),
     )
+    MOVING_MATRIX_CASES = (
+        (3, 'triangle', 0.65),
+        (5, 'square', 0.65),
+        (7, 'A', 0.55),
+        (8, 'V', 0.55),
+        (9, 'diamond', 0.55),
+        (10, 'S', 0.55),
+    )
 
     def test_slots_are_centered_and_keep_requested_clearance(self):
         controller = make_controller()
@@ -1055,7 +1097,8 @@ class FormationConvergenceTests(unittest.TestCase):
         self.assertTrue(controller._compute_and_commit_assignment(snapshot))
         anchored_centroid = (controller.centroid_x, controller.centroid_y)
 
-        for _ in range(1000):
+        # At RTF 3.0 this represents the 75 wall-second live horizon.
+        for _ in range(4500):
             controller._control_step(None)
             if controller._initial_formation_acquired:
                 break
@@ -1125,6 +1168,157 @@ class FormationConvergenceTests(unittest.TestCase):
             anchored_centroid,
             (controller.centroid_x, controller.centroid_y),
         )
+
+    def test_complete_moving_matrix_has_a_safe_rigid_orbit_at_rtf3(self):
+        horizon_steps = int(75.0 * 3.0 * 20.0)
+
+        for robot_count, shape, spacing in self.MOVING_MATRIX_CASES:
+            with self.subTest(robot_count=robot_count, shape=shape):
+                controller, _targets = make_closed_loop_controller(
+                    robot_count, shape, spacing
+                )
+                controller.movement_mode = formation.MovementMode.MOVING
+                controller._initial_formation_acquired = False
+                controller.model_poses = {
+                    zone['model']: (
+                        zone.get('x', 0.0),
+                        zone.get('y', 0.0),
+                        zone.get('yaw', 0.0),
+                    )
+                    for zone in controller.spawn_exclusion_zones
+                    if zone.get('model')
+                }
+
+                snapshot = controller._prepare_assignment_locked()
+                self.assertTrue(
+                    controller._compute_and_commit_assignment(snapshot),
+                    controller.placement_error,
+                )
+                self.assertTrue(controller.orbit_path_validated)
+                self.assertEqual(
+                    len(controller.model_poses),
+                    controller.orbit_validation_live_models,
+                )
+                self.assertEqual(
+                    set(controller.robot_ids),
+                    set(controller.route_waypoints),
+                )
+
+                swept_offsets, sample_count = (
+                    controller._rigid_orbit_offsets(
+                        tuple(controller.formation_offsets),
+                        controller.effective_path_radius,
+                        controller.orbit_sample_step,
+                    )
+                )
+                self.assertEqual(
+                    sample_count, controller.orbit_validation_samples
+                )
+                swept_targets = [
+                    (
+                        controller.path_center_x + offset_x,
+                        controller.path_center_y + offset_y,
+                    )
+                    for offset_x, offset_y in swept_offsets
+                ]
+                self.assertTrue(formation_targets_are_safe(
+                    swept_targets,
+                    controller.arena_size,
+                    controller.arena_margin,
+                    controller.formation_obstacle_clearance,
+                    controller.spawn_exclusion_zones,
+                    controller.arena_profile,
+                    controller.model_poses,
+                ))
+
+                acquired_at = None
+                for step in range(horizon_steps):
+                    controller._control_step(None)
+                    self.assertTrue(
+                        controller.is_running, controller.placement_error
+                    )
+                    dt = 1.0 / controller.control_rate
+                    for robot_id in controller.robot_ids:
+                        command = controller.cmd_vel_pubs[
+                            robot_id
+                        ].messages[-1]
+                        yaw = formation.normalize_angle(
+                            controller.robot_yaws[robot_id]
+                            + command.angular.z * dt
+                        )
+                        pose = controller.robot_poses[robot_id]
+                        pose.position.x += (
+                            command.linear.x * math.cos(yaw) * dt
+                        )
+                        pose.position.y += (
+                            command.linear.x * math.sin(yaw) * dt
+                        )
+                        controller.robot_yaws[robot_id] = yaw
+                    if (
+                        acquired_at is None
+                        and controller._initial_formation_acquired
+                    ):
+                        acquired_at = step
+
+                self.assertIsNotNone(acquired_at)
+                self.assertEqual(
+                    formation.FormationState.MOVING,
+                    controller.formation_state,
+                )
+                self.assertGreater(controller.centroid_time, 0.0)
+                self.assertAlmostEqual(controller.formation_heading, 0.0)
+                for offset, target in zip(
+                    controller.formation_offsets,
+                    controller._get_world_targets(),
+                ):
+                    self.assertAlmostEqual(
+                        target[0] - controller.centroid_x,
+                        offset[0],
+                        places=9,
+                    )
+                    self.assertAlmostEqual(
+                        target[1] - controller.centroid_y,
+                        offset[1],
+                        places=9,
+                    )
+
+    def test_live_obstacle_on_the_next_orbit_pose_fails_closed(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.spawn_exclusion_zones = [{
+            'name': 'moving_box',
+            'model': 'moving_box',
+            'worlds': ['swarm_arena'],
+            'shape': 'circle',
+            'x': 4.0,
+            'y': 4.0,
+            'radius': 0.10,
+        }]
+        controller.path_center_x = 0.0
+        controller.path_center_y = 0.0
+        controller.effective_path_radius = 0.5
+        controller.centroid_time = 0.0
+        controller._set_circular_centroid_pose()
+        controller.orbit_path_validated = True
+        controller._initial_formation_acquired = True
+        controller._maximum_position_error = 0.0
+
+        next_phase = (
+            controller.centroid_speed / controller.effective_path_radius
+            / controller.control_rate
+        )
+        controller.model_poses = {
+            'moving_box': (
+                0.5 * math.cos(next_phase),
+                0.5 * math.sin(next_phase),
+                0.0,
+            )
+        }
+
+        controller._update_centroid(1.0 / controller.control_rate)
+
+        self.assertIn('live obstacle', controller.placement_error)
+        self.assertEqual(0.0, controller.centroid_time)
 
 
 class FormationLifecycleTests(unittest.TestCase):
