@@ -1,7 +1,5 @@
-import { lazy } from "react";
+import { Navigate } from "react-router-dom";
 import authRoles from "../../../../auth/authRoles";
-
-const TaskConfigApp = lazy(() => import("./TaskConfigApp"));
 
 const TaskConfigAppConfig = {
     settings: {
@@ -15,7 +13,7 @@ const TaskConfigAppConfig = {
     routes: [
         {
             path: "/apps/configs/task",
-            element: <TaskConfigApp />,
+            element: <Navigate replace to="/apps/GTS/task-templates" />,
         },
     ],
 };

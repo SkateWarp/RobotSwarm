@@ -1,10 +1,13 @@
+import { Navigate } from "react-router-dom";
 import authRoles from "../auth/authRoles";
 import AccountsAppConfig from "../main/apps/accounts/AccountsAppConfig";
 import LeafSortingAppConfig from "../main/apps/GeeTS/LeafSorting/LeafSortingAppConfig";
 import LeafTypesAppConfig from "../main/apps/GeeTS/LeafType/LeafTypeAppConfig";
 import RobotDetailAppConfig from "../main/apps/GeeTS/RobotDetail/RobotDetailAppConfig";
 import RobotGroupsAppConfig from "../main/apps/GeeTS/RobotGroups/RobotGroupsAppConfig";
+import TaskConfigAppConfig from "../main/apps/GeeTS/Tasks/TaskConfigAppConfig";
 import TaskLogAppConfig from "../main/apps/GeeTS/TaskLog/TaskLogAppConfig";
+import TaskDashboardAppConfig from "../main/apps/dashboards/tasks/TaskDashboardAppConfig";
 import navigationGTSConfig from "./navigationGTSConfig";
 
 const navigationItem = (id) => navigationGTSConfig.find((item) => item.id === id);
@@ -74,5 +77,20 @@ describe("GTS section navigation", () => {
         expect(RobotDetailAppConfig.auth).toEqual(authRoles.user);
         expect(redirect.element.props.to).toBe("/apps/GTS/realtime");
         expect(redirect.element.props.replace).toBe(true);
+    });
+
+    it("redirects legacy task pages to the real task sources", () => {
+        const taskConfig = route(TaskConfigAppConfig, "/apps/configs/task");
+        const taskDashboard = route(TaskDashboardAppConfig, "apps/dashboard/tasks");
+
+        expect(TaskConfigAppConfig.auth).toEqual(authRoles.admin);
+        expect(taskConfig.element.type).toBe(Navigate);
+        expect(taskConfig.element.props.to).toBe("/apps/GTS/task-templates");
+        expect(taskConfig.element.props.replace).toBe(true);
+
+        expect(TaskDashboardAppConfig.auth).toEqual(authRoles.user);
+        expect(taskDashboard.element.type).toBe(Navigate);
+        expect(taskDashboard.element.props.to).toBe("/apps/GTS/taskLogs");
+        expect(taskDashboard.element.props.replace).toBe(true);
     });
 });
