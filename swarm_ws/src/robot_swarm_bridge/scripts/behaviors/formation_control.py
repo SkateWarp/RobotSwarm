@@ -392,6 +392,13 @@ class FormationController:
         self.centroid_heading = 0.0  # heading angle of centroid path
         self.centroid_time = 0.0     # elapsed time for path parametrization
         self.current_waypoint_idx = 0
+        self.path_center_x = 0.0
+        self.path_center_y = 0.0
+        # A moving target is held still while the robots assemble. Starting the
+        # path before that point turns formation into a chase, especially for a
+        # large fleet whose slots take longer to fill.
+        self._initial_formation_acquired = False
+        self._maximum_position_error = 0.0
 
         # Robots (populated from /fleet/robot_list or default namespace list)
         self.robot_ids: List[str] = []
@@ -513,6 +520,7 @@ class FormationController:
         assignment_snapshot = None
         with self.command_lock:
             if ids != self.robot_ids:
+                self._initial_formation_acquired = False
                 if not ids:
                     self.is_running = False
                     self.is_paused = False
@@ -562,6 +570,7 @@ class FormationController:
                     self.formation_type, new_type,
                 )
                 self.formation_type = new_type
+                self._initial_formation_acquired = False
                 assignment_snapshot = self._recompute_formation_locked()
         self._compute_and_commit_assignment(assignment_snapshot)
 
@@ -613,6 +622,7 @@ class FormationController:
             self.placement_error = None
             self._slot_reached = {}
             self._settled_duration = 0.0
+            self._initial_formation_acquired = False
             self._reset_centroid_path_pose_locked()
 
             if recompute:
@@ -644,6 +654,7 @@ class FormationController:
             self.is_running = False
             self.is_paused = False
             self.formation_state = FormationState.STOPPED
+            self._initial_formation_acquired = False
             self._cancel_pending_assignment_locked(clear_assignments=True)
             self._stop_all_robots()
         rospy.loginfo("Formation control STOPPED")
@@ -690,6 +701,7 @@ class FormationController:
                 self.is_running = False
                 self.is_paused = False
                 self.formation_state = FormationState.STOPPED
+                self._initial_formation_acquired = False
                 self._cancel_pending_assignment_locked(
                     clear_assignments=True
                 )
@@ -701,6 +713,7 @@ class FormationController:
         with self.command_lock:
             self.is_running = False
             self.is_paused = False
+            self._initial_formation_acquired = False
             self._stop_all_robots()
 
     def _odom_cb(self, msg: Odometry, robot_id: str):
@@ -1095,6 +1108,14 @@ class FormationController:
                 previous_slots.append(self.assignments.get(robot_id))
             model_poses = dict(self.model_poses)
 
+        if (
+            self.movement_mode != MovementMode.STATIC
+            and not self._initial_formation_acquired
+        ):
+            # This also covers a fleet resize: the last first-odometry callback
+            # rebuilds the assignment from the complete, current fleet.
+            self._reset_centroid_path_pose_locked(robot_positions)
+
         static_plan = None
         if self.movement_mode == MovementMode.STATIC:
             # A static shape belongs where the fleet already is. Route-aware
@@ -1470,18 +1491,40 @@ class FormationController:
     # ------------------------------------------------------------------
     # Centroid update
     # ------------------------------------------------------------------
-    def _reset_centroid_path_pose_locked(self):
-        """Reset to the exact pose used by the configured path at t=0."""
+    def _reset_centroid_path_pose_locked(self, robot_positions=None):
+        """Anchor the configured path at the fleet's current centroid."""
+        if robot_positions is None:
+            with self.lock:
+                robot_positions = [
+                    (pose.position.x, pose.position.y)
+                    for robot_id in self.robot_ids
+                    for pose in (self.robot_poses.get(robot_id),)
+                    if pose is not None
+                ]
+
+        if robot_positions:
+            start_x = sum(x for x, _ in robot_positions) / len(robot_positions)
+            start_y = sum(y for _, y in robot_positions) / len(robot_positions)
+        else:
+            start_x = self.centroid_x
+            start_y = self.centroid_y
+
         self.centroid_time = 0.0
         self.current_waypoint_idx = 0
-        self.centroid_x = 0.0
-        self.centroid_y = 0.0
+        self.centroid_x = start_x
+        self.centroid_y = start_y
         self.centroid_heading = 0.0
+        self.path_center_x = start_x
+        self.path_center_y = start_y
+        self._maximum_position_error = 0.0
 
         if self.movement_mode == MovementMode.STATIC:
             return
 
         if self.centroid_path == CentroidPath.CIRCULAR:
+            # Put t=0 exactly at the fleet centroid. The path can then begin on
+            # the next control tick without teleporting every assigned slot.
+            self.path_center_x = start_x - self.path_radius
             self._set_circular_centroid_pose()
             return
 
@@ -1508,15 +1551,37 @@ class FormationController:
         """Set the circular path pose for the current centroid_time."""
         angular_speed = self.centroid_speed / max(0.1, self.path_radius)
         t = self.centroid_time * angular_speed
-        self.centroid_x = self.path_radius * math.cos(t)
-        self.centroid_y = self.path_radius * math.sin(t)
+        self.centroid_x = self.path_center_x + self.path_radius * math.cos(t)
+        self.centroid_y = self.path_center_y + self.path_radius * math.sin(t)
         self.centroid_heading = t + math.pi / 2.0
 
     def _update_centroid(self, dt: float):
         """Advance the centroid along the configured path."""
-        if self.movement_mode == MovementMode.STATIC:
+        if (
+            self.movement_mode == MovementMode.STATIC
+            or not self._initial_formation_acquired
+        ):
             # Centroid stays at the average of initial robot positions
             return
+
+        # Slow the path before tracking error grows large enough to break the
+        # formation. This lets small swarms use the requested pace while larger
+        # letters automatically move at the pace their outer slots can hold.
+        slowdown_error = max(0.02, self.position_tolerance - 0.04)
+        stop_error = max(
+            slowdown_error + 0.01,
+            min(
+                self.position_release_tolerance - 0.02,
+                self.position_tolerance + 0.01,
+            ),
+        )
+        tracking_error = self._maximum_position_error
+        if not math.isfinite(tracking_error) or tracking_error >= stop_error:
+            return
+        if tracking_error > slowdown_error:
+            dt *= (stop_error - tracking_error) / (
+                stop_error - slowdown_error
+            )
 
         self.centroid_time += dt
 
@@ -1577,6 +1642,7 @@ class FormationController:
 
         if self.placement_error:
             self.formation_state = FormationState.FAILED
+            self._initial_formation_acquired = False
             self._stop_all_robots()
             self._publish_status([], 0.0)
             self.is_running = False
@@ -1793,6 +1859,7 @@ class FormationController:
         formation_is_settled = (
             all_in_position and self._settled_duration >= self.settle_time
         )
+        self._maximum_position_error = maximum_position_error
 
         # ---- Update formation state ----
         if deforming:
@@ -1801,6 +1868,7 @@ class FormationController:
             if self.movement_mode == MovementMode.STATIC:
                 self.formation_state = FormationState.FORMED
             else:
+                self._initial_formation_acquired = True
                 self.formation_state = FormationState.MOVING
         else:
             self.formation_state = FormationState.FORMING

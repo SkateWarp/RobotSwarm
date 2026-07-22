@@ -271,6 +271,13 @@ def make_controller():
     controller.centroid_heading = 0.0
     controller.centroid_time = 99.0
     controller.current_waypoint_idx = 3
+    controller.path_center_x = 0.0
+    controller.path_center_y = 0.0
+    controller._initial_formation_acquired = False
+    controller._maximum_position_error = 0.0
+    controller.control_rate = 20.0
+    controller.max_linear_vel = 0.2
+    controller.max_angular_vel = 1.5
 
     controller.pid_linear = {'tb3_0': FakePid()}
     controller.pid_angular = {'tb3_0': FakePid()}
@@ -349,8 +356,9 @@ def make_closed_loop_controller(robot_count, shape, spacing):
 
 
 class FormationAssignmentTests(unittest.TestCase):
-    def test_start_assigns_against_circular_path_t0_pose(self):
+    def test_start_anchors_circular_path_at_the_fleet_centroid(self):
         controller = make_controller()
+        controller.robot_poses['tb3_0'] = Pose(x=2.0, y=3.0)
         captured = {}
 
         def capture_assignment(
@@ -374,22 +382,34 @@ class FormationAssignmentTests(unittest.TestCase):
                 'spacing': 1.0,
             })))
 
-        self.assertAlmostEqual(controller.centroid_x, 2.5)
-        self.assertAlmostEqual(controller.centroid_y, 0.0)
+        self.assertAlmostEqual(controller.centroid_x, 2.0)
+        self.assertAlmostEqual(controller.centroid_y, 3.0)
+        self.assertAlmostEqual(controller.path_center_x, -0.5)
+        self.assertAlmostEqual(controller.path_center_y, 3.0)
         self.assertAlmostEqual(controller.centroid_heading, math.pi / 2.0)
-        self.assertAlmostEqual(captured['targets'][0][0], 2.5)
-        self.assertAlmostEqual(captured['targets'][0][1], 1.0)
+        self.assertAlmostEqual(captured['targets'][0][0], 2.0)
+        self.assertAlmostEqual(captured['targets'][0][1], 4.0)
 
         assigned_target = captured['targets'][0]
         controller._update_centroid(1.0 / 20.0)
-        first_tick_target = controller._get_world_targets()[0]
-        self.assertLess(
-            math.hypot(
-                first_tick_target[0] - assigned_target[0],
-                first_tick_target[1] - assigned_target[1],
-            ),
-            0.02,
+        self.assertEqual(0.0, controller.centroid_time)
+        self.assertEqual(
+            assigned_target,
+            controller._get_world_targets()[0],
         )
+
+        controller._initial_formation_acquired = True
+        controller._update_centroid(1.0 / 20.0)
+        self.assertGreater(controller.centroid_time, 0.0)
+        self.assertNotEqual(
+            assigned_target,
+            controller._get_world_targets()[0],
+        )
+
+        controller._maximum_position_error = 0.10
+        held_time = controller.centroid_time
+        controller._update_centroid(1.0 / 20.0)
+        self.assertEqual(held_time, controller.centroid_time)
 
     def test_emergency_stop_is_not_blocked_and_rejects_stale_solution(self):
         controller = make_controller()
@@ -1024,16 +1044,100 @@ class FormationConvergenceTests(unittest.TestCase):
                 self.assertLessEqual(max(errors), 0.1)
                 self.assertGreater(closest_seen, 0.3)
 
+    def test_moving_diamond_forms_before_its_centroid_path_starts(self):
+        controller, _targets = make_closed_loop_controller(
+            9, 'diamond', 0.55
+        )
+        controller.movement_mode = formation.MovementMode.MOVING
+        controller._initial_formation_acquired = False
+
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(controller._compute_and_commit_assignment(snapshot))
+        anchored_centroid = (controller.centroid_x, controller.centroid_y)
+
+        for _ in range(1000):
+            controller._control_step(None)
+            if controller._initial_formation_acquired:
+                break
+
+            self.assertEqual(
+                anchored_centroid,
+                (controller.centroid_x, controller.centroid_y),
+            )
+            dt = 1.0 / controller.control_rate
+            for robot_id in controller.robot_ids:
+                command = controller.cmd_vel_pubs[robot_id].messages[-1]
+                yaw = formation.normalize_angle(
+                    controller.robot_yaws[robot_id]
+                    + command.angular.z * dt
+                )
+                pose = controller.robot_poses[robot_id]
+                pose.position.x += command.linear.x * math.cos(yaw) * dt
+                pose.position.y += command.linear.x * math.sin(yaw) * dt
+                controller.robot_yaws[robot_id] = yaw
+
+        self.assertTrue(controller._initial_formation_acquired)
+        self.assertEqual(
+            formation.FormationState.MOVING,
+            controller.formation_state,
+        )
+        self.assertEqual(0.0, controller.centroid_time)
+
+        maximum_tracking_error = 0.0
+        for _ in range(1500):
+            controller._control_step(None)
+            dt = 1.0 / controller.control_rate
+            for robot_id in controller.robot_ids:
+                command = controller.cmd_vel_pubs[robot_id].messages[-1]
+                yaw = formation.normalize_angle(
+                    controller.robot_yaws[robot_id]
+                    + command.angular.z * dt
+                )
+                pose = controller.robot_poses[robot_id]
+                pose.position.x += command.linear.x * math.cos(yaw) * dt
+                pose.position.y += command.linear.x * math.sin(yaw) * dt
+                controller.robot_yaws[robot_id] = yaw
+
+            world_targets = controller._get_world_targets()
+            maximum_tracking_error = max(
+                maximum_tracking_error,
+                max(
+                    math.hypot(
+                        controller.robot_poses[robot_id].position.x
+                        - world_targets[controller.assignments[robot_id]][0],
+                        controller.robot_poses[robot_id].position.y
+                        - world_targets[controller.assignments[robot_id]][1],
+                    )
+                    for robot_id in controller.robot_ids
+                ),
+            )
+            self.assertEqual(
+                formation.FormationState.MOVING,
+                controller.formation_state,
+            )
+
+        self.assertLessEqual(maximum_tracking_error, 0.11)
+        self.assertGreater(
+            controller.centroid_time * controller.centroid_speed,
+            0.5,
+        )
+        self.assertNotEqual(
+            anchored_centroid,
+            (controller.centroid_x, controller.centroid_y),
+        )
+
 
 class FormationLifecycleTests(unittest.TestCase):
     def test_orderly_shutdown_zeroes_every_formation_command(self):
         controller = make_controller()
         controller.is_running = True
+        controller._initial_formation_acquired = True
 
         controller._shutdown()
 
         self.assertFalse(controller.is_running)
         self.assertFalse(controller.is_paused)
+        self.assertFalse(controller._initial_formation_acquired)
         for publisher in controller.cmd_vel_pubs.values():
             command = publisher.messages[-1]
             self.assertEqual(0.0, command.linear.x)
@@ -1128,6 +1232,7 @@ class FormationLifecycleTests(unittest.TestCase):
         controller = make_controller()
         controller.current_task_id = 'task-current'
         controller.is_running = True
+        controller._initial_formation_acquired = True
         publisher = controller.cmd_vel_pubs['tb3_0']
 
         controller._pause_cb(String(data=json.dumps({
@@ -1154,12 +1259,14 @@ class FormationLifecycleTests(unittest.TestCase):
             'task_id': 'task-stale'
         })))
         self.assertTrue(controller.is_running)
+        self.assertTrue(controller._initial_formation_acquired)
         self.assertEqual(publisher.messages, [])
 
         controller._stop_cb(String(data=json.dumps({
             'task_id': 'task-current'
         })))
         self.assertFalse(controller.is_running)
+        self.assertFalse(controller._initial_formation_acquired)
         self.assertEqual(
             controller.formation_state, formation.FormationState.STOPPED
         )
@@ -1170,6 +1277,7 @@ class FormationLifecycleTests(unittest.TestCase):
         controller.current_task_id = 'task-current'
         controller.is_running = True
         controller.is_paused = True
+        controller._initial_formation_acquired = True
         publisher = controller.cmd_vel_pubs['tb3_0']
         subscriber = FakeResource()
         avoidance = FakeResource()
@@ -1180,6 +1288,7 @@ class FormationLifecycleTests(unittest.TestCase):
 
         self.assertFalse(controller.is_running)
         self.assertFalse(controller.is_paused)
+        self.assertFalse(controller._initial_formation_acquired)
         self.assertIsNone(controller.current_task_id)
         self.assertEqual(
             controller.formation_state, formation.FormationState.STOPPED

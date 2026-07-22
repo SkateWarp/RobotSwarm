@@ -1128,13 +1128,16 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                 DRIVER,
                 "run_command",
                 return_value=DRIVER.ProcessOutput(code, "private output", ""),
-            ), self.assertRaisesRegex(DRIVER.MatrixError, reason):
+            ), self.assertRaisesRegex(
+                DRIVER.TaskActivityError, reason
+            ) as raised:
                 docker.wait_task_active(
                     container,
                     "matrix-" + "a" * 32,
                     scenario,
                     1,
                 )
+            self.assertEqual(reason, raised.exception.reason)
 
     def test_abort_acceptance_finalizes_state_and_validates_stop_protocol(self):
         docker = DRIVER.DockerHost("docker", threading.Event())
@@ -1979,6 +1982,64 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         with self.assertRaisesRegex(DRIVER.MatrixError, "complete active sampling"):
             DRIVER.validate_active_overlap(passing_overlap(overlapped=False))
 
+    def test_active_gate_keeps_protocol_when_task_finishes_before_sampling(self):
+        scenario = DRIVER.SCENARIOS[0]
+        result = passing_result(scenario)
+        result.update({
+            "passed": False,
+            "failures": ["formation did not become complete in moving mode"],
+        })
+        summary = {
+            **passing_summary(),
+            "passed": 0,
+            "failed": 1,
+            "all_passed": False,
+            "failed_scenarios": [scenario.name],
+        }
+        child = child_output(result, summary, returncode=1)
+        docker = mock.Mock()
+
+        def finish_scenario(
+            _container,
+            _scenario,
+            _timeout,
+            _task_id,
+            _run_token,
+            **kwargs,
+        ):
+            kwargs["on_started"](time.monotonic())
+            time.sleep(0.02)
+            kwargs["on_exited"](time.monotonic())
+            return child
+
+        docker.run_acceptance.side_effect = finish_scenario
+        docker.wait_task_active.side_effect = DRIVER.TaskActivityError(
+            "task_terminal_before_activity"
+        )
+
+        with self.assertRaises(
+            DRIVER.ActiveScenarioGateError
+        ) as raised, mock.patch.object(DRIVER, "run_command") as probe:
+            DRIVER.run_active_scenario_gate(
+                docker=docker,
+                container=DRIVER.ContainerHandle("c" * 64, "version"),
+                scenario=scenario,
+                scenario_timeout=1,
+                probe_command=["active-probe"],
+                probe_environment={},
+                ui=mock.Mock(),
+                stop_event=threading.Event(),
+            )
+
+        self.assertEqual("beforeVisualSampling", raised.exception.phase)
+        self.assertIs(child, raised.exception.scenario_output)
+        self.assertFalse(
+            DRIVER.parse_ros_protocol(
+                raised.exception.scenario_output, scenario
+            ).result["passed"]
+        )
+        probe.assert_not_called()
+
     def test_active_probe_failure_is_classified_without_raw_output(self):
         timeout = DRIVER.ProcessOutput(
             1,
@@ -2489,11 +2550,11 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         ), mock.patch.object(
             DRIVER,
             "run_active_scenario_gate",
-            return_value=(
+            side_effect=DRIVER.ActiveScenarioGateError(
+                "The correlated ROS task was not active during visual sampling "
+                "(task_terminal_before_activity)",
+                "beforeVisualSampling",
                 failed_child,
-                DRIVER.ProcessOutput(0, "Gazebo GUI preflight passed\n", ""),
-                passing_active_video(),
-                passing_overlap(),
             ),
         ), mock.patch.object(
             DRIVER, "load_active_probe_evidence", return_value=startup
@@ -2519,6 +2580,14 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertEqual(1, report["ros"]["exitCode"])
         self.assertTrue(report["ros"]["protocolParsed"])
         self.assertFalse(report["ros"]["taskCleanupVerified"])
+        self.assertEqual(
+            {
+                "phase": "beforeVisualSampling",
+                "childProtocolAvailable": True,
+                "childProtocolPreserved": True,
+            },
+            report["activeScenarioGateFailure"],
+        )
         serialized = json.dumps(report["ros"])
         self.assertNotIn("owner@example.test", serialized)
         self.assertNotIn(str(session_id), serialized)
