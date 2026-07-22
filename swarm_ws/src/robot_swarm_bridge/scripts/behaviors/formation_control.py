@@ -454,6 +454,7 @@ class FormationController:
         self.stale_odometry: List[str] = []
         self.waiting_for_odometry: List[str] = []
         self.model_poses: Dict[str, Tuple[float, float, float]] = {}
+        self.invalid_model_poses: Tuple[str, ...] = ()
         self.placement_error: Optional[str] = None
 
         # Formation positions: list of (x, y) offsets from centroid (unscaled)
@@ -583,16 +584,24 @@ class FormationController:
             if isinstance(zone, dict) and zone.get('model')
         }
         live_poses = {}
+        invalid_models = []
         for model_name, pose in zip(msg.name, msg.pose):
             if model_name not in configured_models:
                 continue
-            live_poses[model_name] = (
+            live_pose = (
                 pose.position.x,
                 pose.position.y,
                 quaternion_to_yaw(pose.orientation),
             )
+            if all(math.isfinite(value) for value in live_pose):
+                live_poses[model_name] = live_pose
+            else:
+                # Do not drop back to the configured pose silently. Remember
+                # the rejected sample so the next command batch fails closed.
+                invalid_models.append(model_name)
         with self.lock:
             self.model_poses = live_poses
+            self.invalid_model_poses = tuple(sorted(invalid_models))
 
     def _set_shape_cb(self, msg: String):
         """Dynamically change formation type at runtime."""
@@ -1128,6 +1137,8 @@ class FormationController:
             self.route_batches = []
             self.route_batch_index = 0
             self.active_placement_plan = None
+            self._live_orbit_validation_key = None
+            self._live_orbit_validation_safe = False
             self.assignment_pending = False
             return None
 
@@ -1144,6 +1155,8 @@ class FormationController:
                 self.route_batches = []
                 self.route_batch_index = 0
                 self.active_placement_plan = None
+                self._live_orbit_validation_key = None
+                self._live_orbit_validation_safe = False
                 self.assignment_pending = True
                 return None
 
@@ -1151,6 +1164,9 @@ class FormationController:
                 robot_positions.append((pose.position.x, pose.position.y))
                 previous_slots.append(self.assignments.get(robot_id))
             model_poses = dict(self.model_poses)
+            invalid_model_poses = tuple(getattr(
+                self, 'invalid_model_poses', ()
+            ))
 
         if (
             self.movement_mode != MovementMode.STATIC
@@ -1187,6 +1203,7 @@ class FormationController:
                 'exclusion_zones': tuple(self.spawn_exclusion_zones),
                 'arena_profile': self.arena_profile,
                 'model_poses': model_poses,
+                'invalid_model_poses': invalid_model_poses,
                 'slot_clearance': slot_clearance,
                 'planned_slot_clearance': min(
                     self.spacing - 0.01,
@@ -1217,6 +1234,7 @@ class FormationController:
                 'exclusion_zones': tuple(self.spawn_exclusion_zones),
                 'arena_profile': self.arena_profile,
                 'model_poses': model_poses,
+                'invalid_model_poses': invalid_model_poses,
                 'slot_clearance': slot_clearance,
                 'planned_slot_clearance': min(
                     self.spacing - 0.01,
@@ -1241,6 +1259,12 @@ class FormationController:
         self.route_waypoint_indices = {}
         self.route_batches = []
         self.route_batch_index = 0
+        # There is deliberately no active geometry while the replacement
+        # assignment is being solved. The control loop has no assignments in
+        # this state, so it can only publish zero commands until commit.
+        self.active_placement_plan = None
+        self._live_orbit_validation_key = None
+        self._live_orbit_validation_safe = False
         self.assignment_pending = True
         return {
             'generation': generation,
@@ -1313,6 +1337,8 @@ class FormationController:
     ) -> bool:
         """Validate the continuous full-lap footprint against live geometry."""
 
+        if not self._model_poses_are_finite(model_poses):
+            return False
         sample_step = float(placement_plan['sample_step'])
         swept_offsets, _sample_count = self._rigid_orbit_offsets(
             offsets, radius, sample_step
@@ -1345,6 +1371,8 @@ class FormationController:
     ) -> bool:
         """Check every remaining entry segment and its reserved final slot."""
 
+        if not self._model_poses_are_finite(model_poses):
+            return False
         if len(robot_ids) != len(slots):
             return False
         if not formation_targets_are_safe(
@@ -1420,6 +1448,8 @@ class FormationController:
     ) -> bool:
         """Revalidate a placement without trusting its planning snapshot."""
 
+        if not self._model_poses_are_finite(model_poses):
+            return False
         if placement_plan['kind'] == 'circular':
             if path_center is None or path_radius is None:
                 return False
@@ -1705,6 +1735,21 @@ class FormationController:
             return False
 
         placement_plan = assignment_snapshot.get('placement_plan')
+        if (
+            placement_plan is not None
+            and (
+                placement_plan.get('invalid_model_poses')
+                or not self._model_poses_are_finite(
+                    placement_plan.get('model_poses', {})
+                )
+            )
+        ):
+            return self._reject_assignment_plan(
+                assignment_snapshot,
+                "The live obstacle state contained a non-finite pose; no "
+                "robot was released.",
+                'live geometry',
+            )
         planned_center = None
         planned_orbit = None
         planned_routes = {}
@@ -1783,6 +1828,9 @@ class FormationController:
             if placement_plan is not None:
                 with self.lock:
                     live_model_poses = dict(self.model_poses)
+                    invalid_live_model_poses = tuple(getattr(
+                        self, 'invalid_model_poses', ()
+                    ))
                     live_robot_positions = {
                         robot_id: (
                             self.robot_poses[robot_id].position.x,
@@ -1796,20 +1844,23 @@ class FormationController:
                 if planned_orbit is not None:
                     path_center = planned_orbit['path_center']
                     path_radius = planned_orbit['radius']
-                if not self._placement_plan_is_live_safe(
-                    placement_plan,
-                    assignment_snapshot['robot_ids'],
-                    live_robot_positions,
-                    list(assignment_snapshot['target_world']),
-                    list(slots),
-                    full_routes,
-                    live_model_poses,
-                    path_center,
-                    path_radius,
-                    {
-                        robot_id: 1
-                        for robot_id in assignment_snapshot['robot_ids']
-                    },
+                if (
+                    invalid_live_model_poses
+                    or not self._placement_plan_is_live_safe(
+                        placement_plan,
+                        assignment_snapshot['robot_ids'],
+                        live_robot_positions,
+                        list(assignment_snapshot['target_world']),
+                        list(slots),
+                        full_routes,
+                        live_model_poses,
+                        path_center,
+                        path_radius,
+                        {
+                            robot_id: 1
+                            for robot_id in assignment_snapshot['robot_ids']
+                        },
+                    )
                 ):
                     return self._reject_assignment_plan(
                         assignment_snapshot,
@@ -1913,6 +1964,23 @@ class FormationController:
             self._slot_reached = {}
         self._settled_duration = 0.0
 
+    @staticmethod
+    def _model_poses_are_finite(
+        model_poses: Dict[str, Tuple[float, float, float]]
+    ) -> bool:
+        """Reject corrupt Gazebo geometry instead of using a fallback pose."""
+
+        try:
+            return all(
+                len(pose) >= 3
+                and all(
+                    math.isfinite(float(value)) for value in pose[:3]
+                )
+                for pose in model_poses.values()
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+
     def _live_motion_is_safe_locked(
         self,
         world_targets: List[Tuple[float, float]],
@@ -1920,11 +1988,17 @@ class FormationController:
     ) -> bool:
         """Check the active plan immediately before publishing its batch."""
 
+        model_poses = dict(self.model_poses)
+        if (
+            getattr(self, 'invalid_model_poses', ())
+            or not self._model_poses_are_finite(model_poses)
+        ):
+            return False
+
         plan = getattr(self, 'active_placement_plan', None)
         if plan is None:
             return not self.route_batches
 
-        model_poses = dict(self.model_poses)
         if (
             plan['kind'] == 'circular'
             and not self._cached_live_orbit_is_safe_locked(
@@ -1975,6 +2049,8 @@ class FormationController:
     ) -> bool:
         """Reuse full-lap validation until obstacle motion is material."""
 
+        if not self._model_poses_are_finite(model_poses):
+            return False
         pose_key = tuple(sorted(
             (
                 model_name,
@@ -2476,20 +2552,38 @@ class FormationController:
         # the same lock used by its callback for one final geometric check and
         # the complete publication batch. No positive command from a stale
         # entry plan is allowed to leak out before the next timer cycle.
+        live_safety_exception = None
         with self.lock:
-            if not self._live_motion_is_safe_locked(
-                world_targets, assembling_on_routes
-            ):
-                self.placement_error = (
-                    "A live obstacle invalidated the formation orbit, slots, "
-                    "or remaining entry route."
+            try:
+                live_motion_is_safe = self._live_motion_is_safe_locked(
+                    world_targets, assembling_on_routes
                 )
+            except Exception as exc:  # fail closed on corrupt live telemetry
+                live_motion_is_safe = False
+                live_safety_exception = exc
+
+            if not live_motion_is_safe:
+                if live_safety_exception is None:
+                    self.placement_error = (
+                        "A live obstacle invalidated the formation orbit, "
+                        "slots, or remaining entry route."
+                    )
+                else:
+                    self.placement_error = (
+                        "Formation live safety validation failed "
+                        "unexpectedly; all robots were stopped."
+                    )
             else:
                 for rid, command in commands_to_publish.items():
                     pub = self.cmd_vel_pubs.get(rid)
                     if pub is not None:
                         pub.publish(command)
 
+        if live_safety_exception is not None:
+            rospy.logerr(
+                "Formation live safety validation failed closed: %s",
+                live_safety_exception,
+            )
         if self.placement_error:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False

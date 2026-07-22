@@ -258,6 +258,7 @@ def make_controller():
         'spawn_exclusion_zones'
     ]
     controller.model_poses = {}
+    controller.invalid_model_poses = ()
     controller.placement_error = None
 
     controller.formation_type = 'line'
@@ -542,6 +543,44 @@ class FormationAssignmentTests(unittest.TestCase):
         )
         self.assertEqual(controller.assignments, {})
         self.assertFalse(controller.assignment_pending)
+
+    def test_control_waits_safely_while_a_replacement_plan_is_solving(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        first_snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(
+            controller._compute_and_commit_assignment(first_snapshot)
+        )
+        self.assertIsNotNone(controller.active_placement_plan)
+
+        controller.is_running = True
+        controller._initial_formation_acquired = False
+        controller._publish_status = lambda *args, **kwargs: None
+        controller._publish_markers = lambda *args, **kwargs: None
+
+        # A shape or fleet update prepares under command_lock, then solves
+        # outside it. Exercise the timer interleaving in that open window.
+        controller.formation_offsets = [(-0.25, 0.0)]
+        replacement = controller._prepare_assignment_locked()
+        self.assertTrue(controller.assignment_pending)
+        self.assertEqual({}, controller.assignments)
+        self.assertIsNone(controller.active_placement_plan)
+
+        controller._control_loop(None)
+
+        self.assertTrue(controller.is_running)
+        self.assertIsNone(controller.placement_error)
+        self.assertEqual(
+            formation.FormationState.FORMING, controller.formation_state
+        )
+        waiting_command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertEqual(0.0, waiting_command.linear.x)
+        self.assertEqual(0.0, waiting_command.angular.z)
+
+        self.assertTrue(controller._compute_and_commit_assignment(replacement))
+        self.assertTrue(controller.is_running)
+        self.assertIsNone(controller.placement_error)
+        self.assertEqual({'tb3_0': 0}, controller.assignments)
 
     def test_static_assignment_uses_the_current_fleet_centroid(self):
         controller = make_controller()
@@ -1109,6 +1148,42 @@ class FormationConvergenceTests(unittest.TestCase):
         (10, 'S', 0.55, 'grid'),
     )
 
+    def _controller_with_a_positive_entry_command(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.robot_poses['tb3_0'] = Pose(x=-1.0, y=0.0)
+        controller.spawn_exclusion_zones = [{
+            'name': 'moving_box',
+            'model': 'moving_box',
+            'worlds': ['swarm_arena'],
+            'shape': 'circle',
+            'x': 4.0,
+            'y': 4.0,
+            'radius': 0.10,
+        }]
+        controller._model_states_cb(ModelStates(
+            names=['moving_box'], poses=[Pose(x=4.0, y=4.0)]
+        ))
+        controller.pid_linear['tb3_0'] = formation.PIDController(
+            0.6, 0.01, 0.15, 0.22
+        )
+        controller.pid_angular['tb3_0'] = formation.PIDController(
+            1.2, 0.0, 0.1, 1.5
+        )
+        controller._publish_status = lambda *args, **kwargs: None
+        controller._publish_markers = lambda *args, **kwargs: None
+
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(
+            controller._compute_and_commit_assignment(snapshot),
+            controller.placement_error,
+        )
+        controller.is_running = True
+        controller._control_loop(None)
+        command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertGreater(command.linear.x, 0.0)
+        return controller
+
     def test_slots_are_centered_and_keep_requested_clearance(self):
         controller = make_controller()
 
@@ -1528,6 +1603,69 @@ class FormationConvergenceTests(unittest.TestCase):
         self.assertGreater(
             abs(command.linear.x) + abs(command.angular.z), 0.0
         )
+
+    def test_non_finite_model_states_replace_motion_with_a_stop(self):
+        bad_yaw_pose = Pose(x=4.0, y=4.0)
+        bad_yaw_pose.orientation = Quaternion(z=float('nan'))
+        bad_poses = (
+            ('nan_x', Pose(x=float('nan'), y=4.0)),
+            ('infinite_y', Pose(x=4.0, y=float('inf'))),
+            ('nan_yaw', bad_yaw_pose),
+        )
+
+        for label, bad_pose in bad_poses:
+            with self.subTest(case=label):
+                controller = self._controller_with_a_positive_entry_command()
+                previous_count = len(
+                    controller.cmd_vel_pubs['tb3_0'].messages
+                )
+
+                controller._model_states_cb(ModelStates(
+                    names=['moving_box'], poses=[bad_pose]
+                ))
+                self.assertEqual(
+                    ('moving_box',), controller.invalid_model_poses
+                )
+                self.assertNotIn('moving_box', controller.model_poses)
+                controller._control_loop(None)
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                emitted = controller.cmd_vel_pubs['tb3_0'].messages[
+                    previous_count:
+                ]
+                self.assertTrue(emitted)
+                self.assertTrue(all(
+                    command.linear.x == 0.0
+                    and command.angular.z == 0.0
+                    for command in emitted
+                ))
+
+    def test_live_safety_exception_replaces_motion_with_a_stop(self):
+        controller = self._controller_with_a_positive_entry_command()
+        previous_count = len(controller.cmd_vel_pubs['tb3_0'].messages)
+
+        with mock.patch.object(
+            controller,
+            '_live_motion_is_safe_locked',
+            side_effect=RuntimeError('malformed live geometry'),
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED, controller.formation_state
+        )
+        self.assertIn('safety validation failed', controller.placement_error)
+        emitted = controller.cmd_vel_pubs['tb3_0'].messages[previous_count:]
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
 
 
 class FormationLifecycleTests(unittest.TestCase):
