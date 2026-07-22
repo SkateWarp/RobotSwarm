@@ -178,6 +178,177 @@ class PayloadLoadProbeTests(unittest.TestCase):
         self.assertEqual(2, probe.set_model_state.call_count)
         sleep.assert_called_once_with(0.05)
 
+    def test_pose_does_not_retry_a_permanent_service_rejection(self):
+        class State:
+            def __init__(self):
+                self.pose = types.SimpleNamespace(
+                    position=types.SimpleNamespace(),
+                    orientation=types.SimpleNamespace(),
+                )
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.set_model_state = mock.Mock(return_value=types.SimpleNamespace(
+            success=False,
+            status_message='SetModelState: reference frame does not exist',
+        ))
+
+        with mock.patch.object(PROBE, 'ModelState', State), mock.patch.object(
+            PROBE.time, 'sleep'
+        ) as sleep, self.assertRaisesRegex(RuntimeError, 'reference frame'):
+            probe.set_pose('transport_object', -0.8, -3.0, 0.1)
+
+        self.assertEqual(1, probe.set_model_state.call_count)
+        sleep.assert_not_called()
+
+    def test_payload_readiness_requires_fresh_consecutive_observations(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.lock = PROBE.threading.RLock()
+        probe.stop_requested = False
+        probe.model_states_generation = 4
+        probe.models = {
+            'transport_object': {'position': (-0.8, -3.0, 0.1)},
+        }
+
+        def wait_for(predicate, _timeout, description):
+            self.assertEqual('stable payload spawn', description)
+            self.assertFalse(predicate(), 'the cached generation is stale')
+            probe.model_states_generation = 5
+            self.assertFalse(predicate(), 'one fresh sample is insufficient')
+            probe.models = {}
+            probe.model_states_generation = 6
+            self.assertFalse(predicate(), 'an absence resets stability')
+            probe.models = {
+                'transport_object': {'position': (-0.8, -3.0, 0.1)},
+            }
+            probe.model_states_generation = 7
+            self.assertFalse(predicate())
+            probe.model_states_generation = 8
+            self.assertTrue(predicate())
+
+        probe.wait_for = wait_for
+
+        generation = probe.wait_for_model_observations(
+            'transport_object', True, 4, 2, 'stable payload spawn'
+        )
+
+        self.assertEqual(8, generation)
+
+    def test_payload_replacement_retries_a_fresh_disappearance(self):
+        class SpawnPose:
+            def __init__(self):
+                self.position = types.SimpleNamespace()
+                self.orientation = types.SimpleNamespace()
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.args = types.SimpleNamespace(crate_x=-0.8, crate_y=-3.0)
+        probe.lock = PROBE.threading.RLock()
+        probe.model_states_generation = 3
+        probe.models = {'transport_object': {}}
+        probe.delete_model = mock.Mock(return_value=types.SimpleNamespace(
+            success=True, status_message='',
+        ))
+        probe.spawn_model = mock.Mock(return_value=types.SimpleNamespace(
+            success=True, status_message='',
+        ))
+        probe.wait_for_model_observations = mock.Mock()
+        probe._place_payload_pose = mock.Mock(side_effect=[
+            PROBE._RecoverablePayloadRace('first instance disappeared'),
+            None,
+        ])
+        probe.wait_sim = mock.Mock()
+        probe.log = mock.Mock()
+
+        with mock.patch.object(PROBE, 'Pose', SpawnPose):
+            probe.replace_payload('loaded-model')
+
+        self.assertEqual(2, probe.delete_model.call_count)
+        self.assertEqual(2, probe.spawn_model.call_count)
+        self.assertEqual(2, probe._place_payload_pose.call_count)
+        probe.wait_sim.assert_called_once_with(0.5)
+        self.assertEqual('loaded-model', probe.payload_model_xml)
+        self.assertEqual(1, probe.log.call_count)
+
+    def test_payload_replacement_exhaustion_is_sanitized_and_bounded(self):
+        class SpawnPose:
+            def __init__(self):
+                self.position = types.SimpleNamespace()
+                self.orientation = types.SimpleNamespace()
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.args = types.SimpleNamespace(crate_x=-0.8, crate_y=-3.0)
+        probe.lock = PROBE.threading.RLock()
+        probe.model_states_generation = 3
+        probe.models = {'transport_object': {}}
+        probe.delete_model = mock.Mock(return_value=types.SimpleNamespace(
+            success=True, status_message='',
+        ))
+        probe.spawn_model = mock.Mock(return_value=types.SimpleNamespace(
+            success=True, status_message='',
+        ))
+        probe.wait_for_model_observations = mock.Mock()
+        probe._place_payload_pose = mock.Mock(side_effect=
+            PROBE._RecoverablePayloadRace('private Gazebo detail')
+        )
+        probe.wait_sim = mock.Mock()
+        probe.log = mock.Mock()
+
+        with mock.patch.object(PROBE, 'Pose', SpawnPose), self.assertRaisesRegex(
+            RuntimeError, 'readiness race persisted after 3 replacement attempts'
+        ) as raised:
+            probe.replace_payload('loaded-model')
+
+        self.assertNotIn('private Gazebo detail', str(raised.exception))
+        self.assertEqual(3, probe.delete_model.call_count)
+        self.assertEqual(3, probe.spawn_model.call_count)
+        probe.wait_sim.assert_not_called()
+
+    def test_payload_replacement_does_not_hide_a_permanent_pose_error(self):
+        class SpawnPose:
+            def __init__(self):
+                self.position = types.SimpleNamespace()
+                self.orientation = types.SimpleNamespace()
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.args = types.SimpleNamespace(crate_x=-0.8, crate_y=-3.0)
+        probe.lock = PROBE.threading.RLock()
+        probe.model_states_generation = 3
+        probe.models = {'transport_object': {}}
+        probe.delete_model = mock.Mock(return_value=types.SimpleNamespace(
+            success=True, status_message='',
+        ))
+        probe.spawn_model = mock.Mock(return_value=types.SimpleNamespace(
+            success=True, status_message='',
+        ))
+        probe.wait_for_model_observations = mock.Mock()
+        probe._place_payload_pose = mock.Mock(side_effect=RuntimeError(
+            'could not place transport_object: reference frame rejected'
+        ))
+        probe.wait_sim = mock.Mock()
+        probe.log = mock.Mock()
+
+        with mock.patch.object(PROBE, 'Pose', SpawnPose), self.assertRaisesRegex(
+            RuntimeError, 'reference frame rejected'
+        ):
+            probe.replace_payload('loaded-model')
+
+        self.assertEqual(1, probe.delete_model.call_count)
+        self.assertEqual(1, probe.spawn_model.call_count)
+        probe.log.assert_not_called()
+
+    def test_payload_reset_reinstalls_the_selected_profile_after_loss(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.payload_model_xml = 'loaded-model'
+        probe._place_payload_pose = mock.Mock(side_effect=
+            PROBE._RecoverablePayloadRace('instance disappeared')
+        )
+        probe.replace_payload = mock.Mock()
+        probe.log = mock.Mock()
+
+        probe.reset_payload_pose()
+
+        probe.replace_payload.assert_called_once_with('loaded-model')
+        probe.log.assert_called_once()
+
     def test_trial_duration_excludes_the_safe_stop_publications(self):
         class Command:
             def __init__(self):

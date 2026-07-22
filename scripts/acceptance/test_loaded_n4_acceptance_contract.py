@@ -1447,6 +1447,20 @@ while not marker.exists() and time.monotonic() < deadline:
             "payload_replace_or_visibility_failed", classified["categories"]
         )
         self.assertIn("payload_cleanup_failed", classified["categories"])
+        diagnostics = classified["structuredFailureDiagnostics"]
+        self.assertEqual(2, len(diagnostics))
+        self.assertEqual(
+            hashlib.sha256(result["failures"][0].encode("utf-8")).hexdigest(),
+            diagnostics[0]["sha256"],
+        )
+        self.assertIn(
+            "payload_replace_or_visibility_failed",
+            diagnostics[0]["categories"],
+        )
+        self.assertEqual(
+            ["payload_cleanup_failed"], diagnostics[1]["categories"]
+        )
+        self.assertFalse(classified["rawDiagnosticRetained"])
         self.assertNotIn("secret", json.dumps(classified))
 
         supervision = DRIVER.classify_loaded_probe_failure(
@@ -1455,6 +1469,7 @@ while not marker.exists() and time.monotonic() < deadline:
         self.assertIn(
             "live_marker_supervision_failed", supervision["categories"]
         )
+        self.assertEqual([], supervision["structuredFailureDiagnostics"])
         self.assertNotIn("private", json.dumps(supervision))
 
     def test_bounded_child_kills_process_group_immediately_on_overflow(self):
