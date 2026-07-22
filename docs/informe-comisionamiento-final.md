@@ -8,13 +8,13 @@
 
 ## Resumen
 
-Este documento registra el proceso de cierre técnico del proyecto RobotSwarm. El PR #100 integró el delta de I-055–I-062 como `baba2c1`; el PR #101 corrigió I-063 como `538ba066`. Después, los PR #102, #103 y #104 incorporaron el endurecimiento de aceptación, el orden causal de cuentas y sesiones y la compatibilidad del drenaje con Python 3.8. La revisión vigente en producción es `fbef23eaae2b1b1d5be51ad3fa03e0298239289a`, observada en frontend, backend, worker e imagen ROS. Sobre ella aprobaron la aceptación API multiusuario, dos ventanas visibles, el recorrido administrativo, cuatro anchuras responsive y la caja cargada N=4; el transporte N=2 aprobó su subresultado físico, aunque no el caso gráfico integral. El documento todavía no constituye un acta final: el árbol local contiene correcciones posteriores de los instrumentos de aceptación, del contador de caducidad y del orden causal `Accepted → Running` en el worker. Este delta aún necesita un único PR, CI y repetición postdespliegue. El trabajo no se limita a enumerar cambios; también conserva los síntomas, los intentos rechazados, la localización de cada causa y la evidencia utilizada para aceptar o rechazar una solución.
+Este documento registra el proceso de cierre técnico del proyecto RobotSwarm. El PR #100 integró el delta de I-055–I-062 como `baba2c1`; el PR #101 corrigió I-063 como `538ba066`. Después, los PR #102–#104 incorporaron el endurecimiento de aceptación, el orden causal de cuentas y sesiones y la compatibilidad del drenaje con Python 3.8. El PR #105 reunió el parser UTC, el orden `Accepted → Running`, los límites de los arneses y el PNG histórico. La revisión vigente en producción es `9f49e17435a1ddd6b93b7834b2896d57059616fe`, observada en frontend, backend y worker GPU. Sobre esa base aprobaron la aceptación API multiusuario, dos ventanas visibles y el recorrido administrativo. Las cuatro anchuras responsive y la caja cargada N=4 aceptada continúan vinculadas a `fbef23e`; el reintento sobre la base nueva encontró una carrera de Gazebo antes de llegar a la física. La matriz siguiente mostró además que las seis formaciones móviles podían terminar antes de adquirir la figura. El candidato local, integrado hasta `07da8f4`, corrige esos defectos, añade el marcador visual de destino y retira dos rutas heredadas del frontend. Los commits `511e47c`, `377a0e3`, `568979d`, `4450c13` y `07da8f4` cerraron las fronteras P1 de deformación adaptativa, planes no circulares, publicación finita, frescura de odometría, revalidación de escenas/cadena y atomicidad de los lotes. I-128–I-134 están cerradas en código e I-135, el recorte de cámara localizado durante la prueba visible final, quedó cerrada localmente tras reconstruir la imagen y comprobar las cuatro esquinas. El freeze local exacto, dos transportes N=4 y la imagen `robotswarm-ros:local-final-safe` aprobaron en sus alcances locales. La imagen intermedia anterior continúa descartada y el primer ID seguro quedó supersedido solamente por el ajuste visual. Todavía se necesitan un único PR, CI, despliegue y repetición postdeploy antes de declarar el release. El trabajo no se limita a enumerar cambios; también conserva los síntomas, los intentos rechazados, la localización de cada causa y la evidencia utilizada para aceptar o rechazar una solución.
 
 Al iniciar esta etapa, el sistema de control ya permitía crear sesiones aisladas, cambiar el número de robots y ejecutar las tareas de formación, seguimiento de líder y transporte colaborativo. Sin embargo, el visor privado todavía no estaba habilitado en producción, el despliegue del trabajador GPU requería una confirmación manual y existía evidencia contradictoria para la prueba de transporte con diez robots. Por ese motivo, el proyecto no se consideró terminado.
 
 El primer SHA publicado del candidato descrito en las incidencias I-031 a I-052 fue `f3929bb8da7601264be51b84bf706babe86b7940`, dentro del PR #99. La ejecución CI #31 se rechazó por la dependencia ambiental de I-051; `23b280ecd434647ccff2f179432d5650761a1f5f` corrigió esa dependencia y aprobó CI #32. Después se reconstruyó el historial limpio en `9c0dc0598cd225278e71f924cf30fc1748697370`: CI #33 y GitGuardian aprobaron esa revisión, el PR #99 produjo el merge `bbc7c4611d6d3284c08da1fd2b713afafe641f40` y CI #34 aprobó sobre `main`. Cloudflare publicó el frontend del merge. El despliegue autohospedado que había quedado en espera por I-053 terminó correctamente con esa misma base, y `/health` volvió a comprobarse sano. En aquel corte, el trabajador GPU todavía conservaba el release `62a136a08b4955ea45a58447a87b6518301418fe`; esta diferencia histórica explica por qué las pruebas de esa etapa no se atribuyeron al candidato integrado.
 
-Después de integrar el PR #99 se auditó el resto de la navegación solicitada por el usuario. Esa revisión encontró que Historial, Plantillas, Robots y Grupos todavía mezclaban entidades heredadas con el plano de control ROS, y que el visor no podía cerrarse sin detener toda la sesión. Las incidencias I-055 a I-062 documentan el delta correctivo y su auditoría. El commit candidato `efdec9786fd4d5d4825704188e3eece4fc551250` aprobó el único CI del PR #100; su squash produjo `baba2c1fb4bc73dcd96254a7ab63a16175e6bce9`. El hotfix I-063 se integró después mediante el PR #101 como `538ba066`. I-064–I-091 se integraron mediante los PR #102 y #103, y el ajuste final del parser de drenaje llegó con el PR #104. Esta secuencia explica por qué varias incidencias conservan a `538ba066` o `1182dec` como evidencia histórica, aunque el corte productivo actual sea `fbef23e`.
+Después de integrar el PR #99 se auditó el resto de la navegación solicitada por el usuario. Esa revisión encontró que Historial, Plantillas, Robots y Grupos todavía mezclaban entidades heredadas con el plano de control ROS, y que el visor no podía cerrarse sin detener toda la sesión. Las incidencias I-055 a I-062 documentan el delta correctivo y su auditoría. El commit candidato `efdec9786fd4d5d4825704188e3eece4fc551250` aprobó el único CI del PR #100; su squash produjo `baba2c1fb4bc73dcd96254a7ab63a16175e6bce9`. El hotfix I-063 se integró después mediante el PR #101 como `538ba066`. I-064–I-091 se integraron mediante los PR #102 y #103, el parser de drenaje llegó con el PR #104 y I-093–I-105 quedaron integradas mediante el PR #105. Esta secuencia explica por qué varias incidencias conservan a `538ba066`, `1182dec` o `fbef23e` como evidencia histórica, aunque el corte productivo actual sea `9f49e17`.
 
 ## 1. Objetivos
 
@@ -1044,6 +1044,412 @@ El [reporte saneado y versionado](assets/commissioning-2026-07/final-fbef23e/car
 
 **Limitación deliberada.** Para respetar el PNG exacto solicitado no se generaron derivados gráficos. Como icono PWA sigue siendo rectangular y pesa aproximadamente 407 KiB; la web normal lo carga correctamente, pero un sistema operativo puede encuadrarlo o recortarlo al instalar la aplicación. Crear variantes cuadradas 192×192 y 512×512, con zonas seguras `any`/`maskable`, queda como mejora visual separada y no debe hacerse mediante una transformación silenciosa del original.
 
+### I-106. La formación móvil perseguía un centro que empezaba a moverse demasiado pronto
+
+**Síntoma.** La línea base sobre `9f49e17` aprobó seguimiento y transporte, pero las seis filas de formación móvil fueron rechazadas. El gate exterior observaba `task_terminal_before_activity`: el hijo alcanzaba un estado terminal antes de completar la muestra visible activa. El protocolo que sí alcanzó a emitir mostraba un error de posición elevado y movimiento del centro mientras todavía faltaban robots por ocupar sus slots.
+
+**Localización de la causa.** El controlador iniciaba el reloj de la trayectoria al empezar la tarea. Para una flota grande, la figura no perseguía una posición fija durante el ensamblaje, sino una referencia que avanzaba en cada ciclo. Aumentar la velocidad habría agravado la persecución y ampliar solo el timeout no corregía la dinámica. El arnés también descartaba parte del protocolo al fallar el gate, lo cual hacía menos claro el diagnóstico.
+
+**Corrección.** La trayectoria se ancla en el centro real de la flota y permanece detenida hasta que todos los robots entran en tolerancia durante el intervalo de asentamiento. Recién entonces el estado pasa a `MOVING`. Un cambio de roster o de figura reinicia esta adquisición. El arnés conserva de forma saneada `RESULT_JSON` y `SUMMARY_JSON` aun cuando el gate activo falla, junto con la fase exacta donde ocurrió el rechazo. Así se separa una terminación legítima de un caso que nunca llegó a moverse de forma válida.
+
+### I-107. Una primera pose segura no garantizaba una órbita segura ni cerraba la ventana TOCTOU
+
+**Hallazgo de revisión.** Detener el centro durante la adquisición resolvía la persecución, pero todavía dejaba dos riesgos. Primero, la comprobación geométrica se concentraba en la pose inicial; una letra podía entrar bien y chocar más adelante al girar alrededor de un obstáculo. Segundo, la planificación utilizaba una instantánea de `/gazebo/model_states`: un modelo nuevo podía aparecer entre esa lectura y la publicación del siguiente lote de velocidades.
+
+**Planificador rígido.** Para una trayectoria circular se muestrea la huella completa de todos los slots durante una vuelta. El margen incluye media separación de muestra para cubrir el arco no observado. Si el radio solicitado no cabe, se prueban radios menores de una lista determinista hasta el mínimo configurado. Las letras y figuras conservan su orientación propia; el heading de la trayectoria ya no rota el glifo. Después se asignan rutas de entrada por costo y se dividen en lotes que reservan los slots ya ocupados, reduciendo cruces entre robots.
+
+**Cierre de la carrera.** La geometría viva se vuelve a leer antes de aceptar el plan y de nuevo inmediatamente antes de publicar un lote completo de `Twist`. Se comprueban órbita, slots y rutas que faltan. La caché solo se reutiliza cuando el conjunto de modelos es idéntico o varía dentro del padding ya demostrado. Si aparece un obstáculo o cambia una pose fuera de esa cobertura, el plan se invalida y el lote se sustituye por parada segura; nunca se publica una parte con datos antiguos. La velocidad lineal máxima quedó en 0,22 m/s, valor nominal del TurtleBot3 Burger.
+
+### I-108. Los timeouts de formación mezclaban tiempo de pared con avance simulado
+
+**Problema.** El escenario se acepta con RTF no menor que 2,90, pero el dimensionamiento anterior trataba algunos límites de pared como si equivalieran directamente a segundos simulados. En N=8, por ejemplo, 45 s de pared a un piso conservador RTF 2,7 representan 121,5 s simulados, menos que los 126,05 s observados para adquirir la V. Una ejecución sana podía ser rechazada antes de llegar a `MOVING`.
+
+**Cálculo aplicado.** Se tomaron los tiempos simulados de adquisición de los patrones productivos y se dimensionó cada límite con RTF 2,7, inferior al mínimo que se exigirá en aceptación. Los pares adquisición/límite de pared son: N=3, 15,15/35 s; N=5, 86,25/40 s; N=7, 156,65/65 s; N=8, 126,05/55 s; N=9, 115,20/50 s; y N=10, 208,75/85 s. Al convertir los límites a tiempo simulado quedan márgenes de 79,35; 21,75; 18,85; 22,45; 19,80 y 20,75 s, respectivamente. El tope global del arnés pasó de 720 a 780 s de pared y permanece dentro del wrapper de 900 s. No se relajó la tolerancia geométrica ni se aceleraron los robots.
+
+### I-109. Gazebo entrelazaba `delete`, `spawn` y `set_model_state` al preparar la carga
+
+**Síntoma.** El reintento cargado N=4 se detuvo antes de medir fuerza. La causa no era la masa ni la fricción: después de respuestas individuales aparentemente correctas, `/gazebo/model_states` podía mostrar ausencia, una vida anterior del mismo nombre o una pose todavía no estabilizada. Repetir los tres servicios sin una frontera causal aumentaba la probabilidad de reemplazar un modelo mientras Gazebo procesaba el anterior.
+
+**Solución acotada.** Cada intento de colocación tiene una generación. La sonda exige primero una observación fresca de ausencia; luego crea, posiciona y requiere dos observaciones frescas consecutivas de presencia en la pose correcta. Una respuesta de otra generación no abre la barrera. Se permiten como máximo tres reemplazos y únicamente ante desaparición autoritativa o `model missing`. Los errores permanentes y el cierre solicitado terminan inmediatamente. El timeout de presencia estable recibe una clasificación propia, por lo que el informe distingue falta de convergencia de una carrera recuperable.
+
+### I-110. El diagnóstico de colocación podía crecer sin límite y conservar demasiado contenido
+
+**Riesgo encontrado en revisión.** Guardar cada respuesta cruda de los servicios de Gazebo durante varios reintentos podía aumentar el consumo de memoria y copiar contenido que no era necesario para decidir. En una máquina que ya ejecuta Gazebo, navegador y codificación H.264, un diagnóstico no debe agravar la presión de RAM ni convertirse en una fuente accidental de datos internos.
+
+**Tratamiento.** El informe conserva hasta 16 eventos saneados, el conteo total y la indicación de truncamiento. Solo se aceptan categorías conocidas para formar huellas; la respuesta cruda desaparece del documento. Los caminos de timeout, error permanente y apagado producen estados distintos y acotados. Las regresiones cubren el límite, el truncamiento, categorías rechazadas y la propagación correcta al supervisor exterior.
+
+### I-111. El objetivo del transporte no era visible y el margen de llegada ocultaba el recorrido solicitado
+
+**Pregunta de diseño.** Una prueba que se detenía alrededor de 0,50 m podía parecer limitada por el peso de la caja. Sin embargo, ese valor era el mínimo de aceptación física, no la distancia máxima que los robots podían empujar. La caja de práctica ya ofrece el perfil ligero, 0,25 kg y `mu=0.05`; reducir también la carga de aceptación, de 0,75 kg y `mu=0.25`, habría producido más desplazamiento, pero habría debilitado la comparación ya medida entre uno, dos y cuatro robots.
+
+**Decisión.** Se conserva el perfil cargado. El frontend añade `arrival_tolerance`, con 0,25 m por defecto y rango 0,15–0,75 m; el valor legado 0,50 m sigue disponible cuando el parámetro no llega. Para un recorrido mayor se elige un destino más lejano y un margen menor, sin falsear la dificultad física.
+
+**Marcador fantasma.** El mundo contiene una huella magenta y una caja translúcida de 0,4 m, unidas a un modelo cinemático sin gravedad ni colisión, que indican hacia dónde se moverá la carga. La primera variante era `static`, pero Gazebo Classic no refrescaba de forma fiable su visual después de `set_model_state`; por eso se conserva inmóvil mediante cinemática, no mediante física. Transporte publica la pose una vez mediante un publisher latched de `/gazebo/set_model_state`, sin bloquear el controlador con un RPC bajo locks, y verifica la coordenada observada en `/gazebo/model_states` con tolerancia de 0,02 m. El orquestador y el backend solo permiten los campos `command_published`, `synchronized` y `position`; el frontend los presenta como información de apoyo. Si el marcador falla, la tarea física continúa y la interfaz no afirma que esté sincronizado.
+
+### I-112. Dos rutas de «Tareas» todavía abrían pantallas conectadas a APIs antiguas
+
+**Síntoma.** Aunque la navegación principal ya llevaba a Plantillas e Historial, las URLs `/apps/configs/task` y `/apps/dashboard/tasks` aún montaban componentes que consultaban `/api/TaskActivity` y `/api/TaskForm/widget`. El usuario podía entrar por un marcador viejo y encontrar errores que parecían fallos del backend actual.
+
+**Corrección.** La primera ruta redirige con `Navigate replace` a `/apps/GTS/task-templates` y conserva el rol Admin. La segunda redirige a `/apps/GTS/taskLogs` y queda disponible al usuario normal. Los módulos antiguos ya no se montan. Los contratos de navegación y secciones leen las rutas reales y comprueban que los endpoints retirados no vuelvan a aparecer.
+
+### I-113. Dos fallos locales de herramientas no pertenecían al código candidato
+
+**NuGet.** El primer build del backend terminó antes de compilar porque la caché global de paquetes era de solo lectura y faltaba el analizador de Entity Framework. No se corrigió el repositorio para adaptarlo a una caché dañada. Se creó `/tmp/robotswarm-nuget-corrective`, se restauró allí con permisos del usuario y se repitieron build y pruebas; el resultado válido fue cero errores y cuatro advertencias heredadas.
+
+**npm en WSL.** La primera orden directa resolvió el `npm` instalado en Windows y recibió un directorio WSL como ruta UNC, combinación que el proceso no podía usar como working directory. La compilación válida se realizó en un contenedor Node 18 con el árbol montado de forma normal. Aprobó 30 suites y 164/164 pruebas, además del build de producción; solo aparecieron los avisos heredados de Browserslist/Tailwind y el plugin ESLint opcional ausente.
+
+**Freeze local anterior a I-117–I-125.** El corte integrado hasta `e18926a` aprobó backend 253/253 y omitió por diseño 8 pruebas PostgreSQL en la pasada ordinaria; esas ocho aprobaron 8/8 contra PostgreSQL 17. Worker aprobó 129/129, frontend 164/164 en 30 suites, ROS 461/461 y los siete arneses de aceptación 241/241, desglosados en 17+49+13+61+44+41+16. También quedaron verdes el lint focal, el build de producción frontend, el publicador del visor y las pruebas de despliegue/rollback GPU. La primera compilación frontend encontró un `EACCES` en residuos ignorados de `build/` con otro propietario; se corrigió únicamente esa propiedad y la repetición aprobó, por lo que no se trató como defecto del candidato. Un build intermedio etiquetado `robotswarm-ros:local-final-candidate` terminó catkin al 100 %, con ID `sha256:db8ffda30d79e5e22e1bbfe66978faedb118bb9c43b3e25dedd161807833be14`, tamaño 4.231.139.487 bytes y fecha 2026-07-22T03:10:23Z. La revisión posterior lo descartó al encontrar nuevas fronteras P1. Aunque las incidencias cerradas se corrigieron después hasta `07da8f4`, esa imagen sigue siendo anterior y no puede reutilizarse. Ninguna de estas comprobaciones consumió minutos de GitHub Actions ni se presenta como aceptación productiva.
+
+### I-114. La inspección final encontró residuos diagnósticos y un marcador inmóvil en el render
+
+**Detección y limpieza.** El inventario de procesos encontró un emisor de prueba que repetía `TRANSPORT_OBSERVER_READY` e ignoraba señales, además de una conexión SSH diagnóstica antigua. Se comprobaron argumentos, árbol de procesos y ausencia de una corrida propietaria antes de cerrarlos. No se utilizó un patrón global: el proceso CDP que seguía usando otra sesión de trabajo y el `SwarmWorker` activo quedaron intactos.
+
+**Criterio posterior.** La limpieza final deberá demostrar ausencia por token, ruta privada, grupo y proceso, no simplemente ejecutar `pkill` sobre un nombre compartido. Los PID son efímeros y no se conservan como identificadores académicos; lo auditable es el método de correlación y el resultado de ausencia.
+
+**Comprobación visual del marcador.** La primera sonda movió el modelo declarado `static`. `/gazebo/model_states` informó la coordenada nueva, pero la imagen siguió dibujándolo en el origen. Esto explicó por qué la telemetría podía decir «sincronizado» sin que el espectador viera el destino correcto. El modelo se cambió a cinemático, sin gravedad ni colisión, y la sonda dinámica confirmó que la geometría renderizada sí acompañaba a la pose. El preflight visible correcto identificó `D3D12 (NVIDIA GeForce RTX 3080)`, midió 58,206 FPS de cámara, 62,512 eventos de posrenderizado por segundo y RTF 2,996, con viewport 990×351. El reporte `/tmp/robotswarm-corrected-ghost-gui-report.json` tiene permisos `0600` y SHA-256 `98a4651069f1ea8199d26d278da0b7a4df273b54b93ffaa0a9b65bfd12e1f5d5`. Esta sonda local no se interpreta como una nueva matriz completa ni como aceptación postdeploy.
+
+**Evidencia visual rechazada.** Las capturas de Windows/WSLg realizadas con `CopyFromScreen` quedaron congeladas o recortadas después de redimensionar la ventana. Por ello se rechazaron y no se incorporan a `docs/assets`. La sonda posterior de I-135 produjo capturas locales limpias del caso N=4 y de las cuatro esquinas; continúan pendientes su saneamiento/versionado y la repetición postdeploy.
+
+### I-115. Datos no finitos podían atravesar el control de formación en `MOVING`
+
+**Hallazgo de revisión.** Los gates geométricos de I-107 cerraban el cambio de modelos entre planificación y publicación, pero una odometría con `NaN`/`Inf` podía contaminar la pose durante `MOVING`. En esa condición, las comparaciones de distancia no proporcionan una frontera segura y una excepción inesperada de datos vivos podía abandonar el ciclo sin garantizar que el último `Twist` fuese cero.
+
+**Corrección fail-closed.** La callback de odometría valida conjuntamente `x`, `y` y yaw antes de reemplazar la última pose válida. La lectura viva comprueba siempre la flota completa y rechaza también posiciones no finitas de `/gazebo/model_states`, incluso después del ensamblaje. El bucle principal captura cualquier excepción de esa frontera, marca la tarea como `FAILED`, cancela la asignación y la generación del solver pendientes, publica parada para todos los robots y conserva el estado terminal. No se intenta completar la figura con una flota parcial ni con geometría indeterminada.
+
+**Verificación.** Aprobaron 6/6 pruebas focales de datos inválidos, 50/50 del conjunto formación/rutas/live y 1/1 de evitación. Las regresiones inyectan `NaN`/`Inf` en `x`, `y` y yaw durante `MOVING`, corrupción directa de geometría y una excepción inesperada de evitación; en todos los casos se exige fallo terminal, cancelación del solver y velocidad cero.
+
+### I-116. La sonda cargada podía reintentar Gazebo durante el apagado
+
+**Hallazgo de revisión.** La clasificación recuperable de `model missing` era correcta durante una corrida viva, pero podía abrir un nuevo reemplazo si ROS entraba en shutdown entre la observación y el siguiente servicio. Borrar, crear o posicionar la carga después de solicitar parada no mejora el diagnóstico y puede dejar una vida tardía del modelo.
+
+**Corrección fail-closed.** Una guarda común comprueba `stop_requested` y `rospy.is_shutdown()` antes de `delete`, `spawn` y `set_model_state`, al iniciar el bucle de pose, antes de clasificar una ausencia como recuperable y entre cada etapa de reemplazo. El apagado termina inmediatamente sin nueva generación ni reintento. Las regresiones cubren cierre antes de tocar Gazebo, cierre durante recuperación y ausencia de llamadas posteriores.
+
+**Verificación.** Aprobaron 81/81 pruebas loaded, 170/170 ROS/mundo, 16/16 frontend focales y 53/53 backend focales. Estos resultados verifican la lógica local; la caja de 0,75 kg todavía debe repetirse de forma visible sobre el SHA desplegado.
+
+### I-117. La deformación adaptativa validaba el objetivo anterior a la deformación
+
+**Hallazgo.** La formación adaptativa puede desplazar un slot para separarlo de
+una amenaza. La frontera viva comprobaba el objetivo original del plan, no
+necesariamente la coordenada deformada que llegaría al controlador. Por tanto,
+una validación aprobada no demostraba que ese último objetivo conservara arena
+y clearance.
+
+**Corrección.** `511e47c` construye primero la lista efectiva de objetivos
+deformados, rechaza resultados no finitos y entrega esa misma lista a la
+validación geométrica, al control, al estado y a los marcadores. La deformación
+no se activa durante las rutas de ensamblaje. Si la coordenada resultante invade
+arena, exclusión u obstáculo, no sale ningún comando positivo y la tarea pasa a
+`FAILED`.
+
+### I-118. Las trayectorias lineal y por waypoints podían carecer de plan de colocación
+
+**Hallazgo.** Algunos caminos no circulares podían entrar al movimiento con
+`placement_plan=None`. En ese caso las revalidaciones de I-107 no tenían el
+mismo contexto geométrico utilizado por el camino circular.
+
+**Corrección.** `511e47c` produce y conserva un plan para los modos lineal y por
+waypoints, con arena, margen, exclusiones, clearance, modelos y rutas. Un plan
+ausente solo es admisible durante la breve espera inicial donde todavía no
+existen asignaciones ni rutas y únicamente se publica stop. Una flota asignada
+sin contrato geométrico falla antes de moverse.
+
+### I-119. Faltaba una última barrera finita antes de publicar velocidad
+
+**Hallazgo.** Validar parámetros, odometría y modelos al entrar no prueba por sí
+solo que cada cálculo posterior produzca un `Twist` finito. Una evitación o un
+cálculo malicioso todavía podía introducir `NaN`, `Inf`, un eje no compatible o
+una velocidad superior a la envolvente del TurtleBot3 Burger.
+
+**Corrección.** `511e47c` añadió el gate final de formación y `377a0e3` aplicó
+la misma frontera a seguimiento y transporte. Se inspeccionan los seis
+componentes, los ejes permitidos y los límites 0,22 m/s y 2,84 rad/s. La
+validación ocurre sobre el lote completo antes del primer publish; un elemento
+inválido produce parada de toda la flota y estado terminal, no un recorte
+silencioso que pudiera ocultar la causa.
+
+### I-120. Una odometría inválida podía refrescar la salud del seguimiento
+
+**Hallazgo.** En seguimiento del líder, una muestra de
+odometría no finita podía actualizar el timestamp aunque su pose no fuera útil.
+El monitor podía interpretar como fresca una fuente inválida y retrasar el fallo
+por datos ausentes.
+
+**Corrección.** `377a0e3` valida posición, yaw y cuaternión crudo antes de tomar
+la muestra. Pose, orientación y timestamp se actualizan dentro de una sola
+transacción de control únicamente cuando todos los valores son finitos. La
+muestra rechazada conserva juntos los datos y el tiempo anteriores, queda
+marcada como inválida y, si la tarea está activa, provoca stop y estado
+`failed` correlacionado.
+
+**Verificación de I-117–I-120.** La formación de `511e47c` aprobó 99/99 pruebas
+focales y 469/469 en su ejecución ROS aislada. Después, `377a0e3` aprobó 206/206
+de seguimiento+lifecycle y 473/473 en la ejecución global aislada. También
+aprobaron la comprobación de sintaxis bajo Python 3.8 y `git diff --check`. Estas
+cifras cierran las regresiones de código, pero no se presentan como suite
+combinada final, build de imagen, CI, simulación física ni postdeploy.
+
+### I-121. Una excepción de control podía detenerse sin publicar el `FAILED` correlacionado
+
+**Hallazgo.** Un fallo inesperado podía saltar el epílogo normal del ciclo. Los
+robots quedaban detenidos, pero el consumidor exterior no recibía necesariamente
+un terminal asociado a la tarea y podía confundirlo con inactividad o con el
+estado de una tarea posterior.
+
+**Corrección.** Seguimiento y transporte capturan la excepción dentro de la
+frontera serializada, conservan `task_id` y época, ejecutan la parada completa y
+publican `failed`/`FAILED` antes de liberar esa identidad. Una parada normal
+correlacionada conserva el estado `stopped`/idle y no se convierte en fallo.
+
+### I-122. Validar robot por robot permitía una publicación parcial del lote
+
+**Hallazgo.** Si el segundo comando era `Inf`, el primero podía haberse publicado
+ya. Esa ventana contradecía el requisito de que la flota se mueva como una sola
+unidad segura.
+
+**Corrección.** `SEARCH`, las dos etapas de `APPROACH` y `PUSH` reúnen el lote,
+comprueban orden, presencia y seguridad de todos sus elementos, y solo entonces
+publican. Las regresiones colocan el valor inválido después de un comando válido
+y demuestran que el primero tampoco escapa.
+
+### I-123. Un `ModelStates` truncado podía conservar una pose vieja con timestamp fresco
+
+**Causa.** El uso de `zip(name, pose)` ocultaba una diferencia de longitudes. El
+callback renovaba la marca temporal al recibir el mensaje, aunque la carga
+faltara en la parte truncada; por ello una pose anterior podía parecer actual.
+
+**Corrección.** Transporte exige una correspondencia completa entre nombres y
+poses, valida cada cuaternión y construye la instantánea antes del commit. Un
+mensaje truncado vacía carga, obstáculos y marcador, elimina la frescura,
+registra la razón y publica `FAILED` para la tarea original.
+
+### I-124. Un cuaternión crudo infinito podía producir un yaw aparentemente finito
+
+**Causa y corrección.** Comprobar solamente el yaw convertido no bastaba: las
+operaciones de `atan2` podían devolver un número finito para ciertas entradas
+con `Inf`. La odometría de transporte valida primero `x`, `y`, `z` y `w` del
+cuaternión, además de posición y yaw. Una entrada no finita no refresca pose,
+velocidad ni timestamp.
+
+### I-125. El acumulador de aproximación podía sobrevivir a una excepción
+
+**Riesgo y corrección.** `APPROACH` usa un buffer temporal para construir el
+lote concurrente. Si la evitación fallaba entre su instalación y publicación,
+el atributo podía quedar activo y capturar por error un comando de otro camino.
+`377a0e3` retira el buffer en `finally` para cada uso; el control conserva además
+su finalizador de emergencia. La regresión fuerza una excepción y comprueba que
+el atributo queda en `None` antes del siguiente ciclo.
+
+**Verificación conjunta de I-121–I-125.** Estos casos forman parte de las mismas
+206/206 pruebas de seguimiento+lifecycle y de la ejecución global aislada
+473/473 de `377a0e3`; no se suman como suites independientes. También aprobaron
+Python 3.8 y `git diff --check`. En ese corte aún faltaban el freeze combinado y
+la imagen nueva, completados posteriormente en 6.11; la aceptación
+física/postdeploy continúa pendiente.
+
+### I-126. El planificador asíncrono de seguimiento podía confirmar una escena obsoleta
+
+**Reproducción.** El worker de planificación comenzó con `moving_box` en
+`(8; 8)`. Mientras `_path_plan_worker` calculaba la entrada y la vuelta, el
+modelo se movió a `(1,5; 1,5)`. El resultado todavía pertenecía a la misma tarea,
+generación y roster, por lo que el control aceptó la escena anterior y llegó a
+publicar un `Twist` lineal positivo de 0,00625 m/s sobre una vuelta que ya no era
+segura. La correlación de ciclo de vida evitaba mezclar tareas, pero no demostraba
+que los obstáculos siguieran en la misma pose.
+
+**Corrección.** El cambio se verificó aislado como
+`bd8575593aa24c2d3ac0a878641d0d235fbf6bbe` y se integró como `568979d`. Toma una instantánea
+coherente al terminar el cálculo y compara nombres, posición y yaw con el
+escenario validado. Se toleran únicamente hasta 0,01 m y 0,02 rad para no
+replanificar por jitter de Gazebo. Ante un cambio material, el resultado
+optimista se comprueba otra vez sobre la vuelta completa y, cuando existe, se
+recalcula la ruta de entrada. Después se adquiere de nuevo el lock y se compara
+por segunda vez la escena: si cambió durante esa revalidación, el plan se
+descarta, los robots permanecen detenidos y el siguiente tick planifica desde el
+estado nuevo. También se descarta un error viejo cuando ya no describe la
+escena vigente.
+
+**Verificación.** Aprobaron 40/40 pruebas de seguimiento y 483/483 de la suite
+ROS completa del worktree aislado, además de `py_compile` bajo Python 3.8 y
+`git diff --check`. La integración ya está en el candidato principal, pero aún
+debe participar en la suite combinada final; no constituye build ni aceptación
+visible.
+
+### I-127. Transporte podía publicar después de vencer la frescura dentro del mismo ciclo
+
+**Reproducción.** Transporte comprobaba `ModelStates` al comenzar el
+ciclo, pero no inmediatamente antes del lote. Con un ciclo inducido de 1,0 s y
+un timeout de 0,75 s, la instantánea era válida al entrar y ya estaba vencida al
+salir; aun así se publicó 0,12 m/s durante `SEARCH`. Por tanto, la barrera de
+I-122 era atómica respecto a los comandos, pero no respecto al tiempo de la
+geometría que los justificaba.
+
+**Corrección.** `4450c13` revalida la frescura de `ModelStates` y de la
+odometría completa de la flota dentro del gate final, antes de aceptar cualquier
+lote no nulo. El `command_lock` se conserva desde esa decisión hasta el último
+`Twist` y, donde corresponde, el commit del estado de `ObstacleAvoidance`. Las
+rutas que publican un comando directo atraviesan la misma comprobación. Los
+comandos cero se exceptúan de la exigencia de frescura para que la parada siga
+disponible durante un fallo.
+
+**Verificación.** La regresión cruza el timeout entre la publicación asignada al
+primer y al segundo robot y exige una decisión atómica, sin pulso parcial. El
+corte aislado final aprobó 172/172 pruebas de lifecycle y 487/487 de la suite
+global, además de `py_compile` bajo Python 3.8 y `git diff --check`. I-127 queda
+cerrada en código. El freeze y la imagen se completaron después como registra
+6.11; la ejecución física continúa pendiente.
+
+### I-128. El plan de seguimiento podía confirmar odometría obsoleta de la cadena
+
+**Reproducción.** I-126 correlacionó la escena de obstáculos, pero el
+worker no demostró que las posiciones y yaw usados por el planificador siguieran
+vigentes al confirmar el resultado. Se bloqueó el solver con el líder en
+`(0; 0)`, se entregó una muestra de odometría válida que lo desplazó a `(3; 3)`
+y después se dejó terminar el cálculo. Aun así, el commit conservó
+`anchor=(0; 0)`, `active=true` y `path_anchor_ready=true`; el primer comando
+angular fue aproximadamente −0,0625 rad/s sin una ruta validada desde la pose
+nueva.
+
+**Corrección.** `07da8f4` correlaciona dos veces las posiciones y yaw de toda la
+cadena, usando las tolerancias explícitas que separan el jitter normal de Gazebo
+de un desplazamiento material. Si la odometría cambia durante el cálculo o la
+revalidación, el plan se descarta, toda la flota permanece a velocidad cero y el
+siguiente tick planifica desde el estado nuevo.
+
+### I-129. Formación podía agotar la frescura después del preflight
+
+**Reproducción.** La escena y la odometría tenían marca 10,0 s y el
+timeout de pared era 0,75 s. El ciclo aprobó su entrada con reloj 10,0 s; durante
+el cálculo se adelantó a 11,0 s. A pesar de que la muestra ya había vencido,
+formación publicó 0,22 m/s y permaneció en ejecución. La validación continua de
+I-115 protegía el inicio del ciclo, no el instante del primer `Twist`.
+
+**Corrección.** `07da8f4` repite la comprobación de frescura literalmente después
+del cálculo geométrico, en la última barrera antes del primer `Twist`. El mismo
+lock protege la decisión y la publicación completa. Una expiración produce stop
+global y un terminal `FAILED` correlacionado, sin pulso parcial.
+
+### I-130. Seguimiento conservaba actividad después de vencer sus entradas
+
+**Reproducción.** El caso manual N=1 repitió en seguimiento la ventana
+temporal de I-129. Los datos eran aceptables al iniciar el ciclo, vencieron antes
+de publicar y el controlador emitió 0,1 m/s; después continuó con `active=true`.
+Esto demuestra que correlacionar el lote y validar sus números no prueba por sí
+solo que la geometría que lo originó siga vigente.
+
+**Corrección.** `07da8f4` revalida escena y odometría inmediatamente antes de
+cualquier lote no nulo de seguimiento y mantiene una frontera atómica hasta
+completarlo. Si los datos vencen, descarta el movimiento, publica ceros y termina
+de forma correlacionada.
+
+### I-131. Un ModelStates truncado podía convertir un obstáculo en escena vacía
+
+**Reproducción.** Formación recibió `name=['moving_box']` y `pose=[]`.
+En vez de conservar una invalidación efectiva, el callback dejó vacía la escena
+de modelos. El planificador interpretó la ausencia como espacio libre y publicó
+0,22 m/s hacia un objetivo bloqueado por `moving_box`. Por tanto, una
+instantánea estructuralmente inválida podía ser menos restrictiva que la última
+escena válida.
+
+**Corrección.** `07da8f4` valida `name` y `pose` antes de construir o sustituir
+la instantánea. Una longitud desigual invalida la escena y conserva el fallo
+hasta recibir una muestra completa; nunca equivale a «sin obstáculos». Los
+modelos configurados se filtran por el mundo activo y el ciclo afectado detiene
+toda la flota de forma correlacionada.
+
+### I-132. Cuaterniones crudos no finitos podían producir un yaw aparentemente válido
+
+**Reproducción.** Se inyectó un cuaternión con un componente `Inf`. La
+conversión trigonométrica produjo por casualidad yaw finito 2,356, que fue
+aceptado tanto por la ruta de modelos como por la de odometría de formación. El
+ciclo llegó a publicar 0,22 m/s lineales y −1,5 rad/s angulares. Comprobar solo
+el yaw derivado no demuestra que la orientación de origen sea válida.
+
+**Corrección.** `07da8f4` valida los cuatro componentes crudos del cuaternión
+antes de convertir o guardar la pose, además de posición y yaw derivado. Una
+muestra no finita invalida el snapshot o conserva la última odometría válida sin
+refrescar su tiempo; el gate vivo detiene el lote completo.
+
+### I-133. Formación aceptaba ejes incompatibles con una base no holonómica
+
+**Reproducción.** `_validated_motion_command` comprobaba finitud y
+límites para los seis componentes del `Twist`, pero no exigía cero en
+`linear.y`, `linear.z`, `angular.x` y `angular.y`. Un valor pequeño dentro del
+límite atravesaba el validador aunque el TurtleBot3 Burger solo admite
+`linear.x` y `angular.z`. La comprobación de movimiento/frescura también se
+decidía a partir de esos dos ejes soportados, de modo que un comando lateral
+inválido no activaba necesariamente la frontera esperada.
+
+**Corrección.** `07da8f4` rechaza explícitamente cualquier componente no
+holonómico distinto de cero antes de publicar el lote. El fallo detiene a toda la
+flota y conserva tarea y generación; un valor finito o menor que el máximo
+numérico ya no basta para aceptarlo.
+
+### I-134. Nombres duplicados podían volver ambiguo un ModelStates
+
+**Reproducción.** Un mensaje incluyó dos entradas con el mismo nombre de
+modelo configurado. Con el orden pose NaN→pose válida, una validación posterior
+podía limpiar el error anterior; con dos poses finitas, el callback no tenía una
+identidad unívoca que justificara cuál usar. El resultado dependía del orden del
+mensaje, no de una instantánea válida.
+
+**Corrección.** `07da8f4` exige unicidad en los callbacks de formación,
+seguimiento y transporte. Cualquier duplicado invalida el snapshot completo,
+aunque ambas poses sean finitas, y mantiene el fallo cerrado hasta recibir una
+instantánea posterior completa y unívoca.
+
+**Verificación conjunta de I-128–I-134.** La primera iteración aprobó 95/95
+pruebas de seguimiento+formación antes de los dos últimos hallazgos. Después de
+incorporar I-133 e I-134, el delta final aprobó 6/6 regresiones focales y 497/497
+de la suite global aislada en 109,067 s. También aprobaron `py_compile` con
+Python 3.8.10 para `follow_leader.py`, `formation_control.py`,
+`collaborative_transport.py` y sus tres archivos de prueba, además de
+`git diff --check`. La repetición exacta del árbol principal aprobó después
+497/497 en 109,460 s y RC=0; este resultado precede al ajuste de cámara. Tras
+reconstruir la imagen con ese ajuste, la suite completa volvió a aprobar
+497/497 en 109,592 s, con `OK` y RC=0. Este último corte es el freeze local
+exacto vigente. Ninguno de estos resultados constituye CI, despliegue ni
+aceptación postdeploy.
+
+### I-135. La cámara predeterminada recortaba el marcador en el borde sur
+
+**Reproducción.** Las corridas finales N=4 publicaron y sincronizaron el
+`target_marker` en `x=-3.5`, `y=-4.0`. Sin embargo, las capturas `approach`,
+`search` y `done` tomadas con la pose predeterminada
+`0 -12 10 0 0.7 1.5708` no mostraban completa la huella magenta. La captura
+manual `zoomout2` sí la mostró en la coordenada informada. Una revisión visual
+independiente confirmó que el defecto era el encuadre de la cámara y no la
+publicación, la sincronización ni el algoritmo de transporte.
+
+**Corrección.** La pose inicial del mundo pasó a
+`0 -14.4 12 0 0.72 1.5708`, con suficiente margen para el área de trabajo de
+`-4` a `4` m. La prueba de física del mundo fija esa pose para evitar que una
+modificación posterior vuelva a cerrar el plano sin ser detectada. El primer
+artefacto seguro, ID
+`sha256:02fbd5c2302d3af0eb9e543af04bb4507292786b7155b39b54e9d294b27f4864`,
+queda supersedido solo respecto del encuadre visual; sus resultados algorítmicos
+y físicos no se reclasifican como fallidos.
+
+**Verificación local.** Se reconstruyó `robotswarm-ros:local-final-safe`; catkin
+terminó al 100 % y la imagen exacta resultante tiene ID
+`sha256:e17579ed83e0c37a9ff9b03817652aeb935573b307801ddc5863d29f2a92ae0d`,
+tamaño 4.231.381.706 bytes y fecha
+`2026-07-22T04:53:51.679721236Z`. El cliente visible identificó
+`D3D12 (NVIDIA GeForce RTX 3080)`, midió 57,279 FPS de cámara, 58,791 eventos
+de posrenderizado por segundo y RTF 2,997, con viewport 990×334. Mediante
+`SetModelState` se llevó el marcador a las cuatro esquinas `(4,4)`, `(-4,4)`,
+`(4,-4)` y `(-4,-4)`; en cada PNG la huella y la caja aparecieron completas y
+dentro de los muros. También aprobaron 8/8 pruebas del mundo y
+`git diff --check`. Por ello I-135 queda cerrada localmente, no en producción.
+
+**Evidencia.** El conjunto temporal está en
+`/tmp/robotswarm-local-final-camera-20260722T0454Z/`. Los SHA-256 de las
+capturas NE, NW, SE y SW son, respectivamente,
+`75c53cf725a69c20568d00a529754d463bb79957c2e10e904d4b46e2c22ee839`,
+`84750bdbb15eddb1babaeffedf10205de84a816fd6e474e13a28f35a887152ca`,
+`ade73f6e43125f0945a60606d3db7cb6e10538abc19b2d3fb18e1ead1b848e14` y
+`86f32de8ad0628c0fae1d97b53a1ae3ed9dcf86f73fa753ec5c89a886ea48f51`.
+La ruta es temporal y no sustituye la captura saneada del SHA desplegado.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -1179,10 +1585,43 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-21 | Aislamiento del clic físico | Evidencia `isTrusted` trasladada a un mundo CDP aislado del JavaScript de React | Incidencia I-103; visor 41/41 y transporte UI 44/44 |
 | 2026-07-21 | Eliminación de la carrera al señalizar | `pidfd_open` → revalidación → `pidfd_send_signal`, sin fallback numérico | Incidencia I-104; matriz 60/60 contratos |
 | 2026-07-21 | Restauración de la marca PNG | Wordmark anterior visible en acceso, splash y barra autenticada; 1366/360 sin overflow | Incidencia I-105; frontend 159/159 y build local |
+| 2026-07-21 | Rechazo de las seis formaciones móviles | El centro avanzaba durante el ensamblaje y el gate recibía `task_terminal_before_activity` | Incidencia I-106; protocolo preservado y centro inmóvil hasta asentamiento |
+| 2026-07-21 | Revisión geométrica de formación | Primera pose segura insuficiente y ventana entre snapshot vivo y publicación | Incidencia I-107; órbita rígida completa, rutas por lotes y revalidación fail-closed |
+| 2026-07-21 | Dimensionamiento de timeouts | Límites recalculados con RTF 2,7; márgenes simulados explícitos para N=3/5/7/8/9/10 | Incidencia I-108; wrapper global de 900 s conservado |
+| 2026-07-21 | Carrera de colocación cargada | El reintento N=4 falló antes de física por el entrelazado delete/spawn/set pose | Incidencia I-109; generaciones, ausencia fresca y dos presencias estables |
+| 2026-07-21 | Acotación de diagnóstico de carga | Máximo 16 eventos saneados, conteo y truncamiento; sin respuesta cruda | Incidencia I-110; timeout estable clasificado |
+| 2026-07-21 | Marcador fantasma y tolerancia de llegada | Huella y caja magenta sin colisión; margen UI 0,25 m sin cambiar 0,75 kg ni `mu=0.25` | Incidencia I-111; evidencia visual posterior pendiente del despliegue |
+| 2026-07-21 | Retiro de rutas de tareas antiguas | Dos URLs redirigen a Plantillas e Historial y dejan de montar endpoints inexistentes | Incidencia I-112; contratos frontend/secciones |
+| 2026-07-21 | Freeze local provisional del candidato | Frontend 164/164, backend 253/253 + 8 opt-in omitidas, worker 129/129, PostgreSQL 8/8, ROS 461/461, aceptación 241/241 y build frontend verde | Incidencia I-113; sin GitHub Actions |
+| 2026-07-21 | Revisión final del marcador | El modelo estático movía `ModelStates` pero no el render; la variante cinemática aprobó la sonda visible a 58,206/62,512 FPS y RTF 2,996 | Incidencia I-114; reporte local con SHA-256 y captura limpia pendiente |
+| 2026-07-21 | Retiro de procesos diagnósticos obsoletos | Observador falso y SSH antiguo correlacionados y cerrados; worker y CDP activos preservados | Incidencia I-114; limpieza selectiva |
+| 2026-07-21 | Formación fail-closed ante datos no finitos | Odometría y modelos `NaN`/`Inf` rechazados, validación continua, stop global y cancelación de solver; 6/6 + 50/50 + 1/1 | Incidencia I-115; ejecución visible postdeploy pendiente |
+| 2026-07-21 | Cierre de recuperación cargada durante shutdown | Ningún delete/spawn/set/reintento tras `stop_requested` o cierre ROS; 81/81 loaded y 170/170 ROS/mundo | Incidencia I-116; carga visible postdeploy pendiente |
+| 2026-07-21 | Build ROS intermedio | `robotswarm-ros:local-final-candidate`, catkin 100 %, 4.231.139.487 bytes | ID `db8ffda3…33be14`; descartado tras nuevos P1, no release productivo |
+| 2026-07-21 | Cierre de formación posterior al build | Objetivo adaptive efectivo, planes lineal/waypoints y lote finito; 99/99 focales y 469/469 ROS aisladas | `511e47c`; incidencias I-117–I-119 |
+| 2026-07-21 | Cierre de datos vivos y lotes follow/transport | Timestamp atómico, terminal correlacionado, lotes SEARCH/APPROACH/PUSH, snapshot completo, cuaternión crudo y cleanup `finally`; 206/206 y 473/473 aisladas | `377a0e3`; incidencias I-119–I-125 |
+| 2026-07-21 | Compatibilidad del cierre P1 | Sintaxis Python 3.8 y `git diff --check` aprobados | Evidencia local; suite combinada, imagen y postdeploy pendientes |
+| 2026-07-22 | Revalidación del plan asíncrono de seguimiento | `moving_box` cambió durante el solver; vuelta y ruta se revalidan con doble correlación; 40/40 y 483/483 | `568979d` (verificado antes como `bd85755`); incidencia I-126 |
+| 2026-07-22 | Gate temporal atómico de transporte | Revalidación final de ModelStates+odom, lock hasta último Twist/commit OA y cero stale permitido; 172/172 y 487/487 | `4450c13`; incidencia I-127 |
+| 2026-07-22 | Odometría obsoleta durante el plan de seguimiento | Líder `(0; 0)`→`(3; 3)` mientras el solver esperaba; doble correlación de cadena y replan en cero | `07da8f4`; incidencia I-128 |
+| 2026-07-22 | Frescura final de formación y seguimiento | Reloj 10→11 con timeout 0,75; gates literales antes del lote, stop correlacionado | `07da8f4`; incidencias I-129–I-130 |
+| 2026-07-22 | Snapshot truncado de formación | `name=['moving_box']`, `pose=[]`; invalidación persistente y filtro por mundo activo | `07da8f4`; incidencia I-131 |
+| 2026-07-22 | Cuaternión no finito de formación | Cuatro componentes crudos validados en modelo y odometría antes del yaw | `07da8f4`; incidencia I-132 |
+| 2026-07-22 | Ejes no holonómicos de formación | `linear.y/z` y `angular.x/y` se rechazan aunque sean finitos y pequeños | `07da8f4`; incidencia I-133 |
+| 2026-07-22 | Nombres duplicados en ModelStates | Duplicados fail-closed en formación, seguimiento y transporte; recuperación unívoca | `07da8f4`; incidencia I-134 |
+| 2026-07-22 | Verificación aislada del grupo final | 95/95 follow+formation antes del último ajuste; final 6/6 focales y 497/497 globales en 109,067 s | `07da8f4`; Python 3.8.10 y diff-check, corte anterior al build y sin CI/deploy |
+| 2026-07-22 | Freeze local combinado anterior a la cámara | ROS 497/497 en 109,460 s; aceptación 241/241; física 8/8; todos RC=0 | Python 3.8.10, diff-check, 3 workflows, 4 Compose y escaneo de secretos; trazabilidad pre-cámara, sin CI |
+| 2026-07-22 | Primer build ROS local seguro | Catkin 100 %, 4.231.381.324 bytes; aceptado para las corridas funcionales y supersedido después solo por el encuadre | `robotswarm-ros:local-final-safe`; ID `02fbd5c2…27f4864`, no release ni deploy |
+| 2026-07-22 | Transporte N=4 con tolerancia legada 0,50 m | PASS/RC=0; avance 0,5022 m, distancia final 0,4978 m, RTF 2,9965, 4/4 útiles y cero colisiones | Evidencia local visible sobre `02fbd5c2…27f4864` |
+| 2026-07-22 | Transporte N=4 con tolerancia UI 0,25 m | PASS/RC=0; parámetro inyectado solo en memoria, avance 0,7535 m, distancia final 0,2465 m, RTF 2,9963, 4/4 útiles y cero colisiones | Finder `tb3_1`; cuatro buscadores y cuatro en rendezvous; marcador sincronizado en `(-3.5,-4.0)` |
+| 2026-07-22 | Revisión visual del borde sur | Las capturas iniciales recortaron el marcador; `zoomout2` aisló la causa en la pose de cámara | Incidencia I-135; no fue un fallo de sincronización ni del transporte |
+| 2026-07-22 | Rebuild y cierre local de cámara | Catkin 100 %, 4.231.381.706 bytes; marcador completo en NE/NW/SE/SW, 8/8 mundo y diff-check | ID `e17579ed…ae0d`; D3D12/RTX 3080, 57,279 FPS, RTF 2,997; no release ni deploy |
+| 2026-07-22 | Freeze final posterior a cámara y rebuild | ROS 497/497 en 109,592 s, `OK`, RC=0 | Corte local exacto vigente; reemplaza al de 109,460 s como freeze, sin CI ni deploy |
+| 2026-07-22 | Repetición N=4 sobre la imagen corregida | PASS/RC=0; avance 0,7523 m, distancia final 0,2477 m, RTF 2,9962, 4/4 útiles, fracción simultánea 0,9355 y cero colisiones | ID `e17579ed…ae0d`; captura `search` y log saneado; `push`/`done` excluidas por carrera de cleanup |
 
 ## 6. Resultados previos y cortes históricos
 
-Los datos de 6.1–6.3 se capturaron durante la intervención sobre la revisión base `3fcc80a`; `source-sha.txt` conserva esa referencia. Sirven como aceptación visible del algoritmo y como línea base de rendimiento, pero no se presentan como evidencia de producción actual. Las secciones 6.5 y 6.6 distinguen el inventario histórico y la base del PR #99. La sección 6.8 conserva la fotografía anterior a I-063, cuando frontend y backend ejecutaban `baba2c1` y el worker GPU permanecía en `62a136a`; 6.9 registra la transición desde el PR #101 y 6.10 presenta `fbef23e` y el delta local vigente. La repetición definitiva desde el frontend público sigue sujeta a los criterios de la sección 7.
+Los datos de 6.1–6.3 se capturaron durante la intervención sobre la revisión base `3fcc80a`; `source-sha.txt` conserva esa referencia. Sirven como aceptación visible del algoritmo y como línea base de rendimiento, pero no se presentan como evidencia de producción actual. Las secciones 6.5 y 6.6 distinguen el inventario histórico y la base del PR #99. La sección 6.8 conserva la fotografía anterior a I-063, cuando frontend y backend ejecutaban `baba2c1` y el worker GPU permanecía en `62a136a`; 6.9 registra la transición desde el PR #101, 6.10 conserva el corte `fbef23e` y 6.11 presenta la base `9f49e17` con el delta local vigente. La repetición definitiva desde el frontend público sigue sujeta a los criterios de la sección 7.
 
 ### 6.1 Transporte colaborativo con diez robots
 
@@ -1323,22 +1762,136 @@ Los PR #102–#104 llevaron el candidato anterior hasta `fbef23eaae2b1b1d5be51ad
 
 El estado no es final porque la aceptación encontró defectos en sus propios instrumentos, un error visible de zona horaria y una carrera causal del worker. El árbol local posterior a `fbef23e` agrega compatibilidad Python 3.8, canal atómico de marcadores, diagnóstico MSE, límites y cierre demostrable del observador, clic confiable, parser UTC del frontend y el gate que preserva `Accepted → Running` mientras `StartTask` permanece activo. La política de ahorro de CI consiste en consolidar todo ese delta en un solo PR y usar un solo ciclo de Actions. Hasta entonces, los éxitos sobre `fbef23e` siguen siendo válidos como evidencia de esa base, pero no se trasladan automáticamente al próximo SHA.
 
-El corte local previo al PR aprobó 250 pruebas de backend, con 8 casos PostgreSQL opt-in omitidos por diseño; 159 pruebas de frontend; 429 de ROS; 129 del worker; y 237 contratos distribuidos entre los siete arneses de aceptación (17 API, 47 carga N=4, 13 responsive, 60 matriz ROS, 15 secciones, 44 transporte desde la interfaz y 41 visor multiusuario). También aprobaron los builds de frontend y backend, la imagen ROS, la migración idempotente, la configuración Compose y el publicador. Son resultados del árbol de trabajo local: no se atribuyen a `fbef23e` ni al futuro SHA hasta que el CI selle un commit concreto.
+El corte local previo al PR aprobó 250 pruebas de backend, con 8 casos PostgreSQL opt-in omitidos por diseño; 159 pruebas de frontend; 429 de ROS; 129 del worker; y 237 contratos distribuidos entre los siete arneses de aceptación (17 API, 47 carga N=4, 13 responsive, 60 matriz ROS, 15 secciones, 44 transporte desde la interfaz y 41 visor multiusuario). También aprobaron los builds de frontend y backend, la imagen ROS, la migración idempotente, la configuración Compose y el publicador. Esas cifras corresponden al candidato que terminó integrado por el PR #105; la sección siguiente registra el delta correctivo posterior.
+
+### 6.11 Base productiva `9f49e17` y candidato de formación/destino
+
+El PR #105 produjo `9f49e17435a1ddd6b93b7834b2896d57059616fe`. Frontend, backend y worker GPU anunciaron esa revisión y la aceptación base volvió a comprobar las secciones web y el visor. Antes de modificar el árbol se creó la etiqueta local anotada `rollback/pre-formation-ghost-9f49e17`, que apunta exactamente a ese commit. También permanece disponible el respaldo previo de la intervención; ninguno de los dos se utiliza como evidencia de que el candidato nuevo ya esté desplegado.
+
+Sobre esta base se integró el delta correctivo de destino/tolerancia, telemetría del marcador, estabilización de colocación cargada, límites de diagnóstico, clasificación del timeout estable, redirecciones legacy y formación móvil. La revisión posterior incorporó fronteras fail-closed para odometría/modelos no finitos, apagado de carga, objetivos adaptativos, planes no circulares, lotes completos, estado terminal correlacionado, revalidación de escena/cadena, frescura final, snapshots unívocos y ejes Burger. El candidato de código queda integrado hasta `07da8f4`; el SHA definitivo incluirá también la documentación y los ajustes cinemático y de encuadre del marcador, y será el que deba aprobar CI. Esta descripción evita depender del número de commits, que cambia legítimamente al incorporar revisiones.
+
+El freeze provisional anterior a I-117–I-125 aprobó frontend 164/164 en 30 suites, backend 253/253 con 8 opt-in omitidas en la ejecución ordinaria, PostgreSQL 8/8, worker 129/129, ROS 461/461 y 241/241 contratos de aceptación (17+49+13+61+44+41+16). El cierre previo de formación aprobó además 6/6 focales, 50/50 de formación/rutas/live y 1/1 de evitación; el cierre de apagado cargado obtuvo 81/81 loaded, 170/170 ROS/mundo, 16/16 frontend focales y 53/53 backend focales. Quedaron verdes el lint focal, el build de producción frontend, el publicador del visor y las pruebas de despliegue/rollback GPU. El primer build frontend terminó en `EACCES` por residuos ignorados de `build/` con otro propietario; después de corregir solo esa propiedad, la misma compilación aprobó. Un build intermedio etiquetado `robotswarm-ros:local-final-candidate` completó catkin al 100 %, con ID `sha256:db8ffda30d79e5e22e1bbfe66978faedb118bb9c43b3e25dedd161807833be14`, tamaño 4.231.139.487 bytes y fecha 2026-07-22T03:10:23Z. La revisión posterior lo descartó; aunque los P1 cerrados quedaron corregidos hasta `07da8f4`, esa imagen continúa siendo anterior y no se reutiliza.
+
+La validación posterior se mantiene separada para no presentar una suma artificial. `511e47c` aprobó 99/99 pruebas focales de formación y 469/469 en su ejecución ROS aislada. `377a0e3` aprobó 206/206 de seguimiento+lifecycle y 473/473 en la ejecución global aislada. También aprobaron sintaxis Python 3.8 y `git diff --check`. En ese corte todavía no se habían ejecutado el freeze combinado ni la imagen nueva; ambos se describen abajo. El costo medido del planificador de formación sin ROS fue 52,39 s para 27.000 ticks, alrededor de 1,94 ms por tick; a RTF 3 se estima en 11,6 % de un núcleo. Estas cifras son evidencia local de regresión y capacidad, no comportamiento físico ni aceptación visible posterior al despliegue.
+
+La revisión continuó después de ese corte. I-126 se verificó aislada como
+`bd8575593aa24c2d3ac0a878641d0d235fbf6bbe` y se integró como `568979d`, con
+40/40 pruebas de follow y 483/483 globales. I-127 se integró como `4450c13`, con
+172/172 pruebas de lifecycle y 487/487 globales, además de la comprobación de
+Python 3.8 y `git diff --check`. Estos son cortes aislados, no una suite
+combinada. La revisión abrió después I-128–I-134 por falta de correlación de la
+odometría del planificador, ventanas finales de frescura y validación incompleta
+de `ModelStates`, cuaterniones y ejes de formación. El grupo quedó integrado en
+`07da8f4`: la primera iteración aprobó 95/95 de seguimiento+formación y el delta
+final aprobó 6/6 focales y 497/497 globales aisladas en 109,067 s, además de
+Python 3.8.10 y `git diff --check`.
+
+El freeze combinado anterior al ajuste de cámara aprobó 497/497 pruebas ROS en 109,460 s,
+241/241 contratos de aceptación —17 producción, 49 carga N=4, 13 responsive, 61
+matriz ROS, 44 transporte UI, 41 visor y 16 secciones— y 8/8 pruebas de física
+del mundo, todos con RC=0. También quedaron verdes `py_compile` con Python
+3.8.10 sobre tres controladores y sus tres tests, `git diff --check`, tres
+workflows YAML, las cuatro configuraciones Compose y el escaneo de secretos. La
+única coincidencia del escáner fue la URL deliberadamente inválida del fixture
+negativo `WorkerOptionsValidatorTests.cs:44`; no era un secreto.
+
+La primera imagen `robotswarm-ros:local-final-safe` completó catkin al 100 %,
+con ID
+`sha256:02fbd5c2302d3af0eb9e543af04bb4507292786b7155b39b54e9d294b27f4864`,
+tamaño 4.231.381.324 bytes y fecha
+`2026-07-22T04:42:49.782807841Z`. Este fue el artefacto exacto visible durante
+las dos corridas N=4 descritas abajo. La revisión visual posterior encontró
+I-135, por lo que ese ID quedó supersedido solamente por la pose de la cámara;
+no se invalida la evidencia algorítmica, física o de sincronización producida
+con él.
+
+La reconstrucción posterior al ajuste conserva la etiqueta, completó catkin al
+100 % y tiene ID
+`sha256:e17579ed83e0c37a9ff9b03817652aeb935573b307801ddc5863d29f2a92ae0d`,
+tamaño 4.231.381.706 bytes y fecha
+`2026-07-22T04:53:51.679721236Z`. Esta es la imagen local vigente. Ninguno de
+los dos ID constituye release, CI, despliegue ni aceptación postdeploy.
+
+Sobre el árbol exacto posterior a la cámara y al rebuild se repitió la suite
+ROS completa: 497/497 pruebas aprobaron en 109,592 s, con `OK` y RC=0. Este es
+el freeze local exacto vigente; los 109,460 s permanecen únicamente como
+trazabilidad del corte previo.
+
+Las dos aceptaciones visibles N=4 terminaron `PASS` con RC=0. El perfil legado
+omitió `arrival_tolerance` y aplicó 0,50 m: el objeto avanzó 0,5022 m, quedó a
+0,4978 m de la meta, el RTF fue 2,9965, los cuatro robots realizaron trabajo
+útil y no se registraron colisiones. Para reproducir el parámetro actual de la
+interfaz sin modificar archivos del repositorio, la segunda corrida inyectó
+0,25 m solamente en memoria dentro del arnés. El objeto avanzó 0,7535 m y
+terminó a 0,2465 m, con RTF 2,9963, 4/4 robots útiles, fracción de contribución
+simultánea 0,8707, velocidad máxima 0,1664 m/s, aceleración máxima en ventana
+0,6281 m/s² y cero colisiones. `tb3_1` descubrió la carga y avisó a `tb3_0`,
+`tb3_2` y `tb3_3`; el instrumento observó picos de cuatro buscadores y cuatro
+robots en reunión. El marcador se publicó y confirmó en `x=-3.5`, `y=-4.0`.
+
+El cliente visible identificó `D3D12 (NVIDIA GeForce RTX 3080)`, midió 57,182
+FPS de cámara, 58,795 eventos de posrenderizado por segundo y RTF 2,997, con
+viewport 990×334. La evidencia está en
+`/tmp/robotswarm-local-final-visible-20260722T0444Z/`. Los SHA-256 de
+`approach`, `search`, `done` y `zoomout2` son
+`fa356ca8b084ee62e093f5993b1134a5b65ac2a857e492096e1906a0677c19d6`,
+`d27774ed3560056919728b83dce8386a28187ba4f0e9d7234ac8959e706aff7b`,
+`044573e7ca9a43d347947e51e2db6560e364006b737f4242f7c49c445ca049b4` y
+`9e88ce8444111379ce740c2c7ae4fb01e20c516dcc585f5da4c4c12fe6e1e6c7`.
+Estas rutas son temporales y no se presentan como evidencia productiva.
+
+La corrida física se repitió después sobre la imagen reconstruida exacta
+`e17579ed…ae0d`, sin borrar la flota durante el caso y con la misma inyección
+temporal de 0,25 m. Terminó `PASS` con RC=0. El objeto avanzó 0,7523 m y quedó
+a 0,2477 m del destino; el RTF fue 2,9962. Los 4/4 robots aportaron trabajo
+útil y la fracción simultánea fue 0,9355. `tb3_1` encontró la carga y avisó a
+`tb3_0`, `tb3_2` y `tb3_3`; el instrumento observó un máximo de cuatro robots
+en búsqueda y cuatro en reunión. No hubo colisiones. La velocidad máxima fue
+0,1649 m/s y la aceleración máxima en ventana fue 0,7883 m/s², inferior al
+límite de 1,0 m/s². En tiempo de pared, las transiciones se observaron a
+0,278 s para `SEARCH`, 39,191 s para `APPROACH`, 107,725 s para `PUSH` y
+131,991 s para `DONE`. El marcador quedó publicado y sincronizado en
+`x=-3.5`, `y=-4.0`.
+
+La evidencia correlacionada vive en
+`/tmp/robotswarm-local-final-camera-20260722T0454Z/`. La captura
+`final-n4-search.png`, SHA-256
+`d036d9814b893441f2c57be52a4ab58415339f85bfeba6055177820417211f11`,
+muestra el objeto, el marcador completo y los cuatro robots buscando. El log
+saneado `transport-n4-tolerance-025-final.log`, SHA-256
+`3ad8ad2b65b7589f34d52f716990d8675e57cef9474d9679af9407a81612ac43`,
+respalda las fases y métricas terminales. Las capturas
+`final-n4-push.png` y `final-n4-done.png` se excluyeron deliberadamente: una
+carrera con el `cleanup/reset` puede mostrar una escena posterior y la segunda
+no conserva la pose final porque el arnés restaura la caja. No se las usa como
+prueba de `PUSH`, `DONE` ni de la posición terminal.
+
+La política de CI es conservadora: todos los arreglos y documentos entrarán en un solo PR. No se disparará Actions para diagnósticos que puedan resolverse localmente y, después del merge, el workflow GPU se despachará una sola vez para el SHA exacto. La evidencia «después» se obtendrá únicamente sobre ese artefacto. Hasta entonces se conservan dos capturas «antes» en rutas temporales:
+
+- `/tmp/robotswarm-acceptance/ros-matrix-evidence-20260722T002735Z-3697395/14-transport_grf_n10-browser.png`, 152.356 bytes, SHA-256 `4f27a3112d536da9a734a0b4d4d1a7b10117edded00c7451a723e1ff96018ed9`, escena de transporte anterior al marcador fantasma;
+- `/tmp/robotswarm-acceptance/loaded-n4-evidence-20260722T011035Z-3918620/before-loaded-probe-browser.png`, 132.964 bytes, SHA-256 `1905bea5683a3e75be4a06ef1838954389016b02004860c4c6e403125f489308`, escena previa al probe cargado correctivo.
+
+No se ha presentado ninguna captura local como si fuera posterior al despliegue,
+ni se han copiado todavía esas rutas al repositorio. Tras el despliegue único se
+repetirá Gazebo visible, se sanearán las imágenes reales y se registrarán con
+SHA, hora y checksum.
+
+La sonda cinemática inicial produjo evidencia técnica local en `/tmp/robotswarm-acceptance/corrective-local-20260722T023855Z`. Informó D3D12/RTX 3080, 58,206 FPS de cámara, 62,512 eventos de posrenderizado por segundo, RTF 2,996 y viewport 990×351; su reporte `robotswarm-corrected-ghost-gui-report.json` se conserva con permisos `0600` y SHA-256 `98a4651069f1ea8199d26d278da0b7a4df273b54b93ffaa0a9b65bfd12e1f5d5`. Sus capturas Windows/WSLg tomadas con `CopyFromScreen` quedaron congeladas o recortadas y se rechazaron. Las capturas limpias posteriores de transporte y cuatro esquinas ya cierran I-135 localmente; todavía deben sanearse y versionarse y, en cualquier caso, no sustituyen la repetición sobre el SHA público.
 
 ## 7. Aceptación final en producción
 
-Esta sección permanece abierta hasta consolidar el delta de 6.10 en un único SHA, aprobar sus suites y CI, desplegar ese mismo SHA y repetir los gates afectados. Los ensayos rechazados por I-027, I-030, I-064, I-065, los intentos previos de I-086 y los nuevos falsos rechazos de I-094–I-096 se conservan como diagnóstico y no se reutilizan como resultados aprobados. Sobre `fbef23e` ya aprobaron API multiusuario, dos ventanas, Admin, responsive y carga N=4; el subresultado N=2 aprobó físicamente, pero su caso integral se rechazó por la sonda gráfica secundaria. Falta la matriz consolidada del próximo SHA, el smoke de transporte con el observador endurecido, la regresión del contador UTC y la incorporación permanente de las capturas.
+Esta sección permanece abierta hasta consolidar el delta de 6.11 en un único SHA, aprobar CI, desplegar ese mismo SHA y repetir los gates afectados. Los ensayos rechazados por I-027, I-030, I-064, I-065, los intentos previos de I-086, I-094–I-096 y las formaciones/carga de I-106 e I-109 se conservan como diagnóstico y no se reutilizan como resultados aprobados. `9f49e17` ya demostró API, visor y secciones; responsive y carga N=4 conservan evidencia de `fbef23e`, y el reintento cargado sobre la base nueva se detuvo antes de física. El freeze local, la imagen segura reconstruida, I-135 y el smoke N=4 con marcador y tolerancia 0,25 aprobaron localmente. Todavía faltan la matriz productiva del próximo SHA, la repetición del mismo smoke desde la interfaz desplegada, el gate cargado correctivo y la incorporación permanente de las capturas.
 
 | Grupo de aceptación | Criterio pendiente | Estado actual |
 | --- | --- | --- |
-| API multiusuario | Repetir creación simultánea, rosters 3/7, historial aislado, denegación cruzada, rotación/revocación, parada aislada y limpieza | Aprobado sobre `fbef23e`; repetir una vez después del próximo despliegue para vincularlo al SHA final |
-| Interfaz visible | Operar dos Chrome no headless, iniciar mediante controles reales y conservar capturas sanitizadas | Aprobado sobre `fbef23e`: dos ventanas, HLS ≈30 FPS, figura/seguimiento, interacción, fullscreen y parada aislada. La captura y el reporte siguen temporales; falta regresión tras el parser UTC |
-| Administración web | Probar Historial, Plantillas, Robots, Grupos y Usuarios según rol, con operaciones y cleanup | Recorrido Admin aprobado sobre `fbef23e`; seis rutas y endpoints reales, grupo efímero eliminado. Falta versionar las PNG y repetir si cambia el bundle |
-| Video privado | Comprobar flujos separados, FPS y cierre aislado sin interrumpir ROS ni la otra sesión | Dos HLS independientes y el HLS cargado ≈30 FPS aprobaron con la unidad versionada. El texto de vencimiento fue incorrecto por I-099; el acceso sí caducó a cinco minutos. Falta desplegar y probar el parser UTC |
-| Formaciones | Repetir triángulo N=3, cuadrado N=5, letra A N=7, letra V N=8, rombo N=9 y letra S N=10 | Las seis variantes aprobaron antes del release final; S N=10 se repitió aislada a RTF 2.9247. Falta el humo posterior al despliegue |
+| API multiusuario | Repetir creación simultánea, rosters 3/7, historial aislado, denegación cruzada, rotación/revocación, parada aislada y limpieza | Aprobado sobre `9f49e17`; repetir una vez después del próximo despliegue para vincularlo al SHA final |
+| Interfaz visible | Operar dos Chrome no headless, iniciar mediante controles reales y conservar capturas sanitizadas | Aprobado sobre `9f49e17`: dos ventanas, HLS ≈30 FPS, interacción, fullscreen y parada aislada. La captura y el reporte siguen temporales; falta la tarea corregida y evidencia permanente |
+| Administración web | Probar Historial, Plantillas, Robots, Grupos y Usuarios según rol, con operaciones y cleanup | Recorrido de secciones aprobado sobre `9f49e17`; las dos redirecciones nuevas todavía requieren el bundle correctivo. Falta versionar las PNG |
+| Video privado | Comprobar flujos separados, FPS y cierre aislado sin interrumpir ROS ni la otra sesión | Dos HLS independientes ≈30 FPS aprobaron sobre `9f49e17`. El parser UTC ya está desplegado; el contador cercano a cinco minutos se repetirá junto con el bundle final |
+| Formaciones | Repetir triángulo N=3, cuadrado N=5, letra A N=7, letra V N=8, rombo N=9 y letra S N=10 | Las seis filas sobre `9f49e17` no satisficieron el gate activo; la revisión aisló el centro prematuro y la planificación incompleta de rutas/órbita. El planificador corregido y sus contratos locales aprobaron; falta la ejecución visible postdeploy |
 | Seguimiento de líder | Repetir trayectorias circular N=3, cuadrada N=6 y figura de ocho N=10 | Las tres variantes aprobaron antes del release final; el ocho N=10 se repitió aislado a RTF 2.9410. Falta el humo posterior al despliegue |
-| Transporte | Repetir GRF con N=1, N=2, N=3, N=4 y N=10; para N>1, comprobar búsqueda, aviso, roster y contribución completa | N=1/N=3/N=10 conservan evidencia histórica. El subresultado N=2 de `fbef23e` aprobó dos raíces, 0,50 m, RTF ≈2,996 y cero colisiones, pero su fila integral quedó rechazada por la GUI secundaria. N=4 cargado aprobó sobre `fbef23e` con 4/4, dos raíces y dos compañeros. Falta la matriz consolidada y el smoke web del observador nuevo |
-| Carga física y rendimiento | Mantener 0,75 kg, RTF ≥2,90, Gazebo visible ≥45 FPS y HLS ≥27 FPS durante la carga | Aprobado sobre `fbef23e`: capacidad 0,0070/0,0354/1,0836 m, GRF 0,5001 m a RTF 2,9942, NVIDIA 58,469/62,489 FPS y HLS ≈30 FPS. El gate debe repetirse una vez sobre el próximo SHA |
+| Transporte | Repetir GRF con N=1, N=2, N=3, N=4 y N=10; para N>1, comprobar búsqueda, aviso, roster y contribución completa | N=1/N=2/N=3/N=10 conservan evidencia histórica o parcial. N=4 local sobre `e17579ed…ae0d` aprobó con tolerancia 0,25, 4/4 útiles, avance 0,7523 m, cero colisiones y marcador sincronizado; falta repetirlo desde el frontend desplegado y completar la matriz. El gate cargado de 0,75 kg permanece separado |
+| Carga física y rendimiento | Mantener 0,75 kg, `mu=0.25`, RTF ≥2,90, Gazebo visible ≥45 FPS y HLS ≥27 FPS durante la carga | Aprobado sobre `fbef23e`: capacidad 0,0070/0,0354/1,0836 m, GRF 0,5001 m a RTF 2,9942, NVIDIA 58,469/62,489 FPS y HLS ≈30 FPS. El intento posterior encontró la carrera de colocación; el gate corregido debe repetirse sobre el próximo SHA |
 | Limpieza | Eliminar sesiones, leases, cuentas, contenedores, redes, perfiles, observadores y lectores creados por aceptación | Las corridas públicas aceptadas limpiaron sus recursos. I-097 endurece la prueba de grupo local, proceso remoto, pipes y threads; falta ejercer esa versión en el smoke postdeploy |
 
 Los valores se incorporarán con el SHA del componente, hora de ejecución, criterios de aceptación, capturas y hashes de los artefactos sanitizados. Una fila solo cambiará a «Aprobada» cuando el resultado observado y el estado estructurado coincidan.
@@ -1351,7 +1904,7 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 
 | Incidencia | Antes reproducido | Después comprobado localmente | Evidencia pendiente |
 | --- | --- | --- | --- |
-| I-088 | El contador agregado o una instantánea tomada por callbacks podía perder el origen temporal | Flanco sincrónico en `ObstacleAvoidance`, contexto causal de transporte, stream v2 terminal e ingestión idempotente fail-closed | Corrida y captura postdeploy; N=2 físico sigue pendiente |
+| I-088 | El contador agregado o una instantánea tomada por callbacks podía perder el origen temporal | Flanco sincrónico en `ObstacleAvoidance`, contexto causal de transporte, stream v2 terminal e ingestión idempotente fail-closed | Corrida y captura postdeploy; N=2 conserva solo un subresultado físico parcial |
 | I-089 | El arnés esperaba rótulos anteriores | Seis nombres canónicos y contrato que lee `navigationGTSConfig.js` real | Recorrido Admin y captura responsive del bundle postdeploy |
 | I-090 | React era la única frontera coherente de validación de cuenta | Validador común en Create/PUT/PATCH, exclusión ordenada e invariante `NormalizedEmail` único | Migración y CRUD visible sobre el SHA desplegado |
 | I-091 | `Trim()` y `btrim()` eliminaban conjuntos distintos | Seis caracteres ASCII explícitos en C#, SQL, migración y snapshot, con regresión PostgreSQL | Repetición postdeploy de creación/duplicado sin exponer PII |
@@ -1366,6 +1919,36 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-103 | La aplicación compartía el global que guardaba la prueba `isTrusted` | Listener y evidencia en un mundo CDP aislado, con una sola entrada física | Repetir el clic de transporte desde React sobre el bundle final |
 | I-104 | Un PID podía reciclarse entre la revalidación y `os.kill` | Señalización por `pidfd`, segunda validación y fallo cerrado sin fallback | Confirmar cleanup completo durante la matriz final del host GPU |
 | I-105 | La marca visible todavía mezclaba FUSE/React y el símbolo SVG nuevo | PNG histórico exacto, splash con contraste, barra autenticada y 159/159 pruebas | Capturas públicas postdeploy; derivados PWA cuadrados quedan como mejora separada |
+| I-106 | Las formaciones terminaban antes de la muestra activa | Centro anclado y detenido hasta asentamiento; protocolo del fallo conservado | Seis corridas visibles postdeploy en N=3/5/7/8/9/10 |
+| I-107 | Solo se validaba la pose inicial y el snapshot podía quedar obsoleto | Órbita rígida completa, rutas por lotes y doble revalidación de modelos vivos | Captura y reporte de cada órbita sobre el SHA desplegado |
+| I-108 | Algunos límites de pared eran menores que el tiempo simulado necesario | Presupuestos por caso calculados a RTF 2,7 con al menos 15 s simulados de margen | Confirmar RTF ≥2,90 y terminación dentro del presupuesto postdeploy |
+| I-109 | Gazebo entrelazaba borrar, crear y posicionar la carga | Generaciones, ausencia fresca, dos presencias estables y hasta tres reemplazos justificados | Repetir carga N=4 visible sobre el candidato desplegado |
+| I-110 | El diagnóstico de colocación crecía y retenía respuestas crudas | Máximo 16 eventos saneados, conteo y truncamiento | No requiere captura; conservar el reporte estructurado si vuelve a fallar |
+| I-111 | El espectador no veía la meta y 0,50 m parecía un límite físico | Marcador magenta sin colisión, telemetría permitida y tolerancia UI 0,25 m | Comparación visual «antes/después» y recorrido mayor al mínimo cuando la meta lo permita |
+| I-112 | Dos URLs abrían pantallas ligadas a APIs inexistentes | Redirecciones a Plantillas e Historial, sin montar componentes legacy | Recorrer ambas URLs y las seis secciones en el bundle final |
+| I-113 | Cachés y residuos locales produjeron falsos fallos de herramientas | Cachés temporales controladas y propiedad corregida solo en `build/` ignorado | Freeze local completo; CI único aún pendiente |
+| I-114 | `ModelStates` movía un marcador estático sin refrescar el render | Modelo cinemático sin gravedad/colisión y preflight D3D12 visible | Captura limpia real y repetición postdeploy; descartar `CopyFromScreen` congelado/recortado |
+| I-115 | `NaN`/`Inf` podía atravesar la formación en `MOVING` | Validación total continua, fallo terminal, cancelación de solver y velocidad cero | Repetir las seis formaciones visibles sobre el SHA desplegado |
+| I-116 | La recuperación cargada podía tocar Gazebo durante shutdown | Guardas antes y entre delete/spawn/set/clasificación; sin reintento al cerrar | Repetir N=4 cargado visible y comprobar limpieza sin modelo tardío |
+| I-117 | Adaptive comprobaba el slot previo y no siempre el objetivo deformado | Objetivo efectivo revalidado antes del lote; `511e47c`, formación 99/99 y 469/469 aisladas | Repetir adaptive visible sobre el SHA desplegado |
+| I-118 | Lineal/waypoints podía llegar con `placement_plan=None` | Plan vivo para caminos abiertos y espera sin plan limitada a stop sin asignaciones | Repetir ambos caminos en la matriz final |
+| I-119 | Formación/seguimiento/transporte no compartían una guarda finita final | Seis componentes, ejes y límites Burger validados antes del lote | Freeze e imagen local aprobados; falta inyección visible/estructurada postdeploy |
+| I-120 | Seguimiento refrescaba timestamp con odometría no finita | Pose, cuaternión y tiempo se actualizan atómicamente; `377a0e3`, 206/206 y 473/473 aisladas | Repetir seguimiento visible sobre el SHA desplegado |
+| I-121 | Una excepción podía omitir el terminal correlacionado | Stop y `FAILED` conservan tarea/época; parada normal sigue separada | Comprobar terminal exterior en la matriz final |
+| I-122 | Un comando válido podía escapar antes del miembro inválido | Barrera de lote completa en SEARCH/APPROACH/PUSH | Confirmar cero movimiento parcial ante fallo inducido |
+| I-123 | `ModelStates` truncado mezclaba pose vieja y timestamp fresco | Instantánea atómica, frescura invalidada y terminal correlacionado | Regresión local aprobada; falta carga visible postdeploy |
+| I-124 | Cuaternión crudo `Inf` podía convertirse en yaw finito | Cuatro componentes validados antes de conversión y commit | Regresión incluida en el freeze 497/497 |
+| I-125 | Buffer temporal de APPROACH sobrevivía a una excepción | Limpieza mediante `finally` y finalizador de emergencia conservado | Verificar cleanup completo postdeploy |
+| I-126 | Follow podía confirmar un plan calculado sobre obstáculos ya movidos | `568979d`: revalidación optimista de vuelta+ruta, doble correlación y tolerancia a jitter; 40/40 y 483/483 | Freeze aprobado; repetir seguimiento visible |
+| I-127 | Transporte comprobaba frescura al entrar, no antes del publish | `4450c13`: gate final ModelStates+odom, lote bajo lock, directos protegidos y ceros stale permitidos; 172/172 y 487/487 | Freeze e imagen local aprobados; falta transporte visible |
+| I-128 | Follow correlacionaba obstáculos, no la odometría usada por el planner | `07da8f4`: doble correlación de positions+yaws y descarte/replan en cero | Freeze 497/497 aprobado; repetir seguimiento visible |
+| I-129 | Formación podía agotar frescura tras el preflight | `07da8f4`: gate literal después de geometría, terminal correlacionado | Freeze 497/497 aprobado; repetir formación visible |
+| I-130 | Follow podía publicar después del timeout | `07da8f4`: gate final de escena+odom y lote atómico | Freeze 497/497 aprobado; repetir seguimiento visible |
+| I-131 | ModelStates truncado podía convertirse en escena vacía | `07da8f4`: invalidación persistente, filtro por mundo activo y recuperación completa | Freeze aprobado; repetir formación visible |
+| I-132 | Cuaternión crudo Inf producía yaw finito | `07da8f4`: cuatro componentes validados antes de conversión/commit en modelo y odom | Regresión incluida en el freeze 497/497 |
+| I-133 | Formación aceptaba ejes no holonómicos | `07da8f4`: rechazo explícito de `linear.y/z` y `angular.x/y` | Regresión incluida en el freeze 497/497 |
+| I-134 | ModelStates admitía nombres configurados duplicados | `07da8f4`: duplicado fail-closed en formation/follow/transport y recuperación unívoca | Freeze e imagen local aprobados; falta postdeploy |
+| I-135 | La cámara predeterminada recortaba el marcador cerca de `y=-4` | Pose ampliada a `0 -14.4 12 0 0.72 1.5708` y contrato fijado en el test del mundo | Cerrada localmente: rebuild `e17579ed…ae0d`, cuatro esquinas completas, 8/8 mundo y diff-check; falta repetición postdeploy |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
 
@@ -1385,6 +1968,7 @@ El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre l
 | Figura 24 | Visor sin cierre independiente y parada de sesión inmediata | Botón «Cerrar visor», estado posterior sin stream y evidencia de que ROS continúa | Operación aprobada en la corrida concurrente; PNG temporal pendiente |
 | Figura 25 | Menú con nombres heredados «Tareas»/«Cuentas» y sin Grupos | Navegación completa y adaptación a 360/768/1366/1920 px | Las cuatro capturas responsive de `fbef23e` ya están versionadas; falta la repetición del bundle final |
 | Figura 26 | Contador productivo de ≈244 min para un lease de 5 min | Contador corregido cercano a cinco minutos y expiración efectiva | «Antes» disponible en captura temporal; «después» pendiente del próximo despliegue |
+| Figura 27 | Transporte sin indicación gráfica del destino | Huella y caja fantasma magenta visibles, con estado sincronizado en el panel | «Antes» temporal bajo `/tmp/robotswarm-acceptance/ros-matrix-evidence-20260722T002735Z-3697395/`; `final-n4-search.png` y las cuatro esquinas constituyen evidencia local limpia con hash. Las capturas `CopyFromScreen` y las PNG ambiguas de push/done se rechazaron; faltan saneamiento, versión permanente y postdeploy |
 
 La base probada se conserva en `docs/assets/commissioning-2026-07/final-fbef23e/`; `docs/assets/commissioning-2026-07/final-postdeploy/` se creará solamente con evidencia real del próximo SHA. Cada archivo nuevo se inspeccionará para retirar correos, UUID, tokens, rutas personales y URL internas, y se añadirá al manifiesto de hashes. El texto indicará hora, SHA y criterio; una captura aislada no sustituirá las series temporales de movimiento.
 
@@ -1396,27 +1980,37 @@ La base probada se conserva en `docs/assets/commissioning-2026-07/final-fbef23e/
 - `npm audit` informa 99 avisos heredados de la revisión base. El cambio de visor no incrementó esa cifra ni añadió un hallazgo para `hls.js`, pero la actualización de dependencias antiguas requiere un trabajo separado y pruebas de regresión de la interfaz.
 - Las matrices de figuras, trayectorias y cantidades son muestras representativas; no constituyen una prueba exhaustiva de toda combinación posible de mapa y parámetros.
 - El gate de modelos y reloj evita aceptar una muerte durante aprovisionamiento o cambio de flota. Una muerte posterior a `Ready` todavía necesita un monitor periódico con umbral, gracia de arranque y exclusión mutua con las operaciones de sesión; implementarlo sin esa coordinación introduciría carreras de limpieza.
-- `538ba066` y `1182dec` son cortes históricos. La base productiva observada es `fbef23e`, resultado de los PR #102–#104. El parser UTC, el orden de estados, el endurecimiento de arneses y el branding de I-093–I-105 son posteriores y todavía requieren PR, CI, despliegue y aceptación sobre su propio SHA.
+- `538ba066`, `1182dec` y `fbef23e` son cortes históricos. La base productiva
+  observada es `9f49e17`, resultado del PR #105. Las correcciones I-106–I-135
+  todavía requieren PR, CI, despliegue y aceptación sobre su propio SHA.
 - El PNG histórico restaurado es un wordmark rectangular. Es adecuado para las superficies web verificadas, pero el manifiesto PWA todavía carece de derivados cuadrados 192×192 y 512×512; algunos sistemas pueden encuadrarlo o recortarlo al instalar. Esta mejora debe preservar el original y validarse por separado.
 - La exclusividad del controlador vive en la única instancia de backend desplegada. Un despliegue horizontal necesitaría coordinación distribuida o una generación monotónica compartida antes de permitir takeover entre réplicas.
 - El lint completo de la aplicación conserva 211 errores heredados en módulos no modificados. Los archivos de esta intervención están limpios, pero sanear toda la base frontend sigue siendo trabajo futuro independiente.
 - El registro persistente y los grupos administrativos no son una selección de los modelos runtime. No se debe inferir que pertenecer a un grupo hará que ese robot aparezca con el mismo identificador en Gazebo; el roster de sesión informado por el worker sigue siendo la fuente viva.
 - El monitor runtime muestra estado, rol, namespace y tiempo de actualización, pero el contrato todavía no transporta pose, velocidad ni diagnóstico de sensores. Tampoco aplica por sí solo una política de parada ante una muerte tardía.
-- La aceptación pública de `fbef23e` demuestra concurrencia, HLS y varios algoritmos, pero no la matriz completa bajo el próximo artefacto. Permanecen pendientes los grupos y repeticiones enumerados en la sección 7, además del «después» visual del contador UTC.
+- La aceptación pública de `9f49e17` demuestra concurrencia, HLS y el plano web,
+  pero su matriz encontró las formaciones móviles rechazadas y la repetición
+  cargada no cruzó la barrera de colocación. Permanecen pendientes los grupos y
+  repeticiones de la sección 7, incluida la evidencia «después» del marcador.
 
 ## 9. Conclusiones
 
-La base `fbef23e` ya demuestra que el plano web puede controlar sesiones ROS
+La base `9f49e17` demuestra que el plano web puede controlar sesiones ROS
 aisladas y visualizar Gazebo con aceleración NVIDIA: aprobaron dos usuarios,
-administración, responsive y el transporte cargado N=4 alrededor de RTF 3,0 y
-30 FPS HLS. Los fallos recientes no justificaron cambiar el algoritmo físico;
-mostraron fronteras del instrumento —MSE, canales concurrentes, Python 3.8,
-caducidad y limpieza— y un error de presentación UTC en React.
+administración, responsive y flujos cercanos a 30 FPS. La evidencia cargada N=4
+aceptada continúa vinculada a `fbef23e`, mientras el reintento nuevo permitió
+encontrar la carrera de colocación. Los fallos no justificaron aligerar la caja:
+se mantuvieron 0,75 kg y `mu=0.25`, se corrigieron las fronteras causales de
+Gazebo y se hizo visible el destino con un margen de llegada más preciso.
 
-El cierre sigue abierto. Falta publicar el delta local en un único PR, observar
-su CI, desplegar exactamente ese SHA, repetir la matriz y el smoke afectados y
-versionar las capturas sanitizadas. Esta conclusión es, por tanto, provisional
-y no sustituye el acta de aceptación final.
+El cierre sigue abierto. I-128–I-134 están corregidas en `07da8f4` e I-135 está
+cerrada en el árbol local mediante el encuadre ampliado. El freeze exacto, la
+imagen reconstruida `e17579ed…ae0d`, las cuatro esquinas y el transporte N=4 con
+tolerancia 0,25 aprobaron localmente. Ahora se publicarán el delta correctivo y
+esta documentación en un único PR, se observará su único CI y se desplegará
+exactamente ese SHA. Después se repetirán primero las seis formaciones y luego
+la matriz/carga, y se versionarán las capturas sanitizadas. Esta conclusión es
+provisional y no sustituye el acta de aceptación final.
 
 ## 10. Referencias
 

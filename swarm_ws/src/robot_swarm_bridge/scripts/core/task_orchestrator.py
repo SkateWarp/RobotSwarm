@@ -395,6 +395,13 @@ class TaskOrchestrator:
                 params.get('target_y', config.get('target_y', 3.0)),
                 'target_y', -4.0, 4.0,
             )
+            arrival_tolerance = cls._number_in_range(
+                params.get(
+                    'arrival_tolerance',
+                    config.get('arrival_tolerance', 0.5),
+                ),
+                'arrival_tolerance', 0.15, 0.75,
+            )
             planner = str(
                 config.get('transport_planner', 'grf')
             ).strip().lower()
@@ -403,6 +410,7 @@ class TaskOrchestrator:
             return {
                 'target_x': target_x,
                 'target_y': target_y,
+                'arrival_tolerance': arrival_tolerance,
                 'transport_planner': planner,
             }
 
@@ -903,6 +911,15 @@ class TaskOrchestrator:
         if not isinstance(phase, str):
             phase = None
 
+        arrival_tolerance = self._transport_source_number(
+            status.get('arrival_tolerance')
+        )
+        if (
+            arrival_tolerance is None
+            or not 0.15 <= arrival_tolerance <= 0.75
+        ):
+            arrival_tolerance = None
+
         searching_count = status.get('searching_robot_count')
         if (
             isinstance(searching_count, bool)
@@ -946,11 +963,66 @@ class TaskOrchestrator:
             'all_pushers_confirmed': all_pushers_confirmed,
             'useful_contributor_count': contributor_count,
             'useful_contributor_ids': contributor_ids,
+            'arrival_tolerance': arrival_tolerance,
+            'target_marker': self._transport_target_marker(
+                status.get('target_marker')
+            ),
             'discovery': self._transport_discovery(
                 status.get('discovery'), expected_task_id
             ),
         }
         return {'transport': result}
+
+    @staticmethod
+    def _transport_target_marker(marker):
+        """Copy only bounded facts about the optional Gazebo target ghost."""
+        if not isinstance(marker, dict):
+            return None
+
+        model_name = marker.get('model_name')
+        command_published = marker.get('command_published')
+        synchronized = marker.get('synchronized')
+        if (
+            model_name != 'target_marker'
+            or not isinstance(command_published, bool)
+            or not isinstance(synchronized, bool)
+        ):
+            return None
+
+        position = marker.get('position')
+        clean_position = None
+        if position is not None:
+            if not isinstance(position, dict):
+                return None
+            x = position.get('x')
+            y = position.get('y')
+            if (
+                isinstance(x, bool)
+                or isinstance(y, bool)
+                or not isinstance(x, (int, float))
+                or not isinstance(y, (int, float))
+            ):
+                return None
+            x = float(x)
+            y = float(y)
+            if (
+                not math.isfinite(x)
+                or not math.isfinite(y)
+                or not -4.0 <= x <= 4.0
+                or not -4.0 <= y <= 4.0
+            ):
+                return None
+            clean_position = {'x': x, 'y': y}
+
+        if synchronized and clean_position is None:
+            return None
+
+        return {
+            'model_name': 'target_marker',
+            'published': command_published,
+            'synchronized': synchronized,
+            'position': clean_position,
+        }
 
     @staticmethod
     def _transport_discovery(discovery, expected_task_id):

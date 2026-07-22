@@ -116,6 +116,16 @@ class ModelStates(Message):
         super().__init__(name=[], pose=[])
 
 
+class ModelState(Message):
+    def __init__(self):
+        super().__init__(
+            model_name="",
+            reference_frame="",
+            pose=Pose(),
+            twist=Twist(),
+        )
+
+
 class FakePublisher:
     def __init__(self, *args, **kwargs):
         self.messages = []
@@ -248,6 +258,7 @@ def load_ros_scripts():
     )
     gazebo_msgs_msg = module(
         "gazebo_msgs.msg",
+        ModelState=ModelState,
         ModelStates=ModelStates,
     )
     replacements = {
@@ -559,6 +570,32 @@ class OrchestratorLifecycleTests(unittest.TestCase):
             "spacing": 0.7,
         }, config)
 
+    def test_transport_arrival_margin_is_explicit_and_bounded(self):
+        config = ROS["orchestrator"].TaskOrchestrator._validated_task_config(
+            "transport",
+            {
+                "target_x": "-2.5",
+                "target_y": 1.25,
+                "arrival_tolerance": "0.25",
+            },
+            {"transport_planner": "grf"},
+        )
+
+        self.assertEqual({
+            "target_x": -2.5,
+            "target_y": 1.25,
+            "arrival_tolerance": 0.25,
+            "transport_planner": "grf",
+        }, config)
+        with self.assertRaisesRegex(
+            ValueError, "arrival_tolerance must be between"
+        ):
+            ROS["orchestrator"].TaskOrchestrator._validated_task_config(
+                "transport",
+                {"arrival_tolerance": 0.10},
+                {},
+            )
+
     def test_collision_count_uses_contact_state_not_emergency_threat(self):
         orchestrator = make_orchestrator()
 
@@ -833,6 +870,14 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": True,
                 "useful_contributor_count": 3,
                 "useful_contributor_ids": ["tb3_2", "tb3_0", "tb3_1"],
+                "arrival_tolerance": 0.25,
+                "target_marker": {
+                    "model_name": "target_marker",
+                    "command_published": True,
+                    "synchronized": True,
+                    "position": {"x": -2.5, "y": 1.25, "z": 0.0},
+                    "private_diagnostic": "drop-me",
+                },
                 "collision_events": transport_collision_stream(),
                 "discovery": {
                     "event": "payload_found",
@@ -857,6 +902,13 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": True,
                 "useful_contributor_count": 3,
                 "useful_contributor_ids": ["tb3_0", "tb3_1", "tb3_2"],
+                "arrival_tolerance": 0.25,
+                "target_marker": {
+                    "model_name": "target_marker",
+                    "published": True,
+                    "synchronized": True,
+                    "position": {"x": -2.5, "y": 1.25},
+                },
                 "discovery": {
                     "event": "payload_found",
                     "event_id": "task-a:payload-found",
@@ -886,6 +938,13 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": 1,
                 "useful_contributor_count": True,
                 "useful_contributor_ids": ["tb3_0"],
+                "arrival_tolerance": "0.25",
+                "target_marker": {
+                    "model_name": "../../private-model",
+                    "command_published": "yes",
+                    "synchronized": 1,
+                    "position": {"x": "-2.5", "y": 1.25},
+                },
                 "control_commands": {"tb3_0": {"linear": 0.1}},
                 "collision_events": transport_collision_stream(
                     phase="PUSH"
@@ -897,7 +956,69 @@ class OrchestratorLifecycleTests(unittest.TestCase):
         self.assertIsNone(result["all_pushers_confirmed"])
         self.assertIsNone(result["useful_contributor_count"])
         self.assertIsNone(result["useful_contributor_ids"])
+        self.assertIsNone(result["arrival_tolerance"])
+        self.assertIsNone(result["target_marker"])
         self.assertNotIn("control_commands", result)
+
+    def test_transport_target_marker_failure_stays_optional(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "transport"
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+
+        orchestrator._behavior_status_callback(
+            "transport",
+            String(data=json.dumps({
+                "task_id": "task-a",
+                "phase": "SEARCH",
+                "arrival_tolerance": 0.5,
+                "target_marker": {
+                    "model_name": "target_marker",
+                    "command_published": False,
+                    "synchronized": False,
+                    "position": None,
+                },
+                "collision_events": transport_collision_stream(),
+            })),
+        )
+
+        self.assertEqual(
+            ROS["orchestrator"].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+        result = orchestrator.task_result["transport"]
+        self.assertEqual(0.5, result["arrival_tolerance"])
+        self.assertEqual({
+            "model_name": "target_marker",
+            "published": False,
+            "synchronized": False,
+            "position": None,
+        }, result["target_marker"])
+
+    def test_transport_target_marker_rejects_unbounded_or_incoherent_data(self):
+        valid = {
+            "model_name": "target_marker",
+            "command_published": True,
+            "synchronized": True,
+            "position": {"x": -2.5, "y": 1.25},
+        }
+        malformed = [
+            {**valid, "model_name": "private-model"},
+            {**valid, "command_published": 1},
+            {**valid, "synchronized": "yes"},
+            {**valid, "position": {"x": "-2.5", "y": 1.25}},
+            {**valid, "position": {"x": 4.01, "y": 1.25}},
+            {**valid, "position": {"x": float("nan"), "y": 1.25}},
+            {**valid, "position": None},
+        ]
+        sanitize = (
+            ROS["orchestrator"].TaskOrchestrator
+            ._transport_target_marker
+        )
+
+        for marker in malformed:
+            with self.subTest(marker=marker):
+                self.assertIsNone(sanitize(marker))
 
     def test_stale_or_nested_uncorrelated_discovery_is_not_exposed(self):
         orchestrator = make_orchestrator()
@@ -1991,6 +2112,130 @@ class BehaviorLifecycleTests(unittest.TestCase):
                 }
                 self.assertEqual(robot_count, len(lane_y))
 
+    def test_transport_rejects_malicious_avoidance_output_and_stops(self):
+        class MaliciousAvoidance(FakeAvoidance):
+            def __init__(self, bad_value):
+                super().__init__()
+                self.bad_value = bad_value
+
+            def apply_avoidance(self, _command, *args, **kwargs):
+                command = Twist()
+                command.linear.x = self.bad_value
+                return command
+
+        for bad_value in (float("nan"), float("inf")):
+            with self.subTest(value=bad_value):
+                controller = self._transport_search_controller(2)
+                controller.avoidance_modules["tb3_1"] = MaliciousAvoidance(
+                    bad_value
+                )
+                controller.target_x = 2.0
+                controller.target_y = 1.0
+                controller._active_planner = "grf"
+                controller._active_grf_iterations = 0
+                controller.transport_roles = {}
+                controller.status_pub = FakePublisher()
+
+                controller._search_phase(controller.command_epoch)
+                controller._publish_status(
+                    controller.phase,
+                    task_id=controller.current_task_id,
+                    paused=False,
+                )
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    ROS["transport"].TransportPhase.FAILED,
+                    controller.phase,
+                )
+                self.assertEqual("search-task", controller.current_task_id)
+                self.assertIn("non-finite", controller.failure_reason)
+                # The first robot's valid search command must not leak out
+                # before the second robot's corrupt command is discovered.
+                for publisher in controller.cmd_vel_pubs.values():
+                    self.assertEqual(1, len(publisher.messages))
+                    self.assertEqual(0.0, publisher.messages[0].linear.x)
+                    self.assertEqual(0.0, publisher.messages[0].angular.z)
+                status = json.loads(controller.status_pub.messages[-1].data)
+                self.assertEqual("search-task", status["task_id"])
+                self.assertEqual("FAILED", status["phase"])
+                self.assertIn("non-finite", status["error"])
+
+    def test_transport_command_gate_checks_every_twist_component(self):
+        cases = (
+            ("linear", "x", float("nan")),
+            ("linear", "y", float("inf")),
+            ("linear", "z", -float("inf")),
+            ("angular", "x", float("nan")),
+            ("angular", "y", float("inf")),
+            ("angular", "z", -float("inf")),
+            ("linear", "y", 0.01),
+            ("linear", "z", -0.01),
+            ("angular", "x", 0.01),
+            ("angular", "y", -0.01),
+            (
+                "linear",
+                "x",
+                ROS["transport"].BURGER_MAX_LINEAR_SPEED + 0.01,
+            ),
+            (
+                "angular",
+                "z",
+                ROS["transport"].BURGER_MAX_ANGULAR_SPEED + 0.01,
+            ),
+        )
+        for vector, axis, value in cases:
+            with self.subTest(vector=vector, axis=axis, value=value):
+                controller = self._transport_search_controller(1)
+                command = Twist()
+                setattr(getattr(command, vector), axis, value)
+
+                published = controller._publish_command(
+                    "tb3_0", command, controller.command_epoch
+                )
+
+                self.assertFalse(published)
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    ROS["transport"].TransportPhase.FAILED,
+                    controller.phase,
+                )
+                self.assertEqual("search-task", controller.current_task_id)
+                messages = controller.cmd_vel_pubs["tb3_0"].messages
+                self.assertEqual(1, len(messages))
+                self.assertEqual(0.0, messages[0].linear.x)
+                self.assertEqual(0.0, messages[0].angular.z)
+
+    def test_transport_control_exception_publishes_correlated_failure(self):
+        controller = self._transport_search_controller(2)
+        controller.target_x = 2.0
+        controller.target_y = 1.0
+        controller._active_planner = "grf"
+        controller._active_grf_iterations = 0
+        controller.transport_roles = {}
+        controller.status_pub = FakePublisher()
+        controller._control_loop_serialized = mock.Mock(
+            side_effect=ValueError("malformed avoidance data")
+        )
+
+        controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED,
+            controller.phase,
+        )
+        self.assertEqual("search-task", controller.current_task_id)
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertEqual(1, len(publisher.messages))
+            self.assertEqual(0.0, publisher.messages[0].linear.x)
+            self.assertEqual(0.0, publisher.messages[0].angular.z)
+        self.assertEqual(1, len(controller.status_pub.messages))
+        status = json.loads(controller.status_pub.messages[0].data)
+        self.assertEqual("search-task", status["task_id"])
+        self.assertEqual("FAILED", status["phase"])
+        self.assertIn("invalid live data", status["error"])
+
     def test_transport_search_announces_the_nearest_finder_once(self):
         controller = self._transport_search_controller(3)
         controller.sensing_range = 1.0
@@ -2209,6 +2454,124 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertIsNone(controller.object_position)
         self.assertIn("missing", controller.object_error)
 
+    def test_transport_truncated_model_states_invalidates_live_payload(self):
+        controller = self._transport_search_controller(2)
+        controller.object_position = np.array([3.0, 4.0])
+        controller.object_found = True
+        controller.target_x = 2.0
+        controller.target_y = 1.0
+        controller._active_planner = "grf"
+        controller._active_grf_iterations = 0
+        controller.transport_roles = {}
+        controller.status_pub = FakePublisher()
+        previous_stamp = controller.model_states_received_at
+        truncated = ModelStates()
+        truncated.name = ["transport_object"]
+        truncated.pose = []
+
+        controller._model_states_callback(truncated)
+
+        self.assertIsNotNone(previous_stamp)
+        self.assertIsNone(controller.model_states_received_at)
+        self.assertIn(
+            "truncated", controller.model_states_invalid_reason
+        )
+        self.assertFalse(controller.object_found)
+        self.assertIsNone(controller.object_position)
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED,
+            controller.phase,
+        )
+        self.assertEqual("search-task", controller.current_task_id)
+        self.assertIn("truncated", controller.failure_reason)
+        self.assertIn(
+            "truncated", controller._transport_model_state_error()
+        )
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertEqual(1, len(publisher.messages))
+            self.assertEqual(0.0, publisher.messages[0].linear.x)
+            self.assertEqual(0.0, publisher.messages[0].angular.z)
+        self.assertEqual(1, len(controller.status_pub.messages))
+        status = json.loads(controller.status_pub.messages[0].data)
+        self.assertEqual("search-task", status["task_id"])
+        self.assertEqual("FAILED", status["phase"])
+        self.assertIn("truncated", status["error"])
+
+    def test_transport_duplicate_model_names_require_a_unique_snapshot(self):
+        controller = self._transport_search_controller(1)
+        controller.target_x = 2.0
+        controller.target_y = 1.0
+        controller.object_rest_z = 0.10
+        controller.object_z_tolerance = 0.05
+        controller.status_pub = FakePublisher()
+        first_pose = Pose()
+        first_pose.position.x = -0.8
+        first_pose.position.y = -1.6
+        first_pose.position.z = 0.10
+        conflicting_pose = Pose()
+        conflicting_pose.position.x = 3.0
+        conflicting_pose.position.y = 4.0
+        conflicting_pose.position.z = 0.10
+        duplicate = ModelStates()
+        duplicate.name = ["transport_object", "transport_object"]
+        duplicate.pose = [first_pose, conflicting_pose]
+
+        controller._model_states_callback(duplicate)
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.object_found)
+        self.assertIsNone(controller.object_position)
+        self.assertIn("duplicate", controller.model_states_invalid_reason)
+        self.assertIn("duplicate", controller.failure_reason)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED, controller.phase
+        )
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+        unique = ModelStates()
+        unique.name = ["transport_object"]
+        unique.pose = [first_pose]
+        controller._model_states_callback(unique)
+        self.assertIsNone(controller.model_states_invalid_reason)
+        self.assertTrue(controller.object_found)
+        np.testing.assert_allclose([-0.8, -1.6], controller.object_position)
+
+    def test_transport_odometry_rejects_non_finite_raw_quaternion(self):
+        controller = self._transport_search_controller(1)
+        namespace = "tb3_0"
+        old_position = controller.robot_positions[namespace].copy()
+        old_yaw = controller.robot_yaws[namespace]
+        controller.robot_odom_received_at[namespace] = 7.0
+        message = Odometry()
+        message.pose.pose.position.x = 9.0
+        message.pose.pose.position.y = 8.0
+        # This quaternion produces a finite atan2 result unless its raw
+        # components are checked before yaw conversion.
+        message.pose.pose.orientation.x = float("inf")
+        message.pose.pose.orientation.y = 1.0
+        message.pose.pose.orientation.z = 0.0
+        message.pose.pose.orientation.w = 0.0
+
+        with mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=12.0,
+            create=True,
+        ):
+            controller._odom_callback(namespace, message)
+
+        np.testing.assert_allclose(
+            old_position, controller.robot_positions[namespace]
+        )
+        self.assertEqual(old_yaw, controller.robot_yaws[namespace])
+        self.assertEqual(
+            7.0, controller.robot_odom_received_at[namespace]
+        )
+
     def test_transport_rejects_missing_and_stale_odometry_before_roles(self):
         controller = ROS["transport"].CollaborativeTransport.__new__(
             ROS["transport"].CollaborativeTransport
@@ -2279,6 +2642,163 @@ class BehaviorLifecycleTests(unittest.TestCase):
         command = controller.cmd_vel_pubs["tb3_0"].messages[-1]
         self.assertEqual(0.0, command.linear.x)
         self.assertEqual(0.0, command.angular.z)
+
+    def test_transport_rechecks_model_freshness_before_first_batch_twist(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        controller.model_states_timeout_wall_s = 0.75
+        controller.robot_odom_received_at = {
+            namespace: 10.0 for namespace in controller.robot_namespaces
+        }
+        controller._sync_avoidance_snapshot = mock.Mock()
+        controller._publish_status = mock.Mock()
+        controller._publish_markers = mock.Mock()
+        wall_clock = [10.0]
+
+        def delayed_search(expected_epoch):
+            wall_clock[0] = 11.0
+            commands = {}
+            for namespace in controller.robot_namespaces:
+                command = Twist()
+                command.linear.x = 0.12
+                commands[namespace] = command
+            controller._publish_command_batch(
+                commands, expected_epoch, controller.robot_namespaces
+            )
+
+        controller._search_phase = delayed_search
+        with mock.patch.object(
+            ROS["transport"].time,
+            "monotonic",
+            side_effect=lambda: wall_clock[0],
+        ), mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=10.0,
+            create=True,
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED,
+            controller.phase,
+        )
+        self.assertIn("model states became stale", controller.failure_reason)
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertTrue(all(
+                command.linear.x == 0.0 and command.angular.z == 0.0
+                for command in publisher.messages
+            ))
+
+    def test_transport_rechecks_odometry_before_first_batch_twist(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        controller.robot_odom_received_at = {
+            namespace: 10.0 for namespace in controller.robot_namespaces
+        }
+        controller.transport_odom_timeout = 2.0
+        controller._sync_avoidance_snapshot = mock.Mock()
+        controller._publish_status = mock.Mock()
+        controller._publish_markers = mock.Mock()
+        simulation_clock = [10.0]
+
+        def delayed_search(expected_epoch):
+            simulation_clock[0] = 13.0
+            commands = {}
+            for namespace in controller.robot_namespaces:
+                command = Twist()
+                command.angular.z = 0.4
+                commands[namespace] = command
+            controller._publish_command_batch(
+                commands, expected_epoch, controller.robot_namespaces
+            )
+
+        controller._search_phase = delayed_search
+        with mock.patch.object(
+            ROS["transport"].time, "monotonic", return_value=10.0
+        ), mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            side_effect=lambda: simulation_clock[0],
+            create=True,
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED,
+            controller.phase,
+        )
+        self.assertIn("stale: tb3_0, tb3_1", controller.failure_reason)
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertTrue(all(
+                command.linear.x == 0.0 and command.angular.z == 0.0
+                for command in publisher.messages
+            ))
+
+    def test_transport_zero_batch_is_allowed_with_stale_inputs(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        commands = {
+            namespace: Twist() for namespace in controller.robot_namespaces
+        }
+
+        with mock.patch.object(
+            ROS["transport"].time, "monotonic", return_value=20.0
+        ):
+            published = controller._publish_command_batch(
+                commands,
+                controller.command_epoch,
+                controller.robot_namespaces,
+            )
+
+        self.assertTrue(published)
+        self.assertTrue(controller.is_running)
+        for publisher in controller.cmd_vel_pubs.values():
+            command = publisher.messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+
+    def test_transport_batch_does_not_split_at_the_freshness_boundary(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        controller.model_states_timeout_wall_s = 0.75
+        controller.robot_odom_received_at = {
+            namespace: 10.0 for namespace in controller.robot_namespaces
+        }
+        commands = {}
+        for namespace in controller.robot_namespaces:
+            command = Twist()
+            command.linear.x = 0.12
+            commands[namespace] = command
+
+        samples = iter((10.74, 10.74, 10.76))
+        with mock.patch.object(
+            ROS["transport"].time,
+            "monotonic",
+            side_effect=lambda: next(samples, 10.76),
+        ), mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=10.0,
+            create=True,
+        ):
+            published = controller._publish_command_batch(
+                commands,
+                controller.command_epoch,
+                controller.robot_namespaces,
+            )
+
+        self.assertTrue(published)
+        self.assertTrue(controller.is_running)
+        motion_states = [
+            publisher.messages[-1].linear.x > 0.0
+            for publisher in controller.cmd_vel_pubs.values()
+        ]
+        self.assertEqual([True, True], motion_states)
 
     def test_transport_push_uses_the_common_odometry_freshness_gate(self):
         controller = self._transport_search_controller(1)
@@ -4335,6 +4855,15 @@ class BehaviorLifecycleTests(unittest.TestCase):
             command.linear.x > 0.0 for command, _kwargs in published.values()
         ))
         self.assertEqual(set(), controller.transport_chain_released)
+
+        record_publish = controller._publish_concurrent_approach_command
+        controller._publish_concurrent_approach_command = mock.Mock(
+            side_effect=RuntimeError("avoidance failed")
+        )
+        with self.assertRaises(RuntimeError):
+            controller._approach_phase(4)
+        self.assertIsNone(controller._pending_approach_commands)
+        controller._publish_concurrent_approach_command = record_publish
 
         controller.transport_pre_staged = set(controller.robot_namespaces)
         compression_calls = []
@@ -7262,6 +7791,122 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertIsNone(controller.transport_initial_target_distance)
         self.assertEqual(0.0, controller.transport_reported_progress)
 
+    def test_transport_start_moves_and_observes_the_gazebo_target_ghost(self):
+        controller = self._transport_search_controller(2)
+        controller.object_position = np.array([1.0, 1.0])
+        controller.default_arrival_tolerance = 0.5
+        controller.arrival_tolerance = 0.5
+        controller.transport_planner = "grf"
+        controller.grf_mcmc_iterations = 60
+        controller.grf_large_fleet_iterations = 12
+        controller._grf_kernels = {}
+        controller.target_marker_name = "target_marker"
+        controller.target_marker_position = None
+        controller.target_marker_synced = False
+        controller.target_marker_command_published = False
+        controller.target_marker_sync_tolerance = 0.02
+        controller.target_marker_pub = FakePublisher()
+
+        controller._start_callback(String(data=json.dumps({
+            "task_id": "ghost-task",
+            "target_x": -2.5,
+            "target_y": 1.25,
+            "arrival_tolerance": 0.25,
+            "transport_planner": "grf",
+        })))
+
+        self.assertEqual(0.25, controller.arrival_tolerance)
+        self.assertTrue(controller.target_marker_command_published)
+        self.assertFalse(controller.target_marker_synced)
+        marker_command = controller.target_marker_pub.messages[-1]
+        self.assertEqual("target_marker", marker_command.model_name)
+        self.assertEqual("world", marker_command.reference_frame)
+        self.assertEqual(-2.5, marker_command.pose.position.x)
+        self.assertEqual(1.25, marker_command.pose.position.y)
+        self.assertEqual(0.0, marker_command.pose.position.z)
+        self.assertEqual(1.0, marker_command.pose.orientation.w)
+
+        payload_pose = Pose()
+        payload_pose.position.x = 1.0
+        payload_pose.position.y = 1.0
+        payload_pose.position.z = 0.1
+        marker_pose = Pose()
+        marker_pose.position.x = -2.5
+        marker_pose.position.y = 1.25
+        models = ModelStates()
+        models.name = ["transport_object", "target_marker"]
+        models.pose = [payload_pose, marker_pose]
+        controller.object_rest_z = 0.1
+        controller.object_z_tolerance = 0.05
+        controller._model_states_callback(models)
+
+        self.assertTrue(controller.target_marker_synced)
+        np.testing.assert_allclose(
+            [-2.5, 1.25], controller.target_marker_position
+        )
+        controller.status_pub = FakePublisher()
+        controller._publish_status(
+            ROS["transport"].TransportPhase.SEARCH
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual(0.25, status["arrival_tolerance"])
+        self.assertEqual({
+            "model_name": "target_marker",
+            "command_published": True,
+            "synchronized": True,
+            "position": {"x": -2.5, "y": 1.25},
+        }, status["target_marker"])
+
+    def test_transport_continues_when_the_target_ghost_cannot_be_published(self):
+        class FailingPublisher:
+            def publish(self, _message):
+                raise RuntimeError("publisher unavailable")
+
+        controller = self._transport_search_controller(1)
+        controller.object_position = np.array([1.0, 1.0])
+        controller.default_arrival_tolerance = 0.5
+        controller.arrival_tolerance = 0.5
+        controller.transport_planner = "grf"
+        controller.grf_mcmc_iterations = 60
+        controller.grf_large_fleet_iterations = 12
+        controller._grf_kernels = {}
+        controller.target_marker_position = None
+        controller.target_marker_synced = False
+        controller.target_marker_command_published = False
+        controller.target_marker_pub = FailingPublisher()
+
+        controller._start_callback(String(data=json.dumps({
+            "task_id": "ghost-rejected-task",
+            "target_x": 2.0,
+            "target_y": 2.0,
+        })))
+
+        self.assertTrue(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.SEARCH,
+            controller.phase,
+        )
+        self.assertFalse(controller.target_marker_command_published)
+        self.assertFalse(controller.target_marker_synced)
+
+    def test_transport_without_arrival_override_restores_its_default(self):
+        controller = self._transport_search_controller(1)
+        controller.object_position = np.array([1.0, 1.0])
+        controller.default_arrival_tolerance = 0.5
+        controller.arrival_tolerance = 0.25
+        controller.transport_planner = "grf"
+        controller.grf_mcmc_iterations = 60
+        controller.grf_large_fleet_iterations = 12
+        controller._grf_kernels = {}
+
+        controller._start_callback(String(data=json.dumps({
+            "task_id": "default-margin-task",
+            "target_x": 2.0,
+            "target_y": 2.0,
+        })))
+
+        self.assertEqual(0.5, controller.arrival_tolerance)
+
     def test_transport_progress_starts_complete_inside_arrival_tolerance(self):
         controller = self._transport_search_controller(1)
         controller.object_position = np.array([1.75, -0.1])
@@ -7318,10 +7963,69 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertFalse(controller.is_running)
         self.assertFalse(controller.is_paused)
         self.assertEqual(previous_epoch + 1, controller.command_epoch)
+        self.assertIsNone(controller.failure_reason)
+        self.assertIsNone(controller.object_error)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.SEARCH, controller.phase
+        )
         for publisher in controller.cmd_vel_pubs.values():
             command = publisher.messages[-1]
             self.assertEqual(0.0, command.linear.x)
             self.assertEqual(0.0, command.angular.z)
+
+    def test_transport_correlated_stop_remains_idle_not_failed(self):
+        controller = self._transport_search_controller(2)
+
+        controller._stop_callback(lifecycle_payload("search-task"))
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.is_paused)
+        self.assertIsNone(controller.failure_reason)
+        self.assertIsNone(controller.object_error)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.IDLE, controller.phase
+        )
+        for publisher in controller.cmd_vel_pubs.values():
+            command = publisher.messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+
+        previous_counts = {
+            namespace: len(publisher.messages)
+            for namespace, publisher in controller.cmd_vel_pubs.items()
+        }
+        stale_command = Twist()
+        stale_command.linear.x = float("nan")
+        self.assertFalse(controller._publish_command(
+            "tb3_0", stale_command, controller.command_epoch
+        ))
+        self.assertIsNone(controller.failure_reason)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.IDLE, controller.phase
+        )
+        self.assertEqual(previous_counts, {
+            namespace: len(publisher.messages)
+            for namespace, publisher in controller.cmd_vel_pubs.items()
+        })
+
+        stale_batch = {
+            "tb3_0": Twist(),
+            "tb3_1": Twist(),
+        }
+        stale_batch["tb3_1"].angular.z = float("inf")
+        self.assertFalse(controller._publish_command_batch(
+            stale_batch,
+            controller.command_epoch,
+            ["tb3_0", "tb3_1"],
+        ))
+        self.assertIsNone(controller.failure_reason)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.IDLE, controller.phase
+        )
+        self.assertEqual(previous_counts, {
+            namespace: len(publisher.messages)
+            for namespace, publisher in controller.cmd_vel_pubs.items()
+        })
 
     def test_transport_new_start_waits_for_old_cycle_then_resets_its_state(self):
         controller = ROS["transport"].CollaborativeTransport()

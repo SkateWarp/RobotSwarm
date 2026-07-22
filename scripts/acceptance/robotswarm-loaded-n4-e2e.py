@@ -62,6 +62,7 @@ MAXIMUM_PROTOCOL_OUTPUT_BYTES = 16 * 1024 * 1024
 MAXIMUM_PREFLIGHT_OUTPUT_BYTES = 1024 * 1024
 MAXIMUM_PREFLIGHT_SCRIPT_BYTES = 256 * 1024
 MAXIMUM_GUI_PLUGIN_BYTES = 32 * 1024 * 1024
+MAXIMUM_STRUCTURED_FAILURE_DIAGNOSTICS = 16
 MAXIMUM_MASS_SAMPLE_GAP_SECONDS = 1.0
 MAXIMUM_STATUS_SAMPLE_GAP_SECONDS = 1.0
 MAXIMUM_LIVE_MASS_AGE_SECONDS = 0.75
@@ -782,6 +783,74 @@ def load_matrix_driver() -> ModuleType:
 MATRIX = load_matrix_driver()
 
 
+def _structured_failure_categories(failure: Any) -> list[str]:
+    normalized = str(failure).lower()
+    categories: set[str] = set()
+    exact_failures = {
+        "runtimeerror: timeout waiting for stable payload placement": (
+            "model_placement_failed"
+        ),
+    }
+    exact_category = exact_failures.get(normalized)
+    if exact_category is not None:
+        categories.add(exact_category)
+    if "cleanup failed" in normalized:
+        categories.add("payload_cleanup_failed")
+    if "loaded transport_grf" in normalized:
+        categories.add("loaded_grf_failed")
+    if "serviceexception" in normalized or "service exception" in normalized:
+        categories.add("ros_service_failed")
+    if any(
+        marker in normalized
+        for marker in (
+            "replace_payload",
+            "transport payload",
+            "transport_object",
+            "transport object",
+            "spawn model",
+            "delete model",
+        )
+    ):
+        categories.add("payload_replace_or_visibility_failed")
+    if "runtimeerror" in normalized or "runtime error" in normalized:
+        categories.add("runtime_failure")
+
+    specific_failures = (
+        ("timeout waiting for empty fleet", "fleet_delete_timeout"),
+        ("old gazebo robot deletion", "gazebo_robot_delete_timeout"),
+        ("robot roster", "fleet_spawn_roster_timeout"),
+        ("gazebo robot models", "gazebo_robot_spawn_timeout"),
+        ("burger cmd_vel subscribers", "robot_command_subscriber_timeout"),
+        ("could not place", "model_placement_failed"),
+        ("gazebo telemetry disappeared", "gazebo_telemetry_lost"),
+        ("gazebo clock is unavailable", "gazebo_clock_unavailable"),
+        ("could not delete payload", "payload_delete_failed"),
+        ("could not spawn payload", "payload_spawn_failed"),
+        ("payload deletion", "payload_delete_timeout"),
+        ("payload spawn", "payload_spawn_timeout"),
+        ("swarm task status", "swarm_status_timeout"),
+        ("commands subscriber", "swarm_command_subscriber_timeout"),
+        ("gazebo telemetry", "gazebo_telemetry_timeout"),
+    )
+    categories.update(
+        category
+        for marker, category in specific_failures
+        if marker in normalized
+    )
+    return sorted(categories or {"structured_failure"})
+
+
+def _category_fingerprint(categories: Sequence[str]) -> str:
+    """Fingerprint only the retained, allow-listed diagnostic categories."""
+    encoded = json.dumps(
+        list(categories),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
     protocol_lines = output.stdout.splitlines() if isinstance(output.stdout, str) else []
     marker_lines = output.stderr.splitlines() if isinstance(output.stderr, str) else []
@@ -809,54 +878,24 @@ def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
         categories.add("official_probe_failed")
 
     failure_count = 0
+    failure_diagnostics: list[dict[str, Any]] = []
     if len(load_documents) == 1:
         failures = load_documents[0].get("failures")
         if isinstance(failures, list):
             failure_count = len(failures)
             for failure in failures:
-                normalized = str(failure).lower()
-                if "cleanup failed" in normalized:
-                    categories.add("payload_cleanup_failed")
-                if "loaded transport_grf" in normalized:
-                    categories.add("loaded_grf_failed")
-                if "serviceexception" in normalized or "service exception" in normalized:
-                    categories.add("ros_service_failed")
-                if any(
-                    marker in normalized
-                    for marker in (
-                        "replace_payload",
-                        "transport payload",
-                        "transport_object",
-                        "transport object",
-                        "spawn model",
-                        "delete model",
-                    )
+                failure_categories = _structured_failure_categories(failure)
+                categories.update(failure_categories)
+                if (
+                    len(failure_diagnostics)
+                    < MAXIMUM_STRUCTURED_FAILURE_DIAGNOSTICS
                 ):
-                    categories.add("payload_replace_or_visibility_failed")
-                if "runtimeerror" in normalized or "runtime error" in normalized:
-                    categories.add("runtime_failure")
-                specific_failures = (
-                    ("timeout waiting for empty fleet", "fleet_delete_timeout"),
-                    ("old gazebo robot deletion", "gazebo_robot_delete_timeout"),
-                    ("robot roster", "fleet_spawn_roster_timeout"),
-                    ("gazebo robot models", "gazebo_robot_spawn_timeout"),
-                    ("burger cmd_vel subscribers", "robot_command_subscriber_timeout"),
-                    ("could not place", "model_placement_failed"),
-                    ("gazebo telemetry disappeared", "gazebo_telemetry_lost"),
-                    ("gazebo clock is unavailable", "gazebo_clock_unavailable"),
-                    ("could not delete payload", "payload_delete_failed"),
-                    ("could not spawn payload", "payload_spawn_failed"),
-                    ("payload deletion", "payload_delete_timeout"),
-                    ("payload spawn", "payload_spawn_timeout"),
-                    ("swarm task status", "swarm_status_timeout"),
-                    ("commands subscriber", "swarm_command_subscriber_timeout"),
-                    ("gazebo telemetry", "gazebo_telemetry_timeout"),
-                )
-                categories.update(
-                    category
-                    for marker, category in specific_failures
-                    if marker in normalized
-                )
+                    failure_diagnostics.append({
+                        "categories": failure_categories,
+                        "categorySha256": _category_fingerprint(
+                            failure_categories
+                        ),
+                    })
         if load_documents[0].get("passed") is not False:
             categories.add("load_result_status_inconsistent")
     elif not load_documents:
@@ -895,6 +934,8 @@ def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
         "categories": sorted(categories),
         "structuredLoadResultCount": len(load_documents),
         "structuredFailureCount": failure_count,
+        "structuredFailureDiagnostics": failure_diagnostics,
+        "diagnosticsTruncated": failure_count > len(failure_diagnostics),
         "liveMarkerCounts": marker_counts,
         "rawDiagnosticRetained": False,
     }

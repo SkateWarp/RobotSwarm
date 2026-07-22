@@ -1447,7 +1447,43 @@ while not marker.exists() and time.monotonic() < deadline:
             "payload_replace_or_visibility_failed", classified["categories"]
         )
         self.assertIn("payload_cleanup_failed", classified["categories"])
+        diagnostics = classified["structuredFailureDiagnostics"]
+        self.assertEqual(2, len(diagnostics))
+        sanitized_categories = diagnostics[0]["categories"]
+        self.assertEqual(
+            hashlib.sha256(json.dumps(
+                sanitized_categories,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("ascii")).hexdigest(),
+            diagnostics[0]["categorySha256"],
+        )
+        self.assertIn(
+            "payload_replace_or_visibility_failed",
+            diagnostics[0]["categories"],
+        )
+        self.assertEqual(
+            ["payload_cleanup_failed"], diagnostics[1]["categories"]
+        )
+        self.assertFalse(classified["diagnosticsTruncated"])
+        self.assertFalse(classified["rawDiagnosticRetained"])
         self.assertNotIn("secret", json.dumps(classified))
+        self.assertNotIn("private detail", json.dumps(classified))
+
+        changed_raw = copy.deepcopy(result)
+        changed_raw["failures"][0] += ": unrelated private value"
+        changed = DRIVER.classify_loaded_probe_failure(
+            DRIVER.MATRIX.ProcessOutput(
+                1,
+                "LOAD_RESULT_JSON " + json.dumps(changed_raw) + "\n",
+                "",
+            )
+        )
+        self.assertEqual(
+            diagnostics[0]["categorySha256"],
+            changed["structuredFailureDiagnostics"][0]["categorySha256"],
+        )
 
         supervision = DRIVER.classify_loaded_probe_failure(
             DRIVER.MATRIX.ProcessOutput(92, "", "private raw diagnostic")
@@ -1455,7 +1491,76 @@ while not marker.exists() and time.monotonic() < deadline:
         self.assertIn(
             "live_marker_supervision_failed", supervision["categories"]
         )
+        self.assertEqual([], supervision["structuredFailureDiagnostics"])
+        self.assertFalse(supervision["diagnosticsTruncated"])
         self.assertNotIn("private", json.dumps(supervision))
+
+    def test_loaded_probe_failure_diagnostics_are_bounded(self):
+        failures = [
+            "cleanup failed: private value {}".format(index)
+            for index in range(DRIVER.MAXIMUM_STRUCTURED_FAILURE_DIAGNOSTICS + 1)
+        ]
+        failures.append(
+            "RuntimeError: could not place transport_object: final private value"
+        )
+        output = DRIVER.MATRIX.ProcessOutput(
+            1,
+            "LOAD_RESULT_JSON " + json.dumps({
+                "passed": False,
+                "failures": failures,
+            }) + "\n",
+            "",
+        )
+
+        classified = DRIVER.classify_loaded_probe_failure(output)
+
+        self.assertEqual(len(failures), classified["structuredFailureCount"])
+        self.assertEqual(
+            DRIVER.MAXIMUM_STRUCTURED_FAILURE_DIAGNOSTICS,
+            len(classified["structuredFailureDiagnostics"]),
+        )
+        self.assertTrue(classified["diagnosticsTruncated"])
+        self.assertIn("model_placement_failed", classified["categories"])
+        retained_hashes = {
+            item["categorySha256"]
+            for item in classified["structuredFailureDiagnostics"]
+        }
+        self.assertEqual(1, len(retained_hashes))
+        self.assertNotIn("private value", json.dumps(classified))
+
+    def test_stable_payload_placement_timeout_has_an_exact_safe_category(self):
+        message = "RuntimeError: timeout waiting for stable payload placement"
+        output = DRIVER.MATRIX.ProcessOutput(
+            1,
+            "LOAD_RESULT_JSON " + json.dumps({
+                "passed": False,
+                "failures": [message],
+            }) + "\n",
+            "",
+        )
+
+        classified = DRIVER.classify_loaded_probe_failure(output)
+
+        self.assertIn("model_placement_failed", classified["categories"])
+        self.assertEqual(
+            ["model_placement_failed", "runtime_failure"],
+            classified["structuredFailureDiagnostics"][0]["categories"],
+        )
+        self.assertFalse(classified["rawDiagnosticRetained"])
+        self.assertNotIn("stable payload placement", json.dumps(classified))
+
+        changed = DRIVER.classify_loaded_probe_failure(
+            DRIVER.MATRIX.ProcessOutput(
+                1,
+                "LOAD_RESULT_JSON " + json.dumps({
+                    "passed": False,
+                    "failures": [message + ": private detail"],
+                }) + "\n",
+                "",
+            )
+        )
+        self.assertNotIn("model_placement_failed", changed["categories"])
+        self.assertNotIn("private detail", json.dumps(changed))
 
     def test_bounded_child_kills_process_group_immediately_on_overflow(self):
         source = """

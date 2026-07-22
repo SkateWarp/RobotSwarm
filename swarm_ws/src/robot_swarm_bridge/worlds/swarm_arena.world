@@ -340,25 +340,50 @@
       <pose>-3.0 -3.0 0.1 0 0 0</pose>
     </model>
 
-    <!-- ==================== TARGET MARKER (visual only) ==================== -->
+    <!-- ==================== TRANSPORT TARGET (visual only) ==================== -->
+    <!--
+      The transport controller moves this collision-free model to the
+      requested target.  It is kinematic instead of static because Gazebo
+      Classic does not refresh a static model's visual after set_model_state.
+      Its footprint is easy to read from above, while the translucent box
+      shows where the payload itself is meant to finish.
+    -->
     <model name="target_marker">
-      <static>true</static>
+      <static>false</static>
       <link name="link">
-        <visual name="visual">
+        <gravity>false</gravity>
+        <kinematic>true</kinematic>
+        <visual name="target_footprint">
+          <pose>0 0 0.006 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
           <geometry><cylinder><radius>0.3</radius><length>0.01</length></cylinder></geometry>
           <material>
-            <ambient>0.9 0.1 0.1 0.8</ambient>
-            <diffuse>0.9 0.1 0.1 0.8</diffuse>
+            <ambient>0.95 0.10 0.90 1.0</ambient>
+            <diffuse>0.95 0.10 0.90 1.0</diffuse>
+            <emissive>0.30 0.02 0.28 1.0</emissive>
           </material>
+          <transparency>0.30</transparency>
+        </visual>
+        <visual name="payload_ghost">
+          <pose>0 0 0.10 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><box><size>0.4 0.4 0.2</size></box></geometry>
+          <material>
+            <ambient>0.95 0.10 0.90 1.0</ambient>
+            <diffuse>0.95 0.10 0.90 1.0</diffuse>
+            <emissive>0.24 0.02 0.22 1.0</emissive>
+          </material>
+          <transparency>0.55</transparency>
         </visual>
       </link>
-      <pose>3.0 3.0 0.005 0 0 0</pose>
+      <pose>3.0 3.0 0.0 0 0 0</pose>
     </model>
 
     <!-- Camera position for nice default view -->
     <gui fullscreen="0">
       <camera name="user_camera">
-        <pose>0 -12 10 0 0.7 1.5708</pose>
+        <!-- Keep the complete -4..4 task area visible, including target ghosts. -->
+        <pose>0 -14.4 12 0 0.72 1.5708</pose>
         <view_controller>orbit</view_controller>
       </camera>
     </gui>

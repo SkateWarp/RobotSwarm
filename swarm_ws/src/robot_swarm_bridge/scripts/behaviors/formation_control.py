@@ -36,12 +36,14 @@ from utils.robot_ids import sort_robot_ids
 from robot_swarm_bridge.algorithms.formation import (
     ensure_minimum_spacing,
     find_safe_formation_center,
+    formation_targets_are_safe,
     hungarian_assignment,
     minimum_distance_assignment,
     plan_obstacle_aware_route,
     point_to_route_distance,
     routes_conflict,
     sample_letter_formation,
+    straight_route_is_safe,
 )
 
 
@@ -287,7 +289,7 @@ class FormationController:
         ~formation_type     : str   (default 'triangle')
         ~movement_mode      : str   (default 'moving')
         ~spacing            : float (default 1.0 m)
-        ~max_linear_vel     : float (default 0.2 m/s)
+        ~max_linear_vel     : float (default 0.22 m/s)
         ~max_angular_vel    : float (default 1.5 rad/s)
         ~centroid_speed     : float (default 0.1 m/s)
         ~path_radius        : float (default 2.5 m)
@@ -319,10 +321,32 @@ class FormationController:
         formation_type_str = rospy.get_param('~formation_type', 'triangle')
         movement_mode_str = rospy.get_param('~movement_mode', 'moving')
         self.spacing = rospy.get_param('~spacing', 1.0)
-        self.max_linear_vel = rospy.get_param('~max_linear_vel', 0.2)
+        self.max_linear_vel = rospy.get_param('~max_linear_vel', 0.22)
         self.max_angular_vel = rospy.get_param('~max_angular_vel', 1.5)
         self.centroid_speed = rospy.get_param('~centroid_speed', 0.1)
-        self.path_radius = rospy.get_param('~path_radius', 2.5)
+        self.path_radius = max(
+            0.10, float(rospy.get_param('~path_radius', 2.5))
+        )
+        self.minimum_safe_path_radius = max(
+            0.10,
+            float(rospy.get_param('~minimum_safe_path_radius', 0.25)),
+        )
+        self.orbit_sample_step = min(
+            0.08,
+            max(0.02, float(rospy.get_param('~orbit_sample_step', 0.04))),
+        )
+        self.route_tracking_margin = min(
+            0.12,
+            max(0.0, float(rospy.get_param(
+                '~formation_route_tracking_margin', 0.02
+            ))),
+        )
+        self.route_waypoint_tolerance = min(
+            0.08,
+            max(0.02, float(rospy.get_param(
+                '~formation_route_waypoint_tolerance', 0.08
+            ))),
+        )
         centroid_path_str = rospy.get_param('~centroid_path', 'circular')
         self.position_tolerance = max(
             0.03, float(rospy.get_param('~position_tolerance', 0.09))
@@ -390,13 +414,31 @@ class FormationController:
         self.centroid_x = 0.0
         self.centroid_y = 0.0
         self.centroid_heading = 0.0  # heading angle of centroid path
+        # The path heading is useful for visualization, but it must not rotate
+        # a letter (or any other rigid formation) as the centroid travels.
+        self.formation_heading = 0.0
         self.centroid_time = 0.0     # elapsed time for path parametrization
         self.current_waypoint_idx = 0
+        self.path_center_x = 0.0
+        self.path_center_y = 0.0
+        self.effective_path_radius = self.path_radius
+        self.orbit_path_validated = False
+        self.orbit_validation_samples = 0
+        self.orbit_validation_live_models = 0
+        self.orbit_radius_adapted = False
+        self._live_orbit_validation_key = None
+        self._live_orbit_validation_safe = False
+        # A moving target is held still while the robots assemble. Starting the
+        # path before that point turns formation into a chase, especially for a
+        # large fleet whose slots take longer to fill.
+        self._initial_formation_acquired = False
+        self._maximum_position_error = 0.0
 
         # Robots (populated from /fleet/robot_list or default namespace list)
         self.robot_ids: List[str] = []
         self.robot_poses: Dict[str, Optional[Pose]] = {}
         self.robot_yaws: Dict[str, float] = {}
+        self.invalid_robot_poses: Tuple[str, ...] = ()
         self.odom_received_at: Dict[str, Optional[float]] = {}
         self.odom_timeout_wall_s = max(
             0.2, float(rospy.get_param('~odom_timeout_wall_s', 0.75))
@@ -413,6 +455,7 @@ class FormationController:
         self.stale_odometry: List[str] = []
         self.waiting_for_odometry: List[str] = []
         self.model_poses: Dict[str, Tuple[float, float, float]] = {}
+        self.invalid_model_poses: Tuple[str, ...] = ()
         self.placement_error: Optional[str] = None
 
         # Formation positions: list of (x, y) offsets from centroid (unscaled)
@@ -423,6 +466,7 @@ class FormationController:
         self.route_waypoint_indices: Dict[str, int] = {}
         self.route_batches: List[List[str]] = []
         self.route_batch_index = 0
+        self.active_placement_plan: Optional[Dict] = None
         self.assignment_pending = False
         self._assignment_generation = 0
         self._slot_reached: Dict[str, bool] = {}
@@ -513,6 +557,7 @@ class FormationController:
         assignment_snapshot = None
         with self.command_lock:
             if ids != self.robot_ids:
+                self._initial_formation_acquired = False
                 if not ids:
                     self.is_running = False
                     self.is_paused = False
@@ -534,22 +579,85 @@ class FormationController:
 
     def _model_states_cb(self, msg: ModelStates):
         """Track configured obstacle poses, including the pushable object."""
-        configured_models = {
-            zone.get('model')
-            for zone in self.spawn_exclusion_zones
-            if isinstance(zone, dict) and zone.get('model')
-        }
+        arena_profile = getattr(self, 'arena_profile', 'swarm_arena')
+        configured_models = set()
+        for zone in self.spawn_exclusion_zones:
+            if not isinstance(zone, dict) or not zone.get('model'):
+                continue
+            worlds = zone.get('worlds')
+            if isinstance(worlds, str):
+                worlds = [worlds]
+            if worlds and arena_profile not in worlds:
+                continue
+            configured_models.add(zone['model'])
+
+        try:
+            names = list(getattr(msg, 'name', ()))
+            poses = list(getattr(msg, 'pose', ()))
+        except (TypeError, ValueError):
+            names = poses = None
+
+        with self.lock:
+            invalid_models = set(getattr(
+                self, 'invalid_model_poses', ()
+            )) & configured_models
+
+        names_are_valid = (
+            names is not None
+            and all(isinstance(name, str) for name in names)
+        )
+        snapshot_is_ambiguous = (
+            names_are_valid and len(set(names)) != len(names)
+        )
+        if (
+            not names_are_valid
+            or len(names) != len(poses)
+            or snapshot_is_ambiguous
+        ):
+            # ModelStates is one scene snapshot. If its parallel arrays do not
+            # line up or one name occurs twice, none of the active obstacle
+            # poses can be trusted.
+            invalid_models.update(configured_models)
+            with self.lock:
+                self.model_poses = {}
+                self.invalid_model_poses = tuple(sorted(invalid_models))
+            return
+
         live_poses = {}
-        for model_name, pose in zip(msg.name, msg.pose):
+        for model_name, pose in zip(names, poses):
             if model_name not in configured_models:
                 continue
-            live_poses[model_name] = (
-                pose.position.x,
-                pose.position.y,
-                quaternion_to_yaw(pose.orientation),
-            )
+            try:
+                orientation = pose.orientation
+                quaternion = tuple(
+                    float(getattr(orientation, axis))
+                    for axis in ('x', 'y', 'z', 'w')
+                )
+                if not all(math.isfinite(value) for value in quaternion):
+                    raise ValueError("model quaternion is not finite")
+                live_pose = (
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(quaternion_to_yaw(orientation)),
+                )
+                pose_is_valid = all(
+                    math.isfinite(value) for value in live_pose
+                )
+            except (
+                AttributeError, TypeError, ValueError, OverflowError
+            ):
+                pose_is_valid = False
+
+            if pose_is_valid:
+                live_poses[model_name] = live_pose
+                invalid_models.discard(model_name)
+            else:
+                # Do not drop back to the configured pose silently. Remember
+                # the rejected sample so the next command batch fails closed.
+                invalid_models.add(model_name)
         with self.lock:
             self.model_poses = live_poses
+            self.invalid_model_poses = tuple(sorted(invalid_models))
 
     def _set_shape_cb(self, msg: String):
         """Dynamically change formation type at runtime."""
@@ -562,6 +670,7 @@ class FormationController:
                     self.formation_type, new_type,
                 )
                 self.formation_type = new_type
+                self._initial_formation_acquired = False
                 assignment_snapshot = self._recompute_formation_locked()
         self._compute_and_commit_assignment(assignment_snapshot)
 
@@ -603,6 +712,13 @@ class FormationController:
                     self.spacing = new_spacing
                 except (TypeError, ValueError):
                     pass
+            if 'path_radius' in config:
+                try:
+                    new_radius = max(0.10, float(config['path_radius']))
+                    recompute = recompute or new_radius != self.path_radius
+                    self.path_radius = new_radius
+                except (TypeError, ValueError):
+                    pass
             self.current_task_id = config.get('task_id')
             self.task_started_at = time.monotonic()
             self.stale_odometry = []
@@ -613,6 +729,7 @@ class FormationController:
             self.placement_error = None
             self._slot_reached = {}
             self._settled_duration = 0.0
+            self._initial_formation_acquired = False
             self._reset_centroid_path_pose_locked()
 
             if recompute:
@@ -644,6 +761,7 @@ class FormationController:
             self.is_running = False
             self.is_paused = False
             self.formation_state = FormationState.STOPPED
+            self._initial_formation_acquired = False
             self._cancel_pending_assignment_locked(clear_assignments=True)
             self._stop_all_robots()
         rospy.loginfo("Formation control STOPPED")
@@ -690,6 +808,7 @@ class FormationController:
                 self.is_running = False
                 self.is_paused = False
                 self.formation_state = FormationState.STOPPED
+                self._initial_formation_acquired = False
                 self._cancel_pending_assignment_locked(
                     clear_assignments=True
                 )
@@ -701,17 +820,43 @@ class FormationController:
         with self.command_lock:
             self.is_running = False
             self.is_paused = False
+            self._initial_formation_acquired = False
             self._stop_all_robots()
 
     def _odom_cb(self, msg: Odometry, robot_id: str):
         """Per-robot odometry callback."""
-        pose = msg.pose.pose
-        yaw = quaternion_to_yaw(pose.orientation)
+        pose = None
+        yaw = None
+        try:
+            pose = msg.pose.pose
+            orientation = pose.orientation
+            quaternion = tuple(
+                float(getattr(orientation, axis))
+                for axis in ('x', 'y', 'z', 'w')
+            )
+            if not all(math.isfinite(value) for value in quaternion):
+                raise ValueError("odometry quaternion is not finite")
+            yaw = quaternion_to_yaw(orientation)
+            pose_is_valid = self._planar_robot_pose_is_finite(pose, yaw)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pose_is_valid = False
         should_assign = False
         with self.lock:
-            first_update = self.robot_poses.get(robot_id) is None
             if robot_id not in self.robot_poses:
                 return
+            invalid_robots = set(getattr(
+                self, 'invalid_robot_poses', ()
+            ))
+            if not pose_is_valid:
+                # Keep the last valid pose, but make the rejected sample visible
+                # to the same lock-protected gate that publishes cmd_vel.
+                invalid_robots.add(robot_id)
+                self.invalid_robot_poses = tuple(sorted(invalid_robots))
+                return
+
+            first_update = self.robot_poses.get(robot_id) is None
+            invalid_robots.discard(robot_id)
+            self.invalid_robot_poses = tuple(sorted(invalid_robots))
             self.robot_poses[robot_id] = pose
             self.robot_yaws[robot_id] = yaw
             self.odom_received_at[robot_id] = time.monotonic()
@@ -809,6 +954,9 @@ class FormationController:
             self.route_waypoints, self.route_waypoint_indices,
         ):
             store.pop(robot_id, None)
+        invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
+        invalid_robots.discard(robot_id)
+        self.invalid_robot_poses = tuple(sorted(invalid_robots))
 
         rospy.loginfo("Removed robot: %s", robot_id)
 
@@ -1072,6 +1220,9 @@ class FormationController:
             self.route_waypoint_indices = {}
             self.route_batches = []
             self.route_batch_index = 0
+            self.active_placement_plan = None
+            self._live_orbit_validation_key = None
+            self._live_orbit_validation_safe = False
             self.assignment_pending = False
             return None
 
@@ -1087,6 +1238,9 @@ class FormationController:
                 self.route_waypoint_indices = {}
                 self.route_batches = []
                 self.route_batch_index = 0
+                self.active_placement_plan = None
+                self._live_orbit_validation_key = None
+                self._live_orbit_validation_safe = False
                 self.assignment_pending = True
                 return None
 
@@ -1094,39 +1248,102 @@ class FormationController:
                 robot_positions.append((pose.position.x, pose.position.y))
                 previous_slots.append(self.assignments.get(robot_id))
             model_poses = dict(self.model_poses)
+            invalid_model_poses = tuple(getattr(
+                self, 'invalid_model_poses', ()
+            ))
 
-        static_plan = None
-        if self.movement_mode == MovementMode.STATIC:
-            # A static shape belongs where the fleet already is. Route-aware
-            # placement is solved after releasing command_lock because it may
-            # test several whole-pattern translations and assignments.
-            preferred_center = (
-                sum(x for x, _ in robot_positions) / n,
-                sum(y for _, y in robot_positions) / n,
-            )
+        if (
+            self.movement_mode != MovementMode.STATIC
+            and not self._initial_formation_acquired
+        ):
+            # This also covers a fleet resize: the last first-odometry callback
+            # rebuilds the assignment from the complete, current fleet.
+            self._reset_centroid_path_pose_locked(robot_positions)
+
+        placement_plan = None
+        preferred_center = (
+            sum(x for x, _ in robot_positions) / n,
+            sum(y for _, y in robot_positions) / n,
+        )
+        if (
+            self.movement_mode == MovementMode.STATIC
+            or self.centroid_path != CentroidPath.CIRCULAR
+        ):
+            # Static shapes and open moving paths first need a safe place to
+            # assemble. Route-aware placement is solved after releasing
+            # command_lock because it may test several whole-pattern
+            # translations and assignments. Linear and waypoint paths keep this
+            # plan active so every later target is checked against the live
+            # arena immediately before its command batch is published.
             self.centroid_heading = 0.0
-            static_plan = {
+            slot_clearance = min(0.34, self.spacing - 0.01)
+            placement_plan = {
+                'kind': (
+                    'static'
+                    if self.movement_mode == MovementMode.STATIC
+                    else self.centroid_path.value
+                ),
                 'offsets': tuple(self.formation_offsets[:n]),
                 'preferred_center': preferred_center,
                 'arena_size': self.arena_size,
                 'arena_margin': self.arena_margin,
                 'obstacle_clearance': self.formation_obstacle_clearance,
+                'route_clearance': (
+                    self.formation_obstacle_clearance
+                    + self.route_tracking_margin
+                ),
                 'search_step': self.formation_search_step,
                 'search_limit': self.formation_search_limit,
                 'exclusion_zones': tuple(self.spawn_exclusion_zones),
                 'arena_profile': self.arena_profile,
                 'model_poses': model_poses,
-                'slot_clearance': min(0.34, self.spacing - 0.01),
+                'invalid_model_poses': invalid_model_poses,
+                'slot_clearance': slot_clearance,
+                'planned_slot_clearance': min(
+                    self.spacing - 0.01,
+                    slot_clearance + self.route_tracking_margin,
+                ),
+            }
+        elif self.centroid_path == CentroidPath.CIRCULAR:
+            # A circular task needs more than a safe first frame. The solver
+            # below checks the complete rigid footprint around one full lap,
+            # then plans every robot's route to that validated entry pose.
+            slot_clearance = min(0.34, self.spacing - 0.01)
+            placement_plan = {
+                'kind': 'circular',
+                'offsets': tuple(self.formation_offsets[:n]),
+                'preferred_center': preferred_center,
+                'requested_radius': self.path_radius,
+                'minimum_radius': self.minimum_safe_path_radius,
+                'sample_step': self.orbit_sample_step,
+                'arena_size': self.arena_size,
+                'arena_margin': self.arena_margin,
+                'obstacle_clearance': self.formation_obstacle_clearance,
+                'route_clearance': (
+                    self.formation_obstacle_clearance
+                    + self.route_tracking_margin
+                ),
+                'search_step': self.formation_search_step,
+                'search_limit': self.formation_search_limit,
+                'exclusion_zones': tuple(self.spawn_exclusion_zones),
+                'arena_profile': self.arena_profile,
+                'model_poses': model_poses,
+                'invalid_model_poses': invalid_model_poses,
+                'slot_clearance': slot_clearance,
+                'planned_slot_clearance': min(
+                    self.spacing - 0.01,
+                    slot_clearance + self.route_tracking_margin,
+                ),
             }
 
         self.placement_error = None
-        if static_plan is None:
+        if placement_plan is None:
             target_world = tuple(self._get_world_targets()[:n])
         else:
-            preferred_x, preferred_y = static_plan['preferred_center']
+            preferred_x, preferred_y = placement_plan['preferred_center']
             target_world = tuple(
                 (preferred_x + offset_x, preferred_y + offset_y)
-                for offset_x, offset_y in static_plan['offsets']
+                for offset_x, offset_y in placement_plan['offsets']
             )
 
         # Stop the control loop from using an assignment that belongs to the
@@ -1136,6 +1353,12 @@ class FormationController:
         self.route_waypoint_indices = {}
         self.route_batches = []
         self.route_batch_index = 0
+        # There is deliberately no active geometry while the replacement
+        # assignment is being solved. The control loop has no assignments in
+        # this state, so it can only publish zero commands until commit.
+        self.active_placement_plan = None
+        self._live_orbit_validation_key = None
+        self._live_orbit_validation_safe = False
         self.assignment_pending = True
         return {
             'generation': generation,
@@ -1144,7 +1367,7 @@ class FormationController:
             'target_world': target_world,
             'previous_slots': tuple(previous_slots),
             'switch_penalty': (self.spacing * 0.35) ** 2,
-            'static_plan': static_plan,
+            'placement_plan': placement_plan,
         }
 
     @staticmethod
@@ -1154,34 +1377,277 @@ class FormationController:
             for start, end in zip(route, route[1:])
         )
 
-    def _plan_routed_static_assignment(
-        self, assignment_snapshot: Dict, static_plan: Dict
+    @staticmethod
+    def _orbit_radius_candidates(
+        requested_radius: float, minimum_radius: float
+    ) -> List[float]:
+        """Return a short, deterministic set of conservative orbit radii."""
+
+        requested = max(0.10, float(requested_radius))
+        floor = min(requested, max(0.10, float(minimum_radius)))
+        candidates = [requested]
+        candidates.extend(
+            radius for radius in (1.0, 0.75, 0.50, 0.40, 0.30, floor)
+            if floor - 1e-9 <= radius < requested - 1e-9
+        )
+        unique = []
+        for radius in candidates:
+            if not any(abs(radius - item) <= 1e-9 for item in unique):
+                unique.append(radius)
+        return unique
+
+    @staticmethod
+    def _rigid_orbit_offsets(
+        offsets: Tuple[Tuple[float, float], ...],
+        radius: float,
+        maximum_sample_step: float,
+    ) -> Tuple[List[Tuple[float, float]], int]:
+        """Sample one full lap while keeping every formation offset fixed."""
+
+        samples = max(
+            8,
+            int(math.ceil(
+                2.0 * math.pi * radius / maximum_sample_step
+            )),
+        )
+        swept_offsets = []
+        for sample_index in range(samples):
+            phase = 2.0 * math.pi * sample_index / samples
+            centroid_x = radius * math.cos(phase)
+            centroid_y = radius * math.sin(phase)
+            swept_offsets.extend(
+                (centroid_x + offset_x, centroid_y + offset_y)
+                for offset_x, offset_y in offsets
+            )
+        return swept_offsets, samples
+
+    def _rigid_orbit_is_safe(
+        self,
+        offsets: Tuple[Tuple[float, float], ...],
+        path_center: Tuple[float, float],
+        radius: float,
+        placement_plan: Dict,
+        model_poses: Dict[str, Tuple[float, float, float]],
+    ) -> bool:
+        """Validate the continuous full-lap footprint against live geometry."""
+
+        if not self._model_poses_are_finite(model_poses):
+            return False
+        sample_step = float(placement_plan['sample_step'])
+        swept_offsets, _sample_count = self._rigid_orbit_offsets(
+            offsets, radius, sample_step
+        )
+        swept_targets = [
+            (path_center[0] + offset_x, path_center[1] + offset_y)
+            for offset_x, offset_y in swept_offsets
+        ]
+        padding = sample_step / 2.0
+        return formation_targets_are_safe(
+            swept_targets,
+            placement_plan['arena_size'],
+            placement_plan['arena_margin'] + padding,
+            placement_plan['obstacle_clearance'] + padding,
+            placement_plan['exclusion_zones'],
+            placement_plan['arena_profile'],
+            model_poses,
+        )
+
+    def _routes_are_safe(
+        self,
+        robot_ids: Tuple[str, ...],
+        robot_positions: Dict[str, Tuple[float, float]],
+        targets: List[Tuple[float, float]],
+        slots: List[int],
+        routes: Dict[str, List[Tuple[float, float]]],
+        placement_plan: Dict,
+        model_poses: Dict[str, Tuple[float, float, float]],
+        route_indices: Optional[Dict[str, int]] = None,
+    ) -> bool:
+        """Check every remaining entry segment and its reserved final slot."""
+
+        if not self._model_poses_are_finite(model_poses):
+            return False
+        if len(robot_ids) != len(slots):
+            return False
+        if not formation_targets_are_safe(
+            targets,
+            placement_plan['arena_size'],
+            placement_plan['arena_margin'],
+            placement_plan['obstacle_clearance'],
+            placement_plan['exclusion_zones'],
+            placement_plan['arena_profile'],
+            model_poses,
+        ):
+            return False
+
+        indices = route_indices or {}
+        for robot_id, slot_index in zip(robot_ids, slots):
+            start = robot_positions.get(robot_id)
+            if start is None or not (0 <= slot_index < len(targets)):
+                return False
+            route = list(routes.get(robot_id, []))
+            route_index = max(0, int(indices.get(robot_id, 0)))
+            remaining = route[route_index:]
+            final_target = targets[slot_index]
+            if (
+                not remaining
+                or math.hypot(
+                    remaining[-1][0] - final_target[0],
+                    remaining[-1][1] - final_target[1],
+                ) > 1e-9
+            ):
+                remaining.append(final_target)
+
+            # Slot reservations are a planning/staging constraint, not a live
+            # obstacle. During execution, occupied slots are protected by the
+            # staged batches and the normal inter-robot avoidance layer.
+            route_zones = list(placement_plan['exclusion_zones'])
+            if not formation_targets_are_safe(
+                remaining,
+                placement_plan['arena_size'],
+                placement_plan['arena_margin'],
+                placement_plan['obstacle_clearance'],
+                route_zones,
+                placement_plan['arena_profile'],
+                model_poses,
+            ):
+                return False
+            points = [start] + remaining
+            if any(
+                not straight_route_is_safe(
+                    segment_start,
+                    segment_end,
+                    placement_plan['obstacle_clearance'],
+                    route_zones,
+                    placement_plan['arena_profile'],
+                    model_poses,
+                )
+                for segment_start, segment_end in zip(points, points[1:])
+            ):
+                return False
+        return True
+
+    def _placement_plan_is_live_safe(
+        self,
+        placement_plan: Dict,
+        robot_ids: Tuple[str, ...],
+        robot_positions: Dict[str, Tuple[float, float]],
+        targets: List[Tuple[float, float]],
+        slots: List[int],
+        routes: Dict[str, List[Tuple[float, float]]],
+        model_poses: Dict[str, Tuple[float, float, float]],
+        path_center: Optional[Tuple[float, float]] = None,
+        path_radius: Optional[float] = None,
+        route_indices: Optional[Dict[str, int]] = None,
+    ) -> bool:
+        """Revalidate a placement without trusting its planning snapshot."""
+
+        if not self._model_poses_are_finite(model_poses):
+            return False
+        if placement_plan['kind'] == 'circular':
+            if path_center is None or path_radius is None:
+                return False
+            if not self._rigid_orbit_is_safe(
+                placement_plan['offsets'],
+                path_center,
+                path_radius,
+                placement_plan,
+                model_poses,
+            ):
+                return False
+        return self._routes_are_safe(
+            robot_ids,
+            robot_positions,
+            targets,
+            slots,
+            routes,
+            placement_plan,
+            model_poses,
+            route_indices,
+        )
+
+    def _plan_safe_circular_placement(self, plan: Dict) -> Optional[Dict]:
+        """Find a full rigid orbit using the current live obstacle snapshot."""
+
+        requested_radius = float(plan['requested_radius'])
+        sample_step = float(plan['sample_step'])
+        # Signed distance is 1-Lipschitz. Reserving half a sample step at each
+        # sampled pose covers the unsampled arc between neighbouring poses.
+        validation_padding = sample_step / 2.0
+        preferred_entry_x, preferred_entry_y = plan['preferred_center']
+
+        for radius in self._orbit_radius_candidates(
+            requested_radius, plan['minimum_radius']
+        ):
+            swept_offsets, sample_count = self._rigid_orbit_offsets(
+                plan['offsets'], radius, sample_step
+            )
+            preferred_path_center = (
+                preferred_entry_x - radius,
+                preferred_entry_y,
+            )
+            path_center = find_safe_formation_center(
+                swept_offsets,
+                preferred_path_center,
+                plan['arena_size'],
+                plan['arena_margin'] + validation_padding,
+                plan['obstacle_clearance'] + validation_padding,
+                plan['search_step'],
+                plan['exclusion_zones'],
+                plan['arena_profile'],
+                plan['model_poses'],
+            )
+            if path_center is None:
+                continue
+
+            if not self._rigid_orbit_is_safe(
+                plan['offsets'],
+                path_center,
+                radius,
+                plan,
+                plan['model_poses'],
+            ):
+                continue
+
+            entry_center = (
+                path_center[0] + radius,
+                path_center[1],
+            )
+            targets = [
+                (entry_center[0] + offset_x,
+                 entry_center[1] + offset_y)
+                for offset_x, offset_y in plan['offsets']
+            ]
+            if not formation_targets_are_safe(
+                targets,
+                plan['arena_size'],
+                plan['arena_margin'],
+                plan['obstacle_clearance'],
+                plan['exclusion_zones'],
+                plan['arena_profile'],
+                plan['model_poses'],
+            ):
+                continue
+            return {
+                'path_center': path_center,
+                'entry_center': entry_center,
+                'radius': radius,
+                'targets': targets,
+                'sample_count': sample_count,
+                'live_model_count': len(plan['model_poses']),
+            }
+        return None
+
+    def _plan_routes_to_targets(
+        self,
+        assignment_snapshot: Dict,
+        placement_plan: Dict,
+        targets: List[Tuple[float, float]],
     ) -> Optional[Tuple[
-        Tuple[float, float],
-        List[Tuple[float, float]],
-        List[int],
-        Dict[str, List[Tuple[float, float]]],
+        List[int], Dict[str, List[Tuple[float, float]]]
     ]]:
         """Choose slots by actual route length, then reserve parked slots."""
 
-        center = find_safe_formation_center(
-            static_plan['offsets'],
-            static_plan['preferred_center'],
-            static_plan['arena_size'],
-            static_plan['arena_margin'],
-            static_plan['obstacle_clearance'],
-            static_plan['search_step'],
-            static_plan['exclusion_zones'],
-            static_plan['arena_profile'],
-            static_plan['model_poses'],
-        )
-        if center is None:
-            return None
-
-        targets = [
-            (center[0] + offset_x, center[1] + offset_y)
-            for offset_x, offset_y in static_plan['offsets']
-        ]
         route_options = []
         route_costs = []
         largest_cost = 0.0
@@ -1195,12 +1661,12 @@ class FormationController:
                 route = plan_obstacle_aware_route(
                     start,
                     target,
-                    static_plan['arena_size'],
-                    static_plan['arena_margin'],
-                    static_plan['obstacle_clearance'],
-                    static_plan['exclusion_zones'],
-                    static_plan['arena_profile'],
-                    static_plan['model_poses'],
+                    placement_plan['arena_size'],
+                    placement_plan['arena_margin'],
+                    placement_plan['route_clearance'],
+                    placement_plan['exclusion_zones'],
+                    placement_plan['arena_profile'],
+                    placement_plan['model_poses'],
                     circle_samples=8,
                 )
                 robot_routes.append(route)
@@ -1241,7 +1707,7 @@ class FormationController:
                 'x': target[0],
                 'y': target[1],
                 'radius': 0.0,
-                'clearance': static_plan['slot_clearance'],
+                'clearance': placement_plan['planned_slot_clearance'],
             }
             for index, target in enumerate(targets)
         ]
@@ -1249,7 +1715,7 @@ class FormationController:
         for robot_index, (robot_id, slot_index) in enumerate(zip(
             assignment_snapshot['robot_ids'], slots
         )):
-            route_zones = list(static_plan['exclusion_zones'])
+            route_zones = list(placement_plan['exclusion_zones'])
             route_zones.extend(
                 zone for index, zone in enumerate(slot_zones)
                 if index != slot_index
@@ -1257,18 +1723,53 @@ class FormationController:
             route = plan_obstacle_aware_route(
                 assignment_snapshot['robot_positions'][robot_index],
                 targets[slot_index],
-                static_plan['arena_size'],
-                static_plan['arena_margin'],
-                static_plan['obstacle_clearance'],
+                placement_plan['arena_size'],
+                placement_plan['arena_margin'],
+                placement_plan['route_clearance'],
                 route_zones,
-                static_plan['arena_profile'],
-                static_plan['model_poses'],
+                placement_plan['arena_profile'],
+                placement_plan['model_poses'],
                 circle_samples=8,
             )
             if route is None:
                 return None
             routes[robot_id] = route
+        return slots, routes
 
+    def _plan_routed_static_assignment(
+        self, assignment_snapshot: Dict, static_plan: Dict
+    ) -> Optional[Tuple[
+        Tuple[float, float],
+        List[Tuple[float, float]],
+        List[int],
+        Dict[str, List[Tuple[float, float]]],
+    ]]:
+        """Choose slots by actual route length, then reserve parked slots."""
+
+        center = find_safe_formation_center(
+            static_plan['offsets'],
+            static_plan['preferred_center'],
+            static_plan['arena_size'],
+            static_plan['arena_margin'],
+            static_plan['obstacle_clearance'],
+            static_plan['search_step'],
+            static_plan['exclusion_zones'],
+            static_plan['arena_profile'],
+            static_plan['model_poses'],
+        )
+        if center is None:
+            return None
+
+        targets = [
+            (center[0] + offset_x, center[1] + offset_y)
+            for offset_x, offset_y in static_plan['offsets']
+        ]
+        routed = self._plan_routes_to_targets(
+            assignment_snapshot, static_plan, targets
+        )
+        if routed is None:
+            return None
+        slots, routes = routed
         return center, targets, slots, routes
 
     def _build_route_batches(
@@ -1327,10 +1828,26 @@ class FormationController:
         if assignment_snapshot is None:
             return False
 
-        static_plan = assignment_snapshot.get('static_plan')
+        placement_plan = assignment_snapshot.get('placement_plan')
+        if (
+            placement_plan is not None
+            and (
+                placement_plan.get('invalid_model_poses')
+                or not self._model_poses_are_finite(
+                    placement_plan.get('model_poses', {})
+                )
+            )
+        ):
+            return self._reject_assignment_plan(
+                assignment_snapshot,
+                "The live obstacle state contained a non-finite pose; no "
+                "robot was released.",
+                'live geometry',
+            )
         planned_center = None
+        planned_orbit = None
         planned_routes = {}
-        if static_plan is None:
+        if placement_plan is None:
             slots = minimum_distance_assignment(
                 assignment_snapshot['robot_positions'],
                 assignment_snapshot['target_world'],
@@ -1339,69 +1856,58 @@ class FormationController:
             )
             route_batches = []
         else:
-            plan = self._plan_routed_static_assignment(
-                assignment_snapshot, static_plan
-            )
+            if placement_plan['kind'] != 'circular':
+                plan = self._plan_routed_static_assignment(
+                    assignment_snapshot, placement_plan
+                )
+                if plan is not None:
+                    planned_center, planned_targets, slots, full_routes = plan
+            else:
+                planned_orbit = self._plan_safe_circular_placement(
+                    placement_plan
+                )
+                plan = None
+                if planned_orbit is not None:
+                    planned_center = planned_orbit['entry_center']
+                    planned_targets = planned_orbit['targets']
+                    routed = self._plan_routes_to_targets(
+                        assignment_snapshot,
+                        placement_plan,
+                        planned_targets,
+                    )
+                    if routed is not None:
+                        slots, full_routes = routed
+                        plan = True
+
             if plan is None:
-                with self.command_lock:
-                    if (
-                        assignment_snapshot['generation']
-                        != self._assignment_generation
-                    ):
-                        return False
-                    self.assignments = {}
-                    self.route_waypoints = {}
-                    self.route_waypoint_indices = {}
-                    self.route_batches = []
-                    self.route_batch_index = 0
-                    self.assignment_pending = False
-                    self.placement_error = (
+                if placement_plan['kind'] == 'circular':
+                    error = (
+                        "No collision-free full orbit and entry-route "
+                        "assignment fits this formation and spacing inside "
+                        "the live arena."
+                    )
+                else:
+                    error = (
                         "No collision-free placement and route assignment "
                         "fits this formation and spacing inside the arena."
                     )
-                    self.formation_state = FormationState.FAILED
-                rospy.logerr(
-                    "Formation placement failed: type=%s robots=%d "
-                    "spacing=%.2f",
-                    self.formation_type,
-                    len(assignment_snapshot['robot_ids']),
-                    self.spacing,
+                return self._reject_assignment_plan(
+                    assignment_snapshot, error, 'placement'
                 )
-                return False
-            planned_center, planned_targets, slots, full_routes = plan
             assignment_snapshot['target_world'] = tuple(planned_targets)
             route_batches = self._build_route_batches(
                 assignment_snapshot['robot_ids'],
                 assignment_snapshot['robot_positions'],
                 full_routes,
-                static_plan['slot_clearance'],
+                placement_plan['slot_clearance'],
             )
             if route_batches is None:
-                with self.command_lock:
-                    if (
-                        assignment_snapshot['generation']
-                        != self._assignment_generation
-                    ):
-                        return False
-                    self.assignments = {}
-                    self.route_waypoints = {}
-                    self.route_waypoint_indices = {}
-                    self.route_batches = []
-                    self.route_batch_index = 0
-                    self.assignment_pending = False
-                    self.placement_error = (
-                        "No collision-free staged route fits this formation "
-                        "and spacing inside the arena."
-                    )
-                    self.formation_state = FormationState.FAILED
-                rospy.logerr(
-                    "Formation route staging failed: type=%s robots=%d "
-                    "spacing=%.2f",
-                    self.formation_type,
-                    len(assignment_snapshot['robot_ids']),
-                    self.spacing,
+                return self._reject_assignment_plan(
+                    assignment_snapshot,
+                    "No collision-free staged route fits this formation "
+                    "and spacing inside the arena.",
+                    'route staging',
                 )
-                return False
             planned_routes = {
                 robot_id: route[1:]
                 for robot_id, route in full_routes.items()
@@ -1413,9 +1919,69 @@ class FormationController:
                 != self._assignment_generation
             ):
                 return False
+            if placement_plan is not None:
+                with self.lock:
+                    live_model_poses = dict(self.model_poses)
+                    invalid_live_model_poses = tuple(getattr(
+                        self, 'invalid_model_poses', ()
+                    ))
+                    live_robot_positions = {
+                        robot_id: (
+                            self.robot_poses[robot_id].position.x,
+                            self.robot_poses[robot_id].position.y,
+                        )
+                        for robot_id in assignment_snapshot['robot_ids']
+                        if self.robot_poses.get(robot_id) is not None
+                    }
+                path_center = None
+                path_radius = None
+                if planned_orbit is not None:
+                    path_center = planned_orbit['path_center']
+                    path_radius = planned_orbit['radius']
+                if (
+                    invalid_live_model_poses
+                    or not self._placement_plan_is_live_safe(
+                        placement_plan,
+                        assignment_snapshot['robot_ids'],
+                        live_robot_positions,
+                        list(assignment_snapshot['target_world']),
+                        list(slots),
+                        full_routes,
+                        live_model_poses,
+                        path_center,
+                        path_radius,
+                        {
+                            robot_id: 1
+                            for robot_id in assignment_snapshot['robot_ids']
+                        },
+                    )
+                ):
+                    return self._reject_assignment_plan(
+                        assignment_snapshot,
+                        "The live arena changed while the formation plan "
+                        "was being computed; no robot was released.",
+                        'live revalidation',
+                    )
             if planned_center is not None:
                 self.centroid_x, self.centroid_y = planned_center
                 self.centroid_heading = 0.0
+            if planned_orbit is not None:
+                self.path_center_x, self.path_center_y = (
+                    planned_orbit['path_center']
+                )
+                self.effective_path_radius = planned_orbit['radius']
+                self.orbit_path_validated = True
+                self.orbit_validation_samples = planned_orbit[
+                    'sample_count'
+                ]
+                self.orbit_validation_live_models = planned_orbit[
+                    'live_model_count'
+                ]
+                self.orbit_radius_adapted = (
+                    abs(self.effective_path_radius - self.path_radius) > 1e-9
+                )
+                self.centroid_time = 0.0
+                self._set_circular_centroid_pose()
             self.placement_error = None
             self.assignments = {
                 robot_id: slot_index
@@ -1429,6 +1995,11 @@ class FormationController:
             }
             self.route_batches = route_batches
             self.route_batch_index = 0
+            self.active_placement_plan = (
+                None if placement_plan is None else dict(placement_plan)
+            )
+            self._live_orbit_validation_key = None
+            self._live_orbit_validation_safe = False
             self.assignment_pending = False
             self._slot_reached = {
                 robot_id: False
@@ -1436,6 +2007,38 @@ class FormationController:
             }
             self._settled_duration = 0.0
         return True
+
+    def _reject_assignment_plan(
+        self, assignment_snapshot: Dict, error: str, stage: str
+    ) -> bool:
+        """Discard one current unsafe plan without reviving stale work."""
+
+        with self.command_lock:
+            if (
+                assignment_snapshot['generation']
+                != self._assignment_generation
+            ):
+                return False
+            self.assignments = {}
+            self.route_waypoints = {}
+            self.route_waypoint_indices = {}
+            self.route_batches = []
+            self.route_batch_index = 0
+            self.active_placement_plan = None
+            self._live_orbit_validation_key = None
+            self._live_orbit_validation_safe = False
+            self.assignment_pending = False
+            self.orbit_path_validated = False
+            self.placement_error = error
+            self.formation_state = FormationState.FAILED
+        rospy.logerr(
+            "Formation %s failed: type=%s robots=%d spacing=%.2f",
+            stage,
+            self.formation_type,
+            len(assignment_snapshot['robot_ids']),
+            self.spacing,
+        )
+        return False
 
     def _cancel_pending_assignment_locked(
         self, clear_assignments: bool = False
@@ -1449,39 +2052,310 @@ class FormationController:
             self.route_waypoint_indices = {}
             self.route_batches = []
             self.route_batch_index = 0
+            self.active_placement_plan = None
+            self._live_orbit_validation_key = None
+            self._live_orbit_validation_safe = False
             self._slot_reached = {}
         self._settled_duration = 0.0
 
+    @staticmethod
+    def _model_poses_are_finite(
+        model_poses: Dict[str, Tuple[float, float, float]]
+    ) -> bool:
+        """Reject corrupt Gazebo geometry instead of using a fallback pose."""
+
+        try:
+            return all(
+                len(pose) >= 3
+                and all(
+                    math.isfinite(float(value)) for value in pose[:3]
+                )
+                for pose in model_poses.values()
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _planar_robot_pose_is_finite(
+        pose: Optional[Pose], yaw: Optional[float]
+    ) -> bool:
+        """Check the planar odometry values used by the controller."""
+
+        if pose is None:
+            return False
+        try:
+            values = (pose.position.x, pose.position.y, yaw)
+            return all(math.isfinite(float(value)) for value in values)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    def _live_robot_positions_locked(
+        self,
+    ) -> Optional[Dict[str, Tuple[float, float]]]:
+        """Return a finite fleet snapshot, or None for rejected odometry."""
+
+        invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
+        robot_positions = {}
+        for robot_id in self.robot_ids:
+            pose = self.robot_poses.get(robot_id)
+            yaw = self.robot_yaws.get(robot_id)
+            if (
+                robot_id in invalid_robots
+                or not self._planar_robot_pose_is_finite(pose, yaw)
+            ):
+                return None
+            robot_positions[robot_id] = (
+                pose.position.x,
+                pose.position.y,
+            )
+        return robot_positions
+
+    def _live_motion_is_safe_locked(
+        self,
+        world_targets: List[Tuple[float, float]],
+        assembling_on_routes: bool,
+    ) -> bool:
+        """Check the active plan immediately before publishing its batch."""
+
+        robot_ids = tuple(self.robot_ids)
+        robot_positions = self._live_robot_positions_locked()
+        if robot_positions is None:
+            return False
+
+        model_poses = dict(self.model_poses)
+        if (
+            getattr(self, 'invalid_model_poses', ())
+            or not self._model_poses_are_finite(model_poses)
+        ):
+            return False
+
+        plan = getattr(self, 'active_placement_plan', None)
+        if plan is None:
+            # The brief assignment-planning window has neither assignments nor
+            # routes and may safely emit its all-zero hold batch. Any assigned
+            # fleet without a plan has lost its geometric safety contract.
+            return not self.assignments and not self.route_batches
+
+        if (
+            plan['kind'] == 'circular'
+            and not self._cached_live_orbit_is_safe_locked(
+                plan, model_poses
+            )
+        ):
+            return False
+        if not formation_targets_are_safe(
+            world_targets,
+            plan['arena_size'],
+            plan['arena_margin'],
+            plan['obstacle_clearance'],
+            plan['exclusion_zones'],
+            plan['arena_profile'],
+            model_poses,
+        ):
+            return False
+        if not assembling_on_routes:
+            return True
+
+        slots = [self.assignments.get(robot_id) for robot_id in robot_ids]
+        if any(slot is None for slot in slots):
+            return False
+        return self._routes_are_safe(
+            robot_ids,
+            robot_positions,
+            world_targets,
+            slots,
+            self.route_waypoints,
+            plan,
+            model_poses,
+            self.route_waypoint_indices,
+        )
+
+    def _validated_motion_command(self, command: Twist) -> Optional[Twist]:
+        """Return a detached safe copy, or None for an invalid Twist."""
+
+        try:
+            configured_linear_limit = float(self.max_linear_vel)
+            configured_angular_limit = float(self.max_angular_vel)
+            linear = (
+                float(command.linear.x),
+                float(command.linear.y),
+                float(command.linear.z),
+            )
+            angular = (
+                float(command.angular.x),
+                float(command.angular.y),
+                float(command.angular.z),
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+        if (
+            not math.isfinite(configured_linear_limit)
+            or not math.isfinite(configured_angular_limit)
+            or configured_linear_limit < 0.0
+            or configured_angular_limit < 0.0
+            or not all(math.isfinite(value) for value in linear + angular)
+        ):
+            return None
+
+        # A bad ROS parameter must not enlarge the TurtleBot3 Burger envelope.
+        linear_limit = min(configured_linear_limit, 0.22)
+        angular_limit = min(configured_angular_limit, 2.84)
+        epsilon = 1e-9
+        if (
+            any(abs(value) > epsilon for value in linear[1:] + angular[:2])
+            or any(abs(value) > linear_limit + epsilon for value in linear)
+            or any(abs(value) > angular_limit + epsilon for value in angular)
+        ):
+            return None
+
+        validated = Twist()
+        (
+            validated.linear.x,
+            validated.linear.y,
+            validated.linear.z,
+        ) = linear
+        (
+            validated.angular.x,
+            validated.angular.y,
+            validated.angular.z,
+        ) = angular
+        return validated
+
+    def _cached_live_orbit_is_safe_locked(
+        self,
+        placement_plan: Dict,
+        model_poses: Dict[str, Tuple[float, float, float]],
+    ) -> bool:
+        """Reuse full-lap validation until obstacle motion is material."""
+
+        if not self._model_poses_are_finite(model_poses):
+            return False
+        pose_key = tuple(sorted(
+            (
+                model_name,
+                int(round(float(pose[0]) / 0.005)),
+                int(round(float(pose[1]) / 0.005)),
+                int(round(float(pose[2]) / 0.005)),
+            )
+            for model_name, pose in model_poses.items()
+        ))
+        key = (
+            round(float(self.path_center_x), 6),
+            round(float(self.path_center_y), 6),
+            round(float(self.effective_path_radius), 6),
+            tuple(self.formation_offsets),
+            pose_key,
+        )
+        if key != getattr(self, '_live_orbit_validation_key', None):
+            self._live_orbit_validation_safe = self._rigid_orbit_is_safe(
+                tuple(self.formation_offsets),
+                (self.path_center_x, self.path_center_y),
+                self.effective_path_radius,
+                placement_plan,
+                model_poses,
+            )
+            self._live_orbit_validation_key = key
+        return bool(self._live_orbit_validation_safe)
+
+    def _can_advance_route_waypoint(
+        self,
+        robot_id: str,
+        robot_position: Tuple[float, float],
+        slot_index: int,
+        world_targets: List[Tuple[float, float]],
+        waypoints: List[Tuple[float, float]],
+        next_index: int,
+    ) -> bool:
+        """Only cut a planned corner when the remaining live route is safe."""
+
+        plan = getattr(self, 'active_placement_plan', None)
+        if plan is None:
+            return True
+        with self.lock:
+            return self._routes_are_safe(
+                (robot_id,),
+                {robot_id: robot_position},
+                world_targets,
+                [slot_index],
+                {robot_id: waypoints},
+                plan,
+                dict(self.model_poses),
+                {robot_id: next_index},
+            )
+
     def _get_world_targets(self) -> List[Tuple[float, float]]:
         """
-        Return world positions of every formation slot, accounting for
-        centroid position and heading rotation.
+        Return world positions of every rigid formation slot.
+
+        ``centroid_heading`` follows the path tangent for telemetry and RViz.
+        Slot offsets use their own fixed heading so letters remain readable
+        instead of spinning once per lap.
         """
-        cos_h = math.cos(self.centroid_heading)
-        sin_h = math.sin(self.centroid_heading)
+        return self._world_targets_at(self.centroid_x, self.centroid_y)
+
+    def _world_targets_at(
+        self, centroid_x: float, centroid_y: float
+    ) -> List[Tuple[float, float]]:
+        """Translate the fixed formation footprint to one centroid pose."""
+
+        formation_heading = getattr(self, 'formation_heading', 0.0)
+        cos_h = math.cos(formation_heading)
+        sin_h = math.sin(formation_heading)
         targets: List[Tuple[float, float]] = []
         for (ox, oy) in self.formation_offsets:
-            # Rotate offset by centroid heading
             rx = ox * cos_h - oy * sin_h
             ry = ox * sin_h + oy * cos_h
-            targets.append((self.centroid_x + rx, self.centroid_y + ry))
+            targets.append((centroid_x + rx, centroid_y + ry))
         return targets
 
     # ------------------------------------------------------------------
     # Centroid update
     # ------------------------------------------------------------------
-    def _reset_centroid_path_pose_locked(self):
-        """Reset to the exact pose used by the configured path at t=0."""
+    def _reset_centroid_path_pose_locked(self, robot_positions=None):
+        """Anchor the configured path at the fleet's current centroid."""
+        if robot_positions is None:
+            with self.lock:
+                robot_positions = [
+                    (pose.position.x, pose.position.y)
+                    for robot_id in self.robot_ids
+                    for pose in (self.robot_poses.get(robot_id),)
+                    if pose is not None
+                ]
+
+        if robot_positions:
+            start_x = sum(x for x, _ in robot_positions) / len(robot_positions)
+            start_y = sum(y for _, y in robot_positions) / len(robot_positions)
+        else:
+            start_x = self.centroid_x
+            start_y = self.centroid_y
+
         self.centroid_time = 0.0
         self.current_waypoint_idx = 0
-        self.centroid_x = 0.0
-        self.centroid_y = 0.0
+        self.centroid_x = start_x
+        self.centroid_y = start_y
         self.centroid_heading = 0.0
+        self.path_center_x = start_x
+        self.path_center_y = start_y
+        self.effective_path_radius = self.path_radius
+        self.orbit_path_validated = False
+        self.orbit_validation_samples = 0
+        self.orbit_validation_live_models = 0
+        self.orbit_radius_adapted = False
+        self._live_orbit_validation_key = None
+        self._live_orbit_validation_safe = False
+        self._maximum_position_error = 0.0
 
         if self.movement_mode == MovementMode.STATIC:
             return
 
-        if self.centroid_path == CentroidPath.CIRCULAR:
+        if (
+            self.movement_mode != MovementMode.STATIC
+            and self.centroid_path == CentroidPath.CIRCULAR
+        ):
+            # This provisional pose only exists until the full-lap solver has
+            # selected a safe path center and effective radius.
+            self.path_center_x = start_x - self.effective_path_radius
             self._set_circular_centroid_pose()
             return
 
@@ -1506,22 +2380,79 @@ class FormationController:
 
     def _set_circular_centroid_pose(self):
         """Set the circular path pose for the current centroid_time."""
-        angular_speed = self.centroid_speed / max(0.1, self.path_radius)
+        radius = max(
+            0.1, getattr(self, 'effective_path_radius', self.path_radius)
+        )
+        angular_speed = self.centroid_speed / radius
         t = self.centroid_time * angular_speed
-        self.centroid_x = self.path_radius * math.cos(t)
-        self.centroid_y = self.path_radius * math.sin(t)
+        self.centroid_x = self.path_center_x + radius * math.cos(t)
+        self.centroid_y = self.path_center_y + radius * math.sin(t)
         self.centroid_heading = t + math.pi / 2.0
 
     def _update_centroid(self, dt: float):
         """Advance the centroid along the configured path."""
-        if self.movement_mode == MovementMode.STATIC:
+        if (
+            self.movement_mode == MovementMode.STATIC
+            or not self._initial_formation_acquired
+        ):
             # Centroid stays at the average of initial robot positions
             return
+
+        # Slow the path before tracking error grows large enough to break the
+        # formation. This lets small swarms use the requested pace while larger
+        # letters automatically move at the pace their outer slots can hold.
+        slowdown_error = max(0.02, self.position_tolerance - 0.04)
+        stop_error = max(
+            slowdown_error + 0.01,
+            min(
+                self.position_release_tolerance - 0.02,
+                self.position_tolerance + 0.01,
+            ),
+        )
+        tracking_error = self._maximum_position_error
+        if not math.isfinite(tracking_error) or tracking_error >= stop_error:
+            return
+        if tracking_error > slowdown_error:
+            dt *= (stop_error - tracking_error) / (
+                stop_error - slowdown_error
+            )
 
         self.centroid_time += dt
 
         if self.centroid_path == CentroidPath.CIRCULAR:
+            if not getattr(self, 'orbit_path_validated', False):
+                self.centroid_time -= dt
+                self.placement_error = (
+                    "The circular formation path was not validated before "
+                    "movement."
+                )
+                return
+            previous_pose = (
+                self.centroid_x,
+                self.centroid_y,
+                self.centroid_heading,
+            )
             self._set_circular_centroid_pose()
+            with self.lock:
+                model_poses = dict(self.model_poses)
+            if not formation_targets_are_safe(
+                self._get_world_targets(),
+                self.arena_size,
+                self.arena_margin,
+                self.formation_obstacle_clearance,
+                self.spawn_exclusion_zones,
+                self.arena_profile,
+                model_poses,
+            ):
+                self.centroid_time -= dt
+                (
+                    self.centroid_x,
+                    self.centroid_y,
+                    self.centroid_heading,
+                ) = previous_pose
+                self.placement_error = (
+                    "A live obstacle entered the validated formation orbit."
+                )
 
         elif self.centroid_path == CentroidPath.LINEAR:
             # Move in a straight line along the current heading
@@ -1559,7 +2490,32 @@ class FormationController:
                 or self.emergency_stop_active
             ):
                 return
-            self._control_step(event)
+            try:
+                self._control_step(event)
+            except Exception as exc:
+                # A malformed scan or another unexpected live-data value must
+                # not kill rospy's timer thread while its last Twist is active.
+                self.placement_error = (
+                    "Formation control failed on invalid live data; all "
+                    "robots were stopped."
+                )
+                self.formation_state = FormationState.FAILED
+                self._initial_formation_acquired = False
+                self.is_running = False
+                self._cancel_pending_assignment_locked(
+                    clear_assignments=True
+                )
+                self._stop_all_robots()
+                try:
+                    self._publish_status([], 0.0)
+                except Exception as status_exc:
+                    rospy.logerr(
+                        "Formation failure status could not be published: %s",
+                        status_exc,
+                    )
+                rospy.logerr(
+                    "Formation control exception failed closed: %s", exc
+                )
 
     def _control_step(self, event):
         """Main 20 Hz timer callback."""
@@ -1575,8 +2531,19 @@ class FormationController:
                 + ", ".join(stale)
             )
 
+        if not waiting and not stale:
+            with self.lock:
+                live_robot_positions = self._live_robot_positions_locked()
+            if live_robot_positions is None:
+                self.placement_error = (
+                    "Robot odometry contained a non-finite planar pose; all "
+                    "robots were stopped."
+                )
+
         if self.placement_error:
             self.formation_state = FormationState.FAILED
+            self._initial_formation_acquired = False
+            self._cancel_pending_assignment_locked(clear_assignments=True)
             self._stop_all_robots()
             self._publish_status([], 0.0)
             self.is_running = False
@@ -1600,6 +2567,14 @@ class FormationController:
 
         # ---- Update centroid ----
         self._update_centroid(dt)
+        if self.placement_error:
+            self.formation_state = FormationState.FAILED
+            self._initial_formation_acquired = False
+            self._cancel_pending_assignment_locked(clear_assignments=True)
+            self._stop_all_robots()
+            self._publish_status([], 0.0)
+            self.is_running = False
+            return
 
         # ---- Compute world target positions ----
         world_targets = self._get_world_targets()
@@ -1617,11 +2592,19 @@ class FormationController:
         for av in self.avoidance.values():
             av.update_robot_positions(robot_position_list)
 
+        assembling_on_routes = (
+            self.movement_mode == MovementMode.STATIC
+            or not self._initial_formation_acquired
+        )
+
         # ---- Adaptive mode: detect obstacle proximity ----
         deforming = False
         obstacle_center_x = 0.0
         obstacle_center_y = 0.0
-        if self.movement_mode == MovementMode.ADAPTIVE:
+        if (
+            self.movement_mode == MovementMode.ADAPTIVE
+            and not assembling_on_routes
+        ):
             # Check threat level across all robots; if any is significant, deform
             for rid in self.robot_ids:
                 av = self.avoidance.get(rid)
@@ -1635,11 +2618,39 @@ class FormationController:
                         obstacle_center_y = pose.position.y - rep.y * 0.5
                     break
 
+        control_targets = list(world_targets)
+        adaptive_targets_valid = True
+        if deforming:
+            adaptive_targets_valid = all(math.isfinite(value) for value in (
+                obstacle_center_x, obstacle_center_y, self.spacing,
+            ))
+            if adaptive_targets_valid:
+                deformed_targets = []
+                for target_x, target_y in control_targets:
+                    offset_x = target_x - obstacle_center_x
+                    offset_y = target_y - obstacle_center_y
+                    obstacle_distance = math.hypot(offset_x, offset_y)
+                    if 0.01 < obstacle_distance < self.spacing * 2.0:
+                        push = (
+                            self.spacing * 2.0 - obstacle_distance
+                        ) * 0.5
+                        target_x += push * offset_x / obstacle_distance
+                        target_y += push * offset_y / obstacle_distance
+                    deformed_targets.append((target_x, target_y))
+                adaptive_targets_valid = all(
+                    math.isfinite(value)
+                    for target in deformed_targets
+                    for value in target
+                )
+                if adaptive_targets_valid:
+                    control_targets = deformed_targets
+
         # ---- Per-robot control ----
         all_in_position = bool(self.robot_ids)
         maximum_position_error = 0.0
         active_route_ids = None
-        if self.movement_mode == MovementMode.STATIC and self.route_batches:
+        commands_to_publish: Dict[str, Twist] = {}
+        if assembling_on_routes and self.route_batches:
             while (
                 self.route_batch_index < len(self.route_batches)
                 and all(
@@ -1659,22 +2670,10 @@ class FormationController:
             slot_idx = self.assignments.get(rid)
             if slot_idx is None or slot_idx >= len(world_targets):
                 all_in_position = False
-                pub = self.cmd_vel_pubs.get(rid)
-                if pub is not None:
-                    pub.publish(Twist())
+                commands_to_publish[rid] = Twist()
                 continue
 
-            target_x, target_y = world_targets[slot_idx]
-
-            # Adaptive deformation: push target away from detected obstacle
-            if deforming and self.movement_mode == MovementMode.ADAPTIVE:
-                ox = target_x - obstacle_center_x
-                oy = target_y - obstacle_center_y
-                obs_dist = math.sqrt(ox * ox + oy * oy)
-                if obs_dist < self.spacing * 2.0 and obs_dist > 0.01:
-                    push = (self.spacing * 2.0 - obs_dist) * 0.5
-                    target_x += push * (ox / obs_dist)
-                    target_y += push * (oy / obs_dist)
+            target_x, target_y = control_targets[slot_idx]
 
             final_target_x = target_x
             final_target_y = target_y
@@ -1685,9 +2684,7 @@ class FormationController:
 
             if pose is None:
                 all_in_position = False
-                pub = self.cmd_vel_pubs.get(rid)
-                if pub is not None:
-                    pub.publish(Twist())
+                commands_to_publish[rid] = Twist()
                 continue
 
             robot_x = pose.position.x
@@ -1700,14 +2697,23 @@ class FormationController:
                 maximum_position_error, final_distance
             )
 
-            if self.movement_mode == MovementMode.STATIC:
+            if assembling_on_routes:
                 waypoints = self.route_waypoints.get(rid, [])
                 waypoint_index = self.route_waypoint_indices.get(rid, 0)
                 while waypoint_index < len(waypoints) - 1:
                     waypoint_x, waypoint_y = waypoints[waypoint_index]
                     if math.hypot(
                         waypoint_x - robot_x, waypoint_y - robot_y
-                    ) > 0.10:
+                    ) > self.route_waypoint_tolerance:
+                        break
+                    if not self._can_advance_route_waypoint(
+                        rid,
+                        (robot_x, robot_y),
+                        slot_idx,
+                        control_targets,
+                        waypoints,
+                        waypoint_index + 1,
+                    ):
                         break
                     waypoint_index += 1
                 self.route_waypoint_indices[rid] = waypoint_index
@@ -1736,16 +2742,12 @@ class FormationController:
                 and rid not in active_route_ids
                 and not at_target
             ):
-                pub = self.cmd_vel_pubs.get(rid)
-                if pub is not None:
-                    pub.publish(Twist())
+                commands_to_publish[rid] = Twist()
                 continue
 
             # ---- PID control ----
-            hold_static_slot = (
-                self.movement_mode == MovementMode.STATIC and at_target
-            )
-            if hold_static_slot:
+            hold_assembly_slot = assembling_on_routes and at_target
+            if hold_assembly_slot:
                 # A reached robot should wait for its neighbours instead of
                 # orbiting its slot under residual PID and repulsion forces.
                 linear_vel = 0.0
@@ -1781,10 +2783,100 @@ class FormationController:
             else:
                 safe_cmd = desired_cmd
 
-            # ---- Publish ----
-            pub = self.cmd_vel_pubs.get(rid)
-            if pub is not None:
-                pub.publish(safe_cmd)
+            commands_to_publish[rid] = safe_cmd
+
+        # ModelStates can change while PID commands are being calculated. Hold
+        # the same lock used by its callback for one final geometric check and
+        # the complete publication batch. No positive command from a stale
+        # entry plan is allowed to leak out before the next timer cycle.
+        live_safety_exception = None
+        invalid_command_ids = []
+        late_waiting = []
+        late_stale = []
+        with self.lock:
+            validated_commands = {}
+            requests_motion = False
+            for rid, command in commands_to_publish.items():
+                validated = self._validated_motion_command(command)
+                if validated is None:
+                    invalid_command_ids.append(rid)
+                else:
+                    validated_commands[rid] = validated
+                    requests_motion = requests_motion or (
+                        float(validated.linear.x) != 0.0
+                        or float(validated.angular.z) != 0.0
+                    )
+
+            if invalid_command_ids or not adaptive_targets_valid:
+                live_motion_is_safe = False
+            else:
+                try:
+                    live_motion_is_safe = self._live_motion_is_safe_locked(
+                        control_targets, assembling_on_routes
+                    )
+                except Exception as exc:  # fail closed on corrupt live telemetry
+                    live_motion_is_safe = False
+                    live_safety_exception = exc
+
+            # The geometric check above can scan a complete orbit. Recheck the
+            # odometry clock after that work, at the last gate before the first
+            # Twist, while the pose callback is still excluded by this lock.
+            if live_motion_is_safe and requests_motion:
+                late_waiting, late_stale = self._odometry_readiness(
+                    self.robot_ids
+                )
+                if late_waiting or late_stale:
+                    self.waiting_for_odometry = late_waiting
+                    self.stale_odometry = sorted(set(
+                        late_waiting + late_stale
+                    ))
+                    live_motion_is_safe = False
+
+            if not live_motion_is_safe:
+                if invalid_command_ids:
+                    self.placement_error = (
+                        "A non-finite or out-of-bounds velocity command was "
+                        "rejected for: " + ", ".join(invalid_command_ids)
+                    )
+                elif not adaptive_targets_valid:
+                    self.placement_error = (
+                        "Adaptive formation produced invalid target geometry; "
+                        "all robots were stopped."
+                    )
+                elif late_waiting or late_stale:
+                    self.placement_error = (
+                        "Odometry became stale or unavailable for: "
+                        + ", ".join(self.stale_odometry)
+                    )
+                elif live_safety_exception is None:
+                    self.placement_error = (
+                        "A live obstacle or invalid robot odometry invalidated "
+                        "the formation orbit, slots, or remaining entry route."
+                    )
+                else:
+                    self.placement_error = (
+                        "Formation live safety validation failed "
+                        "unexpectedly; all robots were stopped."
+                    )
+            else:
+                for rid, command in validated_commands.items():
+                    pub = self.cmd_vel_pubs.get(rid)
+                    if pub is not None:
+                        pub.publish(command)
+
+        if live_safety_exception is not None:
+            rospy.logerr(
+                "Formation live safety validation failed closed: %s",
+                live_safety_exception,
+            )
+        if self.placement_error:
+            self.formation_state = FormationState.FAILED
+            self._initial_formation_acquired = False
+            self._cancel_pending_assignment_locked(clear_assignments=True)
+            self._stop_all_robots()
+            self._publish_status([], 0.0)
+            self.is_running = False
+            return
 
         if all_in_position:
             self._settled_duration += dt
@@ -1793,6 +2885,7 @@ class FormationController:
         formation_is_settled = (
             all_in_position and self._settled_duration >= self.settle_time
         )
+        self._maximum_position_error = maximum_position_error
 
         # ---- Update formation state ----
         if deforming:
@@ -1801,19 +2894,24 @@ class FormationController:
             if self.movement_mode == MovementMode.STATIC:
                 self.formation_state = FormationState.FORMED
             else:
+                self._initial_formation_acquired = True
                 self.formation_state = FormationState.MOVING
         else:
             self.formation_state = FormationState.FORMING
 
         # ---- Publish status and markers ----
-        self._publish_status(world_targets, maximum_position_error)
-        self._publish_markers(world_targets)
+        self._publish_status(control_targets, maximum_position_error)
+        self._publish_markers(control_targets)
 
     def _odometry_readiness(self, robot_ids, now=None):
         """Split robots into first-message waiters and stale data sources."""
         started_at = getattr(self, 'task_started_at', None)
+        invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
         if started_at is None:
-            return [], []
+            return [], [
+                robot_id for robot_id in robot_ids
+                if robot_id in invalid_robots
+            ]
         if now is None:
             now = time.monotonic()
         timeout = getattr(self, 'odom_timeout_wall_s', 0.75)
@@ -1824,6 +2922,9 @@ class FormationController:
         waiting = []
         stale = []
         for robot_id in robot_ids:
+            if robot_id in invalid_robots:
+                stale.append(robot_id)
+                continue
             stamp = received.get(robot_id)
             if stamp is None:
                 within_initialization_window = (
@@ -1877,6 +2978,9 @@ class FormationController:
             'state': self.formation_state.value,
             'centroid': {'x': round(self.centroid_x, 4), 'y': round(self.centroid_y, 4)},
             'centroid_heading': round(self.centroid_heading, 4),
+            'formation_heading': round(
+                getattr(self, 'formation_heading', 0.0), 4
+            ),
             'robot_count': len(self.robot_ids),
             'maximum_position_error': round(maximum_position_error, 4),
             'settled_for': round(self._settled_duration, 3),
@@ -1886,6 +2990,39 @@ class FormationController:
                 self, 'waiting_for_odometry', []
             )),
         }
+        if (
+            self.movement_mode != MovementMode.STATIC
+            and self.centroid_path == CentroidPath.CIRCULAR
+        ):
+            effective_radius = float(getattr(
+                self, 'effective_path_radius', self.path_radius
+            ))
+            status['orbit'] = {
+                'validated': bool(getattr(
+                    self, 'orbit_path_validated', False
+                )),
+                'requested_radius': round(float(self.path_radius), 4),
+                'effective_radius': round(effective_radius, 4),
+                'radius_adapted': bool(getattr(
+                    self, 'orbit_radius_adapted', False
+                )),
+                'path_center': {
+                    'x': round(float(self.path_center_x), 4),
+                    'y': round(float(self.path_center_y), 4),
+                },
+                'validation_samples': int(getattr(
+                    self, 'orbit_validation_samples', 0
+                )),
+                'live_obstacle_models': int(getattr(
+                    self, 'orbit_validation_live_models', 0
+                )),
+                'completed_laps': round(
+                    self.centroid_time * self.centroid_speed
+                    / max(0.1, effective_radius)
+                    / (2.0 * math.pi),
+                    4,
+                ),
+            }
         if self.placement_error:
             status['error'] = self.placement_error
         self.status_pub.publish(String(data=json.dumps(status)))

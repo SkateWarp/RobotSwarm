@@ -147,6 +147,15 @@ public static class TaskParameterValidator
                 -4,
                 4,
                 out _,
+                out error)
+            || !TryReadAliasedNumber(
+                parameters,
+                config,
+                "arrival_tolerance",
+                0.5,
+                0.15,
+                0.75,
+                out _,
                 out error))
         {
             return false;

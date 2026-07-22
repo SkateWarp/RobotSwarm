@@ -35,6 +35,15 @@ PRACTICE_WORLD = PACKAGE_DIR / 'worlds' / 'swarm_arena.world'
 MODEL_NAME = 'transport_object'
 ROBOT_RE = re.compile(r'^tb3_(\d+)$')
 TERMINAL_TASK_STATES = {'idle', 'completed', 'failed', 'stopped'}
+PAYLOAD_REPLACEMENT_ATTEMPTS = 3
+PAYLOAD_READINESS_SAMPLES = 2
+PAYLOAD_READINESS_TIMEOUT = 5.0
+PAYLOAD_MISSING_RETRY_TIMEOUT = 0.75
+PAYLOAD_POSITION_TOLERANCE = 0.04
+
+
+class _RecoverablePayloadRace(RuntimeError):
+    """A freshly spawned payload disappeared while Gazebo was settling."""
 
 
 def robot_sort_key(name):
@@ -125,6 +134,7 @@ class LoadProbe:
         self.task_status_fresh_for_cleanup = True
         self.cleanup_task_id = None
         self.delete_results = {}
+        self.payload_model_xml = None
         self.command_pub = rospy.Publisher(
             '/swarm/commands', String, queue_size=10
         )
@@ -238,6 +248,72 @@ class LoadProbe:
             '{:.2f} simulated seconds'.format(seconds),
         )
 
+    def wait_for_model_observations(
+        self, name, present, after_generation, samples, description,
+        expected_position=None,
+    ):
+        """Require consecutive, fresh ModelStates observations.
+
+        ModelStates has no header or model-instance identifier.  A cached
+        name can therefore belong to the object that was just deleted.  The
+        generation fence makes every accepted sample newer than the service
+        operation that it is meant to confirm.
+        """
+        last_generation = after_generation
+        matching_samples = 0
+        fresh_samples = 0
+        last_present = None
+
+        def ready():
+            nonlocal last_generation, matching_samples
+            nonlocal fresh_samples, last_present
+
+            generation = self.model_states_generation
+            if generation <= last_generation:
+                return False
+            last_generation = generation
+            fresh_samples += 1
+
+            model = self.models.get(name)
+            last_present = model is not None
+            matches = last_present is present
+            if matches and present and expected_position is not None:
+                position = model.get('position')
+                matches = (
+                    isinstance(position, tuple)
+                    and len(position) >= 3
+                    and all(
+                        abs(float(position[index]) - expected_position[index])
+                        <= PAYLOAD_POSITION_TOLERANCE
+                        for index in range(3)
+                    )
+                )
+
+            matching_samples = matching_samples + 1 if matches else 0
+            return matching_samples >= samples
+
+        try:
+            self.wait_for(
+                ready,
+                PAYLOAD_READINESS_TIMEOUT,
+                description,
+            )
+        except RuntimeError as exc:
+            # Only a fresh, authoritative absence is repairable.  A silent
+            # ModelStates stream, an unexpected pose or an operator stop must
+            # remain visible as the original failure.
+            if (
+                not self.stop_requested
+                and not rospy.is_shutdown()
+                and fresh_samples > 0
+                and last_present is False
+            ):
+                raise _RecoverablePayloadRace(
+                    '{} disappeared in fresh Gazebo telemetry'.format(name)
+                ) from exc
+            raise
+        return last_generation
+
     def send(self, command, parameters=None):
         payload = {'command': command, 'parameters': parameters or {}}
         self.command_pub.publish(String(data=json.dumps(payload)))
@@ -273,26 +349,46 @@ class LoadProbe:
                 'refusing to interrupt active task ({})'.format(task_status)
             )
 
-    def replace_payload(self, model_xml):
+    @staticmethod
+    def _service_status(response):
+        return ' '.join(str(response.status_message or '').lower().split())
+
+    def _raise_if_stopping(self, description):
+        if getattr(self, 'stop_requested', False) or rospy.is_shutdown():
+            raise RuntimeError('probe stopped while ' + description)
+
+    def _delete_payload_for_replacement(self):
+        self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
         with self.lock:
+            generation = self.model_states_generation
             exists = MODEL_NAME in self.models
         if exists:
             response = self.delete_model(MODEL_NAME)
-            if not response.success:
+            if (
+                not response.success
+                and self._service_status(response)
+                != 'deletemodel: model does not exist'
+            ):
                 raise RuntimeError(
                     'could not delete payload: ' + response.status_message
                 )
-            self.wait_for(
-                lambda: MODEL_NAME not in self.models,
-                5.0,
-                'payload deletion',
-            )
+        self.wait_for_model_observations(
+            MODEL_NAME,
+            False,
+            generation,
+            1,
+            'fresh payload deletion',
+        )
 
+    def _spawn_payload(self, model_xml):
+        self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
         pose = Pose()
         pose.position.x = self.args.crate_x
         pose.position.y = self.args.crate_y
         pose.position.z = 0.1
         pose.orientation.w = 1.0
+        with self.lock:
+            generation = self.model_states_generation
         response = self.spawn_model(
             MODEL_NAME, model_xml, '', pose, 'world'
         )
@@ -300,14 +396,15 @@ class LoadProbe:
             raise RuntimeError(
                 'could not spawn payload: ' + response.status_message
             )
-        self.wait_for(
-            lambda: MODEL_NAME in self.models,
-            5.0,
-            'payload spawn',
+        self.wait_for_model_observations(
+            MODEL_NAME,
+            True,
+            generation,
+            PAYLOAD_READINESS_SAMPLES,
+            'stable payload spawn',
         )
-        self.wait_sim(0.5)
 
-    def set_pose(self, name, x, y, z):
+    def _set_pose(self, name, x, y, z, missing_timeout):
         state = ModelState()
         state.model_name = name
         state.reference_frame = 'world'
@@ -315,31 +412,102 @@ class LoadProbe:
         state.pose.position.y = y
         state.pose.position.z = z
         state.pose.orientation.w = 1.0
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + missing_timeout
         while True:
+            self._raise_if_stopping('placing {}'.format(name))
             response = self.set_model_state(state)
             if response.success:
                 return
-            status = str(response.status_message or '')
-            if (
-                'model does not exist' not in status.lower()
-                or time.monotonic() >= deadline
-            ):
+            status = self._service_status(response)
+            if status != 'setmodelstate: model does not exist':
                 raise RuntimeError(
-                    'could not place {}: {}'.format(name, status)
+                    'could not place {}: {}'.format(
+                        name, response.status_message
+                    )
                 )
-            # Gazebo can publish the new model in ModelStates one cycle before
-            # SetModelState sees it.  Retry only that short startup race; every
-            # other service error still fails immediately.
+            if time.monotonic() >= deadline:
+                # Shutdown can begin while the service call is in flight.  It
+                # is an operator/runtime stop, not a disappearing-model race.
+                self._raise_if_stopping('placing {}'.format(name))
+                raise _RecoverablePayloadRace(
+                    '{} remained unavailable to SetModelState'.format(name)
+                )
             time.sleep(0.05)
 
-    def reset_payload_pose(self):
-        self.set_pose(
+    def _place_payload_pose(self):
+        with self.lock:
+            generation = self.model_states_generation
+        self._set_pose(
             MODEL_NAME,
             self.args.crate_x,
             self.args.crate_y,
             0.1,
+            PAYLOAD_MISSING_RETRY_TIMEOUT,
         )
+        self.wait_for_model_observations(
+            MODEL_NAME,
+            True,
+            generation,
+            PAYLOAD_READINESS_SAMPLES,
+            'stable payload placement',
+            expected_position=(self.args.crate_x, self.args.crate_y, 0.1),
+        )
+
+    def replace_payload(self, model_xml):
+        for attempt in range(1, PAYLOAD_REPLACEMENT_ATTEMPTS + 1):
+            self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
+            try:
+                self._delete_payload_for_replacement()
+                self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
+                self._spawn_payload(model_xml)
+                self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
+                self._place_payload_pose()
+                self.wait_sim(0.5)
+                self.payload_model_xml = model_xml
+                return
+            except _RecoverablePayloadRace as exc:
+                # Do not turn a shutdown that raced with Gazebo into another
+                # delete/spawn cycle.
+                self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
+                if attempt >= PAYLOAD_REPLACEMENT_ATTEMPTS:
+                    raise RuntimeError(
+                        'could not place {}: readiness race persisted after '
+                        '{} replacement attempts'.format(
+                            MODEL_NAME, PAYLOAD_REPLACEMENT_ATTEMPTS
+                        )
+                    ) from exc
+                self.log(
+                    'payload readiness was lost; retrying replacement '
+                    '({}/{})'.format(
+                        attempt + 1, PAYLOAD_REPLACEMENT_ATTEMPTS
+                    )
+                )
+
+    def set_pose(self, name, x, y, z):
+        try:
+            self._set_pose(name, x, y, z, 5.0)
+        except _RecoverablePayloadRace as exc:
+            self._raise_if_stopping('placing {}'.format(name))
+            raise RuntimeError(
+                'could not place {}: model remained unavailable'.format(name)
+            ) from exc
+
+    def reset_payload_pose(self):
+        try:
+            self._place_payload_pose()
+        except _RecoverablePayloadRace as exc:
+            self._raise_if_stopping('resetting {}'.format(MODEL_NAME))
+            model_xml = getattr(self, 'payload_model_xml', None)
+            if model_xml is None:
+                raise RuntimeError(
+                    'could not place {}: no selected payload is available '
+                    'for recovery'.format(MODEL_NAME)
+                ) from exc
+            self.log(
+                'payload disappeared after replacement; reinstalling the '
+                'selected profile'
+            )
+            self.replace_payload(model_xml)
 
     def reset_fleet(self, count):
         with self.lock:

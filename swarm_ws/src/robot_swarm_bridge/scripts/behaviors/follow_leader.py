@@ -43,6 +43,11 @@ from robot_swarm_bridge.algorithms.path_trace import ArcLengthTrace
 
 PARAMETRIC_MODES = ('circular', 'square', 'figure8')
 
+# Physical limits published for TurtleBot3 Burger. Runtime parameters may ask
+# for a calmer controller, but they must never enlarge the robot envelope.
+BURGER_MAX_LINEAR_SPEED = 0.22
+BURGER_MAX_ANGULAR_SPEED = 2.84
+
 # One lobe of x=sin(u), y=sin(u)cos(u), measured for a unit radius.
 # Keeping the complete chain shorter than this prevents two robots from being
 # assigned to the figure-eight crossing from opposite lobes at the same time.
@@ -52,6 +57,8 @@ FIGURE8_LOBE_LENGTH = 3.048611735
 # between two checks. The configured clearance is much larger than this step.
 PATH_PLACEMENT_SAMPLE_STEP = 0.025
 PATH_PLACEMENT_COARSE_SAMPLES = 72
+MODEL_SCENE_POSITION_TOLERANCE = 0.01
+MODEL_SCENE_YAW_TOLERANCE = 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +203,7 @@ class FollowTheLeader:
             configured_zones if isinstance(configured_zones, list) else []
         )
         self.model_poses = {}
+        self.invalid_model_poses = set()
         self.path_relocation_step = max(0.25, float(rospy.get_param(
             '~path_relocation_step', 0.50,
         )))
@@ -265,6 +273,7 @@ class FollowTheLeader:
         self.poses = {}        # str -> Pose
         self.yaws = {}         # str -> float  (cache to avoid repeated quat conversion)
         self.odom_received_at = {}
+        self.invalid_odometry = set()
         self.odom_timeout_wall_s = max(
             0.2, float(rospy.get_param('~odom_timeout_wall_s', 0.75))
         )
@@ -434,6 +443,9 @@ class FollowTheLeader:
         self.poses[name] = None
         self.yaws[name] = 0.0
         self.odom_received_at[name] = None
+        if not hasattr(self, 'invalid_odometry'):
+            self.invalid_odometry = set()
+        self.invalid_odometry.discard(name)
 
         self.linear_pids[name] = PIDController(
             kp=1.0, ki=0.0, kd=0.3,
@@ -477,48 +489,174 @@ class FollowTheLeader:
             self.linear_pids, self.angular_pids,
         ):
             d.pop(name, None)
+        invalid_odometry = set(getattr(self, 'invalid_odometry', set()))
+        invalid_odometry.discard(name)
+        self.invalid_odometry = invalid_odometry
 
         rospy.loginfo("[follow_leader] Removed robot: %s", name)
 
     # -- callbacks ----------------------------------------------------------
 
     def _odom_cb(self, msg, robot_name):
-        """
-        Store the latest pose.
-        """
-        pose = msg.pose.pose
-        yaw = yaw_from_quaternion(pose.orientation)
+        """Store one complete, finite planar odometry sample."""
+        pose = None
+        yaw = None
+        try:
+            pose = msg.pose.pose
+            orientation = pose.orientation
+            orientation_values = tuple(
+                float(getattr(orientation, axis))
+                for axis in ('x', 'y', 'z', 'w')
+            )
+            if not all(math.isfinite(value) for value in orientation_values):
+                raise ValueError("odometry quaternion is not finite")
+            yaw = yaw_from_quaternion(pose.orientation)
+            pose_values = (
+                float(pose.position.x), float(pose.position.y), float(yaw)
+            )
+            pose_is_valid = all(
+                math.isfinite(value) for value in pose_values
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pose_is_valid = False
 
-        with self.lock:
-            if robot_name not in self.poses:
+        with self.command_lock:
+            with self.lock:
+                if robot_name not in self.poses:
+                    return
+                invalid = set(getattr(self, 'invalid_odometry', set()))
+                if not pose_is_valid:
+                    # Keep the last complete sample and its timestamp together.
+                    # Refreshing either one would make corrupt live data look
+                    # healthy to the control loop.
+                    invalid.add(robot_name)
+                    self.invalid_odometry = invalid
+                    avoidance = None
+                else:
+                    invalid.discard(robot_name)
+                    self.invalid_odometry = invalid
+                    self.poses[robot_name] = pose
+                    self.yaws[robot_name] = yaw
+                    self.odom_received_at[robot_name] = time.monotonic()
+                    avoidance = self.avoidance.get(robot_name)
+
+            if not pose_is_valid:
+                if self.is_active:
+                    self._fail_active_task_locked(
+                        "Robot odometry contained a non-finite planar pose; "
+                        "all robots were stopped.",
+                        [robot_name],
+                    )
+                else:
+                    rospy.logwarn_throttle(
+                        2.0,
+                        "[follow_leader] ignoring invalid odometry from {}".format(
+                            robot_name
+                        ),
+                    )
                 return
-            self.poses[robot_name] = pose
-            self.yaws[robot_name] = yaw
-            self.odom_received_at[robot_name] = time.monotonic()
-            avoidance = self.avoidance.get(robot_name)
 
-        # Keep obstacle avoidance module in sync
-        if avoidance is not None:
-            avoidance.set_position(pose.position.x, pose.position.y, yaw)
+            # Keep the avoidance snapshot in the same command transaction as
+            # the controller pose. A timer tick cannot observe half an update.
+            if avoidance is not None:
+                avoidance.set_position(
+                    pose_values[0], pose_values[1], pose_values[2]
+                )
 
     def _model_states_cb(self, msg):
         """Track live poses for configured obstacles and the pushable payload."""
-        configured_models = {
-            zone.get('model')
-            for zone in self.spawn_exclusion_zones
-            if isinstance(zone, dict) and zone.get('model')
-        }
-        live_poses = {}
-        for model_name, pose in zip(msg.name, msg.pose):
-            if model_name not in configured_models:
+        arena_profile = getattr(self, 'arena_profile', 'swarm_arena')
+        configured_models = set()
+        for zone in self.spawn_exclusion_zones:
+            if not isinstance(zone, dict) or not zone.get('model'):
                 continue
-            live_poses[model_name] = (
-                pose.position.x,
-                pose.position.y,
-                yaw_from_quaternion(pose.orientation),
-            )
-        with self.lock:
-            self.model_poses = live_poses
+            worlds = zone.get('worlds')
+            if isinstance(worlds, str):
+                worlds = [worlds]
+            if worlds and arena_profile not in worlds:
+                continue
+            configured_models.add(zone['model'])
+        with self.command_lock:
+            live_poses = {}
+            with self.lock:
+                invalid_models = set(getattr(
+                    self, 'invalid_model_poses', set()
+                )) & configured_models
+            try:
+                names = list(getattr(msg, 'name', ()))
+                poses = list(getattr(msg, 'pose', ()))
+                names_are_valid = all(
+                    isinstance(name, str) for name in names
+                )
+                duplicate_names = (
+                    names_are_valid and len(set(names)) != len(names)
+                )
+            except (TypeError, ValueError):
+                names = poses = []
+                names_are_valid = False
+                duplicate_names = False
+
+            if not names_are_valid or duplicate_names:
+                invalid_models.update(configured_models)
+                with self.lock:
+                    self.model_poses = {}
+                    self.invalid_model_poses = invalid_models
+                if self.is_active:
+                    reason = (
+                        "Gazebo model states snapshot contained duplicate "
+                        "names; all robots were stopped."
+                        if duplicate_names else
+                        "Gazebo model states snapshot was malformed; all "
+                        "robots were stopped."
+                    )
+                    self._fail_active_task_locked(reason)
+                return
+
+            for index, model_name in enumerate(names):
+                if model_name not in configured_models:
+                    continue
+                if index >= len(poses):
+                    invalid_models.add(model_name)
+                    continue
+                pose = poses[index]
+                try:
+                    orientation = pose.orientation
+                    orientation_values = tuple(
+                        float(getattr(orientation, axis))
+                        for axis in ('x', 'y', 'z', 'w')
+                    )
+                    if not all(
+                        math.isfinite(value) for value in orientation_values
+                    ):
+                        raise ValueError("model quaternion is not finite")
+                    live_pose = (
+                        float(pose.position.x),
+                        float(pose.position.y),
+                        float(yaw_from_quaternion(pose.orientation)),
+                    )
+                    pose_is_valid = all(
+                        math.isfinite(value) for value in live_pose
+                    )
+                except (
+                    AttributeError, TypeError, ValueError, OverflowError
+                ):
+                    pose_is_valid = False
+                if pose_is_valid:
+                    live_poses[model_name] = live_pose
+                    invalid_models.discard(model_name)
+                else:
+                    invalid_models.add(model_name)
+
+            with self.lock:
+                # Never let the planner silently fall back to a configured pose
+                # after Gazebo explicitly reported corrupt live geometry.
+                self.model_poses = live_poses
+                self.invalid_model_poses = invalid_models
+            if invalid_models and self.is_active:
+                self._fail_active_task_locked(
+                    "Gazebo obstacle state contained a non-finite pose; all "
+                    "robots were stopped."
+                )
 
     def _start_cb(self, msg):
         # Parse config from task orchestrator (JSON String)
@@ -798,6 +936,9 @@ class FollowTheLeader:
             'names': tuple(names),
             'positions': positions,
             'yaws': yaws,
+            'robot_poses': {
+                name: positions[name] + (yaws[name],) for name in names
+            },
             'mode': self.leader_mode,
             'requested_radius': self.requested_path_radius,
             'follow_distance': self.follow_distance,
@@ -826,20 +967,64 @@ class FollowTheLeader:
             rospy.logerr("[follow_leader] Path planner failed: %s", exc)
             result = {'error': 'Path planning failed: {}'.format(exc)}
 
+        validated_model_poses = snapshot['model_poses']
+        validated_robot_poses = snapshot['robot_poses']
         with self.command_lock:
-            if (
-                snapshot['generation'] != self.path_plan_generation
-                or snapshot['task_id'] != self.current_task_id
-                or tuple(self.robot_names) != snapshot['names']
-                or not self.is_active
-            ):
+            if not self._path_plan_lifecycle_is_current(snapshot):
                 return
+            current_model_poses = self._model_pose_snapshot()
+            current_robot_poses = self._chain_pose_snapshot(snapshot['names'])
+
+        scene_changed = not self._model_scenes_match(
+            current_model_poses, validated_model_poses
+        )
+        chain_changed = not self._robot_scenes_match(
+            current_robot_poses, validated_robot_poses
+        )
+        # The search runs outside the command lock on purpose. Gazebo can
+        # report a moving payload, obstacle, or robot while it is busy. A route
+        # from an old robot position cannot be repaired safely, so discard it;
+        # an obstacle-only change can still be checked against the same route.
+        if result.get('error'):
+            if scene_changed or chain_changed:
+                result = None
+        elif chain_changed:
+            result = None
+        elif scene_changed:
+            result = self._revalidate_path_plan_result(
+                snapshot, result, current_model_poses
+            )
+        validated_model_poses = current_model_poses
+        validated_robot_poses = current_robot_poses
+
+        with self.command_lock:
+            if not self._path_plan_lifecycle_is_current(snapshot):
+                return
+
+            # Another update may have landed during the unlocked revalidation.
+            # Leave the robots stopped and let the next timer tick replan from
+            # the newest complete scene instead of committing a mixed snapshot.
+            if not self._model_scenes_match(
+                self._model_pose_snapshot(), validated_model_poses
+            ) or not self._robot_scenes_match(
+                self._chain_pose_snapshot(snapshot['names']),
+                validated_robot_poses,
+            ):
+                result = None
 
             self.path_planning = False
             self.path_planning_wall_s = max(
                 0.0, time.monotonic() - snapshot['started_at']
             )
             self.path_planning_started_at = None
+            if result is None:
+                self.path_anchor_ready = False
+                self.path_error = None
+                rospy.logwarn(
+                    "[follow_leader] Scene or robot chain changed during path "
+                    "planning; replanning"
+                )
+                return
             if result.get('error'):
                 self.path_error = result['error']
                 self.path_anchor_ready = False
@@ -875,6 +1060,106 @@ class FollowTheLeader:
             self.chain_settle_ticks = 0
             self.leader_speed_scale = 0.0
             self.path_error = None
+
+    def _path_plan_lifecycle_is_current(self, snapshot):
+        """Return whether an asynchronous result still belongs to this task."""
+        return (
+            snapshot['generation'] == self.path_plan_generation
+            and snapshot['task_id'] == self.current_task_id
+            and tuple(self.robot_names) == snapshot['names']
+            and self.is_active
+        )
+
+    def _chain_pose_snapshot(self, names):
+        """Copy the complete planar chain pose for planner correlation."""
+        with self.lock:
+            poses = {}
+            for name in names:
+                pose = self.poses.get(name)
+                if pose is None:
+                    continue
+                poses[name] = (
+                    pose.position.x,
+                    pose.position.y,
+                    self.yaws.get(name),
+                )
+            return poses
+
+    @staticmethod
+    def _robot_scenes_match(first, second):
+        """Correlate a robot chain with the same physical jitter allowance."""
+        return FollowTheLeader._pose_scenes_match(first, second)
+
+    @staticmethod
+    def _model_scenes_match(first, second):
+        """Ignore sub-centimetre Gazebo jitter when correlating two scenes."""
+        return FollowTheLeader._pose_scenes_match(first, second)
+
+    @staticmethod
+    def _pose_scenes_match(first, second):
+        """Compare named planar poses without reacting to simulator jitter."""
+        try:
+            if set(first) != set(second):
+                return False
+            for name in first:
+                first_pose = first[name]
+                second_pose = second[name]
+                if len(first_pose) < 3 or len(second_pose) < 3:
+                    return False
+                first_values = tuple(
+                    float(value) for value in first_pose[:3]
+                )
+                second_values = tuple(
+                    float(value) for value in second_pose[:3]
+                )
+                values = first_values + second_values
+                if not all(math.isfinite(value) for value in values):
+                    return False
+                if math.hypot(
+                    first_values[0] - second_values[0],
+                    first_values[1] - second_values[1],
+                ) > MODEL_SCENE_POSITION_TOLERANCE:
+                    return False
+                if abs(normalize_angle(
+                    first_values[2] - second_values[2]
+                )) > MODEL_SCENE_YAW_TOLERANCE:
+                    return False
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        return True
+
+    def _revalidate_path_plan_result(self, snapshot, result, model_poses):
+        """Refresh a completed path against the latest coherent model scene."""
+        if not self._path_fits_arena(
+            snapshot['mode'],
+            result['radius'],
+            result['anchor'][0],
+            result['anchor'][1],
+            result['rotation'],
+            result['phase'],
+            result['direction'],
+            model_poses,
+        ):
+            return None
+
+        refreshed = dict(result)
+        if result['route']:
+            leader = snapshot['names'][0]
+            route = plan_obstacle_aware_route(
+                snapshot['positions'][leader],
+                result['anchor'],
+                self.arena_size,
+                self.arena_margin,
+                self.spawn_obstacle_clearance,
+                self.spawn_exclusion_zones,
+                self.arena_profile,
+                model_poses,
+                circle_samples=8,
+            )
+            if route is None:
+                return None
+            refreshed['route'] = route
+        return refreshed
 
     def _build_path_plan(self, snapshot):
         """Find an anchored lap, or the nearest safely reachable start."""
@@ -1835,6 +2120,7 @@ class FollowTheLeader:
                 avoidance.update_robot_positions(robot_positions)
 
         entries = []
+        commands = {}
         for index, name in enumerate(names):
             desired = leader_command if index == 0 else self._update_follower(
                 index, dt
@@ -1844,9 +2130,7 @@ class FollowTheLeader:
                 avoidance.apply_avoidance(desired)
                 if avoidance is not None else desired
             )
-            publisher = self.cmd_pubs.get(name)
-            if publisher is not None:
-                publisher.publish(safe)
+            commands[name] = safe
             pose = self.poses.get(name)
             if pose is not None:
                 entries.append({
@@ -1859,6 +2143,9 @@ class FollowTheLeader:
                     'linear_vel': round(safe.linear.x, 4),
                     'angular_vel': round(safe.angular.z, 4),
                 })
+
+        if not self._publish_motion_commands(commands):
+            return
 
         if self.staging_phase == 'aligning':
             self._complete_staging_if_ready(names, aligned)
@@ -1877,6 +2164,164 @@ class FollowTheLeader:
         scaled.angular.z = command.angular.z * scale
         return scaled
 
+    def _invalid_live_odometry(self, names):
+        """List cached poses that cannot safely feed the controller."""
+        invalid = set(getattr(self, 'invalid_odometry', set()))
+        with self.lock:
+            for name in names:
+                pose = self.poses.get(name)
+                if pose is None:
+                    continue
+                try:
+                    values = (
+                        pose.position.x,
+                        pose.position.y,
+                        self.yaws.get(name),
+                    )
+                    if not all(
+                        math.isfinite(float(value)) for value in values
+                    ):
+                        invalid.add(name)
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    invalid.add(name)
+        return sorted(invalid & set(names), key=robot_id_sort_key)
+
+    def _live_model_state_error(self):
+        """Reject an invalid obstacle snapshot before planning or motion."""
+        with self.lock:
+            invalid = set(getattr(self, 'invalid_model_poses', set()))
+            model_poses = dict(self.model_poses)
+        if invalid:
+            return (
+                "Gazebo obstacle state contained a non-finite pose; all "
+                "robots were stopped."
+            )
+        try:
+            model_state_is_valid = all(
+                len(pose) >= 3
+                and all(
+                    math.isfinite(float(value)) for value in pose[:3]
+                )
+                for pose in model_poses.values()
+            )
+        except (TypeError, ValueError, OverflowError):
+            model_state_is_valid = False
+        if model_state_is_valid:
+            return None
+        return (
+            "Gazebo obstacle state contained a non-finite pose; all robots "
+            "were stopped."
+        )
+
+    def _command_error(self, robot_name, command):
+        """Describe an unsafe Burger command, or return ``None``."""
+        try:
+            linear = tuple(
+                float(getattr(command.linear, axis))
+                for axis in ('x', 'y', 'z')
+            )
+            angular = tuple(
+                float(getattr(command.angular, axis))
+                for axis in ('x', 'y', 'z')
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return "Velocity command for {} was malformed".format(robot_name)
+
+        if not all(math.isfinite(value) for value in linear + angular):
+            return "Velocity command for {} was non-finite".format(robot_name)
+
+        epsilon = 1e-9
+        if any(abs(value) > epsilon for value in linear[1:] + angular[:2]):
+            return (
+                "Velocity command for {} requested motion on an unsupported "
+                "Burger axis".format(robot_name)
+            )
+        if abs(linear[0]) > BURGER_MAX_LINEAR_SPEED + epsilon:
+            return "Linear velocity command for {} exceeded the Burger limit".format(
+                robot_name
+            )
+        if abs(angular[2]) > BURGER_MAX_ANGULAR_SPEED + epsilon:
+            return "Angular velocity command for {} exceeded the Burger limit".format(
+                robot_name
+            )
+        return None
+
+    def _publish_motion_commands(self, commands):
+        """Validate a complete fleet batch immediately before publishing it."""
+        with self.command_lock:
+            if (
+                not self.is_active
+                or self.is_paused
+                or self.emergency_stop_active
+            ):
+                return False
+
+            requests_motion = False
+            for robot_name, command in commands.items():
+                error = self._command_error(robot_name, command)
+                if error is not None:
+                    self._fail_active_task_locked(
+                        error + "; all robots were stopped."
+                    )
+                    return False
+                requests_motion = requests_motion or (
+                    float(command.linear.x) != 0.0
+                    or float(command.angular.z) != 0.0
+                )
+
+            if requests_motion:
+                invalid = self._invalid_live_odometry(self.robot_names)
+                if invalid:
+                    self._fail_active_task_locked(
+                        "Robot odometry contained a non-finite planar pose; "
+                        "all robots were stopped.",
+                        invalid,
+                    )
+                    return False
+                model_state_error = self._live_model_state_error()
+                if model_state_error is not None:
+                    self._fail_active_task_locked(model_state_error)
+                    return False
+                stale = self._stale_odometry(self.robot_names)
+                if stale:
+                    self._fail_active_task_locked(
+                        "Odometry became stale or unavailable for: "
+                        + ", ".join(stale),
+                        stale,
+                    )
+                    return False
+
+            # Keep the freshness decision and the complete fleet batch in one
+            # command transaction. Lifecycle callbacks cannot split the batch.
+            for robot_name, command in commands.items():
+                publisher = self.cmd_pubs.get(robot_name)
+                if publisher is not None:
+                    publisher.publish(command)
+            return True
+
+    def _fail_active_task_locked(self, reason, invalid_names=None):
+        """Stop one correlated task without changing normal stop semantics."""
+        if not self.is_active:
+            return False
+        self.path_error = reason
+        if invalid_names:
+            self.stale_odometry = sorted(
+                set(invalid_names), key=robot_id_sort_key
+            )
+        self._cancel_path_plan_locked(clear_staging=True)
+        self.is_active = False
+        self.is_paused = False
+        self._stop_all()
+        try:
+            self._publish_status([])
+        except Exception as exc:
+            rospy.logerr(
+                "[follow_leader] failure status could not be published: %s",
+                exc,
+            )
+        rospy.logerr("[follow_leader] %s", reason)
+        return True
+
     # -- main control loop --------------------------------------------------
 
     def _control_loop(self, event):
@@ -1887,6 +2332,18 @@ class FollowTheLeader:
                 or self.emergency_stop_active
             ):
                 return
+            invalid = self._invalid_live_odometry(self.robot_names)
+            if invalid:
+                self._fail_active_task_locked(
+                    "Robot odometry contained a non-finite planar pose; "
+                    "all robots were stopped.",
+                    invalid,
+                )
+                return
+            model_state_error = self._live_model_state_error()
+            if model_state_error is not None:
+                self._fail_active_task_locked(model_state_error)
+                return
             stale = self._stale_odometry(self.robot_names)
             if stale:
                 self.stale_odometry = stale
@@ -1895,10 +2352,20 @@ class FollowTheLeader:
                     + ", ".join(stale)
                 )
             if self.path_error:
-                self._stop_all()
-                self._publish_status([])
+                self._fail_active_task_locked(
+                    self.path_error, getattr(self, 'stale_odometry', [])
+                )
                 return
-            self._control_step(event)
+            try:
+                self._control_step(event)
+            except Exception as exc:
+                self._fail_active_task_locked(
+                    "Follow-the-leader control failed on invalid live data; "
+                    "all robots were stopped."
+                )
+                rospy.logerr(
+                    "[follow_leader] control exception failed closed: %s", exc
+                )
 
     def _stale_odometry(self, names, now=None):
         """List robots whose pose has not refreshed within the safety window."""
@@ -2000,6 +2467,7 @@ class FollowTheLeader:
 
         # -- 2-4. Compute & publish commands for every robot -----------------
         status_entries = []
+        commands = {}
 
         for idx, name in enumerate(names):
             if idx == 0:
@@ -2021,10 +2489,7 @@ class FollowTheLeader:
             else:
                 safe_cmd = desired_cmd
 
-            # Publish
-            pub = self.cmd_pubs.get(name)
-            if pub is not None:
-                pub.publish(safe_cmd)
+            commands[name] = safe_cmd
 
             # Gather status info
             pose = self.poses.get(name)
@@ -2039,6 +2504,9 @@ class FollowTheLeader:
                     'linear_vel': round(safe_cmd.linear.x, 4),
                     'angular_vel': round(safe_cmd.angular.z, 4),
                 })
+
+        if not self._publish_motion_commands(commands):
+            return
 
         # Advance parametric path time
         if chain_ready:

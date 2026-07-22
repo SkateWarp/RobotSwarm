@@ -161,11 +161,31 @@ class CleanupError(MatrixError):
     """A case could not prove that all of its resources were removed."""
 
 
+class TaskActivityError(MatrixError):
+    """A correlated task did not satisfy the active-sampling contract."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(
+            "The correlated ROS task was not active during visual sampling "
+            f"({reason})"
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class ProcessOutput:
     returncode: int
     stdout: str
     stderr: str
+
+
+class ActiveScenarioGateError(MatrixError):
+    """The active gate failed after the ROS child produced its protocol."""
+
+    def __init__(self, message: str, phase: str, scenario_output: ProcessOutput):
+        self.phase = phase
+        self.scenario_output = scenario_output
+        super().__init__(message)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1960,10 +1980,7 @@ class DockerHost:
                 2: "activity_timeout",
                 3: "task_terminal_before_activity",
             }.get(output.returncode, "probe_protocol_failure")
-            raise MatrixError(
-                "The correlated ROS task was not active during visual sampling "
-                f"({reason})"
-            )
+            raise TaskActivityError(reason)
         try:
             payload = strict_json_loads(entries[0])
         except (json.JSONDecodeError, ValueError) as exc:
@@ -2134,6 +2151,31 @@ def parse_ros_protocol(output: ProcessOutput, expected: ScenarioSpec) -> RosEvid
         summary_sha256=hashlib.sha256(summary_payloads[0].encode("utf-8")).hexdigest(),
         returncode=output.returncode,
     )
+
+
+def record_ros_protocol(
+    case_report: dict[str, Any],
+    output: ProcessOutput,
+    scenario: ScenarioSpec,
+    secrets: Iterable[str] = (),
+) -> RosEvidence:
+    """Parse and retain the bounded ROS protocol without raw child output."""
+    ros = parse_ros_protocol(output, scenario)
+    case_report["ros"] = {
+        "exitCode": ros.returncode,
+        "protocolParsed": True,
+        "taskCleanupVerified": False,
+        "minimumRealTimeFactor": MINIMUM_REAL_TIME_FACTOR,
+        "result": sanitize_report_value(ros.result, secrets),
+        "summary": sanitize_report_value(ros.summary, secrets),
+    }
+    case_report["hashes"].update(
+        {
+            "resultJsonSha256": ros.result_sha256,
+            "summaryJsonSha256": ros.summary_sha256,
+        }
+    )
+    return ros
 
 
 def finite_number(value: Any, description: str) -> float:
@@ -3408,6 +3450,7 @@ def run_active_scenario_gate(
     task_active_after: dict[str, Any] | None = None
     task_active_before_at: float | None = None
     task_active_after_at: float | None = None
+    gate_phase = "scenarioStartup"
 
     def run_scenario() -> None:
         try:
@@ -3456,6 +3499,7 @@ def run_active_scenario_gate(
     scenario_thread.start()
     try:
         _wait_for_timed_start(scenario_run, scenario_thread, stop_event, 10)
+        gate_phase = "beforeVisualSampling"
         task_active_before = docker.wait_task_active(
             container,
             task_id,
@@ -3465,6 +3509,7 @@ def run_active_scenario_gate(
         task_active_before_at = time.monotonic()
         if not scenario_thread.is_alive():
             raise MatrixError("The ROS scenario ended before active visual sampling")
+        gate_phase = "duringVisualSampling"
         probe_thread.start()
         _wait_for_timed_start(probe_run, probe_thread, stop_event, 10)
         video_started = time.monotonic()
@@ -3484,6 +3529,7 @@ def run_active_scenario_gate(
             stop_event,
             ACTIVE_PROBE_TIMEOUT_SECONDS + 20,
         )
+        gate_phase = "afterVisualSampling"
         task_active_after = docker.wait_task_active(
             container,
             task_id,
@@ -3493,19 +3539,32 @@ def run_active_scenario_gate(
         task_active_after_at = time.monotonic()
         if not scenario_thread.is_alive():
             raise MatrixError("The ROS scenario ended before its final activity proof")
+        gate_phase = "scenarioCompletion"
         _join_timed_command(
             scenario_run,
             scenario_thread,
             stop_event,
             scenario_timeout + 50,
         )
-    except BaseException:
+    except BaseException as exc:
+        if (
+            isinstance(exc, TaskActivityError)
+            and exc.reason == "task_terminal_before_activity"
+        ):
+            # A correlated terminal status means the runner is already winding
+            # down. Give it a short chance to print RESULT_JSON/SUMMARY_JSON
+            # before cancellation closes the child process.
+            scenario_thread.join(timeout=10)
         cancel_event.set()
         if probe_thread.ident is not None:
             probe_thread.join(timeout=50)
         scenario_thread.join(timeout=100)
         if scenario_thread.is_alive():
             raise CleanupError("The ROS scenario thread survived explicit cancellation")
+        if isinstance(exc, MatrixError) and scenario_run.output is not None:
+            raise ActiveScenarioGateError(
+                str(exc), gate_phase, scenario_run.output
+            ) from exc
         raise
 
     if (
@@ -4097,6 +4156,7 @@ def run_one_case(
             container,
             probe_workspace,
         )
+        case_report["hashes"].update(probe_input_hashes)
         probe_report_path = lease_directory / "matrix-active-gui-report.json"
         if probe_report_path.exists() or probe_report_path.is_symlink():
             raise MatrixError("The active Gazebo GUI report path is not fresh")
@@ -4107,39 +4167,46 @@ def run_one_case(
             probe_report_path,
         )
         roster_before = docker.verify_full_roster(container, scenario.robot_count)
-        child, probe_output, video, overlap = run_active_scenario_gate(
-            docker=docker,
-            container=container,
-            scenario=scenario,
-            scenario_timeout=args.scenario_timeout,
-            probe_command=probe_command,
-            probe_environment=runtime.environment,
-            ui=ui,
-            stop_event=stop_event,
-        )
+        try:
+            child, probe_output, video, overlap = run_active_scenario_gate(
+                docker=docker,
+                container=container,
+                scenario=scenario,
+                scenario_timeout=args.scenario_timeout,
+                probe_command=probe_command,
+                probe_environment=runtime.environment,
+                ui=ui,
+                stop_event=stop_event,
+            )
+        except ActiveScenarioGateError as gate_error:
+            gate_failure = {
+                "phase": gate_error.phase,
+                "childProtocolAvailable": True,
+                "childProtocolPreserved": False,
+            }
+            try:
+                record_ros_protocol(
+                    case_report,
+                    gate_error.scenario_output,
+                    scenario,
+                    (credentials["email"], credentials["password"]),
+                )
+            except MatrixError as protocol_error:
+                gate_failure["protocolError"] = redact_text(
+                    str(protocol_error),
+                    (credentials["email"], credentials["password"]),
+                )
+            else:
+                gate_failure["childProtocolPreserved"] = True
+            case_report["activeScenarioGateFailure"] = gate_failure
+            raise
         if active_probe_processes(probe_token):
             raise CleanupError("The active GUI probe sandbox left a live process")
-        ros = parse_ros_protocol(child, scenario)
-        safe_result = sanitize_report_value(
-            ros.result, (credentials["email"], credentials["password"])
-        )
-        safe_summary = sanitize_report_value(
-            ros.summary, (credentials["email"], credentials["password"])
-        )
-        case_report["ros"] = {
-            "exitCode": ros.returncode,
-            "protocolParsed": True,
-            "taskCleanupVerified": False,
-            "minimumRealTimeFactor": MINIMUM_REAL_TIME_FACTOR,
-            "result": safe_result,
-            "summary": safe_summary,
-        }
-        case_report["hashes"].update(
-            {
-                "resultJsonSha256": ros.result_sha256,
-                "summaryJsonSha256": ros.summary_sha256,
-                **probe_input_hashes,
-            }
+        ros = record_ros_protocol(
+            case_report,
+            child,
+            scenario,
+            (credentials["email"], credentials["password"]),
         )
         case_report["activeScenarioVideo"] = video
         case_report["activeScenarioOverlap"] = overlap

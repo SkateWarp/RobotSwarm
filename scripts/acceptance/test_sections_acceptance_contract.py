@@ -19,6 +19,16 @@ NAVIGATION_SOURCE = (
     SCRIPT.parents[2]
     / "SwarmFrontend/src/app/fuse-configs/navigationGTSConfig.js"
 )
+LEGACY_TASK_ROUTES = {
+    SCRIPT.parents[2]
+    / "SwarmFrontend/src/app/main/apps/GeeTS/Tasks/TaskConfigAppConfig.js": (
+        "/apps/GTS/task-templates"
+    ),
+    SCRIPT.parents[2]
+    / "SwarmFrontend/src/app/main/apps/dashboards/tasks/TaskDashboardAppConfig.js": (
+        "/apps/GTS/taskLogs"
+    ),
+}
 
 
 def load_harness():
@@ -225,6 +235,16 @@ class SectionsAcceptanceContractTests(unittest.TestCase):
             set(HARNESS.MENU_LABELS),
             {title for _, title, _, _ in entries},
         )
+
+    def test_legacy_task_routes_only_redirect_to_real_task_sources(self):
+        for source_path, destination in LEGACY_TASK_ROUTES.items():
+            with self.subTest(source=source_path.name):
+                source = source_path.read_text(encoding="utf-8")
+                self.assertIn(
+                    '<Navigate replace to="{}" />'.format(destination),
+                    source,
+                )
+                self.assertNotIn("lazy(() => import(", source)
 
     def test_backend_admin_endpoints_follow_the_real_role_policy(self):
         user = {key: 403 for key in HARNESS.ADMIN_ENDPOINTS}

@@ -337,6 +337,13 @@ public sealed class DrainAndOutcomeTests
                 "all_pushers_confirmed": true,
                 "useful_contributor_count": 3,
                 "useful_contributor_ids": ["tb3_0", "tb3_1", "tb3_2"],
+                "arrival_tolerance": 0.25,
+                "target_marker": {
+                  "model_name": "target_marker",
+                  "published": false,
+                  "synchronized": false,
+                  "position": null
+                },
                 "discovery": {
                   "event": "payload_found",
                   "task_id": "{{transport.Id}}",
@@ -348,6 +355,8 @@ public sealed class DrainAndOutcomeTests
             }
             """);
 
+        // The visual target is advisory. A failed publication must not erase
+        // otherwise complete physical transport evidence.
         Assert.True(TaskAcceptancePolicy.TryAccept(
             transport,
             1,
