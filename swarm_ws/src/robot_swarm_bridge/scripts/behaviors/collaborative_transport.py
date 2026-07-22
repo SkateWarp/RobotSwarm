@@ -1507,6 +1507,16 @@ class CollaborativeTransport:
                 "Gazebo model states snapshot was truncated"
             )
             return
+        if not all(isinstance(name, str) for name in names):
+            self._reject_model_states_snapshot(
+                "Gazebo model states snapshot contained a malformed name"
+            )
+            return
+        if len(set(names)) != len(names):
+            self._reject_model_states_snapshot(
+                "Gazebo model states snapshot contained duplicate names"
+            )
+            return
 
         try:
             twists = list(getattr(msg, 'twist', ()))

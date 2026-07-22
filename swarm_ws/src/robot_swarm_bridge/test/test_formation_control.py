@@ -1216,7 +1216,7 @@ class FormationConvergenceTests(unittest.TestCase):
             1.2, 0.0, 0.1, 1.5
         )
 
-    def _controller_with_a_positive_entry_command(self):
+    def _prepared_positive_entry_controller(self):
         controller = make_controller()
         controller.formation_offsets = [(0.0, 0.0)]
         controller.robot_poses['tb3_0'] = Pose(x=-1.0, y=0.0)
@@ -1247,6 +1247,10 @@ class FormationConvergenceTests(unittest.TestCase):
             controller.placement_error,
         )
         controller.is_running = True
+        return controller
+
+    def _controller_with_a_positive_entry_command(self):
+        controller = self._prepared_positive_entry_controller()
         controller._control_loop(None)
         command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
         self.assertGreater(command.linear.x, 0.0)
@@ -1884,13 +1888,81 @@ class FormationConvergenceTests(unittest.TestCase):
             abs(command.linear.x) + abs(command.angular.z), 0.0
         )
 
+    def test_truncated_model_state_cannot_hide_an_obstacle_on_the_route(self):
+        duplicate_bad_pose = Pose(x=4.0, y=4.0)
+        duplicate_bad_pose.orientation.z = float('nan')
+        malformed_messages = (
+            (
+                'truncated',
+                ModelStates(names=['moving_box'], poses=[]),
+            ),
+            (
+                'malformed',
+                types.SimpleNamespace(name=None, pose=[]),
+            ),
+            (
+                'malformed_name',
+                types.SimpleNamespace(name=[[]], pose=[Pose()]),
+            ),
+            (
+                'duplicate_name',
+                ModelStates(
+                    names=['moving_box', 'moving_box'],
+                    poses=[duplicate_bad_pose, Pose(x=4.0, y=4.0)],
+                ),
+            ),
+        )
+        for label, malformed in malformed_messages:
+            with self.subTest(case=label):
+                controller = self._prepared_positive_entry_controller()
+                target_x, target_y = controller._get_world_targets()[0]
+                controller._model_states_cb(ModelStates(
+                    names=['moving_box'],
+                    poses=[Pose(x=target_x, y=target_y)],
+                ))
+                self.assertIn('moving_box', controller.model_poses)
+
+                controller._model_states_cb(malformed)
+
+                self.assertEqual(
+                    ('moving_box',), controller.invalid_model_poses
+                )
+                self.assertNotIn('moving_box', controller.model_poses)
+                controller._control_loop(None)
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                emitted = controller.cmd_vel_pubs['tb3_0'].messages
+                self.assertTrue(emitted)
+                self.assertTrue(all(
+                    command.linear.x == 0.0
+                    and command.angular.z == 0.0
+                    for command in emitted
+                ))
+
+                # A later complete, finite sample clears only this model's
+                # rejection and lets a future task use live geometry again.
+                controller._model_states_cb(ModelStates(
+                    names=['moving_box'], poses=[Pose(x=4.0, y=4.0)]
+                ))
+                self.assertEqual((), controller.invalid_model_poses)
+                self.assertEqual(
+                    (4.0, 4.0, 0.0), controller.model_poses['moving_box']
+                )
+
     def test_non_finite_model_states_replace_motion_with_a_stop(self):
         bad_yaw_pose = Pose(x=4.0, y=4.0)
         bad_yaw_pose.orientation = Quaternion(z=float('nan'))
+        infinite_quaternion_pose = Pose(x=4.0, y=4.0)
+        infinite_quaternion_pose.orientation = Quaternion(z=float('inf'))
         bad_poses = (
             ('nan_x', Pose(x=float('nan'), y=4.0)),
             ('infinite_y', Pose(x=4.0, y=float('inf'))),
             ('nan_yaw', bad_yaw_pose),
+            ('infinite_raw_quaternion', infinite_quaternion_pose),
         )
 
         for label, bad_pose in bad_poses:
@@ -1923,6 +1995,32 @@ class FormationConvergenceTests(unittest.TestCase):
                     and command.angular.z == 0.0
                     for command in emitted
                 ))
+
+    def test_non_finite_raw_odometry_quaternion_does_not_refresh_pose(self):
+        controller = self._controller_with_a_positive_entry_command()
+        previous_pose = controller.robot_poses['tb3_0']
+        previous_yaw = controller.robot_yaws['tb3_0']
+        previous_stamp = controller.odom_received_at['tb3_0']
+        previous_count = len(controller.cmd_vel_pubs['tb3_0'].messages)
+        message = Odometry()
+        message.pose.pose.position.x = -1.0
+        message.pose.pose.orientation.z = float('inf')
+
+        controller._odom_cb(message, 'tb3_0')
+
+        self.assertEqual(('tb3_0',), controller.invalid_robot_poses)
+        self.assertIs(previous_pose, controller.robot_poses['tb3_0'])
+        self.assertEqual(previous_yaw, controller.robot_yaws['tb3_0'])
+        self.assertEqual(previous_stamp, controller.odom_received_at['tb3_0'])
+        controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        emitted = controller.cmd_vel_pubs['tb3_0'].messages[previous_count:]
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
 
     def test_live_safety_exception_replaces_motion_with_a_stop(self):
         controller = self._controller_with_a_positive_entry_command()
@@ -1980,6 +2078,10 @@ class FormationConvergenceTests(unittest.TestCase):
             ('infinite_angular', 'angular', 'z', float('inf'), None, None),
             ('linear_over_limit', 'linear', 'x', 0.23, None, None),
             ('angular_over_limit', 'angular', 'z', 1.51, None, None),
+            ('unsupported_linear_y', 'linear', 'y', 0.01, None, None),
+            ('unsupported_linear_z', 'linear', 'z', -0.01, None, None),
+            ('unsupported_angular_x', 'angular', 'x', 0.01, None, None),
+            ('unsupported_angular_y', 'angular', 'y', -0.01, None, None),
             ('negative_linear_limit', 'linear', 'x', 0.0, -0.1, None),
             ('negative_angular_limit', 'angular', 'z', 0.0, None, -0.1),
             ('burger_linear_limit', 'linear', 'x', 0.23, 1.0, None),
@@ -2190,6 +2292,38 @@ class FormationConvergenceTests(unittest.TestCase):
                     and command.angular.z == 0.0
                     for command in emitted
                 ))
+
+    def test_odometry_expiring_during_control_stops_before_first_twist(self):
+        controller = self._prepared_positive_entry_controller()
+        controller.task_started_at = 10.0
+        controller.odom_received_at = {'tb3_0': 10.0}
+        clock = [10.0]
+
+        def expire_during_live_geometry(*_args, **_kwargs):
+            clock[0] = 11.0
+            return True
+
+        with mock.patch.object(
+            controller,
+            '_live_motion_is_safe_locked',
+            side_effect=expire_during_live_geometry,
+        ), mock.patch.object(
+            formation.time, 'monotonic', side_effect=lambda: clock[0]
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED, controller.formation_state
+        )
+        self.assertEqual(['tb3_0'], controller.stale_odometry)
+        self.assertIn('Odometry became stale', controller.placement_error)
+        emitted = controller.cmd_vel_pubs['tb3_0'].messages
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
 
 
 class FormationLifecycleTests(unittest.TestCase):

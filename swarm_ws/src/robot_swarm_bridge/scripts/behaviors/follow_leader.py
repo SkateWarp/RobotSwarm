@@ -565,19 +565,53 @@ class FollowTheLeader:
 
     def _model_states_cb(self, msg):
         """Track live poses for configured obstacles and the pushable payload."""
-        configured_models = {
-            zone.get('model')
-            for zone in self.spawn_exclusion_zones
-            if isinstance(zone, dict) and zone.get('model')
-        }
+        arena_profile = getattr(self, 'arena_profile', 'swarm_arena')
+        configured_models = set()
+        for zone in self.spawn_exclusion_zones:
+            if not isinstance(zone, dict) or not zone.get('model'):
+                continue
+            worlds = zone.get('worlds')
+            if isinstance(worlds, str):
+                worlds = [worlds]
+            if worlds and arena_profile not in worlds:
+                continue
+            configured_models.add(zone['model'])
         with self.command_lock:
             live_poses = {}
             with self.lock:
                 invalid_models = set(getattr(
                     self, 'invalid_model_poses', set()
                 )) & configured_models
-            names = list(getattr(msg, 'name', ()))
-            poses = list(getattr(msg, 'pose', ()))
+            try:
+                names = list(getattr(msg, 'name', ()))
+                poses = list(getattr(msg, 'pose', ()))
+                names_are_valid = all(
+                    isinstance(name, str) for name in names
+                )
+                duplicate_names = (
+                    names_are_valid and len(set(names)) != len(names)
+                )
+            except (TypeError, ValueError):
+                names = poses = []
+                names_are_valid = False
+                duplicate_names = False
+
+            if not names_are_valid or duplicate_names:
+                invalid_models.update(configured_models)
+                with self.lock:
+                    self.model_poses = {}
+                    self.invalid_model_poses = invalid_models
+                if self.is_active:
+                    reason = (
+                        "Gazebo model states snapshot contained duplicate "
+                        "names; all robots were stopped."
+                        if duplicate_names else
+                        "Gazebo model states snapshot was malformed; all "
+                        "robots were stopped."
+                    )
+                    self._fail_active_task_locked(reason)
+                return
+
             for index, model_name in enumerate(names):
                 if model_name not in configured_models:
                     continue
@@ -902,6 +936,9 @@ class FollowTheLeader:
             'names': tuple(names),
             'positions': positions,
             'yaws': yaws,
+            'robot_poses': {
+                name: positions[name] + (yaws[name],) for name in names
+            },
             'mode': self.leader_mode,
             'requested_radius': self.requested_path_radius,
             'follow_distance': self.follow_distance,
@@ -931,26 +968,34 @@ class FollowTheLeader:
             result = {'error': 'Path planning failed: {}'.format(exc)}
 
         validated_model_poses = snapshot['model_poses']
+        validated_robot_poses = snapshot['robot_poses']
         with self.command_lock:
             if not self._path_plan_lifecycle_is_current(snapshot):
                 return
             current_model_poses = self._model_pose_snapshot()
+            current_robot_poses = self._chain_pose_snapshot(snapshot['names'])
 
         scene_changed = not self._model_scenes_match(
             current_model_poses, validated_model_poses
         )
+        chain_changed = not self._robot_scenes_match(
+            current_robot_poses, validated_robot_poses
+        )
         # The search runs outside the command lock on purpose. Gazebo can
-        # report a moving payload or obstacle while it is busy, so verify every
-        # successful result against the freshest coherent scene. An old failure
-        # is also discarded when it no longer describes that scene.
+        # report a moving payload, obstacle, or robot while it is busy. A route
+        # from an old robot position cannot be repaired safely, so discard it;
+        # an obstacle-only change can still be checked against the same route.
         if result.get('error'):
-            if scene_changed:
+            if scene_changed or chain_changed:
                 result = None
+        elif chain_changed:
+            result = None
         elif scene_changed:
             result = self._revalidate_path_plan_result(
                 snapshot, result, current_model_poses
             )
         validated_model_poses = current_model_poses
+        validated_robot_poses = current_robot_poses
 
         with self.command_lock:
             if not self._path_plan_lifecycle_is_current(snapshot):
@@ -961,6 +1006,9 @@ class FollowTheLeader:
             # the newest complete scene instead of committing a mixed snapshot.
             if not self._model_scenes_match(
                 self._model_pose_snapshot(), validated_model_poses
+            ) or not self._robot_scenes_match(
+                self._chain_pose_snapshot(snapshot['names']),
+                validated_robot_poses,
             ):
                 result = None
 
@@ -973,8 +1021,8 @@ class FollowTheLeader:
                 self.path_anchor_ready = False
                 self.path_error = None
                 rospy.logwarn(
-                    "[follow_leader] Scene changed during path planning; "
-                    "replanning"
+                    "[follow_leader] Scene or robot chain changed during path "
+                    "planning; replanning"
                 )
                 return
             if result.get('error'):
@@ -1022,9 +1070,34 @@ class FollowTheLeader:
             and self.is_active
         )
 
+    def _chain_pose_snapshot(self, names):
+        """Copy the complete planar chain pose for planner correlation."""
+        with self.lock:
+            poses = {}
+            for name in names:
+                pose = self.poses.get(name)
+                if pose is None:
+                    continue
+                poses[name] = (
+                    pose.position.x,
+                    pose.position.y,
+                    self.yaws.get(name),
+                )
+            return poses
+
+    @staticmethod
+    def _robot_scenes_match(first, second):
+        """Correlate a robot chain with the same physical jitter allowance."""
+        return FollowTheLeader._pose_scenes_match(first, second)
+
     @staticmethod
     def _model_scenes_match(first, second):
         """Ignore sub-centimetre Gazebo jitter when correlating two scenes."""
+        return FollowTheLeader._pose_scenes_match(first, second)
+
+    @staticmethod
+    def _pose_scenes_match(first, second):
+        """Compare named planar poses without reacting to simulator jitter."""
         try:
             if set(first) != set(second):
                 return False
@@ -2175,25 +2248,56 @@ class FollowTheLeader:
 
     def _publish_motion_commands(self, commands):
         """Validate a complete fleet batch immediately before publishing it."""
-        if (
-            not self.is_active
-            or self.is_paused
-            or self.emergency_stop_active
-        ):
-            return False
-        for robot_name, command in commands.items():
-            error = self._command_error(robot_name, command)
-            if error is not None:
-                self._fail_active_task_locked(
-                    error + "; all robots were stopped."
-                )
+        with self.command_lock:
+            if (
+                not self.is_active
+                or self.is_paused
+                or self.emergency_stop_active
+            ):
                 return False
 
-        for robot_name, command in commands.items():
-            publisher = self.cmd_pubs.get(robot_name)
-            if publisher is not None:
-                publisher.publish(command)
-        return True
+            requests_motion = False
+            for robot_name, command in commands.items():
+                error = self._command_error(robot_name, command)
+                if error is not None:
+                    self._fail_active_task_locked(
+                        error + "; all robots were stopped."
+                    )
+                    return False
+                requests_motion = requests_motion or (
+                    float(command.linear.x) != 0.0
+                    or float(command.angular.z) != 0.0
+                )
+
+            if requests_motion:
+                invalid = self._invalid_live_odometry(self.robot_names)
+                if invalid:
+                    self._fail_active_task_locked(
+                        "Robot odometry contained a non-finite planar pose; "
+                        "all robots were stopped.",
+                        invalid,
+                    )
+                    return False
+                model_state_error = self._live_model_state_error()
+                if model_state_error is not None:
+                    self._fail_active_task_locked(model_state_error)
+                    return False
+                stale = self._stale_odometry(self.robot_names)
+                if stale:
+                    self._fail_active_task_locked(
+                        "Odometry became stale or unavailable for: "
+                        + ", ".join(stale),
+                        stale,
+                    )
+                    return False
+
+            # Keep the freshness decision and the complete fleet batch in one
+            # command transaction. Lifecycle callbacks cannot split the batch.
+            for robot_name, command in commands.items():
+                publisher = self.cmd_pubs.get(robot_name)
+                if publisher is not None:
+                    publisher.publish(command)
+            return True
 
     def _fail_active_task_locked(self, reason, invalid_names=None):
         """Stop one correlated task without changing normal stop semantics."""

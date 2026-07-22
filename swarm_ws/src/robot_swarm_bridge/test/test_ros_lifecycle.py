@@ -2498,6 +2498,48 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertEqual("FAILED", status["phase"])
         self.assertIn("truncated", status["error"])
 
+    def test_transport_duplicate_model_names_require_a_unique_snapshot(self):
+        controller = self._transport_search_controller(1)
+        controller.target_x = 2.0
+        controller.target_y = 1.0
+        controller.object_rest_z = 0.10
+        controller.object_z_tolerance = 0.05
+        controller.status_pub = FakePublisher()
+        first_pose = Pose()
+        first_pose.position.x = -0.8
+        first_pose.position.y = -1.6
+        first_pose.position.z = 0.10
+        conflicting_pose = Pose()
+        conflicting_pose.position.x = 3.0
+        conflicting_pose.position.y = 4.0
+        conflicting_pose.position.z = 0.10
+        duplicate = ModelStates()
+        duplicate.name = ["transport_object", "transport_object"]
+        duplicate.pose = [first_pose, conflicting_pose]
+
+        controller._model_states_callback(duplicate)
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.object_found)
+        self.assertIsNone(controller.object_position)
+        self.assertIn("duplicate", controller.model_states_invalid_reason)
+        self.assertIn("duplicate", controller.failure_reason)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED, controller.phase
+        )
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+        unique = ModelStates()
+        unique.name = ["transport_object"]
+        unique.pose = [first_pose]
+        controller._model_states_callback(unique)
+        self.assertIsNone(controller.model_states_invalid_reason)
+        self.assertTrue(controller.object_found)
+        np.testing.assert_allclose([-0.8, -1.6], controller.object_position)
+
     def test_transport_odometry_rejects_non_finite_raw_quaternion(self):
         controller = self._transport_search_controller(1)
         namespace = "tb3_0"

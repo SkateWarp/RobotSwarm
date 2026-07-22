@@ -568,6 +568,56 @@ class FollowLeaderPathTests(unittest.TestCase):
         self.assertEqual(controller.robot_names, status["stale_odometry"])
         self.assertFalse(controller.is_active)
 
+    def test_odometry_expiring_during_control_stops_before_first_twist(self):
+        controller = make_controller(mode="manual", count=1)
+        controller.task_started_at = 10.0
+        controller.odom_received_at = {"tb3_0": 10.0}
+        controller.chain_assembled = True
+        controller.leader_speed_scale = 1.0
+        controller.manual_twist.linear.x = 0.1
+        clock = [10.0]
+
+        class ExpireDuringAvoidance(FakeAvoidance):
+            def apply_avoidance(self, command, *args, **kwargs):
+                clock[0] = 11.0
+                return command
+
+        controller.avoidance["tb3_0"] = ExpireDuringAvoidance()
+        with mock.patch.object(
+            FOLLOW.time, "monotonic", side_effect=lambda: clock[0]
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_active)
+        self.assertEqual(["tb3_0"], controller.stale_odometry)
+        self.assertIn("Odometry became stale", controller.path_error)
+        emitted = controller.cmd_pubs["tb3_0"].messages
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
+
+    def test_stale_odometry_does_not_block_an_explicit_zero_batch(self):
+        controller = make_controller(mode="manual", count=2)
+        controller.task_started_at = 10.0
+        controller.odom_received_at = {
+            name: 10.0 for name in controller.robot_names
+        }
+        commands = {
+            name: FOLLOW.Twist() for name in controller.robot_names
+        }
+
+        with mock.patch.object(FOLLOW.time, "monotonic", return_value=11.0):
+            self.assertTrue(controller._publish_motion_commands(commands))
+
+        self.assertTrue(controller.is_active)
+        self.assertIsNone(controller.path_error)
+        for publisher in controller.cmd_pubs.values():
+            self.assertEqual(1, len(publisher.messages))
+            self.assertEqual(0.0, publisher.messages[0].linear.x)
+            self.assertEqual(0.0, publisher.messages[0].angular.z)
+
     def test_non_finite_odometry_is_rejected_as_one_atomic_sample(self):
         cases = (
             ("nan_x", "x", float("nan"), None),
@@ -746,6 +796,42 @@ class FollowLeaderPathTests(unittest.TestCase):
                 for publisher in controller.cmd_pubs.values():
                     self.assertEqual(0.0, publisher.messages[-1].linear.x)
                     self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+    def test_duplicate_model_names_fail_closed_until_a_unique_snapshot(self):
+        controller = make_controller(mode="manual", count=1)
+        controller.spawn_exclusion_zones = [{
+            "name": "moving_box",
+            "model": "moving_box",
+        }, {
+            "name": "other_world_box",
+            "model": "other_world_box",
+            "worlds": ["other_arena"],
+        }]
+        bad_pose = pose_at(4.0, 4.0)
+        bad_pose.orientation.z = float("nan")
+        duplicate = ModelStates()
+        duplicate.name = ["moving_box", "moving_box"]
+        duplicate.pose = [bad_pose, pose_at(4.0, 4.0)]
+
+        controller._model_states_cb(duplicate)
+
+        self.assertFalse(controller.is_active)
+        self.assertEqual({"moving_box"}, controller.invalid_model_poses)
+        self.assertEqual({}, controller.model_poses)
+        self.assertIn("duplicate names", controller.path_error)
+        for publisher in controller.cmd_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+        unique = ModelStates()
+        unique.name = ["moving_box"]
+        unique.pose = [pose_at(4.0, 4.0)]
+        controller._model_states_cb(unique)
+        self.assertEqual(set(), controller.invalid_model_poses)
+        self.assertEqual(
+            (4.0, 4.0, 0.0), controller.model_poses["moving_box"]
+        )
 
     def test_malicious_avoidance_output_stops_the_complete_follow_batch(self):
         class MaliciousAvoidance(FakeAvoidance):
@@ -1042,6 +1128,142 @@ class FollowLeaderPathTests(unittest.TestCase):
         self.assertFalse(controller.path_plan_thread.is_alive())
         self.assertFalse(controller.path_planning)
         self.assertTrue(controller.path_anchor_ready)
+        self.assertIsNone(controller.path_error)
+
+    def test_slow_path_planner_discards_a_material_robot_pose_change(self):
+        controller = make_controller(mode="circular", count=1)
+        controller.arena_size = 20.0
+        controller.path_planner_async = True
+        planner_started = threading.Event()
+        release_planner = threading.Event()
+        original_builder = controller._build_path_plan
+
+        def slow_builder(snapshot):
+            planner_started.set()
+            release_planner.wait(2.0)
+            return original_builder(snapshot)
+
+        controller._build_path_plan = slow_builder
+        controller._begin_path_planning_locked(list(controller.robot_names))
+        self.assertTrue(planner_started.wait(0.5))
+
+        odometry = Odometry()
+        odometry.pose.pose.position.x = 3.0
+        odometry.pose.pose.position.y = 3.0
+        controller.avoidance["tb3_0"].set_position = lambda *args: None
+        controller._odom_cb(odometry, "tb3_0")
+        release_planner.set()
+        controller.path_plan_thread.join(2.0)
+
+        self.assertFalse(controller.path_plan_thread.is_alive())
+        self.assertFalse(controller.path_planning)
+        self.assertFalse(controller.path_anchor_ready)
+        self.assertIsNone(controller.path_error)
+        self.assertEqual(
+            (3.0, 3.0),
+            (
+                controller.poses["tb3_0"].position.x,
+                controller.poses["tb3_0"].position.y,
+            ),
+        )
+
+        # The next tick may request a new plan, but it cannot drive toward the
+        # old (0, 0) anchor while that fresh plan is unavailable.
+        with mock.patch.object(controller, '_begin_path_planning_locked'):
+            controller._control_loop(None)
+        emitted = controller.cmd_pubs["tb3_0"].messages
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
+
+    def test_slow_path_planner_ignores_small_robot_pose_jitter(self):
+        controller = make_controller(mode="circular", count=3)
+        controller.arena_size = 20.0
+        controller.path_planner_async = True
+        planner_started = threading.Event()
+        release_planner = threading.Event()
+        original_builder = controller._build_path_plan
+
+        def slow_builder(snapshot):
+            planner_started.set()
+            release_planner.wait(2.0)
+            return original_builder(snapshot)
+
+        controller._build_path_plan = slow_builder
+        controller._begin_path_planning_locked(list(controller.robot_names))
+        self.assertTrue(planner_started.wait(0.5))
+
+        odometry = Odometry()
+        odometry.pose.pose.position.x = 0.006
+        odometry.pose.pose.position.y = -0.004
+        odometry.pose.pose.orientation.z = math.sin(0.005)
+        odometry.pose.pose.orientation.w = math.cos(0.005)
+        controller.avoidance["tb3_2"].set_position = lambda *args: None
+        controller._odom_cb(odometry, "tb3_2")
+        release_planner.set()
+        controller.path_plan_thread.join(2.0)
+
+        self.assertFalse(controller.path_plan_thread.is_alive())
+        self.assertFalse(controller.path_planning)
+        self.assertTrue(controller.path_anchor_ready)
+        self.assertIsNone(controller.path_error)
+
+    def test_robot_motion_during_scene_revalidation_discards_the_plan(self):
+        controller = make_controller(mode="circular", count=1)
+        controller.arena_size = 20.0
+        controller.path_planner_async = True
+        controller.spawn_exclusion_zones = [{
+            "name": "moving_box",
+            "model": "moving_box",
+            "worlds": ["swarm_arena"],
+            "shape": "circle",
+            "x": 8.0,
+            "y": 8.0,
+            "radius": 0.20,
+        }]
+        controller.model_poses = {"moving_box": (8.0, 8.0, 0.0)}
+        planner_started = threading.Event()
+        release_planner = threading.Event()
+        revalidation_started = threading.Event()
+        release_revalidation = threading.Event()
+        original_builder = controller._build_path_plan
+        original_revalidator = controller._revalidate_path_plan_result
+
+        def slow_builder(snapshot):
+            planner_started.set()
+            release_planner.wait(2.0)
+            return original_builder(snapshot)
+
+        def slow_revalidator(snapshot, result, model_poses):
+            revalidation_started.set()
+            release_revalidation.wait(2.0)
+            return original_revalidator(snapshot, result, model_poses)
+
+        controller._build_path_plan = slow_builder
+        controller._revalidate_path_plan_result = slow_revalidator
+        controller._begin_path_planning_locked(list(controller.robot_names))
+        self.assertTrue(planner_started.wait(0.5))
+
+        model_states = ModelStates()
+        model_states.name = ["moving_box"]
+        model_states.pose = [pose_at(8.2, 8.0)]
+        controller._model_states_cb(model_states)
+        release_planner.set()
+        self.assertTrue(revalidation_started.wait(0.5))
+
+        odometry = Odometry()
+        odometry.pose.pose.position.x = 3.0
+        odometry.pose.pose.position.y = 3.0
+        controller.avoidance["tb3_0"].set_position = lambda *args: None
+        controller._odom_cb(odometry, "tb3_0")
+        release_revalidation.set()
+        controller.path_plan_thread.join(2.0)
+
+        self.assertFalse(controller.path_plan_thread.is_alive())
+        self.assertFalse(controller.path_planning)
+        self.assertFalse(controller.path_anchor_ready)
         self.assertIsNone(controller.path_error)
 
     def test_coarse_screen_never_replaces_final_path_verification(self):

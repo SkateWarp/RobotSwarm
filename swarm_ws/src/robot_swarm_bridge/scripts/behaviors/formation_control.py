@@ -579,27 +579,82 @@ class FormationController:
 
     def _model_states_cb(self, msg: ModelStates):
         """Track configured obstacle poses, including the pushable object."""
-        configured_models = {
-            zone.get('model')
-            for zone in self.spawn_exclusion_zones
-            if isinstance(zone, dict) and zone.get('model')
-        }
+        arena_profile = getattr(self, 'arena_profile', 'swarm_arena')
+        configured_models = set()
+        for zone in self.spawn_exclusion_zones:
+            if not isinstance(zone, dict) or not zone.get('model'):
+                continue
+            worlds = zone.get('worlds')
+            if isinstance(worlds, str):
+                worlds = [worlds]
+            if worlds and arena_profile not in worlds:
+                continue
+            configured_models.add(zone['model'])
+
+        try:
+            names = list(getattr(msg, 'name', ()))
+            poses = list(getattr(msg, 'pose', ()))
+        except (TypeError, ValueError):
+            names = poses = None
+
+        with self.lock:
+            invalid_models = set(getattr(
+                self, 'invalid_model_poses', ()
+            )) & configured_models
+
+        names_are_valid = (
+            names is not None
+            and all(isinstance(name, str) for name in names)
+        )
+        snapshot_is_ambiguous = (
+            names_are_valid and len(set(names)) != len(names)
+        )
+        if (
+            not names_are_valid
+            or len(names) != len(poses)
+            or snapshot_is_ambiguous
+        ):
+            # ModelStates is one scene snapshot. If its parallel arrays do not
+            # line up or one name occurs twice, none of the active obstacle
+            # poses can be trusted.
+            invalid_models.update(configured_models)
+            with self.lock:
+                self.model_poses = {}
+                self.invalid_model_poses = tuple(sorted(invalid_models))
+            return
+
         live_poses = {}
-        invalid_models = []
-        for model_name, pose in zip(msg.name, msg.pose):
+        for model_name, pose in zip(names, poses):
             if model_name not in configured_models:
                 continue
-            live_pose = (
-                pose.position.x,
-                pose.position.y,
-                quaternion_to_yaw(pose.orientation),
-            )
-            if all(math.isfinite(value) for value in live_pose):
+            try:
+                orientation = pose.orientation
+                quaternion = tuple(
+                    float(getattr(orientation, axis))
+                    for axis in ('x', 'y', 'z', 'w')
+                )
+                if not all(math.isfinite(value) for value in quaternion):
+                    raise ValueError("model quaternion is not finite")
+                live_pose = (
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(quaternion_to_yaw(orientation)),
+                )
+                pose_is_valid = all(
+                    math.isfinite(value) for value in live_pose
+                )
+            except (
+                AttributeError, TypeError, ValueError, OverflowError
+            ):
+                pose_is_valid = False
+
+            if pose_is_valid:
                 live_poses[model_name] = live_pose
+                invalid_models.discard(model_name)
             else:
                 # Do not drop back to the configured pose silently. Remember
                 # the rejected sample so the next command batch fails closed.
-                invalid_models.append(model_name)
+                invalid_models.add(model_name)
         with self.lock:
             self.model_poses = live_poses
             self.invalid_model_poses = tuple(sorted(invalid_models))
@@ -770,9 +825,21 @@ class FormationController:
 
     def _odom_cb(self, msg: Odometry, robot_id: str):
         """Per-robot odometry callback."""
-        pose = msg.pose.pose
-        yaw = quaternion_to_yaw(pose.orientation)
-        pose_is_valid = self._planar_robot_pose_is_finite(pose, yaw)
+        pose = None
+        yaw = None
+        try:
+            pose = msg.pose.pose
+            orientation = pose.orientation
+            quaternion = tuple(
+                float(getattr(orientation, axis))
+                for axis in ('x', 'y', 'z', 'w')
+            )
+            if not all(math.isfinite(value) for value in quaternion):
+                raise ValueError("odometry quaternion is not finite")
+            yaw = quaternion_to_yaw(orientation)
+            pose_is_valid = self._planar_robot_pose_is_finite(pose, yaw)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pose_is_valid = False
         should_assign = False
         with self.lock:
             if robot_id not in self.robot_poses:
@@ -2134,9 +2201,11 @@ class FormationController:
         # A bad ROS parameter must not enlarge the TurtleBot3 Burger envelope.
         linear_limit = min(configured_linear_limit, 0.22)
         angular_limit = min(configured_angular_limit, 2.84)
+        epsilon = 1e-9
         if (
-            any(abs(value) > linear_limit + 1e-9 for value in linear)
-            or any(abs(value) > angular_limit + 1e-9 for value in angular)
+            any(abs(value) > epsilon for value in linear[1:] + angular[:2])
+            or any(abs(value) > linear_limit + epsilon for value in linear)
+            or any(abs(value) > angular_limit + epsilon for value in angular)
         ):
             return None
 
@@ -2722,14 +2791,21 @@ class FormationController:
         # entry plan is allowed to leak out before the next timer cycle.
         live_safety_exception = None
         invalid_command_ids = []
+        late_waiting = []
+        late_stale = []
         with self.lock:
             validated_commands = {}
+            requests_motion = False
             for rid, command in commands_to_publish.items():
                 validated = self._validated_motion_command(command)
                 if validated is None:
                     invalid_command_ids.append(rid)
                 else:
                     validated_commands[rid] = validated
+                    requests_motion = requests_motion or (
+                        float(validated.linear.x) != 0.0
+                        or float(validated.angular.z) != 0.0
+                    )
 
             if invalid_command_ids or not adaptive_targets_valid:
                 live_motion_is_safe = False
@@ -2742,6 +2818,20 @@ class FormationController:
                     live_motion_is_safe = False
                     live_safety_exception = exc
 
+            # The geometric check above can scan a complete orbit. Recheck the
+            # odometry clock after that work, at the last gate before the first
+            # Twist, while the pose callback is still excluded by this lock.
+            if live_motion_is_safe and requests_motion:
+                late_waiting, late_stale = self._odometry_readiness(
+                    self.robot_ids
+                )
+                if late_waiting or late_stale:
+                    self.waiting_for_odometry = late_waiting
+                    self.stale_odometry = sorted(set(
+                        late_waiting + late_stale
+                    ))
+                    live_motion_is_safe = False
+
             if not live_motion_is_safe:
                 if invalid_command_ids:
                     self.placement_error = (
@@ -2752,6 +2842,11 @@ class FormationController:
                     self.placement_error = (
                         "Adaptive formation produced invalid target geometry; "
                         "all robots were stopped."
+                    )
+                elif late_waiting or late_stale:
+                    self.placement_error = (
+                        "Odometry became stale or unavailable for: "
+                        + ", ".join(self.stale_odometry)
                     )
                 elif live_safety_exception is None:
                     self.placement_error = (
