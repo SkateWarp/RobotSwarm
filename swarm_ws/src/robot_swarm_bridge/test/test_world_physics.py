@@ -137,7 +137,9 @@ class WorldPhysicsTests(unittest.TestCase):
         root = ET.parse(WORLDS_DIR / 'swarm_arena.world').getroot()
         marker = root.find("./world/model[@name='target_marker']")
         self.assertIsNotNone(marker)
-        self.assertEqual('true', marker.findtext('static').lower())
+        self.assertEqual('false', marker.findtext('static').lower())
+        self.assertEqual('false', marker.findtext('./link/gravity').lower())
+        self.assertEqual('true', marker.findtext('./link/kinematic').lower())
         self.assertIsNone(marker.find('./link/collision'))
 
         footprint = marker.find("./link/visual[@name='target_footprint']")
@@ -155,6 +157,13 @@ class WorldPhysicsTests(unittest.TestCase):
         self.assertLess(float(footprint.findtext('transparency')), 1.0)
         self.assertGreater(float(ghost.findtext('transparency')), 0.0)
         self.assertLess(float(ghost.findtext('transparency')), 1.0)
+
+        camera = root.find("./world/gui/camera[@name='user_camera']")
+        self.assertIsNotNone(camera)
+        camera_pose = tuple(
+            float(value) for value in camera.findtext('pose').split()
+        )
+        self.assertEqual((0.0, -14.4, 12.0, 0.0, 0.72, 1.5708), camera_pose)
 
     def test_loaded_transport_profile_brackets_one_and_four_burgers(self):
         root = ET.parse(

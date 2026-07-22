@@ -3,18 +3,39 @@
 ## Estado del documento
 
 Este documento conserva la arquitectura objetivo y la evolución del plan de
-liberación. Las afirmaciones intermedias sobre I-064–I-091 son cortes históricos,
-no el estado vigente. Los PR #102, #103 y #104 integraron posteriormente ese
-trabajo y dejaron `fbef23eaae2b1b1d5be51ad3fa03e0298239289a` alineado en
-frontend, backend, worker e imagen ROS durante la aceptación del 21 de julio.
+liberación. Las afirmaciones intermedias sobre I-064–I-105 son cortes
+históricos, no el estado vigente. Los PR #102–#105 integraron ese trabajo y
+dejaron `9f49e17435a1ddd6b93b7834b2896d57059616fe` alineado en frontend,
+backend y worker durante la aceptación del 21 de julio.
 
-La base `fbef23e` aprobó API multiusuario, dos visores privados visibles, el
-recorrido administrativo, cuatro anchos responsive y transporte cargado N=4.
-El árbol local posterior agrega el endurecimiento de los arneses, el parser UTC
-del visor y la garantía causal `Accepted → Running` del worker. Todavía debe
-consolidarse en un único PR, aprobar CI, desplegarse con un único SHA y repetir
-los gates finales. Por tanto, este archivo describe el plan; no declara por sí
-solo una aceptación final.
+La base `9f49e17` aprobó API multiusuario, dos visores privados visibles y el
+recorrido administrativo. Los cuatro anchos responsive y la carga N=4 aceptada
+permanecen ligados a `fbef23e`; el reintento nuevo falló antes de la física y
+permitió localizar la carrera de colocación. Sobre `9f49e17` se preparó un
+delta correctivo que resuelve los fallos de formación móvil, una carrera de
+colocación en Gazebo, diagnóstico acotado de carga, visualización del destino y
+dos rutas de tareas antiguas. La revisión añadió el rechazo fail-closed de
+datos numéricos inválidos, el cese de toda recuperación de carga durante el
+apagado y el ajuste que convirtió el marcador en cinemático. Los commits
+`511e47c` y `377a0e3` cerraron después las fronteras de formación adaptativa,
+planes no circulares, publicación por lotes y datos vivos de seguimiento y
+transporte. Finalmente, `568979d` revalidó los planes de seguimiento ante
+cambios de escena y `4450c13` hizo atómica la última comprobación de frescura de
+transporte;
+debe pasar por un único PR, un solo ciclo normal de CI y un despliegue con SHA
+único antes de repetir los gates finales. Por tanto, este archivo describe el
+plan; no declara por sí solo una aceptación final.
+
+I-126 e I-127 ya están cerradas en código. La revisión de liberación encontró
+después I-128–I-134: correlación incompleta de la cadena del planificador,
+ventanas de frescura al publicar y validaciones incompletas de instantáneas,
+cuaterniones, ejes no holonómicos y nombres duplicados. `07da8f4` cierra esas
+fronteras. El árbol principal exacto aprobó después el freeze local combinado.
+La imagen local segura también se reconstruyó. Una primera comprobación visible
+encontró I-135, un recorte del marcador en el borde sur; el encuadre se corrigió
+y la imagen reconstruida aprobó las cuatro esquinas del área de trabajo. La
+liberación sigue abierta porque todavía faltan PR, CI y la repetición visible
+sobre el SHA desplegado.
 
 El [estado de implementación](../IMPLEMENTATION_STATUS.md) mantiene la frontera
 vigente y el [informe de comisionamiento](informe-comisionamiento-final.md)
@@ -120,6 +141,13 @@ siguiente manera:
 | Robots de esta sesión | Roster informado por el worker para la sesión propiedad del usuario | Estado, rol, namespace, ordinal, última actualización y resumen operativo | No fabrica posición ni velocidad: esos campos no forman parte del contrato actual |
 | Usuarios | CRUD de cuentas existente, rol `Admin` | Navegación y encabezado coherentes bajo el nombre «Usuarios» | No cambia el modelo de roles ni crea permisos nuevos |
 
+Dos URLs que seguían montando módulos heredados ya no abren pantallas falsas.
+`/apps/configs/task` redirige a `/apps/GTS/task-templates`, protegida como
+administración, y `/apps/dashboard/tasks` redirige a
+`/apps/GTS/taskLogs`, el historial real del usuario. Con ello se retiran del
+recorrido los consumidores de `/api/TaskActivity` y
+`/api/TaskForm/widget`, que no forman parte de la API vigente.
+
 Las seis secciones utilizan capitalización normal, tipografía Inter,
 encabezados sobrios, foco visible y superficies delineadas en lugar de
 gradientes y sombras decorativas. Robots se presenta como tabla; Grupos conserva
@@ -157,11 +185,82 @@ sintaxis Bash, el lint de 75 archivos frontend, el build de producción y
 `git diff --check`. Estas cifras no sustituyen el único CI ni los recorridos
 sobre el SHA desplegado.
 
-El corte local vigente del nuevo delta aprobó backend 250/250, con 8 casos
-PostgreSQL opt-in omitidos; frontend 159/159; ROS 429/429; worker 129/129; y
-237/237 contratos de aceptación. Son resultados locales posteriores a
-`fbef23e`: no se atribuyen a esa base ni al futuro SHA antes de que el CI selle
-el commit exacto.
+El freeze provisional anterior a I-117–I-125, integrado hasta `e18926a`, aprobó backend
+253/253, con 8 casos PostgreSQL opt-in omitidos por diseño; frontend 164/164 en
+30 suites; ROS 461/461; y los siete arneses 241/241 contratos:
+17+49+13+61+44+41+16. El cierre numérico de formación aprobó 6/6 focales,
+50/50 de formación/rutas/live y 1/1 de evitación. El cierre de apagado de la
+carga aprobó 81/81 pruebas loaded, 170/170 ROS/mundo, 16/16 frontend focales y
+53/53 backend focales. Worker aprobó 129/129, PostgreSQL 17 opt-in 8/8, el lint
+focal, el build de producción frontend, el publicador del visor y las pruebas
+de despliegue/rollback GPU quedaron en verde. El primer build frontend encontró
+un `EACCES` en residuos ignorados de `build/`; después de corregir solo su
+propiedad, aprobó sin cambiar código. Un build intermedio etiquetado
+`robotswarm-ros:local-final-candidate` terminó catkin al 100 %, con ID
+`sha256:db8ffda30d79e5e22e1bbfe66978faedb118bb9c43b3e25dedd161807833be14`,
+4.231.139.487 bytes y fecha 2026-07-22T03:10:23Z. Ese ID se descartó como
+candidato final al aparecer hallazgos P1 posteriores. Aunque el código quedó
+corregido, esa imagen continúa siendo anterior y fue reemplazada después por el
+artefacto seguro descrito abajo. `511e47c`
+aprobó posteriormente 99/99 pruebas focales de
+formación y 469/469 en su ejecución ROS aislada. `377a0e3` aprobó 206/206 de
+seguimiento+lifecycle y 473/473 en la ejecución global aislada. También
+aprobaron la compatibilidad con Python 3.8 y `git diff --check`. En ese corte aún
+faltaban la suite combinada y la nueva imagen, completadas abajo; CI, despliegue
+y pruebas visibles siguen pendientes. Son resultados locales
+posteriores a `9f49e17`: no se atribuyen a esa base ni al futuro SHA antes de
+que el CI selle el commit exacto.
+
+I-126 se verificó de forma aislada como
+`bd8575593aa24c2d3ac0a878641d0d235fbf6bbe` y se integró como `568979d`; aprobó
+40/40 pruebas de seguimiento y 483/483 globales. I-127 se integró como
+`4450c13` y aprobó 172/172 pruebas de lifecycle y 487/487 globales. Ambos cortes
+aprobaron la comprobación de sintaxis con Python 3.8 y `git diff --check`. Estas
+cifras no forman todavía el freeze combinado.
+
+I-128 reprodujo que el solver de seguimiento se
+bloqueó con el líder en `(0; 0)`; tras recibir una odometría válida en `(3; 3)`,
+el resultado antiguo confirmó `anchor=(0; 0)` y emitió un primer giro de
+aproximadamente −0,0625 rad/s.
+
+I-129–I-134 ampliaron el mismo análisis. Formación agotó un timeout de
+0,75 s al pasar el reloj de 10,0 a 11,0 y aun publicó 0,22 m/s; seguimiento N=1
+repitió la ventana con 0,1 m/s. Una instantánea truncada de formación con
+`name=['moving_box']` y `pose=[]` vació la escena y permitió 0,22 m/s hacia el
+objetivo bloqueado. Por último, un cuaternión crudo con `Inf` produjo yaw finito
+2,356 y atravesó modelo/odometría hasta generar 0,22 m/s y −1,5 rad/s.
+I-133 mostró que un comando finito y dentro del límite todavía podía usar
+`linear.y/z` o `angular.x/y`, ejes incompatibles con el Burger. I-134 encontró
+que un nombre configurado duplicado en `ModelStates` podía limpiar una
+invalidación en orden NaN→válido o entregar dos poses ambiguas.
+
+El grupo quedó integrado como `07da8f4`. La primera iteración aprobó 95/95 de
+seguimiento+formación antes del último ajuste; la versión final aprobó 6/6
+regresiones focales y 497/497 globales en 109,067 s. También aprobaron
+`py_compile` bajo Python 3.8.10 para tres controladores y tres archivos de prueba
+y `git diff --check`. Son resultados aislados, no el freeze combinado.
+
+La repetición exacta del árbol principal `07da8f4`, junto con los cambios aún no
+confirmados de documentación y mundo, aprobó 497/497 pruebas ROS en 109,460 s,
+241/241 contratos de aceptación (17+49+13+61+44+41+16) y 8/8 pruebas de física
+del mundo, todos con RC=0. También aprobaron Python 3.8.10 para tres
+controladores y sus tres tests, `git diff --check`, tres workflows YAML, cuatro
+variantes Compose y el escaneo de secretos. La única coincidencia fue la URL
+del fixture negativo en `WorkerOptionsValidatorTests.cs:44`; no es un secreto.
+Este corte combinado precede al ajuste de cámara y se conserva para
+trazabilidad; no es CI, despliegue ni postdeploy. La primera
+imagen `robotswarm-ros:local-final-safe`, ID
+`sha256:02fbd5c2302d3af0eb9e543af04bb4507292786b7155b39b54e9d294b27f4864`,
+completó catkin y sirvió para validar el algoritmo y la física. Sus capturas
+mostraron después que la cámara predeterminada recortaba el marcador en el borde
+sur; ese ID quedó supersedido solamente por el ajuste de encuadre. La imagen
+reconstruida con la misma etiqueta completó catkin al 100 %, con ID
+`sha256:e17579ed83e0c37a9ff9b03817652aeb935573b307801ddc5863d29f2a92ae0d`,
+tamaño 4.231.381.706 bytes y fecha
+`2026-07-22T04:53:51.679721236Z`. Sigue siendo un artefacto local, no un
+release. Después de ese ajuste y rebuild, la suite completa volvió a aprobar
+497/497 pruebas en 109,592 s, con `OK` y RC=0. Este último resultado sustituye
+al de 109,460 s como freeze local exacto vigente.
 
 I-088 impide que una fase `SEARCH` declarada sustituya el movimiento observado:
 el smoke web integra la trayectoria de cada robot y exige al menos 0,015 m por
@@ -232,12 +331,94 @@ along the leader's travelled path, so the chain grows naturally with the fleet
 size. Each robot receives collision avoidance, velocity limits, and smoothed
 final commands.
 
+La recepción de odometría valida posición, yaw y los cuatro componentes del
+cuaternión antes de actualizar estado. Una muestra inválida conserva juntos la
+última pose y su timestamp anterior; no puede aparentar que la fuente sigue
+fresca. Los `ModelStates` de obstáculos también fallan cerrado. El control reúne
+primero el lote completo del líder y sus seguidores, comprueba finitud, ejes y
+límites Burger y recién después lo publica. Si falla un dato, un cálculo o la
+evitación, todos reciben stop y el estado `failed` conserva el identificador de
+la tarea; una parada normal correlacionada permanece `stopped`.
+
+El planificador de trayectoria trabaja fuera del lock para no bloquear el
+control. I-126 mostró que, si `moving_box` pasaba de `(8; 8)` a `(1,5; 1,5)`
+durante ese cálculo, el resultado antiguo podía liberar 0,00625 m/s. La
+corrección integrada `568979d` compara la escena con tolerancias de
+0,01 m/0,02 rad,
+revalida de forma optimista vuelta completa y ruta de entrada y vuelve a
+correlacionar la escena bajo lock antes del commit. Otro cambio durante la
+revalidación descarta el resultado y mantiene stop hasta replanificar.
+
+La escena no es la única entrada mutable del solver. I-128 reprodujo que las
+posiciones y yaw de la cadena podían cambiar durante el cálculo sin invalidar el
+resultado. `07da8f4` toma y compara esa odometría dos veces, con las mismas
+tolerancias explícitas al jitter utilizadas para la escena. Un desplazamiento
+material descarta el plan, mantiene velocidad cero y replanifica desde la
+muestra nueva.
+
+I-130 queda cubierta por un gate final de escena y odometría inmediatamente
+antes del lote de seguimiento. Un controlador N=1 ya no puede publicar 0,1 m/s
+ni seguir `active` cuando el cálculo cruzó el timeout.
+
 ### Figures and letters
 
 Geometric outlines and glyph strokes are resampled for the active fleet. A
 minimum-cost robot-to-slot match includes a small hysteresis penalty, reducing
 long crossings when the formation is recalculated. The controller can search
 for a safer nearby centre when a requested outline intersects an obstacle.
+
+La matriz visible encontró que el centro de una formación móvil comenzaba su
+órbita antes de que los robots ocuparan los slots. El grupo perseguía entonces
+una meta que ya se movía y la tarea podía llegar a estado terminal antes de la
+muestra activa. El plan corregido ancla la trayectoria en el centro real de la
+flota, inmoviliza ese centro hasta completar un tiempo de asentamiento y mantiene
+la orientación de letras y figuras mientras se desplazan.
+
+`07da8f4` cierra I-129, I-131 e I-132. El gate de formación vuelve a comprobar
+la frescura literalmente después del cálculo geométrico e inmediatamente antes
+de publicar; las longitudes distintas de `name` y `pose` invalidan de forma
+atómica el snapshot; y los cuatro componentes crudos de cada cuaternión se
+validan antes de convertirlo a yaw. Ante cualquiera de estas condiciones no
+sale el primer comando no nulo y la tarea falla correlacionada con stop global.
+
+El mismo commit cierra I-133 al rechazar explícitamente `linear.y/z` y
+`angular.x/y`, aunque sean finitos y pequeños. I-134 hace fallar cerrado los
+callbacks de formación, seguimiento y transporte ante cualquier nombre
+duplicado; la recuperación solo ocurre después de una instantánea completa y
+unívoca. El conjunto de modelos configurados se filtra además por el mundo
+activo para no convertir exclusiones ajenas al escenario en fallos espurios.
+
+Para una trayectoria circular no basta con validar el primer fotograma. El
+controlador muestrea una vuelta completa de la huella rígida, añade margen para
+los arcos entre muestras, busca un centro seguro y puede reducir el radio de
+forma determinista hasta el mínimo configurado. Luego calcula rutas de entrada
+por lotes, reservando slots ya ocupados. La geometría de modelos vivos se vuelve
+a leer entre la instantánea y el commit y otra vez antes de publicar el lote
+completo de `Twist`; ante un obstáculo nuevo, se invalida el plan y solo se
+publica parada. Así se cierra la ventana TOCTOU sin mandar comandos parciales.
+
+La revisión numérica posterior trata `NaN` e `Inf` como una pérdida de datos,
+no como posiciones válidas. La callback de odometría rechaza de forma atómica
+`x`, `y` o yaw no finitos y conserva la última muestra válida. Cada ciclo vuelve
+a validar todos los robots y todos los modelos, incluso durante `MOVING`. Una
+excepción inesperada del control vivo cambia la tarea a `FAILED`, cancela el
+solver y su asignación pendientes y publica velocidad cero para toda la flota.
+
+El commit `511e47c` cierra el gate que faltaba. Adaptive construye primero los
+objetivos deformados y revalida esas coordenadas efectivas antes del lote; los
+modos lineal y waypoints conservan un `placement_plan` con arena, exclusiones y
+modelos vivos. Un plan ausente solo permite la espera inicial sin asignaciones
+ni rutas. La flota completa de `Twist` se valida por finitud, ejes permitidos y
+límites físicos del Burger antes del primer publish. Si un elemento falla, la
+tarea pasa a `FAILED`, cancela el solver y envía parada a toda la flota.
+
+Los presupuestos de formación se expresan en tiempo de pared, pero se dimensionan
+con un piso conservador RTF 2,7. Los tiempos simulados de adquisición medidos
+para N=3/5/7/8/9/10 fueron 15,15/86,25/156,65/126,05/115,20/208,75 s. Los
+límites de pared 35/40/65/55/50/85 s dejan respectivamente
+79,35/21,75/18,85/22,45/19,80/20,75 s simulados de margen. El control conserva
+la velocidad lineal nominal máxima del Burger, 0,22 m/s; el aumento de timeout
+no acelera la física ni relaja la precisión.
 
 ### Collaborative transport
 
@@ -257,6 +438,25 @@ has priority, and the controller does not form a one-by-one waiting queue.
 Obstacle and inter-robot avoidance remain active. The safety layer distinguishes
 confirmed payload/companion contact from a closer unrelated wall or robot, so
 the intended push is allowed without masking environmental collision hazards.
+
+El destino aparece además en Gazebo como una huella magenta y una caja
+translúcida de 0,4 m, unidas a un modelo cinemático, sin gravedad ni colisión.
+Se evita el modelo `static` porque Gazebo Classic no refresca de forma fiable su
+visual después de `set_model_state`. Transporte publica una sola actualización
+latched a `/gazebo/set_model_state` y confirma la posición
+observada por `/gazebo/model_states`; no realiza una llamada RPC bajo los locks
+del comportamiento. El estado `command_published/synchronized/position` cruza
+una lista permitida del orquestador hasta el frontend. Si falla este apoyo
+visual, la tarea continúa y la interfaz lo presenta como advertencia, no como
+éxito ficticio.
+
+`arrival_tolerance` se puede ajustar entre 0,15 y 0,75 m y vale 0,25 m por
+defecto en la interfaz; el valor legado de 0,50 m se conserva cuando el
+parámetro no existe. Reducirlo obliga a acercar más la caja al mismo objetivo.
+No se reducen masa ni fricción para producir más desplazamiento aparente: la
+aceptación cargada mantiene 0,75 kg y `mu=0.25`, porque ese perfil distingue el
+empuje colectivo del esfuerzo de un solo robot. Para ensayos rápidos ya existe
+el perfil de práctica de 0,25 kg y `mu=0.05`.
 
 ## Visible simulation observations obtained so far
 
@@ -321,6 +521,73 @@ raíces y dos compañeros. La carga avanzó 0,5002 m, las 1598 muestras fueron
 no registró contactos de seguridad. Durante
 `PUSH`, la sonda visible midió 58,816/58,831 FPS y RTF 2,996 en la RTX 3080.
 
+El corte local final añadió dos corridas visibles N=4 con RC=0 sobre la imagen
+`02fbd5c2…27f4864`, todavía anterior únicamente al ajuste posterior de cámara.
+Al omitir `arrival_tolerance`, el perfil legado de 0,50 m desplazó la carga
+0,5022 m, terminó a 0,4978 m de la meta, mantuvo RTF 2,9965, acreditó 4/4
+empujadores útiles y no registró colisiones. Para reproducir el valor actual de
+la interfaz sin alterar el repositorio, el segundo ensayo inyectó 0,25 m
+solamente en memoria dentro del arnés. Ese ensayo desplazó la carga 0,7535 m,
+terminó a 0,2465 m, mantuvo RTF 2,9963 y acreditó 4/4 empujadores útiles, una
+fracción simultánea de 0,8707, velocidad máxima de 0,1664 m/s, aceleración
+máxima en ventana de 0,6281 m/s² y cero colisiones. `tb3_1` avisó del hallazgo
+a `tb3_0`, `tb3_2` y `tb3_3`; hubo picos de cuatro robots en búsqueda y cuatro
+en reunión, mientras el marcador quedó publicado y sincronizado en `x=-3.5`,
+`y=-4.0`.
+
+El cliente visible de esas corridas identificó
+`D3D12 (NVIDIA GeForce RTX 3080)`, 57,182 FPS de cámara, 58,795 eventos de
+posrenderizado por segundo, RTF 2,997 y un viewport 990×334. La evidencia
+temporal se conserva en
+`/tmp/robotswarm-local-final-visible-20260722T0444Z/`; los SHA-256 de las
+capturas `approach`, `search`, `done` y `zoomout2` son
+`fa356ca8b084ee62e093f5993b1134a5b65ac2a857e492096e1906a0677c19d6`,
+`d27774ed3560056919728b83dce8386a28187ba4f0e9d7234ac8959e706aff7b`,
+`044573e7ca9a43d347947e51e2db6560e364006b737f4242f7c49c445ca049b4` y
+`9e88ce8444111379ce740c2c7ae4fb01e20c516dcc585f5da4c4c12fe6e1e6c7`,
+respectivamente.
+
+La revisión visual independiente detectó que la pose de cámara
+`0 -12 10 0 0.7 1.5708` recortaba el marcador cerca de `y=-4`; la captura
+`zoomout2` demostró que el modelo sí estaba sincronizado y aisló el defecto en
+el encuadre. I-135 cambió la pose a `0 -14.4 12 0 0.72 1.5708` y fijó ese
+contrato en la prueba del mundo. Sobre la imagen reconstruida `e17579ed…ae0d`,
+la sonda visible exacta midió 57,279 FPS de cámara, 58,791 eventos de
+posrenderizado por segundo y RTF 2,997 con D3D12/RTX 3080 y viewport 990×334.
+`SetModelState` llevó el marcador a `(4,4)`, `(-4,4)`, `(4,-4)` y `(-4,-4)`;
+la huella y la caja permanecieron completas y dentro de los muros en los cuatro
+casos. Aprobaron 8/8 pruebas del mundo y `git diff --check`, por lo que I-135 se
+cierra localmente. En
+`/tmp/robotswarm-local-final-camera-20260722T0454Z/`, las capturas NE, NW, SE y
+SW tienen SHA-256
+`75c53cf725a69c20568d00a529754d463bb79957c2e10e904d4b46e2c22ee839`,
+`84750bdbb15eddb1babaeffedf10205de84a816fd6e474e13a28f35a887152ca`,
+`ade73f6e43125f0945a60606d3db7cb6e10538abc19b2d3fb18e1ead1b848e14` y
+`86f32de8ad0628c0fae1d97b53a1ae3ed9dcf86f73fa753ec5c89a886ea48f51`.
+Toda esta evidencia es local y no productiva.
+
+Finalmente se repitió el caso completo sobre la imagen corregida
+`e17579ed…ae0d`, sin eliminar la flota durante la corrida y con 0,25 m inyectados
+solo en memoria. Terminó `PASS`/RC=0: el objeto avanzó 0,7523 m, quedó a
+0,2477 m de la meta y mantuvo RTF 2,9962. Los 4/4 robots fueron útiles, la
+fracción simultánea fue 0,9355, hubo picos de cuatro buscadores y cuatro robots
+en reunión, y `tb3_1` avisó a los otros tres. No se registraron colisiones; la
+velocidad máxima fue 0,1649 m/s y la aceleración máxima en ventana, 0,7883
+m/s², inferior al límite de 1,0 m/s². La cronología de pared situó `SEARCH` en
+0,278 s, `APPROACH` en 39,191 s, `PUSH` en 107,725 s y `DONE` en 131,991 s. El
+marcador quedó sincronizado en `x=-3.5`, `y=-4.0`.
+
+En el mismo directorio temporal, `final-n4-search.png`, SHA-256
+`d036d9814b893441f2c57be52a4ab58415339f85bfeba6055177820417211f11`,
+es la única captura de esta repetición aceptada como evidencia visual de fase:
+muestra simultáneamente el objeto, el marcador completo y los cuatro robots en
+búsqueda. El log saneado `transport-n4-tolerance-025-final.log`, SHA-256
+`3ad8ad2b65b7589f34d52f716990d8675e57cef9474d9679af9407a81612ac43`,
+sustenta el resultado terminal. `final-n4-push.png` y `final-n4-done.png` no se
+utilizan: una carrera entre la captura y el `cleanup/reset` impide atribuirles
+la fase de empuje o la pose final. Esta exclusión evita que una imagen ambigua
+reemplace la serie temporal correlacionada.
+
 La primera validación exterior de v11 supuso erróneamente que cada flota
 reiniciaría sus ordinales en cero. El contrato corregido admite el offset fresco
 del gestor, pero exige namespaces canónicos, bloques contiguos y distintos,
@@ -358,6 +625,57 @@ For sequential Gazebo cases, the acceptance harness reuses `tb3_0` through
 models no longer appear in `/gazebo/model_states`, and per-robot `cmd_vel`
 monitors were unregistered. This bounds ROS-side state even though Gazebo
 Classic can retain allocator and plugin caches after model deletion.
+
+El reemplazo de la carga de aceptación necesita una barrera adicional. Gazebo puede
+entrelazar las respuestas de borrado, aparición y posicionamiento; una llamada
+exitosa no garantiza que el `ModelStates` siguiente pertenezca a la misma vida
+del modelo. La sonda usa generaciones, exige una ausencia fresca y luego dos
+presencias frescas consecutivas en la pose correcta. Solo repite el reemplazo
+—como máximo tres veces— cuando existe evidencia autoritativa de desaparición o
+de modelo ausente. Errores permanentes y cierre del proceso fallan de inmediato.
+Los diagnósticos conservan como máximo 16 eventos saneados, conteo total,
+truncamiento y categorías permitidas; no retienen respuestas crudas.
+Antes de borrar, crear, posicionar o clasificar un fallo como recuperable, la
+sonda comprueba tanto `stop_requested` como `rospy.is_shutdown()`. Si cualquiera
+está activo, termina sin abrir otra generación ni repetir servicios de Gazebo.
+
+El control de transporte aplica la misma transacción de comandos en las tres
+fases activas: `SEARCH`, `APPROACH` y `PUSH` construyen y validan el lote entero
+antes del primer `Twist`. De este modo, un segundo robot con salida `Inf` no deja
+escapar el comando válido del primero. Una excepción del ciclo termina en
+`FAILED` con el `task_id` y la época originales, aun cuando no alcance el
+epílogo normal de estado. El acumulador temporal utilizado para reunir comandos
+de aproximación se retira en `finally`, también si la evitación lanza una
+excepción.
+
+La geometría de Gazebo se acepta ahora como una instantánea indivisible. Si las
+listas `name` y `pose` tienen longitudes diferentes, se vacían pose de carga,
+obstáculos y marcador, se invalida la frescura y se publica el fallo
+correlacionado. Antes, `zip` podía conservar la pose vieja de la carga mientras
+refrescaba el timestamp del mensaje truncado. La odometría de transporte valida
+además los cuatro componentes crudos del cuaternión; un `Inf` que por casualidad
+produzca un yaw finito ya no atraviesa el gate.
+
+I-127 demostró que esa comprobación al inicio aún no bastaba. Un ciclo inducido
+de 1,0 s, mayor que el timeout de 0,75 s, alcanzó a publicar 0,12 m/s en
+`SEARCH`. `4450c13` revalida `ModelStates` y la odometría de toda la flota en el
+gate final, antes del primer comando no nulo. El mismo `command_lock` permanece
+tomado hasta el último `Twist` y el commit de `ObstacleAvoidance`, de modo que el
+lote no se divide si el timeout cruza entre dos robots. Las rutas de publicación
+directa aplican la misma frontera; los ceros de parada pueden publicarse aun con
+datos vencidos para conservar el fallo seguro.
+
+El preflight visible inicial del cambio cinemático, anterior a I-135, identificó
+`D3D12 (NVIDIA GeForce RTX 3080)`, 58,206 FPS de cámara, 62,512 eventos de
+posrenderizado por segundo, RTF 2,996 y un viewport 990×351. El reporte local
+`/tmp/robotswarm-corrected-ghost-gui-report.json`, con permisos `0600`, tiene
+SHA-256
+`98a4651069f1ea8199d26d278da0b7a4df273b54b93ffaa0a9b65bfd12e1f5d5`.
+Las capturas Windows/WSLg realizadas con `CopyFromScreen` quedaron congeladas o
+recortadas después de redimensionar la ventana y fueron rechazadas; no se usan
+como evidencia del encuadre. Las capturas limpias posteriores de la búsqueda
+N=4 y de las cuatro esquinas cierran el encuadre localmente; todavía deben
+sanearse/versionarse y repetirse después del despliegue.
 
 Ground-truth static-obstacle clearance defaults to 0.13 m from the robot centre
 to the obstacle surface. This lies just beyond the Burger body/contact threshold
@@ -478,9 +796,10 @@ deployment rather than silently enabling a path.
 
 ## Secuencia de liberación pendiente
 
-1. Consolidar I-093–I-105 en una rama nueva nacida de `origin/main`, publicar
-   un único PR y consumir un solo ciclo normal de CI; no repetir jobs aprobados
-   solo para duplicar evidencia.
+1. Conservar la imagen local segura reconstruida (`e17579ed…ae0d`) y la etiqueta
+   `rollback/pre-formation-ghost-9f49e17`, publicar un único PR y consumir un
+   solo ciclo normal de CI; no repetir jobs aprobados solo para duplicar
+   evidencia.
 2. Después del merge, comprobar que Cloudflare y el backend anuncien el SHA
    exacto. Despachar el workflow del worker GPU una sola vez y verificar la
    revisión instalada, la unidad versionada, AF_NETLINK y el preflight NVIDIA.
@@ -491,16 +810,17 @@ deployment rather than silently enabling a path.
 4. Repetir User/Admin, visitar Historial, Plantillas, Robots, Grupos y Usuarios,
    ejercer autorización real, eliminar únicamente el grupo efímero propio y
    restaurar el rol con revocación de tokens.
-5. Ejecutar en sesiones frescas la matriz final de formaciones, seguimiento y
-   transporte N=1/2/3/4/10. `SEARCH` debe mostrar movimiento sostenido de toda
-   la flota, seguido por aviso del hallazgo, rendezvous y contribución útil de
-   todos los robots al empuje.
+5. Ejecutar primero las seis formaciones corregidas y, si aprueban, continuar
+   en sesiones frescas con seguimiento y transporte N=1/2/3/4/10. `SEARCH`
+   debe mostrar movimiento sostenido de toda la flota, seguido por aviso del
+   hallazgo, rendezvous y contribución útil de todos los robots al empuje.
 6. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA visible
    sobre el mismo master Gazebo. Exigir al menos 45 FPS de render y RTF 2,90;
    luego comprobar que no queden tareas, robots, procesos ni recursos activos.
 7. Repetir el smoke React N=4 y confirmar la secuencia persistida exacta
-   `Accepted → Running → Completed`, además del contador UTC cercano a cinco
-   minutos, los cuatro viewports y la interacción/fullscreen privada.
+   `Accepted → Running → Completed`, el marcador de destino sincronizado y
+   visible, el margen 0,25 m, el contador UTC cercano a cinco minutos, los
+   cuatro viewports y la interacción/fullscreen privada.
 8. Retirar roles, tokens, cuentas, sesiones, perfiles y artefactos temporales.
    Incorporar al informe únicamente capturas saneadas, separadas por SHA y con
    checksums; conservar la etiqueta de rollback hasta completar la observación.

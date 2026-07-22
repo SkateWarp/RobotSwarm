@@ -342,13 +342,17 @@
 
     <!-- ==================== TRANSPORT TARGET (visual only) ==================== -->
     <!--
-      The transport controller moves this static, collision-free model to the
-      requested target.  Its footprint is easy to read from above, while the
-      translucent box shows where the payload itself is meant to finish.
+      The transport controller moves this collision-free model to the
+      requested target.  It is kinematic instead of static because Gazebo
+      Classic does not refresh a static model's visual after set_model_state.
+      Its footprint is easy to read from above, while the translucent box
+      shows where the payload itself is meant to finish.
     -->
     <model name="target_marker">
-      <static>true</static>
+      <static>false</static>
       <link name="link">
+        <gravity>false</gravity>
+        <kinematic>true</kinematic>
         <visual name="target_footprint">
           <pose>0 0 0.006 0 0 0</pose>
           <cast_shadows>false</cast_shadows>
@@ -378,7 +382,8 @@
     <!-- Camera position for nice default view -->
     <gui fullscreen="0">
       <camera name="user_camera">
-        <pose>0 -12 10 0 0.7 1.5708</pose>
+        <!-- Keep the complete -4..4 task area visible, including target ghosts. -->
+        <pose>0 -14.4 12 0 0.72 1.5708</pose>
         <view_controller>orbit</view_controller>
       </camera>
     </gui>
