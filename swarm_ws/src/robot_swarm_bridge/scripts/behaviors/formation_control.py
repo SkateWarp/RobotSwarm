@@ -1198,14 +1198,24 @@ class FormationController:
             sum(x for x, _ in robot_positions) / n,
             sum(y for _, y in robot_positions) / n,
         )
-        if self.movement_mode == MovementMode.STATIC:
-            # A static shape belongs where the fleet already is. Route-aware
-            # placement is solved after releasing command_lock because it may
-            # test several whole-pattern translations and assignments.
+        if (
+            self.movement_mode == MovementMode.STATIC
+            or self.centroid_path != CentroidPath.CIRCULAR
+        ):
+            # Static shapes and open moving paths first need a safe place to
+            # assemble. Route-aware placement is solved after releasing
+            # command_lock because it may test several whole-pattern
+            # translations and assignments. Linear and waypoint paths keep this
+            # plan active so every later target is checked against the live
+            # arena immediately before its command batch is published.
             self.centroid_heading = 0.0
             slot_clearance = min(0.34, self.spacing - 0.01)
             placement_plan = {
-                'kind': 'static',
+                'kind': (
+                    'static'
+                    if self.movement_mode == MovementMode.STATIC
+                    else self.centroid_path.value
+                ),
                 'offsets': tuple(self.formation_offsets[:n]),
                 'preferred_center': preferred_center,
                 'arena_size': self.arena_size,
@@ -1779,7 +1789,7 @@ class FormationController:
             )
             route_batches = []
         else:
-            if placement_plan['kind'] == 'static':
+            if placement_plan['kind'] != 'circular':
                 plan = self._plan_routed_static_assignment(
                     assignment_snapshot, placement_plan
                 )
@@ -2054,7 +2064,10 @@ class FormationController:
 
         plan = getattr(self, 'active_placement_plan', None)
         if plan is None:
-            return not self.route_batches
+            # The brief assignment-planning window has neither assignments nor
+            # routes and may safely emit its all-zero hold batch. Any assigned
+            # fleet without a plan has lost its geometric safety contract.
+            return not self.assignments and not self.route_batches
 
         if (
             plan['kind'] == 'circular'
@@ -2089,6 +2102,56 @@ class FormationController:
             model_poses,
             self.route_waypoint_indices,
         )
+
+    def _validated_motion_command(self, command: Twist) -> Optional[Twist]:
+        """Return a detached safe copy, or None for an invalid Twist."""
+
+        try:
+            configured_linear_limit = float(self.max_linear_vel)
+            configured_angular_limit = float(self.max_angular_vel)
+            linear = (
+                float(command.linear.x),
+                float(command.linear.y),
+                float(command.linear.z),
+            )
+            angular = (
+                float(command.angular.x),
+                float(command.angular.y),
+                float(command.angular.z),
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+        if (
+            not math.isfinite(configured_linear_limit)
+            or not math.isfinite(configured_angular_limit)
+            or configured_linear_limit < 0.0
+            or configured_angular_limit < 0.0
+            or not all(math.isfinite(value) for value in linear + angular)
+        ):
+            return None
+
+        # A bad ROS parameter must not enlarge the TurtleBot3 Burger envelope.
+        linear_limit = min(configured_linear_limit, 0.22)
+        angular_limit = min(configured_angular_limit, 2.84)
+        if (
+            any(abs(value) > linear_limit + 1e-9 for value in linear)
+            or any(abs(value) > angular_limit + 1e-9 for value in angular)
+        ):
+            return None
+
+        validated = Twist()
+        (
+            validated.linear.x,
+            validated.linear.y,
+            validated.linear.z,
+        ) = linear
+        (
+            validated.angular.x,
+            validated.angular.y,
+            validated.angular.z,
+        ) = angular
+        return validated
 
     def _cached_live_orbit_is_safe_locked(
         self,
@@ -2460,11 +2523,19 @@ class FormationController:
         for av in self.avoidance.values():
             av.update_robot_positions(robot_position_list)
 
+        assembling_on_routes = (
+            self.movement_mode == MovementMode.STATIC
+            or not self._initial_formation_acquired
+        )
+
         # ---- Adaptive mode: detect obstacle proximity ----
         deforming = False
         obstacle_center_x = 0.0
         obstacle_center_y = 0.0
-        if self.movement_mode == MovementMode.ADAPTIVE:
+        if (
+            self.movement_mode == MovementMode.ADAPTIVE
+            and not assembling_on_routes
+        ):
             # Check threat level across all robots; if any is significant, deform
             for rid in self.robot_ids:
                 av = self.avoidance.get(rid)
@@ -2478,15 +2549,38 @@ class FormationController:
                         obstacle_center_y = pose.position.y - rep.y * 0.5
                     break
 
+        control_targets = list(world_targets)
+        adaptive_targets_valid = True
+        if deforming:
+            adaptive_targets_valid = all(math.isfinite(value) for value in (
+                obstacle_center_x, obstacle_center_y, self.spacing,
+            ))
+            if adaptive_targets_valid:
+                deformed_targets = []
+                for target_x, target_y in control_targets:
+                    offset_x = target_x - obstacle_center_x
+                    offset_y = target_y - obstacle_center_y
+                    obstacle_distance = math.hypot(offset_x, offset_y)
+                    if 0.01 < obstacle_distance < self.spacing * 2.0:
+                        push = (
+                            self.spacing * 2.0 - obstacle_distance
+                        ) * 0.5
+                        target_x += push * offset_x / obstacle_distance
+                        target_y += push * offset_y / obstacle_distance
+                    deformed_targets.append((target_x, target_y))
+                adaptive_targets_valid = all(
+                    math.isfinite(value)
+                    for target in deformed_targets
+                    for value in target
+                )
+                if adaptive_targets_valid:
+                    control_targets = deformed_targets
+
         # ---- Per-robot control ----
         all_in_position = bool(self.robot_ids)
         maximum_position_error = 0.0
         active_route_ids = None
         commands_to_publish: Dict[str, Twist] = {}
-        assembling_on_routes = (
-            self.movement_mode == MovementMode.STATIC
-            or not self._initial_formation_acquired
-        )
         if assembling_on_routes and self.route_batches:
             while (
                 self.route_batch_index < len(self.route_batches)
@@ -2510,17 +2604,7 @@ class FormationController:
                 commands_to_publish[rid] = Twist()
                 continue
 
-            target_x, target_y = world_targets[slot_idx]
-
-            # Adaptive deformation: push target away from detected obstacle
-            if deforming and self.movement_mode == MovementMode.ADAPTIVE:
-                ox = target_x - obstacle_center_x
-                oy = target_y - obstacle_center_y
-                obs_dist = math.sqrt(ox * ox + oy * oy)
-                if obs_dist < self.spacing * 2.0 and obs_dist > 0.01:
-                    push = (self.spacing * 2.0 - obs_dist) * 0.5
-                    target_x += push * (ox / obs_dist)
-                    target_y += push * (oy / obs_dist)
+            target_x, target_y = control_targets[slot_idx]
 
             final_target_x = target_x
             final_target_y = target_y
@@ -2557,7 +2641,7 @@ class FormationController:
                         rid,
                         (robot_x, robot_y),
                         slot_idx,
-                        world_targets,
+                        control_targets,
                         waypoints,
                         waypoint_index + 1,
                     ):
@@ -2637,17 +2721,39 @@ class FormationController:
         # the complete publication batch. No positive command from a stale
         # entry plan is allowed to leak out before the next timer cycle.
         live_safety_exception = None
+        invalid_command_ids = []
         with self.lock:
-            try:
-                live_motion_is_safe = self._live_motion_is_safe_locked(
-                    world_targets, assembling_on_routes
-                )
-            except Exception as exc:  # fail closed on corrupt live telemetry
+            validated_commands = {}
+            for rid, command in commands_to_publish.items():
+                validated = self._validated_motion_command(command)
+                if validated is None:
+                    invalid_command_ids.append(rid)
+                else:
+                    validated_commands[rid] = validated
+
+            if invalid_command_ids or not adaptive_targets_valid:
                 live_motion_is_safe = False
-                live_safety_exception = exc
+            else:
+                try:
+                    live_motion_is_safe = self._live_motion_is_safe_locked(
+                        control_targets, assembling_on_routes
+                    )
+                except Exception as exc:  # fail closed on corrupt live telemetry
+                    live_motion_is_safe = False
+                    live_safety_exception = exc
 
             if not live_motion_is_safe:
-                if live_safety_exception is None:
+                if invalid_command_ids:
+                    self.placement_error = (
+                        "A non-finite or out-of-bounds velocity command was "
+                        "rejected for: " + ", ".join(invalid_command_ids)
+                    )
+                elif not adaptive_targets_valid:
+                    self.placement_error = (
+                        "Adaptive formation produced invalid target geometry; "
+                        "all robots were stopped."
+                    )
+                elif live_safety_exception is None:
                     self.placement_error = (
                         "A live obstacle or invalid robot odometry invalidated "
                         "the formation orbit, slots, or remaining entry route."
@@ -2658,7 +2764,7 @@ class FormationController:
                         "unexpectedly; all robots were stopped."
                     )
             else:
-                for rid, command in commands_to_publish.items():
+                for rid, command in validated_commands.items():
                     pub = self.cmd_vel_pubs.get(rid)
                     if pub is not None:
                         pub.publish(command)
@@ -2699,8 +2805,8 @@ class FormationController:
             self.formation_state = FormationState.FORMING
 
         # ---- Publish status and markers ----
-        self._publish_status(world_targets, maximum_position_error)
-        self._publish_markers(world_targets)
+        self._publish_status(control_targets, maximum_position_error)
+        self._publish_markers(control_targets)
 
     def _odometry_readiness(self, robot_ids, now=None):
         """Split robots into first-message waiters and stale data sources."""

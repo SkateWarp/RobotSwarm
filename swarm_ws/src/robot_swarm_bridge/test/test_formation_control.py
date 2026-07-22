@@ -135,6 +135,17 @@ class PassThroughAvoidance:
         return command
 
 
+class AdaptiveThreatAvoidance(PassThroughAvoidance):
+    def __init__(self, repulsion_x=0.04, repulsion_y=0.0):
+        self.repulsion = Point(x=repulsion_x, y=repulsion_y)
+
+    def compute_threat_level(self):
+        return 1.0
+
+    def compute_repulsion_force(self):
+        return self.repulsion
+
+
 def _module(name, **attributes):
     module = types.ModuleType(name)
     for key, value in attributes.items():
@@ -339,6 +350,21 @@ def make_closed_loop_controller(robot_count, shape, spacing):
     )
     controller.assignments = dict(zip(controller.robot_ids, slots))
     controller.assignment_pending = False
+    controller.active_placement_plan = {
+        'kind': 'static',
+        'arena_size': controller.arena_size,
+        'arena_margin': controller.arena_margin,
+        'obstacle_clearance': controller.formation_obstacle_clearance,
+        'exclusion_zones': (),
+        'arena_profile': controller.arena_profile,
+    }
+    controller.route_waypoints = {
+        robot_id: [targets[controller.assignments[robot_id]]]
+        for robot_id in controller.robot_ids
+    }
+    controller.route_waypoint_indices = {
+        robot_id: 0 for robot_id in controller.robot_ids
+    }
     controller._slot_reached = {
         robot_id: False for robot_id in controller.robot_ids
     }
@@ -433,6 +459,38 @@ def apply_production_spawn_pattern(controller, robot_count, pattern):
 
 
 class FormationAssignmentTests(unittest.TestCase):
+    def test_open_moving_paths_keep_a_live_safe_placement_plan(self):
+        for centroid_path in (
+            formation.CentroidPath.LINEAR,
+            formation.CentroidPath.WAYPOINTS,
+        ):
+            with self.subTest(path=centroid_path.value):
+                controller = make_controller()
+                controller.movement_mode = formation.MovementMode.MOVING
+                controller.centroid_path = centroid_path
+                controller.formation_offsets = [(0.0, 0.0)]
+                if centroid_path == formation.CentroidPath.WAYPOINTS:
+                    controller.centroid_waypoints = [{'x': 1.0, 'y': 0.0}]
+
+                snapshot = controller._prepare_assignment_locked()
+
+                self.assertIsNotNone(snapshot['placement_plan'])
+                self.assertEqual(
+                    centroid_path.value,
+                    snapshot['placement_plan']['kind'],
+                )
+                self.assertTrue(
+                    controller._compute_and_commit_assignment(snapshot),
+                    controller.placement_error,
+                )
+                self.assertEqual(
+                    centroid_path.value,
+                    controller.active_placement_plan['kind'],
+                )
+                self.assertEqual(
+                    {'tb3_0'}, set(controller.route_waypoints)
+                )
+
     def test_start_plans_a_safe_orbit_and_holds_its_entry_pose(self):
         controller = make_controller()
         controller.robot_poses['tb3_0'] = Pose(x=2.0, y=3.0)
@@ -1149,6 +1207,15 @@ class FormationConvergenceTests(unittest.TestCase):
         (10, 'S', 0.55, 'grid'),
     )
 
+    @staticmethod
+    def _enable_pid_motion(controller):
+        controller.pid_linear['tb3_0'] = formation.PIDController(
+            0.6, 0.01, 0.15, 0.22
+        )
+        controller.pid_angular['tb3_0'] = formation.PIDController(
+            1.2, 0.0, 0.1, 1.5
+        )
+
     def _controller_with_a_positive_entry_command(self):
         controller = make_controller()
         controller.formation_offsets = [(0.0, 0.0)]
@@ -1519,6 +1586,218 @@ class FormationConvergenceTests(unittest.TestCase):
         self.assertIn('live obstacle', controller.placement_error)
         self.assertEqual(0.0, controller.centroid_time)
 
+    def test_open_path_target_outside_the_arena_fails_closed(self):
+        for centroid_path in (
+            formation.CentroidPath.LINEAR,
+            formation.CentroidPath.WAYPOINTS,
+        ):
+            with self.subTest(path=centroid_path.value):
+                controller = make_controller()
+                controller.movement_mode = formation.MovementMode.MOVING
+                controller.centroid_path = centroid_path
+                controller.formation_offsets = [(0.0, 0.0)]
+                controller.robot_poses['tb3_0'] = Pose(x=4.0, y=0.0)
+                if centroid_path == formation.CentroidPath.WAYPOINTS:
+                    controller.centroid_waypoints = [{'x': 5.0, 'y': 0.0}]
+
+                snapshot = controller._prepare_assignment_locked()
+                self.assertTrue(
+                    controller._compute_and_commit_assignment(snapshot),
+                    controller.placement_error,
+                )
+                controller.centroid_x = 4.649
+                controller.centroid_y = 0.0
+                controller.centroid_heading = 0.0
+                controller._initial_formation_acquired = True
+                controller._maximum_position_error = 0.0
+                controller.is_running = True
+                self._enable_pid_motion(controller)
+                generation = controller._assignment_generation
+
+                controller._control_step(None)
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                self.assertIn('live obstacle', controller.placement_error)
+                self.assertGreater(
+                    controller._assignment_generation, generation
+                )
+                self.assertEqual({}, controller.assignments)
+                messages = controller.cmd_vel_pubs['tb3_0'].messages
+                self.assertTrue(messages)
+                self.assertTrue(all(
+                    message.linear.x == 0.0
+                    and message.angular.z == 0.0
+                    for message in messages
+                ))
+
+    def test_linear_path_rechecks_an_obstacle_before_publishing(self):
+        controller = make_controller()
+        controller.movement_mode = formation.MovementMode.MOVING
+        controller.centroid_path = formation.CentroidPath.LINEAR
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.robot_poses['tb3_0'] = Pose(x=-0.5, y=0.0)
+        controller.spawn_exclusion_zones = [{
+            'name': 'moving_box',
+            'model': 'moving_box',
+            'worlds': ['swarm_arena'],
+            'shape': 'circle',
+            'x': 4.0,
+            'y': 4.0,
+            'radius': 0.10,
+        }]
+        controller._model_states_cb(ModelStates(
+            names=['moving_box'], poses=[Pose(x=4.0, y=4.0)]
+        ))
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(
+            controller._compute_and_commit_assignment(snapshot),
+            controller.placement_error,
+        )
+        controller._initial_formation_acquired = True
+        controller._maximum_position_error = 0.0
+        controller.is_running = True
+        self._enable_pid_motion(controller)
+        obstacle_was_moved = []
+
+        class MoveObstacleDuringCommand(PassThroughAvoidance):
+            def apply_avoidance(self, command):
+                target_x, target_y = controller._get_world_targets()[0]
+                controller._model_states_cb(ModelStates(
+                    names=['moving_box'],
+                    poses=[Pose(x=target_x, y=target_y)],
+                ))
+                obstacle_was_moved.append(True)
+                return command
+
+        controller.avoidance['tb3_0'] = MoveObstacleDuringCommand()
+
+        controller._control_step(None)
+
+        self.assertTrue(obstacle_was_moved)
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn('live obstacle', controller.placement_error)
+        messages = controller.cmd_vel_pubs['tb3_0'].messages
+        self.assertTrue(messages)
+        self.assertTrue(all(
+            message.linear.x == 0.0 and message.angular.z == 0.0
+            for message in messages
+        ))
+
+    def test_adaptive_deformed_target_is_validated_before_publish(self):
+        controller = make_controller()
+        controller.movement_mode = formation.MovementMode.ADAPTIVE
+        controller.centroid_path = formation.CentroidPath.LINEAR
+        controller.centroid_speed = 0.0
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.robot_poses['tb3_0'] = Pose(x=4.0, y=0.0)
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(
+            controller._compute_and_commit_assignment(snapshot),
+            controller.placement_error,
+        )
+        controller._initial_formation_acquired = True
+        controller._maximum_position_error = 0.0
+        controller.is_running = True
+        self._enable_pid_motion(controller)
+        controller.avoidance['tb3_0'] = AdaptiveThreatAvoidance()
+
+        controller._control_step(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn('live obstacle', controller.placement_error)
+        messages = controller.cmd_vel_pubs['tb3_0'].messages
+        self.assertTrue(messages)
+        self.assertTrue(all(
+            message.linear.x == 0.0 and message.angular.z == 0.0
+            for message in messages
+        ))
+
+    def test_safe_adaptive_target_drives_status_and_markers(self):
+        controller = make_controller()
+        controller.movement_mode = formation.MovementMode.ADAPTIVE
+        controller.centroid_path = formation.CentroidPath.LINEAR
+        controller.centroid_speed = 0.0
+        controller.formation_offsets = [(0.0, 0.0)]
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(
+            controller._compute_and_commit_assignment(snapshot),
+            controller.placement_error,
+        )
+        controller._initial_formation_acquired = True
+        controller._maximum_position_error = 0.0
+        controller.is_running = True
+        self._enable_pid_motion(controller)
+        controller.avoidance['tb3_0'] = AdaptiveThreatAvoidance()
+        published = {}
+        controller._publish_status = lambda targets, error: published.update(
+            status=list(targets), error=error
+        )
+        controller._publish_markers = lambda targets: published.update(
+            markers=list(targets)
+        )
+
+        controller._control_step(None)
+
+        self.assertTrue(controller.is_running, controller.placement_error)
+        self.assertEqual(
+            formation.FormationState.DEFORMING,
+            controller.formation_state,
+        )
+        self.assertAlmostEqual(0.99, published['status'][0][0], places=6)
+        self.assertEqual(published['status'], published['markers'])
+        self.assertAlmostEqual(0.0, controller._get_world_targets()[0][0])
+        command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertGreater(command.linear.x, 0.0)
+
+    def test_non_finite_adaptive_geometry_fails_closed(self):
+        controller = make_controller()
+        controller.movement_mode = formation.MovementMode.ADAPTIVE
+        controller.centroid_path = formation.CentroidPath.LINEAR
+        controller.centroid_speed = 0.0
+        controller.formation_offsets = [(0.0, 0.0)]
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(
+            controller._compute_and_commit_assignment(snapshot),
+            controller.placement_error,
+        )
+        controller._initial_formation_acquired = True
+        controller._maximum_position_error = 0.0
+        controller.is_running = True
+        self._enable_pid_motion(controller)
+        controller.avoidance['tb3_0'] = AdaptiveThreatAvoidance(
+            repulsion_x=float('nan')
+        )
+
+        controller._control_step(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn('invalid target geometry', controller.placement_error)
+        messages = controller.cmd_vel_pubs['tb3_0'].messages
+        self.assertTrue(messages)
+        self.assertTrue(all(
+            math.isfinite(message.linear.x)
+            and math.isfinite(message.angular.z)
+            and message.linear.x == 0.0
+            and message.angular.z == 0.0
+            for message in messages
+        ))
+
     def test_obstacle_entering_an_assembly_route_only_publishes_stop(self):
         controller = make_controller()
         controller.formation_offsets = [(0.0, 0.0)]
@@ -1687,6 +1966,114 @@ class FormationConvergenceTests(unittest.TestCase):
             formation.FormationState.FAILED, controller.formation_state
         )
         self.assertIn('invalid live data', controller.placement_error)
+        self.assertEqual({}, controller.assignments)
+        emitted = controller.cmd_vel_pubs['tb3_0'].messages[previous_count:]
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
+
+    def test_invalid_velocity_command_fails_closed_before_publish(self):
+        cases = (
+            ('nan_linear', 'linear', 'x', float('nan'), None, None),
+            ('infinite_angular', 'angular', 'z', float('inf'), None, None),
+            ('linear_over_limit', 'linear', 'x', 0.23, None, None),
+            ('angular_over_limit', 'angular', 'z', 1.51, None, None),
+            ('negative_linear_limit', 'linear', 'x', 0.0, -0.1, None),
+            ('negative_angular_limit', 'angular', 'z', 0.0, None, -0.1),
+            ('burger_linear_limit', 'linear', 'x', 0.23, 1.0, None),
+            ('burger_angular_limit', 'angular', 'z', 2.85, None, 10.0),
+        )
+
+        for (
+            label, vector, field, value, linear_limit, angular_limit
+        ) in cases:
+            with self.subTest(case=label):
+                controller = self._controller_with_a_positive_entry_command()
+                if linear_limit is not None:
+                    controller.max_linear_vel = linear_limit
+                if angular_limit is not None:
+                    controller.max_angular_vel = angular_limit
+                previous_count = len(
+                    controller.cmd_vel_pubs['tb3_0'].messages
+                )
+                generation = controller._assignment_generation
+                late_snapshot = {
+                    'generation': generation,
+                    'robot_ids': tuple(controller.robot_ids),
+                    'robot_positions': tuple(
+                        (
+                            controller.robot_poses[robot_id].position.x,
+                            controller.robot_poses[robot_id].position.y,
+                        )
+                        for robot_id in controller.robot_ids
+                    ),
+                    'target_world': tuple(controller._get_world_targets()),
+                    'previous_slots': tuple(
+                        controller.assignments.get(robot_id)
+                        for robot_id in controller.robot_ids
+                    ),
+                    'switch_penalty': (controller.spacing * 0.35) ** 2,
+                    'placement_plan': dict(
+                        controller.active_placement_plan
+                    ),
+                }
+
+                class InvalidCommandAvoidance(PassThroughAvoidance):
+                    def apply_avoidance(self, _command):
+                        command = Twist()
+                        setattr(getattr(command, vector), field, value)
+                        return command
+
+                controller.avoidance['tb3_0'] = InvalidCommandAvoidance()
+
+                controller._control_loop(None)
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                self.assertIn(
+                    'non-finite or out-of-bounds',
+                    controller.placement_error,
+                )
+                self.assertGreater(
+                    controller._assignment_generation, generation
+                )
+                self.assertFalse(controller.assignment_pending)
+                self.assertEqual({}, controller.assignments)
+                self.assertFalse(
+                    controller._compute_and_commit_assignment(late_snapshot)
+                )
+                self.assertEqual({}, controller.assignments)
+                emitted = controller.cmd_vel_pubs['tb3_0'].messages[
+                    previous_count:
+                ]
+                self.assertTrue(emitted)
+                self.assertTrue(all(
+                    math.isfinite(command.linear.x)
+                    and math.isfinite(command.angular.z)
+                    and command.linear.x == 0.0
+                    and command.angular.z == 0.0
+                    for command in emitted
+                ))
+
+    def test_missing_active_plan_cannot_publish_motion(self):
+        controller = self._controller_with_a_positive_entry_command()
+        previous_count = len(controller.cmd_vel_pubs['tb3_0'].messages)
+        generation = controller._assignment_generation
+        controller.active_placement_plan = None
+
+        controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertGreater(controller._assignment_generation, generation)
         self.assertEqual({}, controller.assignments)
         emitted = controller.cmd_vel_pubs['tb3_0'].messages[previous_count:]
         self.assertTrue(emitted)
