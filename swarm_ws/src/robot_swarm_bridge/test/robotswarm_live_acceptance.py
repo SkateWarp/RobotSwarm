@@ -31,6 +31,7 @@ ROBOT_RE = re.compile(r"^tb3_\d+$")
 TERMINAL_STATES = {"completed", "failed", "stopped"}
 TRANSPORT_PROGRESS_EPSILON_M = 0.001
 MINIMUM_FORMATION_ACTIVE_SECONDS = 15.0
+MINIMUM_FOLLOW_ACTIVE_SECONDS = 15.0
 TRANSPORT_PHASES = frozenset({
     "SEARCH", "APPROACH", "PUSH", "DONE", "FAILED",
 })
@@ -398,6 +399,37 @@ def validate_formation_active_selection(seconds, cases):
     ):
         raise ValueError(
             "--formation-active-seconds requires exactly one formation scenario"
+        )
+    return active_seconds
+
+
+def validate_follow_active_selection(seconds, cases):
+    """Keep a selected follow task alive long enough for an external GUI gate."""
+    try:
+        active_seconds = float(seconds)
+    except (TypeError, ValueError):
+        raise ValueError("--follow-active-seconds must be a number")
+    if not math.isfinite(active_seconds):
+        raise ValueError("--follow-active-seconds must be finite")
+    if active_seconds < 0.0:
+        raise ValueError("--follow-active-seconds cannot be negative")
+    if 0.0 < active_seconds < MINIMUM_FOLLOW_ACTIVE_SECONDS:
+        raise ValueError(
+            "--follow-active-seconds must be zero or at least {:.0f}".format(
+                MINIMUM_FOLLOW_ACTIVE_SECONDS
+            )
+        )
+    if active_seconds > 240.0:
+        raise ValueError("--follow-active-seconds cannot exceed 240")
+    if active_seconds and (
+        len(cases) != 1 or cases[0]["behavior"] != "follow"
+    ):
+        raise ValueError(
+            "--follow-active-seconds requires exactly one follow scenario"
+        )
+    if active_seconds and active_seconds > float(cases[0]["duration"]):
+        raise ValueError(
+            "--follow-active-seconds cannot exceed the scenario duration"
         )
     return active_seconds
 
@@ -3634,6 +3666,10 @@ class AcceptanceHarness:
             float(getattr(self.args, "formation_active_seconds", 0.0) or 0.0)
             if case["behavior"] == "formation" else 0.0
         )
+        follow_active_seconds = (
+            float(getattr(self.args, "follow_active_seconds", 0.0) or 0.0)
+            if case["behavior"] == "follow" else 0.0
+        )
         follow_lap_completed = False
         collision_start = 0
         metrics = None
@@ -3802,6 +3838,7 @@ class AcceptanceHarness:
                         )
             elif case["behavior"] == "follow":
                 deadline = time.monotonic() + case["duration"]
+                active_window_started = time.monotonic()
                 while time.monotonic() < deadline and not self.stop_requested:
                     with self.lock:
                         state = self.swarm_task.get("status")
@@ -3813,7 +3850,12 @@ class AcceptanceHarness:
                         case["mode"],
                         required_follow_laps,
                     )
-                    if follow_lap_completed:
+                    active_window_complete = (
+                        not follow_active_seconds
+                        or time.monotonic() - active_window_started
+                        >= follow_active_seconds
+                    )
+                    if follow_lap_completed and active_window_complete:
                         break
                     if state in {"failed", "stopped"} or emergency:
                         break
@@ -3824,6 +3866,29 @@ class AcceptanceHarness:
                             case["name"], required_follow_laps
                         )
                     )
+                observed_active_seconds = max(
+                    0.0, time.monotonic() - active_window_started
+                )
+                if follow_active_seconds:
+                    active_window_complete = (
+                        observed_active_seconds + 0.001
+                        >= follow_active_seconds
+                    )
+                    result["follow_active_window"] = {
+                        "requested_wall_seconds": follow_active_seconds,
+                        "observed_wall_seconds": rounded(
+                            observed_active_seconds
+                        ),
+                        "required_laps": required_follow_laps,
+                        "lap_requirement_met": follow_lap_completed,
+                        "completed": (
+                            active_window_complete and follow_lap_completed
+                        ),
+                    }
+                    if not active_window_complete:
+                        result["failures"].append(
+                            "follow active window was interrupted"
+                        )
                 with self.lock:
                     state = self.swarm_task.get("status")
                 result["task_outcome"] = (
@@ -3939,6 +4004,9 @@ class AcceptanceHarness:
                     if formation_active_seconds else None
                 ),
                 "minimum_follow_robot_travel_m": self.args.min_follow_travel,
+                "minimum_follow_active_wall_seconds": (
+                    follow_active_seconds if follow_active_seconds else None
+                ),
                 "minimum_follow_completed_laps": (
                     required_follow_laps
                     if case["behavior"] == "follow" else None
@@ -4663,6 +4731,15 @@ def build_parser():
             "window; zero keeps the normal static acceptance behavior"
         ),
     )
+    parser.add_argument(
+        "--follow-active-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "keep one selected follow task active for a bounded wall-time "
+            "window after dispatch; zero keeps the normal lap-only behavior"
+        ),
+    )
     parser.add_argument("--list", action="store_true", help="list scenario names and exit")
     parser.add_argument("--min-rtf", type=float, default=2.90)
     parser.add_argument("--min-center-distance", type=float, default=0.24)
@@ -4830,6 +4907,9 @@ def main():
     try:
         args.formation_active_seconds = validate_formation_active_selection(
             args.formation_active_seconds, cases
+        )
+        args.follow_active_seconds = validate_follow_active_selection(
+            args.follow_active_seconds, cases
         )
     except ValueError as exc:
         parser.error(str(exc))

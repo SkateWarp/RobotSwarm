@@ -213,8 +213,16 @@ class PayloadLoadProbeTests(unittest.TestCase):
             'tb3_0': {'position': (-0.315, 0.0, 0.0)},
         }
         probe.log = lambda _message: None
-        probe.reset_fleet = lambda _count: None
-        probe.arrange_pushers = lambda: ['tb3_0']
+        setup_events = []
+        probe.reset_fleet = lambda count: setup_events.append(
+            ('reset_fleet', count)
+        )
+        probe.replace_payload = lambda payload: setup_events.append(
+            ('replace_payload', payload)
+        )
+        probe.arrange_pushers = lambda: (
+            setup_events.append(('arrange_pushers', None)) or ['tb3_0']
+        )
         probe.wait_for = lambda predicate, _timeout, description: (
             self.assertTrue(predicate(), description)
         )
@@ -239,7 +247,7 @@ class PayloadLoadProbeTests(unittest.TestCase):
         ), mock.patch.object(
             PROBE.time, 'monotonic', side_effect=lambda: wall_time[0]
         ), mock.patch.object(PROBE.time, 'sleep', side_effect=sleep):
-            result = probe.run_trial(1)
+            result = probe.run_trial(1, 'loaded-model')
 
         self.assertEqual(12.0, result['push_duration_sim_s'])
         self.assertEqual(4.0, result['push_duration_wall_s'])
@@ -247,6 +255,14 @@ class PayloadLoadProbeTests(unittest.TestCase):
         self.assertEqual(112.5, probe.sim_time)
         self.assertEqual(8, Publisher.instances[0].speeds.count(0.0))
         self.assertTrue(Publisher.instances[0].unregistered)
+        self.assertEqual(
+            [
+                ('reset_fleet', 1),
+                ('replace_payload', 'loaded-model'),
+                ('arrange_pushers', None),
+            ],
+            setup_events,
+        )
 
     def test_capacity_gate_accepts_resistant_single_and_moving_fleet(self):
         single = self.trial(1, 0.02, {'tb3_0': 0.01})

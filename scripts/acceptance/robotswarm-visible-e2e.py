@@ -62,6 +62,9 @@ POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
 DEFAULT_PORTS = {"A": 9332, "B": 9333}
 SCENE_PIXEL_THRESHOLD = 32
 MIN_SCENE_DIFFERENCE_RATIO = 0.00075
+FAST_FIGURE_RECORD_SETTLE_SECONDS = 5.0
+MAX_VIEWER_LEASE_SECONDS = 30 * 60
+VIEWER_LEASE_COUNTDOWN = re.compile(r"Vence en (0|[1-9]\d*):([0-5]\d)")
 
 LOGIN_EMAIL = 'input[name="email"]'
 LOGIN_PASSWORD = 'input[name="password"]'
@@ -117,6 +120,23 @@ class DriverError(RuntimeError):
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_viewer_lease_countdown(value: Any) -> int:
+    """Return the remaining lease seconds exposed by the browser viewer."""
+    if not isinstance(value, str):
+        raise DriverError("The viewer lease countdown was not published")
+
+    match = VIEWER_LEASE_COUNTDOWN.fullmatch(value.strip())
+    if match is None:
+        raise DriverError("The viewer lease countdown did not use the Vence en M:SS format")
+
+    remaining = int(match.group(1)) * 60 + int(match.group(2))
+    if remaining <= 0:
+        raise DriverError("The interactive viewer published an expired lease countdown")
+    if remaining > MAX_VIEWER_LEASE_SECONDS:
+        raise DriverError("The viewer lease countdown exceeded the 30-minute backend limit")
+    return remaining
 
 
 def parse_backend_time(value: Any, field: str) -> dt.datetime | None:
@@ -479,21 +499,52 @@ class CdpClient:
                     raise DriverError(f"CDP {method} failed ({error.get('code', 'unknown')})")
                 return reply.get("result", {})
 
-    def evaluate(self, expression: str, *, await_promise: bool = False, timeout: float = 30.0) -> Any:
+    def evaluate(
+        self,
+        expression: str,
+        *,
+        await_promise: bool = False,
+        context_id: int | None = None,
+        timeout: float = 30.0,
+    ) -> Any:
+        parameters: dict[str, Any] = {
+            "expression": expression,
+            "awaitPromise": await_promise,
+            "returnByValue": True,
+            "userGesture": True,
+        }
+        if context_id is not None:
+            parameters["contextId"] = context_id
         result = self.call(
             "Runtime.evaluate",
-            {
-                "expression": expression,
-                "awaitPromise": await_promise,
-                "returnByValue": True,
-                "userGesture": True,
-            },
+            parameters,
             timeout=timeout,
         )
         remote = result.get("result", {})
         if remote.get("subtype") == "error" or result.get("exceptionDetails"):
             raise DriverError("JavaScript evaluation failed")
         return remote.get("value")
+
+    def create_isolated_world(self) -> int:
+        """Create a DOM-visible world whose globals the application cannot edit."""
+        frame_tree = self.call("Page.getFrameTree")
+        frame_id = (
+            (frame_tree.get("frameTree") or {}).get("frame") or {}
+        ).get("id")
+        if not isinstance(frame_id, str) or not frame_id:
+            raise DriverError("Could not identify the main frame for trusted input evidence")
+        result = self.call(
+            "Page.createIsolatedWorld",
+            {
+                "frameId": frame_id,
+                "worldName": "robotswarm-acceptance-input",
+                "grantUniveralAccess": False,
+            },
+        )
+        context_id = result.get("executionContextId")
+        if not isinstance(context_id, int) or context_id <= 0:
+            raise DriverError("Chrome did not create the isolated input evidence world")
+        return context_id
 
 
 @dataclass
@@ -670,6 +721,7 @@ class RobotSwarmUi:
         self.created_session = False
         self.started_task_session_id: str | None = None
         self.started_task_id: str | None = None
+        self._click_evidence: list[dict[str, Any]] = []
 
     def raise_if_interrupted(self) -> None:
         if self.stop_event.is_set():
@@ -697,6 +749,56 @@ class RobotSwarmUi:
             raise DriverError("Could not inspect the current page")
         return {key: str(result.get(key, "")) for key in ("url", "origin", "path", "title")}
 
+    def browser_media_capabilities(self) -> dict[str, bool]:
+        """Mirror the hls.js platform gate without creating a viewer lease."""
+        result = self.cdp.evaluate("""
+            (() => {
+                const mediaSource = window.MediaSource || window.WebKitMediaSource;
+                const sourceBuffer = window.SourceBuffer || window.WebKitSourceBuffer;
+                const sourceBufferReady = !sourceBuffer || Boolean(
+                    sourceBuffer.prototype &&
+                    typeof sourceBuffer.prototype.appendBuffer === 'function' &&
+                    typeof sourceBuffer.prototype.remove === 'function'
+                );
+                const supports = mime => Boolean(
+                    mediaSource &&
+                    typeof mediaSource.isTypeSupported === 'function' &&
+                    mediaSource.isTypeSupported(mime)
+                );
+                const baselineAvc = supports(
+                    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"'
+                );
+                const baselineAudio = supports('audio/mp4;codecs="mp4a.40.2"');
+                return {
+                    mediaSource: Boolean(mediaSource),
+                    sourceBufferReady,
+                    baselineAvc,
+                    baselineAudio,
+                    hlsJsEquivalent: Boolean(
+                        mediaSource && sourceBufferReady && (baselineAvc || baselineAudio)
+                    ),
+                };
+            })()
+        """)
+        if not isinstance(result, dict) or not all(
+            isinstance(result.get(key), bool)
+            for key in (
+                "mediaSource",
+                "sourceBufferReady",
+                "baselineAvc",
+                "baselineAudio",
+                "hlsJsEquivalent",
+            )
+        ):
+            raise DriverError("Could not inspect the browser HLS capabilities")
+        return {key: bool(value) for key, value in result.items()}
+
+    def require_hls_media_capabilities(self) -> dict[str, bool]:
+        capabilities = self.browser_media_capabilities()
+        if not capabilities["hlsJsEquivalent"] or not capabilities["baselineAvc"]:
+            raise DriverError("Visible Chrome does not currently expose H.264 MediaSource support")
+        return capabilities
+
     def assert_origin(self) -> None:
         if self.current_page()["origin"] != self.expected_origin:
             raise DriverError("Login was redirected outside the expected RobotSwarm origin")
@@ -716,42 +818,173 @@ class RobotSwarmUi:
         if self.cdp.evaluate(expression) is not True:
             raise DriverError("A required form input was not found")
 
-    def click_selector(self, selector: str, description: str) -> None:
+    def click_selector(
+        self,
+        selector: str,
+        description: str,
+        *,
+        require_trusted: bool = False,
+    ) -> dict[str, Any]:
+        click_context = self.cdp.create_isolated_world()
         point = self.cdp.evaluate(f"""
             (() => {{
                 const element = document.querySelector({json.dumps(selector)});
                 if (!element || element.disabled) return false;
                 element.scrollIntoView({{block: 'center'}});
                 const box = element.getBoundingClientRect();
-                return {{x: box.left + box.width / 2, y: box.top + box.height / 2}};
+                const x = box.left + box.width / 2;
+                const y = box.top + box.height / 2;
+                const hit = document.elementFromPoint(x, y);
+                if (!hit || !element.contains(hit)) return false;
+                globalThis.__robotswarmAcceptanceClick = {{received: false, trusted: false}};
+                element.addEventListener('click', event => {{
+                    globalThis.__robotswarmAcceptanceClick = {{
+                        received: true,
+                        trusted: Boolean(event.isTrusted),
+                    }};
+                }}, {{capture: true, once: true}});
+                return {{x, y}};
             }})()
-        """)
+        """, context_id=click_context)
         if not isinstance(point, dict):
             raise DriverError(f"Could not click {description}")
-        self._mouse_click(float(point["x"]), float(point["y"]))
+        return self._activate_prepared_click(
+            float(point["x"]),
+            float(point["y"]),
+            f"""
+                (() => {{
+                    const element = document.querySelector({json.dumps(selector)});
+                    if (!element || element.disabled) return false;
+                    element.click();
+                    return true;
+                }})()
+            """,
+            description,
+            require_trusted=require_trusted,
+            click_context=click_context,
+        )
 
     def has_button(self, text: str) -> bool:
         return bool(self.cdp.evaluate(self._text_element_expression("button", text, click=False)))
 
-    def click_button(self, text: str) -> None:
-        point = self.cdp.evaluate(self._text_element_point_expression("button", text))
+    def click_button(self, text: str, *, require_trusted: bool = False) -> dict[str, Any]:
+        click_context = self.cdp.create_isolated_world()
+        point = self.cdp.evaluate(
+            self._text_element_point_expression("button", text, arm_click_probe=True),
+            context_id=click_context,
+        )
         if not isinstance(point, dict):
             raise DriverError(f"Button is missing, disabled, or covered: {text}")
-        self._mouse_click(float(point["x"]), float(point["y"]))
+        return self._activate_prepared_click(
+            float(point["x"]),
+            float(point["y"]),
+            self._text_element_expression("button", text, click=True),
+            f"button {text}",
+            require_trusted=require_trusted,
+            click_context=click_context,
+        )
+
+    def _activate_prepared_click(
+        self,
+        x: float,
+        y: float,
+        fallback_expression: str,
+        description: str,
+        *,
+        require_trusted: bool,
+        click_context: int,
+    ) -> dict[str, Any]:
+        """Prefer one trusted CDP click, then use one verified browser fallback."""
+        self.cdp.call("Page.bringToFront")
+        self.cdp.evaluate("window.focus(); true", context_id=click_context)
+        self._mouse_click(x, y)
+        try:
+            click = self.cdp.evaluate(
+                "globalThis.__robotswarmAcceptanceClick || null",
+                context_id=click_context,
+            )
+        except DriverError:
+            # A navigation can replace the JavaScript context immediately after
+            # a successful click.  The caller's state wait remains authoritative.
+            evidence = {
+                "description": description,
+                "received": True,
+                "trusted": None,
+                "fallbackUsed": False,
+                "contextReplaced": True,
+            }
+            if require_trusted:
+                raise DriverError(f"Could not prove a trusted click for {description}")
+            self._click_evidence.append(evidence)
+            return evidence
+        if isinstance(click, dict) and click.get("received") is True:
+            evidence = {
+                "description": description,
+                "received": True,
+                "trusted": click.get("trusted") is True,
+                "fallbackUsed": False,
+                "contextReplaced": False,
+            }
+            if require_trusted and evidence["trusted"] is not True:
+                raise DriverError(f"The click for {description} was not a trusted browser event")
+            self._click_evidence.append(evidence)
+            return evidence
+        if require_trusted:
+            raise DriverError(f"Chrome did not dispatch a trusted click for {description}")
+        if self.cdp.evaluate(fallback_expression, context_id=click_context) is not True:
+            raise DriverError(f"Could not activate {description}")
+        evidence = {
+            "description": description,
+            "received": True,
+            "trusted": False,
+            "fallbackUsed": True,
+            "contextReplaced": False,
+        }
+        self._click_evidence.append(evidence)
+        return evidence
+
+    def click_evidence(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._click_evidence]
 
     def _mouse_click(self, x: float, y: float) -> None:
-        self.cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
         self.cdp.call(
             "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {
+                "type": "mouseMoved",
+                "x": x,
+                "y": y,
+                "buttons": 0,
+                "pointerType": "mouse",
+            },
         )
         self.cdp.call(
             "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {
+                "type": "mousePressed",
+                "x": x,
+                "y": y,
+                "button": "left",
+                "buttons": 1,
+                "clickCount": 1,
+                "pointerType": "mouse",
+            },
+        )
+        self.cdp.call(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseReleased",
+                "x": x,
+                "y": y,
+                "button": "left",
+                "buttons": 0,
+                "clickCount": 1,
+                "pointerType": "mouse",
+            },
         )
 
     def select_option(self, label_id: str, option_text: str) -> None:
         """Open a Material UI Select and choose its visible option with mouse events."""
+        click_context = self.cdp.create_isolated_world()
         control_point = self.cdp.evaluate(f"""
             (() => {{
                 const labelId = {json.dumps(label_id)};
@@ -764,12 +997,40 @@ class RobotSwarmUi:
                 if (!control || control.getAttribute('aria-disabled') === 'true') return false;
                 control.scrollIntoView({{block: 'center'}});
                 const box = control.getBoundingClientRect();
-                return {{x: box.left + box.width / 2, y: box.top + box.height / 2}};
+                const x = box.left + box.width / 2;
+                const y = box.top + box.height / 2;
+                const hit = document.elementFromPoint(x, y);
+                if (!hit || !control.contains(hit)) return false;
+                globalThis.__robotswarmAcceptanceClick = {{received: false, trusted: false}};
+                control.addEventListener('click', event => {{
+                    globalThis.__robotswarmAcceptanceClick = {{
+                        received: true,
+                        trusted: Boolean(event.isTrusted),
+                    }};
+                }}, {{capture: true, once: true}});
+                return {{x, y}};
             }})()
-        """)
+        """, context_id=click_context)
         if not isinstance(control_point, dict):
             raise DriverError(f"Material UI select was not found: {label_id}")
-        self._mouse_click(float(control_point["x"]), float(control_point["y"]))
+        self._activate_prepared_click(
+            float(control_point["x"]),
+            float(control_point["y"]),
+            f"""
+                (() => {{
+                    const label = document.getElementById({json.dumps(label_id)});
+                    const control = label
+                        ? document.querySelector(`[aria-labelledby~="${{label.id}}"]`)
+                        : null;
+                    if (!control || control.getAttribute('aria-disabled') === 'true') return false;
+                    control.click();
+                    return true;
+                }})()
+            """,
+            f"Material UI select {label_id}",
+            require_trusted=False,
+            click_context=click_context,
+        )
 
         option_expression = self._text_element_point_expression('[role="option"]', option_text)
         deadline = time.monotonic() + 12
@@ -777,7 +1038,25 @@ class RobotSwarmUi:
             self.raise_if_interrupted()
             point = self.cdp.evaluate(option_expression)
             if isinstance(point, dict):
-                self._mouse_click(float(point["x"]), float(point["y"]))
+                click_context = self.cdp.create_isolated_world()
+                armed_point = self.cdp.evaluate(
+                    self._text_element_point_expression(
+                        '[role="option"]', option_text, arm_click_probe=True
+                    ),
+                    context_id=click_context,
+                )
+                if not isinstance(armed_point, dict):
+                    raise DriverError(f"Material UI option disappeared: {option_text}")
+                self._activate_prepared_click(
+                    float(armed_point["x"]),
+                    float(armed_point["y"]),
+                    self._text_element_expression(
+                        '[role="option"]', option_text, click=True
+                    ),
+                    f"Material UI option {option_text}",
+                    require_trusted=False,
+                    click_context=click_context,
+                )
                 selected_expression = f"""
                     (() => {{
                         const labelId = {json.dumps(label_id)};
@@ -853,7 +1132,21 @@ class RobotSwarmUi:
         """
 
     @staticmethod
-    def _text_element_point_expression(selector: str, text: str) -> str:
+    def _text_element_point_expression(
+        selector: str,
+        text: str,
+        *,
+        arm_click_probe: bool = False,
+    ) -> str:
+        arm = """
+                globalThis.__robotswarmAcceptanceClick = {received: false, trusted: false};
+                element.addEventListener('click', event => {
+                    globalThis.__robotswarmAcceptanceClick = {
+                        received: true,
+                        trusted: Boolean(event.isTrusted),
+                    };
+                }, {capture: true, once: true});
+        """ if arm_click_probe else ""
         return f"""
             (() => {{
                 const wanted = {json.dumps(text)};
@@ -867,6 +1160,7 @@ class RobotSwarmUi:
                 const y = box.top + box.height / 2;
                 const hit = document.elementFromPoint(x, y);
                 if (!hit || !element.contains(hit)) return false;
+                {arm}
                 return {{x, y}};
             }})()
         """
@@ -938,8 +1232,10 @@ class RobotSwarmUi:
         self.wait_js(condition, timeout, f"Ready state for {robot_count} robots")
         return {"state": "Ready", "activeRobots": robot_count}
 
-    def open_viewer(self, timeout: float) -> None:
+    def request_viewer(self) -> None:
         self.click_button(OPEN_VIEWER_BUTTON)
+
+    def wait_viewer_frame(self, timeout: float) -> None:
         condition = """
             (() => {
                 const videos = [...document.querySelectorAll('video')].filter(item => item.offsetParent !== null);
@@ -947,6 +1243,58 @@ class RobotSwarmUi:
             })()
         """
         self.wait_js(condition, timeout, "a decoded private viewer frame")
+
+    def open_viewer(self, timeout: float) -> None:
+        self.request_viewer()
+        self.wait_viewer_frame(timeout)
+
+    def viewer_startup_state(self) -> dict[str, Any]:
+        """Return a bounded, token-free snapshot when the first frame is late."""
+        result = self.cdp.evaluate(r"""
+            (() => {
+                const clean = value => (value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+                const visible = element => Boolean(element && element.offsetParent !== null);
+                return {
+                    path: location.pathname,
+                    visibilityState: document.visibilityState,
+                    focused: document.hasFocus(),
+                    userActivationActive: Boolean(navigator.userActivation?.isActive),
+                    userActivationSeen: Boolean(navigator.userActivation?.hasBeenActive),
+                    mediaSource: Boolean(window.MediaSource || window.WebKitMediaSource),
+                    sourceBuffer: Boolean(window.SourceBuffer || window.WebKitSourceBuffer),
+                    baselineAvc: Boolean(
+                        (window.MediaSource || window.WebKitMediaSource)?.isTypeSupported?.(
+                            'video/mp4;codecs="avc1.42E01E,mp4a.40.2"'
+                        )
+                    ),
+                    hlsResourceCount: performance.getEntriesByType('resource').filter(entry =>
+                        /\/hls\/|\.m3u8(?:$|\?)/i.test(entry.name)
+                    ).length,
+                    preparing: visible(document.querySelector('[data-testid="viewer-preparing"]')),
+                    commandError: visible(document.querySelector('[data-testid="viewer-command-error"]')),
+                    privateViewerMounted: visible(document.querySelector('[data-testid="private-viewer"]')),
+                    closing: visible(document.querySelector('[data-testid="viewer-closing"]')),
+                    statuses: [...document.querySelectorAll(
+                        '[data-testid="viewer-status"], [role="alert"], [data-testid="viewer-preparing"]'
+                    )].filter(visible).map(element => clean(element.textContent)).filter(Boolean).slice(0, 8),
+                    videos: [...document.querySelectorAll('video')].map(video => ({
+                        visible: visible(video),
+                        readyState: video.readyState,
+                        width: video.videoWidth,
+                        height: video.videoHeight,
+                        paused: video.paused,
+                        mediaErrorCode: video.error?.code || null,
+                    })).slice(0, 4),
+                    openButton: [...document.querySelectorAll('button')].some(button =>
+                        clean(button.textContent) === 'Abrir visor' && !button.disabled),
+                    closeButton: [...document.querySelectorAll('button')].some(button =>
+                        clean(button.textContent).startsWith('Cerrar visor') && !button.disabled),
+                };
+            })()
+        """)
+        if not isinstance(result, dict):
+            raise DriverError("Could not inspect the private viewer startup state")
+        return result
 
     def close_viewer_while_task_runs(self, continuity_seconds: float = 10.0) -> dict[str, Any]:
         before = self.task_status()
@@ -994,6 +1342,7 @@ class RobotSwarmUi:
                 const video = document.querySelector('[data-testid="viewer-video"]');
                 const status = document.querySelector('[data-testid="viewer-status"]');
                 const fps = document.querySelector('[data-testid="viewer-fps"]');
+                const lease = document.querySelector('[data-testid="viewer-lease-countdown"]');
                 const control = document.querySelector('[aria-label="Activar control interactivo"], '
                     + '[aria-label="Desactivar control interactivo"]');
                 const fullscreen = document.querySelector('[aria-label="Abrir visor en pantalla completa"], '
@@ -1010,6 +1359,7 @@ class RobotSwarmUi:
                 return {
                     status: (status?.textContent || '').trim(),
                     fps: (fps?.getAttribute('aria-label') || fps?.textContent || '').trim(),
+                    leaseCountdown: (lease?.getAttribute('aria-label') || lease?.textContent || '').trim(),
                     hlsInteractive: !document.querySelector('[data-testid="whep-fallback-note"]'),
                     controlText: (control?.textContent || '').trim(),
                     controlDisabled: Boolean(control?.disabled),
@@ -1038,8 +1388,15 @@ class RobotSwarmUi:
                     const status = document.querySelector('[data-testid="viewer-status"]')?.textContent.trim();
                     const fpsChip = document.querySelector('[data-testid="viewer-fps"]');
                     const fps = (fpsChip?.getAttribute('aria-label') || fpsChip?.textContent || '').trim();
+                    const leaseChip = document.querySelector('[data-testid="viewer-lease-countdown"]');
+                    const lease = (leaseChip?.getAttribute('aria-label') || leaseChip?.textContent || '').trim();
+                    const leaseParts = /^Vence en (0|[1-9]\\d*):([0-5]\\d)$/.exec(lease);
+                    const leaseSeconds = leaseParts
+                        ? Number(leaseParts[1]) * 60 + Number(leaseParts[2])
+                        : 0;
                     const control = document.querySelector('[aria-label="Activar control interactivo"]');
                     return status === 'En vivo' && /^Video \\d+(?:\\.\\d+)? FPS$/.test(fps)
+                        && leaseSeconds > 0 && leaseSeconds <= 30 * 60
                         && control && !control.disabled
                         && !document.querySelector('[data-testid="whep-fallback-note"]');
                 })()
@@ -1056,6 +1413,9 @@ class RobotSwarmUi:
             raise DriverError("The interactive-control button was disabled")
         if not re.fullmatch(r"Video \d+(?:\.\d+)? FPS", str(state.get("fps", ""))):
             raise DriverError("The viewer did not expose a numeric decoded FPS value")
+        state["leaseSecondsRemaining"] = parse_viewer_lease_countdown(
+            state.get("leaseCountdown")
+        )
         video = state.get("video") or {}
         if int(video.get("readyState") or 0) < 2 or int(video.get("width") or 0) <= 0:
             raise DriverError("The interactive viewer had no decoded video frame")
@@ -1348,7 +1708,7 @@ class RobotSwarmUi:
         entered = False
         left_with_escape = False
         try:
-            self.click_button("Pantalla completa")
+            self.click_button("Pantalla completa", require_trusted=True)
             self.wait_js(
                 "document.fullscreenElement === document.querySelector('[data-testid=\"private-viewer\"]')",
                 15,
@@ -1512,19 +1872,25 @@ class RobotSwarmUi:
                 f"Parallel task-start barrier was broken before {expected_type} click"
             ) from exc
         click_started = time.monotonic()
-        self.click_button(START_TASK_BUTTON)
+        self.click_button(START_TASK_BUTTON, require_trusted=True)
         accepted = self._wait_for_new_task(session_id, previous_ids, expected_type)
         self.started_task_session_id = session_id
         return click_started, accepted
 
-    def start_figure_triangle(self, start_barrier: threading.Barrier) -> dict[str, Any]:
+    def start_figure_letter_a(self, start_barrier: threading.Barrier) -> dict[str, Any]:
         self.select_task_type("Figure")
         self.wait_js("Boolean(document.getElementById('formation-type-label'))", 10, "figure controls")
-        self.select_option("formation-type-label", "Triángulo")
+        self.select_option("formation-type-label", "Letra")
+        self.wait_js(
+            "Boolean(document.getElementById('formation-letter-label'))",
+            10,
+            "letter controls",
+        )
+        self.select_option("formation-letter-label", "A")
         click_started, accepted = self._start_selected_task("Figure", start_barrier)
         return {
             "requested": "Figure",
-            "parameters": {"formation": "triangle"},
+            "parameters": {"formation": "A"},
             "clickedAt": utc_now(),
             "backendAcceptance": accepted,
             "_clickMonotonic": click_started,
@@ -2154,6 +2520,7 @@ def recorded_task_overlap(records: dict[str, dict[str, Any]]) -> dict[str, Any] 
 def observe_same_round_running(users: list[UserRun], timeout: float = 60) -> dict[str, Any]:
     """Prove overlap by reading both task panels concurrently in one polling round."""
     deadline = time.monotonic() + timeout
+    record_settle_deadline: float | None = None
     round_number = 0
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -2187,6 +2554,11 @@ def observe_same_round_running(users: list[UserRun], timeout: float = 60) -> dic
             }
         if states.get("A") in {"Completed", "Failed", "Cancelled"}:
             if states.get("A") == "Completed":
+                if record_settle_deadline is None:
+                    record_settle_deadline = min(
+                        deadline,
+                        time.monotonic() + FAST_FIGURE_RECORD_SETTLE_SECONDS,
+                    )
                 records = parallel(
                     users,
                     lambda user: user.ui.started_task_record(),  # type: ignore[union-attr]
@@ -2202,6 +2574,16 @@ def observe_same_round_running(users: list[UserRun], timeout: float = 60) -> dic
                         "users": last,
                         "backendTasks": records,
                     }
+                # SignalR can paint the terminal Figure just before the next
+                # authenticated task-list read reflects both timestamps. Give
+                # that durable evidence a short settling window, but never infer
+                # overlap from the UI state alone.
+                if (
+                    states.get("B") == "Running"
+                    and time.monotonic() < record_settle_deadline
+                ):
+                    time.sleep(0.2)
+                    continue
             raise DriverError(
                 f"Could not prove concurrent Running states: A reached {states.get('A')} before a shared Running round"
             )
@@ -3032,15 +3414,18 @@ def main() -> int:
                 "ownedPid": user.chrome.process.pid if user.chrome.process else None,
             }
 
-        def login_user(user: UserRun) -> bool:
+        def login_user(user: UserRun) -> dict[str, bool]:
             assert user.ui
             user.ui.navigate(args.url)
             user.ui.login(user.credentials["email"], user.credentials["password"])
-            return True
+            return user.ui.require_hls_media_capabilities()
 
-        parallel(users, login_user)
+        media_capabilities = parallel(users, login_user)
         for user in users:
             report["users"][user.label]["login"] = "passed"
+            report["users"][user.label]["browser"]["mediaCapabilities"] = (
+                media_capabilities[user.label]
+            )
         print("Both accounts reached the real simulation workspace.", flush=True)
 
         parallel(users, lambda user: user.ui.create_session(user.robot_count))  # type: ignore[union-attr]
@@ -3153,7 +3538,7 @@ def main() -> int:
         def start_required_task(user: UserRun) -> dict[str, Any]:
             assert user.ui
             return (
-                user.ui.start_figure_triangle(start_barrier)
+                user.ui.start_figure_letter_a(start_barrier)
                 if user.label == "A"
                 else user.ui.start_follow_figure8(start_barrier)
             )
@@ -3168,7 +3553,7 @@ def main() -> int:
             "clickSkewMs": round((max(click_points) - min(click_points)) * 1000, 3),
             "overlap": overlap,
         }
-        print("UI started Figure/triangle for A and FollowLeader/figure-eight for B.", flush=True)
+        print("UI started Figure/letter A for A and FollowLeader/figure-eight for B.", flush=True)
 
         user_a, user_b = users
         assert user_a.label == "A" and user_b.label == "B" and user_a.ui and user_b.ui
@@ -3306,6 +3691,7 @@ def main() -> int:
         stop_event.clear()
         for user in users:
             if user.ui:
+                report["users"][user.label]["clickAudit"] = user.ui.click_evidence()
                 report["cleanup"][f"viewer{user.label}"] = user.ui.normalize_viewer()
         if not args.leave_sessions:
             for user in reversed(users):

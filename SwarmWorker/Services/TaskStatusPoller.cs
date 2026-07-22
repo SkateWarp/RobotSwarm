@@ -11,19 +11,22 @@ public sealed class TaskStatusPoller : BackgroundService
 {
     private readonly DockerSessionManager _sessions;
     private readonly TaskStatusTracker _tracker;
-    private readonly WorkerHubConnection _hub;
+    private readonly BoundedCommandExecutor _commandExecutor;
+    private readonly IWorkerCommandHub _hub;
     private readonly WorkerOptions _options;
     private readonly ILogger<TaskStatusPoller> _logger;
 
     public TaskStatusPoller(
         DockerSessionManager sessions,
         TaskStatusTracker tracker,
-        WorkerHubConnection hub,
+        BoundedCommandExecutor commandExecutor,
+        IWorkerCommandHub hub,
         IOptions<WorkerOptions> options,
         ILogger<TaskStatusPoller> logger)
     {
         _sessions = sessions;
         _tracker = tracker;
+        _commandExecutor = commandExecutor;
         _hub = hub;
         _options = options.Value;
         _logger = logger;
@@ -35,7 +38,7 @@ public sealed class TaskStatusPoller : BackgroundService
         {
             try
             {
-                await PollAsync(stoppingToken);
+                await PollOnceAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -54,7 +57,7 @@ public sealed class TaskStatusPoller : BackgroundService
         }
     }
 
-    private async Task PollAsync(CancellationToken cancellationToken)
+    internal async Task PollOnceAsync(CancellationToken cancellationToken)
     {
         var trackedTasks = _tracker.Snapshot();
         IReadOnlyList<ManagedSessionInfo> managedSessions;
@@ -98,6 +101,11 @@ public sealed class TaskStatusPoller : BackgroundService
         IReadOnlyDictionary<Guid, ManagedSessionInfo[]> sessionsById,
         CancellationToken cancellationToken)
     {
+        if (_commandExecutor.IsStartTaskActive(trackedTask.SessionId))
+        {
+            return;
+        }
+
         if (!sessionsById.TryGetValue(trackedTask.SessionId, out var matches)
             || matches.Length != 1
             || !matches[0].Running)
@@ -110,7 +118,8 @@ public sealed class TaskStatusPoller : BackgroundService
             var status = await _sessions.ReadTaskStatusAsync(
                 matches[0],
                 cancellationToken);
-            if (status is null)
+            if (status is null
+                || _commandExecutor.IsStartTaskActive(trackedTask.SessionId))
             {
                 return;
             }
@@ -166,10 +175,16 @@ public sealed class TaskStatusPoller : BackgroundService
         ManagedSessionInfo session,
         CancellationToken cancellationToken)
     {
+        if (_commandExecutor.IsStartTaskActive(session.SessionId))
+        {
+            return;
+        }
+
         try
         {
             var status = await _sessions.ReadTaskStatusAsync(session, cancellationToken);
-            if (status is null)
+            if (status is null
+                || _commandExecutor.IsStartTaskActive(session.SessionId))
             {
                 return;
             }

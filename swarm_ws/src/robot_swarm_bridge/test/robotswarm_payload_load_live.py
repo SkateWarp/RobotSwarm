@@ -437,9 +437,14 @@ class LoadProbe:
                 if ROBOT_RE.fullmatch(str(name))
             }
 
-    def run_trial(self, count):
+    def run_trial(self, count, payload_xml=None):
         self.log('starting fixed-command trial with {} robot(s)'.format(count))
         self.reset_fleet(count)
+        # A fleet reset can briefly invalidate Gazebo's model handle on the
+        # production worker.  Reinstall the selected payload after the reset
+        # so every capacity trial measures the same physical object.
+        if payload_xml is not None:
+            self.replace_payload(payload_xml)
         robots = self.arrange_pushers()
         publishers = {
             robot: rospy.Publisher(
@@ -800,10 +805,9 @@ def main():
     try:
         probe.ensure_idle_and_visible(args.external_viewer_verified)
         cleanup_needed = True
-        probe.replace_payload(loaded_xml)
-        single = probe.run_trial(1)
-        roots = probe.run_trial(2)
-        fleet = probe.run_trial(args.fleet_count)
+        single = probe.run_trial(1, loaded_xml)
+        roots = probe.run_trial(2, loaded_xml)
+        fleet = probe.run_trial(args.fleet_count, loaded_xml)
         failures, gain = evaluate(single, roots, fleet, args)
         result.update({
             'single_robot_trial': rounded(single),

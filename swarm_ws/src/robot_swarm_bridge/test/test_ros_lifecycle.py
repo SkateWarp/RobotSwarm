@@ -1770,6 +1770,7 @@ class BehaviorLifecycleTests(unittest.TestCase):
     def test_transport_live_defaults_follow_burger_contact_geometry(self):
         controller = ROS["transport"].CollaborativeTransport()
 
+        self.assertEqual(2, controller.max_pushing_robots)
         self.assertAlmostEqual(0.038, controller.robot_forward_contact_extent)
         self.assertAlmostEqual(0.102, controller.robot_rear_contact_extent)
         self.assertAlmostEqual(0.005, controller.transport_contact_slop)

@@ -1,229 +1,331 @@
-# Loaded transport acceptance
+# Aceptación del transporte colaborativo con carga
 
-The arena's green 0.25 kg crate is a fast practice payload.  It is useful for
-search, rendezvous and controller regression tests, but one TurtleBot3 Burger
-can move it.  That does not demonstrate physical load sharing.
+## 1. Objetivo y alcance
 
-The separate `transport_crate_loaded` profile is 0.75 kg with a 0.25 contact
-friction coefficient.  The values were chosen from a simple traction bracket:
+Esta prueba comprueba que cuatro TurtleBot3 Burger pueden encontrar, rodear y
+transportar juntos una carga que no debería ser desplazada de forma útil por un
+solo robot. No basta con observar movimiento en Gazebo: la aceptación relaciona
+la física de la carga, los estados del algoritmo GRF, el visor HLS abierto en un
+navegador normal y la limpieza posterior de la sesión.
 
-- loaded crate breakaway estimate: `0.75 * 0.25 * g = 1.84 N`
-- stock 1 kg Burger traction estimate: `1.00 * 0.10 * g = 0.98 N`
-- four-Burger traction estimate: `4 * 0.98 = 3.92 N`
+La caja verde del escenario habitual tiene una masa de 0,25 kg. Sirve para las
+pruebas rápidas de búsqueda, aviso, encuentro y control, pero un Burger puede
+moverla por sí solo. Para estudiar reparto físico de carga se utiliza el perfil
+`transport_crate_loaded`, de 0,75 kg y con un coeficiente de fricción de contacto
+de 0,25.
 
-The estimates only choose a reasonable profile.  The simulator result is the
-acceptance evidence.
+La selección de esos valores parte de una estimación sencilla:
 
-## Capacity probe
+- fuerza de inicio de movimiento de la caja: `0,75 × 0,25 × g = 1,84 N`;
+- tracción estimada de un Burger de 1 kg: `1,00 × 0,10 × g = 0,98 N`;
+- tracción estimada de cuatro Burger: `4 × 0,98 = 3,92 N`.
 
-Run the probe only while the visible GPU Gazebo session is idle.  It refuses
-to run without a `/gazebo_gui` node or while a swarm task is active.
+Este cálculo solo sirve para escoger un caso de prueba razonable. El criterio de
+aceptación procede de las mediciones del simulador y no de la estimación.
+
+## 2. Ejecución supervisada
+
+El gate productivo se inicia desde el equipo con GPU cuando no existe otra
+sesión de aceptación. Se emplea Chrome visible, sin `--headless` y sin
+`--disable-gpu`, y se crea una sesión nueva de cuatro robots mediante la misma
+interfaz pública que utiliza una persona.
 
 ```bash
-source /opt/ros/noetic/setup.bash
-source /catkin_ws/devel/setup.bash
-rosrun robot_swarm_bridge gazebo_gui_preflight.py \
-  --min-render-fps 45 \
-  --min-real-time-factor 2.90 \
-  --report /tmp/robotswarm-loaded-gui-preflight.json
-python3 /catkin_ws/src/robot_swarm_bridge/test/robotswarm_payload_load_live.py \
-  --fleet-count 4 \
-  --min-rtf 2.90 \
-  --external-viewer-verified \
-  --verify-grf-n4
+python3 scripts/acceptance/robotswarm-loaded-n4-e2e.py \
+  --execute-production \
+  --deployment-commit <sha-productivo-completo> \
+  --credentials <archivo-privado-0600> \
+  --chrome <chrome-visible> \
+  --profile-root <directorio-temporal> \
+  --output <informe-saneado.json>
 ```
 
-The preflight and load probe must use the same ROS/Gazebo master and run back to
-back. Keep both JSON results together. The `/gazebo_gui` ROS node checked by the
-load probe is only a legacy in-container liveness precondition. The production
-viewer runs on the GPU host, outside the ROS container, so its supervised gate
-passes `--external-viewer-verified` after binding the viewer to the same session.
-The preceding preflight is still the evidence that proves a real visible
-viewport, the NVIDIA renderer, at least 45 rendered FPS and physics RTF of at
-least 2.90. Do not use that option or accept a loaded run when the supervising
-viewer evidence is missing or failed.
+El archivo de credenciales no forma parte de la evidencia. El informe final se
+escribe con permisos `0600`, oculta identificadores privados y conserva hashes
+SHA-256 de los documentos que sí pueden auditarse.
 
-The probe temporarily replaces `transport_object` with the amber loaded
-crate.  It applies the same 0.16 m/s command to one Burger, to the two direct
-payload roots, and then to four Burgers arranged as those same roots with a
-companion behind each one.  It passes only when:
+La secuencia supervisada es la siguiente:
 
-- one robot moves the crate no more than 0.05 m in 12 simulated seconds;
-- the two roots alone move it no more than 0.06 m;
-- four robots move it at least 0.20 m;
-- fleet payload progress is at least four times the single-robot result;
-- every fleet robot advances at least 0.05 m and remains connected to its
-  declared payload-root or companion contact; and
-- all three trials maintain the requested real-time factor.
+1. Se comprueba que Chrome dispone de Media Source Extensions (MSE),
+   `SourceBuffer` y soporte H.264 compatible con `hls.js` antes de solicitar un
+   lease. Así, un navegador incapaz de reproducir el visor no consume una sesión
+   productiva para terminar después en un falso diagnóstico de Gazebo.
+2. Se crea la sesión N=4, se comprueba su roster y se vincula un único contenedor
+   administrado al SHA esperado.
+3. Se abre el HLS privado y se exige al menos un fotograma decodificado. El
+   `gzclient` primario debe pertenecer al publicador de ese lease y usar los
+   mismos `ROS_MASTER_URI`, `GAZEBO_MASTER_URI`, red y display privado que la
+   sesión.
+4. La sonda oficial instala la caja de 0,75 kg y ejecuta ensayos de capacidad con
+   uno, dos y cuatro robots. A continuación mantiene esa carga para el GRF N=4.
+5. Mientras el GRF cargado sigue activo, se abre un segundo `gzclient` temporal
+   en el mismo display y se ejecuta el preflight oficial de GPU, FPS y RTF. El
+   navegador mide HLS durante el mismo intervalo.
+6. Durante `PUSH`, una captura debe quedar encerrada entre dos estados nuevos de
+   la misma tarea, con masa fresca de 0,75 kg, roster completo y HLS por encima
+   del mínimo. Solo después se validan los resultados y la limpieza.
 
-With `--verify-grf-n4`, the same invocation keeps the loaded crate installed
-long enough to run the normal four-robot acceptance. That second phase starts
-the payload outside initial sensor range and requires SEARCH, finder notice,
-fleet rendezvous and the synchronized GRF push before cleanup.
+La opción interna `--external-viewer-verified` no certifica una ventana por sí
+misma. Solo se entrega a la sonda ROS después de que el supervisor haya
+correlacionado el proceso real, el lease, el display y los dos masters. Ejecutar
+el probe aislado con esa opción no constituye evidencia válida.
 
-The final `LOAD_RESULT_JSON` line contains the measured payload and per-robot
-travel.  The probe deletes its robots and restores the normal green practice
-crate even after a failed gate.  An interrupt also sends zero velocity before
-cleanup.
+## 3. Criterios físicos y algorítmicos
 
-Cleanup is intentionally fail-closed. The probe records roster and Gazebo
-generations before issuing `delete_robots`, attaches a unique `request_id` and
-accepts only the matching `/fleet/delete_result` with an empty
-`remaining_robot_ids` list. It then requires a post-command empty roster and no
-`tb3_*` model. The practice crate is not restored if the correlated task does
-not stop, deletion is partial, or either observation is missing. When the GRF
-child has to be interrupted, the parent waits for a fresh status carrying that
-child's explicit task ID and uses a bounded SIGINT→SIGTERM→SIGKILL escalation.
+En los ensayos de capacidad se envía la misma orden lineal de 0,16 m/s durante
+12 segundos simulados. La prueba aprueba únicamente cuando se cumplen todos los
+siguientes puntos:
 
-The fixed-command phase isolates Gazebo load capacity. A physical load-sharing
-claim is accepted only when the optional `transport_grf_n4` phase also passes,
-because that phase exercises search, notification, rendezvous, role assignment
-and the GRF controller rather than calibration commands.
+- un robot desplaza la caja como máximo 0,05 m;
+- las dos raíces en contacto directo la desplazan como máximo 0,06 m;
+- cuatro robots la desplazan al menos 0,20 m;
+- el avance con la flota es al menos cuatro veces el avance individual;
+- cada robot avanza como mínimo 0,05 m;
+- las dos raíces conservan contacto medido con la carga y los otros dos robots
+  conservan contacto con su predecesor; y
+- los tres ensayos mantienen RTF no menor que 2,90.
 
-## Notas de diagnóstico del probe
+Las duraciones `push_duration_*` abarcan solo el comando positivo. Los ocho
+mensajes de velocidad cero de la parada segura se publican después de capturar
+los extremos. Por este motivo se admite una tolerancia de 0,25 s simulados, pero
+no se suma la parada al intervalo que se utiliza para recalcular el RTF.
 
-La aparición de `transport_object` en `/gazebo/model_states` no garantiza que
-`/gazebo/set_model_state` ya pueda resolverlo en el mismo ciclo. Gazebo puede
-publicar primero el estado y responder durante unos milisegundos que el modelo
-no existe. La colocación reintenta únicamente ese mensaje cada 50 ms y durante
-un máximo de cinco segundos. Una respuesta distinta falla de inmediato; el
-reintento no sirve para ocultar errores generales del servicio.
+El segundo tramo ejecuta el algoritmo normal de transporte con la carga todavía
+instalada. Se exige la secuencia no regresiva `SEARCH → APPROACH → PUSH → DONE`,
+un único robot descubridor, aviso a sus tres compañeros, búsqueda inicial por
+los cuatro, encuentro en las coordenadas comunicadas y contribución útil de toda
+la flota. La prioridad es ocupar primero los dos contactos directos con la caja;
+los demás robots empujan a través de cadenas contiguas de compañeros. El avance
+físico mínimo hacia el objetivo se mantiene en 0,50 m.
 
-`--external-viewer-verified` existe para la topología de producción, donde el
-`gzclient` visible se ejecuta en el host GPU y no registra `/gazebo_gui` dentro
-del contenedor ROS. La opción no descubre ni certifica por sí sola una ventana:
-solo el supervisor que ya correlacionó proceso, lease, display y masters puede
-entregarla después de aprobar el preflight visible. Sin esa correlación, el
-probe debe ejecutarse sin la opción y conserva la exigencia fail-closed del nodo
-`/gazebo_gui`.
+El umbral que publica el runner es dinámico: parte de la distancia restante al
+entrar en `PUSH`, resta la tolerancia de llegada y se limita por la configuración.
+Puede aparecer como 0,4999 m por redondeo. El arnés valida ese eco con un epsilon
+de 0,001 m, pero en una comprobación separada continúa exigiendo 0,50 m de avance
+físico real.
 
-El umbral que publica el runner GRF es dinámico: se calcula con la distancia a
-la meta al comenzar `PUSH`, menos la tolerancia de llegada, y se limita por el
-valor configurado. Por redondeo o por un movimiento previo puede ser 0,4999 m.
-El supervisor vuelve a calcular y valida ese eco, incluida su base y el epsilon
-de 0,001 m, pero mantiene en otra comprobación el mínimo físico de avance real
-en 0,50 m. Un eco coherente de 0,4999 m no permite aprobar un desplazamiento de
-0,4999 m.
+## 4. Correcciones introducidas durante el diagnóstico
 
-Los 12,0 s de cada ensayo de capacidad abarcan solo el comando positivo. Los
-ocho mensajes cero de la parada segura se publican después de capturar los
-extremos simulado y de pared y no forman parte de `push_duration_*`. Esta
-separación es relevante a RTF 3,0: la parada añade aproximadamente 0,52 s
-simulados y el gate exterior rechaza una duración mayor que 12,25 s.
+### 4.1. Reinstalación de la carga después de cada reset
 
-## Historical commissioning observation (not a final gate)
+El segundo diagnóstico productivo observó un marcador inicial de 0,75 kg y,
+después, seis muestras de 0,25 kg. El `LOAD_RESULT_JSON` estructurado clasificó
+el fallo como `model_placement_failed`: `reset_fleet()` había restablecido la
+caja de práctica antes de colocar los robots del siguiente subensayo.
 
-The loaded profile moved 0.0072 m with one Burger and 0.0336 m with the two
-payload roots alone. With two companions pushing through those roots, all four
-robots stayed connected and moved the crate 1.1796 m: 164.8 times the
-single-robot result. The normal search/rendezvous transport matrix also passed
-with 1, 3, 4, and 10 robots, with every robot moving and joining the reported
-payload location before coordinated transport.
+La sonda ahora recibe el XML seleccionado en cada `run_trial()`. Primero reinicia
+la flota, después reinstala la misma caja cargada y solo entonces organiza los
+empujadores. Para poder comprobar el SHA productivo anterior sin modificarlo, el
+supervisor inspecciona la firma del probe desplegado: si esa versión aún no
+acepta `payload_xml`, aplica una envoltura de compatibilidad a `reset_fleet()`;
+si ya lo acepta, no la aplica. Esto evita tanto perder la carga como instalarla
+dos veces tras el futuro despliegue.
 
-This observation predates the current candidate and its raw output was not
-retained with a final commit SHA. It is useful for choosing representative
-parameters, but it is not evidence for the production acceptance gate. The
-current local candidate has since repeated the practice-payload N=1 case in a
-visible window: it reached `DONE`, advanced the crate 0.5005 m at RTF 2.9964,
-confirmed its single useful pusher in 100% of the applicable samples, and
-recorded zero collisions. That result validates the one-robot lifecycle only;
-it does not demonstrate physical load sharing. A subsequent practice-payload
-N=3 run also reached `DONE`: one finder notified both teammates, all three
-robots connected and pushed, and the crate advanced approximately 0.5005 m at
-RTF 2.996 with zero collisions. This validates local three-robot coordination,
-not the 0.75 kg capacity claim.
+El marcador `LOADED_PAYLOAD_READY_JSON` se emite únicamente después de comprobar
+en el XML una masa de 0,75 kg. Además, el supervisor exige una muestra posterior
+del servicio de propiedades de Gazebo; el marcador por sí solo no abre la
+barrera de carga.
 
-## Estado local del candidato cargado
+### 4.2. Ejecución del preflight en una montura ejecutable
 
-El primer GRF N=4 cargado agotó el tope anterior de 180 s después de unos 70 s
-de `PUSH`: había avanzado 0,2335 m, acumulado 752 muestras y mantenido 4/4
-contribuidores útiles, sin colisiones. La cronología justificó límites de pared
-de 60/100/190 s para `SEARCH`/`APPROACH`/`PUSH`, bajo un tope total de 355 s;
-el requisito de 0,50 m no cambió.
+El directorio del lease situado bajo `/run/user/1000` estaba en una montura
+`noexec`. Guardar allí el plugin permitía copiarlo, pero no mapearlo como objeto
+compartido. Los archivos ejecutables se preparan ahora en un directorio privado
+`/tmp/robotswarm-matrix-probe-*`, con modo `0700`. El sandbox de `bwrap` monta el
+script y el plugin individualmente, en solo lectura, sobre `/viewer` antes de
+realizar `--chdir`; su `/tmp` interno sigue siendo un `tmpfs` aislado.
 
-La corrida v10 ya había completado la física, pero el gate integral la rechazó
-porque las duraciones de capacidad incluían aproximadamente 0,52 s de la parada
-segura. La medición se corrigió y se cubrió con una regresión. En v11, los
-ensayos de uno, dos y cuatro robots avanzaron 0,0070, 0,0340 y 1,0424 m. Sus
-duraciones simuladas fueron 12,048, 12,024 y 12,000 s, con RTF recalculados de
-2,9969, 2,9962 y 2,9975. La ganancia exterior recalculada fue 148,9143×. Las
-cuatro unidades permanecieron conectadas mediante dos raíces sobre la carga y
-dos compañeros.
+La limpieza no elimina una ruta arbitraria. Antes de retirar el workspace se
+comprueban padre, nombre, propietario, modo, lista cerrada de archivos y tipos
+regulares. Si cualquiera de esas condiciones cambia, la aceptación falla de
+forma cerrada.
 
-El GRF v11 terminó `SEARCH` en 39,2083 s de pared, entró en `PUSH` a los
-115,4389 s y llegó a `DONE/completed` a los 252,6 s. `tb3_1` informó el hallazgo
-a los otros tres robots; los cuatro buscaron, completaron el rendezvous y
-empujaron. Se registraron 1598 muestras, todas con la flota completa útil,
-0,5002 m de avance hacia la meta, eficiencia 0,9946 y RTF exterior 2,9756. La
-métrica ground-truth registró un atraque declarado de raíz y el contador de
-seguridad ya filtrado no registró contactos.
-La sonda visible concurrente con `PUSH` midió 58,816 FPS de cámara, 58,831
-eventos de posrenderizado por segundo y RTF 2,996 en la RTX 3080, con viewport
-1618×869.
+### 4.3. Identidad del `gzclient` y espacios de PID
 
-La primera evaluación exterior de v11 todavía produjo un falso rechazo: asumía
-que cada subensayo debía usar `tb3_0…tb3_{N-1}`. El gestor asignó correctamente
-namespaces frescos y monotónicos: `tb3_0`, luego `tb3_1`–`tb3_2` y finalmente
-`tb3_3`–`tb3_6`. La validación corregida permite un ordinal inicial arbitrario,
-pero exige nombres `tb3_<n>` canónicos, mapas de progreso y conexión idénticos,
-bloques contiguos sin reutilización y secuencia monotónica entre ensayos. Los
-37/37 contratos existentes y la evidencia real v11 aprobaron después de la
-corrección.
+Un primer intento rechazó incorrectamente el visor primario porque comparó el
+PID informado dentro del sandbox con el PID visto desde el host. Linux publica
+ambas identidades en `NSpid`. La correlación actual recorre únicamente los
+descendientes del publicador ligado a la sesión, exige el ejecutable esperado,
+el argumento `/viewer/plugin.so`, el display correcto y acepta el PID reportado
+solo si coincide con el PID del host o con una entrada de `NSpid`.
 
-Una revisión P2 posterior encontró una frontera adicional en la captura de
-`PUSH`. El arnés comprobaba correlación, masa, fase y progreso antes y después de
-la PNG, pero podía conservarla aunque el HLS hubiese caído por debajo del mínimo
-durante ese intervalo. La validación usa ahora el mismo
-`MATRIX.MINIMUM_BROWSER_VIDEO_FPS` de la matriz, actualmente 27,0 FPS: ambas
-lecturas decodificadas que rodean la captura deben ser finitas y alcanzar el
-umbral. Una regresión con 26,9 FPS antes y 27,0 FPS después demuestra el rechazo.
-Esta regresión forma parte de los 38/38 contratos vigentes; no se volvió a
-etiquetar la captura local anterior como si el gate hubiese sido medido en
-producción.
+Para detectar procesos temporales abandonados ya no se reutiliza el PID que ve
+un namespace. Cada preflight recibe un token aleatorio en
+`ROBOTSWARM_ACTIVE_PROBE_TOKEN`; el token se hereda por Python, `bwrap` y
+`gzclient`. El supervisor recorre `/proc`, compara también el *start tick* para
+evitar reutilización de PID y aplica `SIGTERM` seguido de `SIGKILL` si queda un
+proceso propio. La aceptación requiere que la búsqueda final quede vacía.
 
-El mismo cierre exige que el historial del task avance de manera no decreciente
-`SEARCH` → `APPROACH` → `PUSH`. Una secuencia que vuelva de `PUSH` a `APPROACH`
-falla aunque conserve el mismo identificador, masa y roster. La suite ROS que
-incluye esta regresión terminó en 416/416.
+### 4.4. Compatibilidad con Python 3.8
 
-I-088 añadió una comprobación temporal que no modifica ni vuelve a interpretar
-la corrida física v11. Un contador agregado podía terminar acompañado por una
-evidencia final válida de atraque y ocultar que uno de sus episodios había
-comenzado antes. Muestrear estados a 10 Hz tampoco bastaba, y sellar el episodio
-en el `task_lock` del orquestador todavía dependía del orden de callbacks. La
-autoridad quedó en la evaluación de seguridad: `ObstacleAvoidance` detecta el
-flanco filtrado sincrónicamente y `CollaborativeTransport` aporta la tarea, fase,
-UUID de fuente, secuencia de origen, secuencia de control y tiempos de simulación
-y pared.
+La máquina de trabajo utiliza Python 3.8. Esta versión no ofrece
+`subprocess.Popen(umask=...)` ni `str.removesuffix()`. El hijo que genera archivos
+privados se inicia mediante un programa fijo de `sh` que ejecuta `umask 077` y
+realiza `exec` con cada argumento separado; no evalúa texto procedente del hijo.
+Para retirar `.json` se utiliza una comprobación de sufijo y un corte explícito.
+Las dos rutas tienen regresiones focales para evitar que una validación local
+funcione solo en un Python más reciente que el host real.
 
-Ese origen publica un stream v2 de hasta 128 eventos dentro del mismo
-`/transport/status`, incluido el terminal. El orquestador valida continuidad,
-watermark, ventana de tarea, UUID, identidad, fase, tiempos y capacidad, y copia
-solo novedades de manera idempotente. El `Bool` de compatibilidad no incrementa
-el contador durante transporte. El arnés conserva tiempos de origen y de
-observación separados y falla ante huecos, reinicios, regresiones o capacidad
-agotada.
+### 4.5. Marcadores JSON concurrentes
 
-La señal ya excluye mediante la máscara de seguridad los contactos con la carga
-y los vecinos declarados de la cadena. Por ello todo flanco filtrado restante es
-inesperado, incluso en `PUSH` y `DONE`. El atraque se demuestra de forma
-independiente mediante contacto carga/predecesor, geometría ground-truth y
-métricas GRF; una evidencia final válida nunca reclasifica un contacto de
-seguridad.
+El monitor de masa y la sonda oficial comparten el mismo pipe. En el intento
+`loaded-n4-hybrid-mse` dos escrituras se entrelazaron y produjeron un
+`LOADED_GRF_ACTIVE_JSON` malformado. El intento se rechazó correctamente y no se
+interpretó su contenido parcial como estado ROS.
 
-Con ello, capacidad, GRF, preflight y limpieza aprueban la compuerta cargada
-local. El cierre completo vigente del árbol terminó con ROS 427/427, frontend
-149/149 en 28 suites, worker 124/124 y backend con 250 pruebas aprobadas más 8
-opt-in omitidas por diseño en la ejecución sin PostgreSQL configurado. El filtro
-ordinario aprobó 250/250, las focales de cuentas 23/23 y las ocho opt-in 8/8 contra
-PostgreSQL 17.10. Los siete arneses offline sumaron 193/193 contratos
-(16+38+13+44+37+30+15). La matriz incluye ahora un contrato N=2 que exige dos
-raíces sobre la carga, cero compañeros y dos empujadores útiles;
-todavía no existe una corrida física N=2 del GRF. Esta aceptación no corresponde
-todavía al release: no se ejecutaron CI, despliegue, repetición sobre el SHA
-productivo ni capturas sanitizadas para ese cierre. La evidencia versionada de
-N=10 que aparece en el informe final corresponde a una corrida distinta.
+Los marcadores vivos se serializan ahora sin `NaN`, incluyendo prefijo, JSON y
+salto de línea en una sola escritura `os.write`. Se rechaza cualquier mensaje
+mayor de 4096 bytes, límite adoptado para permanecer dentro de la escritura
+atómica del pipe. El lector también detecta prefijos conocidos incrustados en un
+JSON roto y conserva solamente longitud, hash y tipo de marcador; no guarda el
+texto potencialmente sensible.
 
-La verificación integrada incluyó además `py_compile` sobre 14 módulos, sintaxis
-Bash, lint de 75 archivos frontend, build de producción y `git diff --check`;
-todos esos gates quedaron en verde dentro del árbol local.
+La escritura atómica del informe tiene un propósito distinto: cada actualización
+se genera en un archivo temporal privado, se sincroniza y se sustituye mediante
+`os.replace`. Así, una interrupción no deja un JSON final parcialmente escrito.
+
+### 4.6. Presupuestos de espera, HLS y limpieza
+
+El visor utiliza un solo presupuesto de 240 s desde el clic en «Abrir visor»
+hasta el primer fotograma. El tiempo consumido esperando el lease se descuenta
+antes de esperar video, en lugar de iniciar un segundo timeout completo. Si el
+fotograma no llega, el informe registra un estado acotado de MSE, recursos HLS,
+elementos de video y mensajes visibles, sin copiar tokens.
+
+El preflight dispone de 45 s para calentamiento, medición y cierre. El timeout
+exterior debe añadir al menos cinco segundos para observar su terminación; de lo
+contrario, los argumentos se rechazan antes de crear una sesión. La medición HLS
+de cinco segundos debe quedar por completo dentro del proceso cargado, de la
+tarea GRF y del preflight.
+
+Un intento que agotó la espera del fotograma eliminó contenedor y red, pero el
+directorio del lease tardó más y el informe quedó como `cleanup-failed`. Esto es
+un fallo real de la compuerta de limpieza, aunque la causa funcional fuera HLS.
+En cambio, cuando el probe termina antes de emitir su postcheck estructurado, la
+destrucción comprobada del contenedor inmutable demuestra que su tarea, roster y
+proceso ya no existen. El informe conserva ambas ideas por separado:
+`officialProbeTaskRosterClean=false` indica que faltó el postcheck del probe, y
+`taskRosterClean=true` solo puede obtenerse entonces mediante
+`containerAbsent=true`. De esta forma no se presenta un falso fallo de recursos,
+pero tampoco se inventa una limpieza oficial que nunca fue observada.
+
+## 5. Evidencia histórica y local
+
+Una corrida local histórica, denominada v11, sí aprobó el perfil cargado antes
+del candidato actual. Sus ensayos de uno, dos y cuatro robots desplazaron la
+caja 0,0070 m, 0,0340 m y 1,0424 m. Los RTF recalculados fueron 2,9969, 2,9962 y
+2,9975, y la ganancia frente al robot individual fue 148,9143 veces. Las cuatro
+unidades permanecieron conectadas mediante dos raíces y dos compañeros.
+
+En esa misma corrida, el GRF llegó a `DONE/completed` después de que `tb3_1`
+avisara a los otros tres robots. Se registraron 1598 muestras con los cuatro
+contribuyentes útiles, 0,5002 m de avance hacia la meta, eficiencia 0,9946 y RTF
+exterior 2,9756. La sonda visible concurrente midió 58,816 FPS de cámara, 58,831
+eventos de posrenderizado por segundo y RTF 2,996 en una RTX 3080.
+
+Estas cifras son útiles como referencia física, pero no cierran producción: la
+salida original no quedó asociada al SHA productivo actual ni satisface las
+correcciones posteriores del instrumento. Tampoco se reutilizan sus capturas
+como si pertenecieran al gate vigente.
+
+En el árbol de trabajo actual aprobaron 47/47 contratos focales del arnés cargado
+y 60/60 contratos de la matriz ROS. Son pruebas locales del instrumento; no
+demuestran por sí mismas que la carga haya sido transportada en el sitio
+desplegado. El árbol contiene cambios sin desplegar sobre el commit local
+`2dda980fc743eb3c19f9d245fab9a99802418b0d`, mientras que las corridas públicas de
+esta sección utilizan el release
+`fbef23eaae2b1b1d5be51ad3fa03e0298239289a`.
+
+## 6. Diagnóstico productivo del 21 de julio de 2026
+
+Todos los intentos de esta tabla usaron Chrome 150 visible, una sesión pública
+nueva N=4 y el release `fbef23e…9289a`. Un intento rechazado sirve para localizar
+la causa, pero nunca se suma a la aceptación.
+
+| Intento | Observación | Clasificación |
+| --- | --- | --- |
+| `loaded-n4-final` | El visor HLS entregó 30,9 FPS; el arranque de Gazebo midió 49,59 FPS y RTF 2,996. El probe terminó antes de confirmar la barrera de 0,75 kg. | Rechazado; limpieza completa. |
+| `loaded-n4-diagnostic` | Se obtuvo un `LOAD_RESULT_JSON` fallido y siete muestras de masa. | Rechazado como fallo del probe y de reemplazo/visibilidad de la carga. |
+| `loaded-n4-diagnostic-2` | Hubo una muestra de 0,75 kg seguida de seis de 0,25 kg. | Rechazado; `model_placement_failed` permitió localizar el reset que restauraba la caja de práctica. |
+| `loaded-n4-dom-controls` | La sesión llegó a `Ready`, pero no apareció un fotograma HLS dentro del presupuesto. | Rechazado como `cleanup-failed`: contenedor y red desaparecieron, pero el runtime del lease no se confirmó ausente a tiempo. |
+| `loaded-n4-hybrid-mse` | MSE/H.264, los clics auditados y el visor aprobaron; el marcador activo llegó entrelazado. | Rechazado por `LOADED_GRF_ACTIVE_JSON` malformado; limpieza completa. |
+| `loaded-n4-atomic-markers` | La escritura atómica eliminó el marcador malformado, pero el probe terminó antes de iniciar el GRF N=4. | Rechazado; limpieza completa. El diagnóstico estructurado de ese punto todavía necesitaba conservarse en todos los caminos de excepción. |
+| `loaded-n4-classified` | El HLS inicial midió 31,0 FPS y Gazebo 49,563/49,990 FPS con RTF 2,996. Después de terminar el payload, el arnés volvió a pedir HLS cuando ya había vencido el TTL intencional de cinco minutos del lease. | Rechazado por un gate HLS final redundante; limpieza completa. |
+| `loaded-n4-post-ttl-fix` | Conservó las mediciones HLS tomadas dentro del TTL, completó capacidad, GRF, restauración y limpieza sobre el mismo release. | **Aprobado** con `status=passed`, `success=true` y limpieza completa. |
+
+Los intentos rechazados se conservan porque explican cómo se llegó al instrumento
+actual; sus resultados no se mezclan entre sí. La aprobación se apoya solamente
+en `loaded-n4-post-ttl-fix`, que produjo su propio conjunto completo de
+documentos, hashes y capturas correlacionadas.
+
+## 7. Aprobación productiva: `loaded-n4-post-ttl-fix`
+
+La corrida se ejecutó entre las 22:21:26 y las 22:27:32 UTC del 21 de julio de
+2026. El informe saneado terminó con `status=passed`, `success=true` y quedó
+vinculado al release productivo
+`fbef23eaae2b1b1d5be51ad3fa03e0298239289a`. La imagen del contenedor estaba
+inmovilizada por ese SHA, la sesión N=4 llegó a `Ready` y el display, el lease,
+la red privada y los masters ROS/Gazebo pertenecían a la misma sesión.
+
+### 7.1. Video y rendimiento visible
+
+Chrome 150 se ejecutó con GPU y en modo visible. El HLS entregó entre 30,0 y
+30,8 FPS en las comprobaciones de apertura, captura y cierre del intervalo útil.
+Durante la coincidencia entre carga, GRF y preflight se midieron 152 fotogramas
+en 5,051 s: 30,094 FPS presentados y decodificados, sin fotogramas descartados.
+Las lecturas inmediatamente anterior y posterior a la captura de `PUSH` fueron
+ambas de 30,0 FPS, por encima del mínimo de 27,0 FPS.
+
+El `gzclient` primario informó 49,548 FPS de cámara, 50,034 eventos de
+posrenderizado por segundo y RTF 2,996. El preflight oficial, ejecutado mientras
+el GRF cargado seguía activo, identificó el adaptador `D3D12 (NVIDIA GeForce RTX
+3080)` y midió 58,469 FPS de cámara, 62,489 eventos de posrenderizado por segundo
+y RTF 2,996. Por tanto, no se utilizó renderizado headless ni un renderer por
+software.
+
+Al terminar el payload, el lease ya había alcanzado su TTL deliberado y el panel
+mostró el rechazo temporal esperado. Esta observación no invalida el gate: el
+video se midió dentro del TTL, durante el proceso cargado y a ambos lados de la
+captura correlacionada. El arreglo consistió en registrar el estado final del
+lease sin volver a exigir una reproducción que, por diseño, ya debía estar
+revocada.
+
+### 7.2. Capacidad física y comportamiento GRF
+
+Con el mismo perfil de 0,75 kg, los ensayos de uno, dos y cuatro robots
+desplazaron la caja 0,0070 m, 0,0354 m y 1,0836 m, respectivamente. La ganancia
+de la flota sobre el robot individual fue 154,8 veces. Los RTF recalculados de
+los tres ensayos fueron 2,9951, 2,9975 y 2,9941; los cuatro robots conservaron la
+estructura prevista de dos raíces en contacto con la carga y dos compañeros.
+
+En el tramo algorítmico, un descubridor emitió el aviso a la flota completa. Los
+cuatro robots registraron movimiento de búsqueda, los cuatro completaron el
+encuentro y los cuatro contribuyeron al empuje. Se obtuvieron 1621 muestras GRF,
+de las cuales 1618 confirmaron simultáneamente a toda la flota como útil. La caja
+avanzó 0,5001 m hacia la meta, con eficiencia 0,9946 y RTF exterior 2,9942. Estos
+valores satisfacen el mínimo físico de 0,50 m y demuestran búsqueda, aviso,
+reunión y transporte colaborativo en una sola tarea.
+
+### 7.3. Limpieza y conjunto de evidencia
+
+La limpieza terminó con `cleanup.complete=true`. El postcheck oficial observó la
+tarea terminal, roster vacío, ausencia de modelos `tb3_*` y restauración de la
+caja de práctica de 0,25 kg. También quedaron ausentes los hijos acotados, el
+preflight temporal, su workspace, el visor, el publicador, el lease, el
+contenedor, la red, Chrome y su perfil efímero.
+
+El hash del conjunto saneado es
+`c9095a31ec596c4dccaf12d3ef3beb109ddd652399b44962215ffc94011a7dac`.
+El [reporte saneado](assets/commissioning-2026-07/final-fbef23e/carga-n4-reporte.json)
+y las tres PNG pertenecen a esta misma corrida. Se inspeccionaron para excluir
+correos, UUID, tokens y rutas internas antes de incorporarlos al manifiesto:
+
+- [Antes del probe cargado](assets/commissioning-2026-07/final-fbef23e/carga-n4-antes.png), 131134 bytes, SHA-256 `4579c14a4020fb2e3527ed3ac18926f7eaf712ef60e641938dd164084903c89a`;
+- [Durante el `PUSH` cargado](assets/commissioning-2026-07/final-fbef23e/carga-n4-durante-push.png), 149175 bytes, SHA-256 `7a5be6cb6e57cabfab83a94c340a1920620e5496973822bcbed581dfb079abaa`;
+- [Después del probe, con la regresión UTC visible](assets/commissioning-2026-07/final-fbef23e/contador-utc-antes.png), 58771 bytes, SHA-256 `fdfbef8f65b81178508f281130ea1ebf851aa9144bac9665a3024d77cf022206`.
+
+Este resultado aprueba el transporte cargado N=4 del release productivo
+`fbef23e…9289a`. No sustituye la repetición posterior al despliegue del candidato
+final: cuando los ajustes del arnés y de ROS se publiquen, el mismo procedimiento
+deberá ejecutarse otra vez sobre el nuevo SHA para comprobar que el artefacto
+final conserva el comportamiento aprobado aquí.

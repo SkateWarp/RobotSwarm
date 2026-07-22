@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime as dt
 import importlib.util
 import inspect
 import json
+import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -464,7 +468,9 @@ class TransportUiAcceptanceContractTests(unittest.TestCase):
 
     def test_ui_start_has_one_physical_click_and_explicit_hit_test_barrier(self):
         source = inspect.getsource(HARNESS.run_smoke)
-        self.assertEqual(source.count("ui.click_button(START_BUTTON)"), 1)
+        trusted_click = "ui.click_button(START_BUTTON, require_trusted=True)"
+        self.assertEqual(source.count(trusted_click), 1)
+        self.assertIn('"gesture": start_gesture', source)
         barrier = inspect.getsource(HARNESS.require_start_barrier)
         self.assertIn("document.elementFromPoint", barrier)
         self.assertIn("MuiBackdrop-root", barrier)
@@ -592,7 +598,10 @@ class TransportUiAcceptanceContractTests(unittest.TestCase):
 
     def test_task_watcher_is_installed_before_the_only_click_and_polls_at_100ms(self):
         source = inspect.getsource(HARNESS.run_smoke)
-        self.assertLess(source.index("install_task_watcher"), source.index("ui.click_button(START_BUTTON)"))
+        self.assertLess(
+            source.index("install_task_watcher"),
+            source.index("ui.click_button(START_BUTTON, require_trusted=True)"),
+        )
         watcher = inspect.getsource(HARNESS.install_task_watcher)
         self.assertIn("setInterval(poll, 100)", watcher)
         self.assertIn("MAXIMUM_TASK_DOCUMENT", watcher)
@@ -688,6 +697,274 @@ class TransportUiAcceptanceContractTests(unittest.TestCase):
         serialized = json.dumps(evidence)
         self.assertNotRegex(serialized, HARNESS.ROBOT_PATTERN)
         self.assertNotIn(TASK_ID, serialized)
+
+    def test_private_ros_observer_bounds_lines_before_newline_and_total_evidence(self):
+        with tempfile.TemporaryFile() as stream:
+            stream.write(
+                b"x" * (HARNESS.MAXIMUM_OBSERVER_LINE + 1)
+                + b"\nTRANSPORT_OBSERVER_READY\n"
+            )
+            stream.seek(0)
+            self.assertEqual(
+                list(HARNESS.TransportStatusObserver._bounded_lines(stream)),
+                [None, b"TRANSPORT_OBSERVER_READY"],
+            )
+
+        observer = HARNESS.TransportStatusObserver(
+            types.SimpleNamespace(executable="docker"),
+            HARNESS.ContainerHandle("b" * 64),
+            ROSTER,
+            10,
+        )
+        line = (
+            b'TRANSPORT_OBSERVER_JSON {"observed_at":1.0,"phase":"SEARCH"}'
+        )
+        with mock.patch.object(HARNESS, "MAXIMUM_OBSERVER_EVIDENCE", len(line) - 1):
+            observer._handle_stdout_line(line)
+        with self.assertRaisesRegex(HARNESS.TransportSmokeError, "evidence bound"):
+            observer.snapshot()
+        self.assertEqual(observer.documents, [])
+        self.assertLessEqual(
+            HARNESS.MAXIMUM_OBSERVER_EVIDENCE,
+            8 * 1024 * 1024,
+        )
+        self.assertIn("os.read", inspect.getsource(HARNESS.TransportStatusObserver._bounded_lines))
+
+    def test_private_ros_observer_kills_local_group_but_fails_closed_without_remote_proof(self):
+        docker = types.SimpleNamespace(
+            executable="docker",
+            run=mock.Mock(side_effect=RuntimeError("marker unavailable")),
+        )
+        observer = HARNESS.TransportStatusObserver(
+            docker,
+            HARNESS.ContainerHandle("b" * 64),
+            ROSTER,
+            10,
+        )
+        child_source = """
+import signal
+import time
+
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print('TRANSPORT_OBSERVER_READY', flush=True)
+while True:
+    time.sleep(1)
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", child_source],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        observer.process = process
+        identity = observer._read_process_identity(process.pid)
+        self.assertIsNotNone(identity)
+        self.assertTrue(identity.owns_private_group)
+        observer.process_identity = identity
+        observer.threads = [
+            threading.Thread(target=observer._read_stdout, daemon=True),
+            threading.Thread(target=observer._read_stderr, daemon=True),
+        ]
+        for thread in observer.threads:
+            thread.start()
+        self.assertTrue(observer.ready.wait(2))
+        try:
+            with mock.patch.multiple(
+                HARNESS,
+                OBSERVER_MARKER_GRACE_SECONDS=0.02,
+                OBSERVER_SIGNAL_GRACE_SECONDS=0.05,
+                OBSERVER_KILL_GRACE_SECONDS=2.0,
+                OBSERVER_READER_JOIN_SECONDS=1.0,
+            ):
+                self.assertFalse(observer.stop())
+            self.assertIsNotNone(process.poll())
+            self.assertTrue(observer._private_group_absent(identity))
+            self.assertTrue(process.stdout.closed)
+            self.assertTrue(process.stderr.closed)
+            self.assertTrue(all(not thread.is_alive() for thread in observer.threads))
+            self.assertEqual(docker.run.call_count, 2)
+        finally:
+            if observer._identity_matches(identity):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(identity.process_group, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+
+    def test_private_ros_observer_never_signals_a_reused_local_identity(self):
+        docker = types.SimpleNamespace(
+            executable="docker",
+            run=mock.Mock(
+                return_value=HARNESS.ProcessOutput(
+                    0,
+                    "TRANSPORT_OBSERVER_STOPPED\n",
+                    "",
+                )
+            ),
+        )
+        observer = HARNESS.TransportStatusObserver(
+            docker,
+            HARNESS.ContainerHandle("b" * 64),
+            ROSTER,
+            10,
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        actual = observer._read_process_identity(process.pid)
+        self.assertIsNotNone(actual)
+        observer.process = process
+        observer.process_identity = HARNESS.LocalProcessIdentity(
+            actual.pid,
+            actual.process_group,
+            actual.session,
+            actual.start_ticks + 1,
+        )
+        try:
+            with mock.patch.object(HARNESS.os, "killpg") as kill_group, mock.patch.multiple(
+                HARNESS,
+                OBSERVER_MARKER_GRACE_SECONDS=0.02,
+                OBSERVER_SIGNAL_GRACE_SECONDS=0.02,
+                OBSERVER_KILL_GRACE_SECONDS=0.02,
+            ):
+                self.assertFalse(observer.stop())
+            kill_group.assert_not_called()
+            self.assertIsNone(process.poll())
+            docker.run.assert_called_once()
+        finally:
+            if observer._identity_matches(actual):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(actual.process_group, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+
+    def test_finished_local_wrapper_still_stops_and_proves_remote_observer_absent(self):
+        docker = types.SimpleNamespace(
+            executable="docker",
+            run=mock.Mock(
+                return_value=HARNESS.ProcessOutput(
+                    0,
+                    "TRANSPORT_OBSERVER_STOPPED\n",
+                    "",
+                )
+            ),
+        )
+        observer = HARNESS.TransportStatusObserver(
+            docker,
+            HARNESS.ContainerHandle("b" * 64),
+            ROSTER,
+            10,
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(0.05)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        identity = observer._read_process_identity(process.pid)
+        self.assertIsNotNone(identity)
+        observer.process = process
+        observer.process_identity = identity
+        process.wait(timeout=2)
+
+        self.assertTrue(observer.stop())
+        docker.run.assert_called_once()
+        command = docker.run.call_args.args[0]
+        self.assertIn(
+            f"ROBOTSWARM_OBSERVER_STOP_PATH={observer.stop_path}",
+            command,
+        )
+        self.assertIn(HARNESS.REMOTE_OBSERVER_STOP_SOURCE, command)
+        self.assertTrue(observer.remote_observer_terminated)
+        self.assertTrue(observer.local_group_terminated)
+
+    def test_remote_stop_probe_removes_its_marker_when_no_observer_exists(self):
+        stop_path = Path(
+            f"/tmp/robotswarm-transport-ui-{uuid.uuid4().hex}.stop"
+        )
+        environment = os.environ.copy()
+        environment["ROBOTSWARM_OBSERVER_STOP_PATH"] = str(stop_path)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", HARNESS.REMOTE_OBSERVER_STOP_SOURCE],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            self.assertEqual(
+                completed.stdout.decode().strip(),
+                "TRANSPORT_OBSERVER_STOPPED",
+            )
+            self.assertFalse(stop_path.exists())
+            source = HARNESS.REMOTE_OBSERVER_STOP_SOURCE
+            self.assertIn("details = os.fstat(marker_fd)", source)
+            self.assertIn("(current.st_dev, current.st_ino)", source)
+            self.assertIn("os.unlink(filename, dir_fd=directory_fd)", source)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                stop_path.unlink()
+
+    def test_confirmed_container_cleanup_skips_impossible_remote_exec(self):
+        docker = types.SimpleNamespace(
+            executable="docker",
+            run=mock.Mock(side_effect=AssertionError("container is already absent")),
+        )
+        observer = HARNESS.TransportStatusObserver(
+            docker,
+            HARNESS.ContainerHandle("b" * 64),
+            ROSTER,
+            10,
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(0.05)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        identity = observer._read_process_identity(process.pid)
+        self.assertIsNotNone(identity)
+        observer.process = process
+        observer.process_identity = identity
+        process.wait(timeout=2)
+
+        self.assertTrue(
+            HARNESS.finish_observer_cleanup(
+                observer,
+                False,
+                {"containerAbsent": True},
+            )
+        )
+        docker.run.assert_not_called()
+        self.assertTrue(observer.remote_observer_terminated)
+
+        uncertain = mock.Mock()
+        uncertain.stop.return_value = False
+        self.assertFalse(
+            HARNESS.finish_observer_cleanup(
+                uncertain,
+                False,
+                {"containerAbsent": False},
+            )
+        )
+        uncertain.accept_container_absence_proof.assert_not_called()
+        uncertain.stop.assert_called_once()
+
+        run_source = inspect.getsource(HARNESS.run_smoke)
+        self.assertLess(
+            run_source.index('report["cleanup"] = cleanup_run('),
+            run_source.index("observer_exited = finish_observer_cleanup("),
+        )
 
     def test_private_ros_observer_rejects_regression_missing_notice_and_foreign_task(self):
         regression = ros_documents()
@@ -991,6 +1268,27 @@ class TransportUiAcceptanceContractTests(unittest.TestCase):
             HARNESS.wait_viewer_lease_closed(
                 FakeUi([failed]), SESSION_ID, binding, 0.01
             )
+
+    def test_viewer_is_bound_before_waiting_for_the_first_decoded_frame(self):
+        source = inspect.getsource(HARNESS.run_smoke)
+        request = source.index("ui.request_viewer()")
+        bind = source.index("binding = active_viewer_runtime(")
+        decoded = source.index("ui.wait_viewer_frame(")
+        self.assertLess(request, bind)
+        self.assertLess(bind, decoded)
+        self.assertNotIn("ui.open_viewer(", source)
+        self.assertIn("startup = ui.viewer_startup_state()", source)
+        self.assertIn('"sessionBoundRuntime": binding is not None', source)
+        self.assertEqual(source.count("args.viewer_timeout"), 1)
+        self.assertEqual(
+            source.count('remaining_budget(viewer_deadline, "private viewer startup")'),
+            2,
+        )
+        with mock.patch.object(HARNESS.time, "monotonic", return_value=10.25):
+            self.assertAlmostEqual(HARNESS.remaining_budget(12.0, "viewer"), 1.75)
+        with mock.patch.object(HARNESS.time, "monotonic", return_value=12.0):
+            with self.assertRaisesRegex(HARNESS.TransportSmokeError, "exhausted"):
+                HARNESS.remaining_budget(12.0, "viewer")
 
     def test_failed_chrome_launch_still_removes_only_its_owned_profile(self):
         with tempfile.TemporaryDirectory() as temporary:

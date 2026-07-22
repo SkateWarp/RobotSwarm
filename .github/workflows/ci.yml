@@ -444,8 +444,10 @@ jobs:
             src/app/fuse-configs/routesConfig.js \
             src/app/fuse-layouts/layout1/Layout1Config.js \
             src/app/fuse-layouts/layout1/components/FooterLayout1.js \
+            src/app/fuse-layouts/layout1/components/ToolbarLayout1.js \
             src/app/fuse-layouts/layout1/components/navbar/style-1/NavbarStyle1Content.js \
             src/app/fuse-layouts/shared-components/FullScreenToggle.js \
+            src/app/fuse-layouts/shared-components/Logo.js \
             src/app/fuse-layouts/shared-components/NavbarToggleButton.js \
             src/app/fuse-layouts/shared-components/NavbarToggleButton.test.js \
             src/app/main/apps/GeeTS/LeafSorting/LeafSortingAppConfig.js \
@@ -478,6 +480,8 @@ jobs:
             src/app/main/apps/GeeTS/Realtime/WhepViewer.js \
             src/app/main/apps/GeeTS/Realtime/WhepViewer.test.js \
             src/app/main/apps/GeeTS/Realtime/transportTaskStatus.js \
+            src/app/main/apps/GeeTS/Realtime/viewerTimestamp.js \
+            src/app/main/apps/GeeTS/Realtime/viewerTimestamp.test.js \
             src/app/main/apps/GeeTS/RobotDetail/RobotDetailAppConfig.js \
             src/app/main/apps/GeeTS/RobotGroups/RobotGroupsApp.js \
             src/app/main/apps/GeeTS/RobotGroups/RobotGroupsApp.test.js \
@@ -498,6 +502,7 @@ jobs:
             src/app/main/apps/accounts/AccountsTable.test.js \
             src/app/main/login/Login.js \
             src/app/main/login/Register.js \
+            src/app/main/login/Branding.test.js \
             src/app/main/login/tabs/JWTLoginTab.js \
             src/app/main/login/tabs/JWTRegisterTab.js \
             src/app/shared-components/GeneralHeader.js \

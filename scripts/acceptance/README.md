@@ -11,16 +11,15 @@ carga y el smoke de transporte desde la interfaz completan los siete recorridos.
 Los arneses visibles no admiten modo headless y fijan el origen de las
 credenciales a `https://rs.zerav.la`.
 
-El freeze offline vigente aprobó 193/193 contratos, distribuidos en API 16,
-carga N=4 38, responsive 13, matriz ROS 44, transporte desde la interfaz 37,
-visor multiusuario 30 y secciones 15. La suite completa de backend sin conexión
-PostgreSQL aprobó 250 pruebas y omitió las 8 opt-in (258 descubiertas); el filtro
-ordinario confirmó 250/250, las focales de cuentas 23/23 y esas ocho aprobaron
-8/8 contra PostgreSQL 17.10. También aprobaron worker 124/124, ROS 427/427 y
-frontend 149/149 en 28 suites. `py_compile` cubrió 14 módulos, el lint 75 archivos
-y también aprobaron sintaxis Bash, build y `git diff --check`. Este párrafo
-describe la verificación local: no se ejecutaron CI, despliegue ni recorridos
-postdeploy para este cierre.
+La ejecución offline vigente aprobó 237/237 contratos: API de producción 17,
+carga N=4 47, responsive 13, matriz ROS 60, secciones 15, transporte desde la
+interfaz 44 y visor multiusuario 41. Este conteo corresponde a las pruebas
+unitarias de los siete instrumentos; no equivale a haber aprobado sus recorridos
+contra un release desplegado. La compuerta N=4 aprobó sobre la base `fbef23e`,
+pero debe repetirse, junto con la matriz productiva completa, sobre el SHA final.
+Los resultados de suites de aplicación, CI y postdeploy deben citarse con el SHA
+y el reporte de la ejecución que los produjo, no inferirse a partir de estos 237
+contratos.
 
 ## Archivos locales requeridos
 
@@ -81,12 +80,30 @@ Todos los JSON y PNG se crean con modo `0600`; los perfiles de Chrome, sesiones
 y controles interactivos se liberan incluso ante interrupción. Un resultado no
 se considera aprobatorio si la limpieza falla.
 
+Antes de solicitar un visor, el recorrido multiusuario y la compuerta N=4
+inspeccionan en Chrome las Media Source Extensions (MSE), `SourceBuffer` y el
+soporte H.264 que utiliza `hls.js`; esta comprobación no crea un lease. Así se
+distingue una incapacidad del navegador de un fallo posterior de provisión o
+reproducción HLS. Si el primer frame no llega en la compuerta N=4, el diagnóstico
+acotado conserva únicamente señales como estado MSE, número de recursos HLS,
+estado visible de la interfaz y dimensiones del elemento `video`, sin retener
+URL firmada, token ni identificador de lease.
+
+Los controles HTML se someten primero a hit-test y a un clic CDP físico. El
+resultado registra si Chrome emitió un evento `isTrusted`; si un control
+ordinario no lo recibe, se permite un único `element.click()` como fallback y se
+deja constancia explícita mediante `fallbackUsed`. Las acciones que requieren
+activación de usuario —inicio de tarea y pantalla completa— exigen el clic
+trusted y fallan de forma cerrada: nunca utilizan ese fallback. Los gestos sobre
+Gazebo (ratón, rueda y teclado) continúan enviándose como eventos de entrada
+reales y no como llamadas DOM.
+
 Al salir de fullscreen, el visor debe emitir una sola liberación global de
 entradas retenidas. `Escape` pertenece al navegador en esa transición y no debe
 llegar a Gazebo; el frontend consume el auto-repeat mediante `event.repeat` y
 permite un nuevo Escape después de volver a fullscreen, aunque el `keyup`
-anterior no se haya recibido. La regresión que fija esta condición está incluida
-en las 149 pruebas frontend.
+anterior no se haya recibido. La regresión frontend correspondiente fija esta
+condición de forma explícita.
 
 Los programas muestran únicamente mensajes y reportes saneados. No deben
 copiarse a la documentación el archivo de credenciales, la clave de enlace, los
@@ -109,6 +126,14 @@ reproducción controlada termina en 401 y cero sesiones. El `DELETE` de sesión
 declara también en Swagger/OpenAPI su posible 409 cuando agota los reintentos de
 serialización; un instrumento no debe tratar ese estado como un 404 ni como una
 limpieza confirmada.
+
+Los timestamps de .NET se validan antes de comparar intervalos o caducidades.
+Los parsers admiten de uno a siete dígitos fraccionarios, normalizan a los seis
+microsegundos que acepta Python 3.8 y conservan `Z` o el desplazamiento UTC. En
+las columnas históricas `timestamp without time zone`, la ausencia de sufijo se
+interpreta de forma explícita como UTC. Esto evita tanto el error de precisión
+de `datetime.fromisoformat` en Python 3.8 como comparaciones entre fechas aware y
+naive, sin aceptar texto o zonas horarias arbitrarias.
 
 La misma regla alcanza las operaciones Admin sobre otra cuenta. Si una petición
 ya pasó el middleware pero su actor queda revocado mientras espera, el handler
@@ -270,20 +295,35 @@ El transporte adicional es `transport_grf_n2`. Su gate exige el roster exacto en
 `SEARCH` → `APPROACH` → `PUSH` → `DONE`, búsqueda y aviso correlacionados para
 ambos robots, rendezvous completo, exactamente dos raíces sobre la carga, cero
 compañeros y dos empujadores útiles. La adición cierra una brecha del catálogo y
-de sus contratos; todavía no hay una corrida física N=2 que pueda citarse como
-aceptación del algoritmo.
+de sus contratos. El recorrido ROS físico N=2 ya aprobó la lógica del algoritmo:
+los dos robots buscaron, el hallazgo se anunció al compañero, ambos completaron
+el rendezvous y empujaron como raíces; la carga avanzó más de 0,50 m, el RTF fue
+aproximadamente 2,996 y no se registraron colisiones. En esa corrida el HLS rondó
+30 FPS y el `gzclient` primario 49,6 FPS. Sin embargo, la sonda gráfica secundaria
+concurrente todavía no dispone de un reporte integral aprobatorio. Por ello esta
+evidencia acepta el algoritmo N=2, pero no permite marcar como aprobada la matriz
+productiva completa.
 
 En los seis casos de formación, la matriz añade de forma explícita
-`--formation-active-seconds 15.0`. Esta variante inicia la forma en modo
+`--formation-active-seconds 75.0`. Esta variante inicia la forma en modo
 `moving`, espera una asignación que cubra exactamente toda la flota, exige el
 estado correlacionado `moving`, ausencia de error y odometría incompleta, y un
 error máximo de posición de 0,12 m. Desde ese punto mantiene la tarea en
-`running` durante al menos quince segundos de pared, recibe mensajes frescos y
+`running` durante al menos 75 segundos de pared, recibe mensajes frescos y
 vigila parada de emergencia y contactos. Las distancias, límites, velocidad,
 aceleración y RTF se vuelven a evaluar con el resto de las métricas al cerrar la
 ventana. Luego el runner detiene la misma tarea por su `task_id`. Fuera de esta
 opción, `robotswarm_live_acceptance.py` conserva el comportamiento normal de
 formación estática y exige que termine en `formed`.
+
+Los tres casos de seguimiento reciben asimismo
+`--follow-active-seconds 75.0`. El runner no termina al observar la primera
+vuelta válida: exige simultáneamente la vuelta paramétrica requerida y la
+ventana activa completa, mantiene el mismo `task_id` en estado `running` y
+vuelve a evaluar líder, cadena, separaciones, movimiento, seguridad y RTF al
+cerrarla. Ambas ventanas de 75 segundos superan el timeout de 45 segundos de la
+sonda gráfica y permiten demostrar solapamiento real sin prolongar
+artificialmente los casos de transporte.
 
 Antes de enviar el `docker exec` del runner, el operador prepara dentro del
 contenedor un estado y un lock privados, regulares, propiedad del mismo euid y
@@ -453,10 +493,19 @@ estar vacía al comenzar y se mantiene bajo el mismo bloqueo de operador que la
 matriz, de modo que ambas pruebas no pueden competir por la cuenta o la GPU.
 
 El arnés verifica primero el contenedor, la revisión OCI, la imagen inmutable y
-la red interna. Luego vincula el proceso `gzclient` del publicador con el lease,
-el display privado y los masters ROS/Gazebo de ese mismo contenedor. El script
-`gazebo_gui_preflight.py` y su plugin se copian desde la imagen desplegada al
-runtime privado del lease; no se toman del checkout del operador.
+la red interna. La apertura se divide deliberadamente en tres hitos ordenados:
+petición del visor → localización y validación del runtime del lease → primer
+frame HLS decodificado. De este modo, una espera de video no oculta si el
+publicador nunca creó el lease correcto. Luego se vincula el proceso `gzclient`
+del publicador con ese lease, el display privado y los masters ROS/Gazebo del
+mismo contenedor.
+
+El script `gazebo_gui_preflight.py` y su plugin se copian desde la imagen
+desplegada a un workspace efímero, privado y ejecutable bajo `/tmp`; no se toman
+del checkout del operador ni se ejecutan desde `/run/user`, que puede estar
+montado con `noexec`. El sandbox los incorpora de forma individual y de solo
+lectura, mientras mantiene el reporte y la autoridad X11 dentro del runtime del
+lease. El workspace se elimina de manera explícita durante la limpieza.
 
 El `gzclient` de producción vive en el host GPU y, a diferencia de un cliente
 dentro del contenedor, no publica `/gazebo_gui` en ese grafo ROS. El supervisor
@@ -490,6 +539,11 @@ que el área útil permanezca visible y que la proporción de frames descartados
 no supere 0,10. Por tanto, la tarea GRF N=4 real, la carga física, el preflight
 de Gazebo y la reproducción del navegador quedan demostrados de forma
 concurrente y con el mismo `task_id`.
+
+El CLI exige para `--preflight-timeout` un mínimo de 55 segundos: 45 para el
+probe gráfico activo, 5 para la muestra HLS concurrente y 5 de margen de cierre.
+El valor predeterminado es 60 segundos. Un presupuesto inferior se rechaza antes
+de crear la sesión y no puede acortar silenciosamente ninguna de esas ventanas.
 
 El probe desplegado recibe explícitamente los siguientes límites de capacidad:
 
@@ -567,6 +621,11 @@ python3 scripts/acceptance/robotswarm-loaded-n4-e2e.py \
   --output /tmp/robotswarm-acceptance/loaded-n4.json
 ```
 
+En el estado actual de comisionamiento todavía no existe un reporte aprobatorio
+de este comando sobre el release final. Los resultados locales que siguen son
+antecedentes de ingeniería y no deben presentarse como aceptación N=4
+postdeploy.
+
 En el diagnóstico local del candidato, el límite antiguo de 180 s cortó una
 primera corrida con 0,2335 m, 752 muestras y 4/4 robots útiles. Por ello los
 presupuestos actuales son 60 s para `SEARCH`, 100 s para `APPROACH` y 190 s
@@ -594,7 +653,7 @@ conexión iguales, ausencia de reutilización y continuidad monotónica. Una
 revisión P2 añadió el gate que exige, antes y después de la captura de `PUSH`,
 FPS decodificados finitos y no inferiores a
 `MATRIX.MINIMUM_BROWSER_VIDEO_FPS`. El caso de 26,9 frente a 27,0 debe fallar.
-La regresión forma parte de los 38/38 contratos vigentes; la evidencia v11 y
+La regresión forma parte de los 47/47 contratos vigentes; la evidencia v11 y
 los contratos aprobaron en sus alcances respectivos. Esta aprobación es local;
 el mismo comando sigue siendo obligatorio sobre el SHA desplegado.
 
@@ -603,12 +662,20 @@ los cuatro documentos del protocolo, los documentos sanitizados de
 solapamiento y correlación, el reporte oficial de Gazebo y las capturas de
 antes, durante `PUSH` y después se escriben con permisos privados y hashes
 SHA-256. No se conservan salidas crudas, UUID, credenciales, identificadores de
-contenedor, red o lease. `stdout` y `stderr` se drenan simultáneamente con un
-límite estricto: 1 MiB para el preflight y 16 MiB para el probe y las órdenes
-Docker. El preflight también drena el `gzclient` mediante una tubería con cuota
-de 1 MiB y le asigna un `TMPDIR` efímero, propio y `0700` bajo `/tmp`. Al alcanzar
-un límite se termina el proceso correspondiente sin esperar a acumular toda la
-salida en memoria.
+contenedor, red o lease. El hijo de carga mantiene el protocolo oficial en
+`stdout` y reserva una segunda tubería, recibida como `stderr` por el arnés,
+exclusivamente para los marcadores live. Ese canal acepta solo líneas completas
+con los prefijos `LOADED_PAYLOAD_READY_JSON`, `LOADED_MASS_SAMPLE_JSON`,
+`LOADED_GRF_ACTIVE_JSON` o `LOADED_PUSH_LIVE_JSON`; cualquier línea adicional,
+incompleta o con otro prefijo termina el hijo en modo fail-closed. El diagnóstico
+ordinario de `stderr` se descarta dentro del contenedor y los fallos se clasifican
+a partir del protocolo estructurado.
+
+Ambas tuberías se drenan simultáneamente con un límite conjunto de 16 MiB para
+el probe; las órdenes Docker aplican la misma cota. El preflight y su `gzclient`
+usan cuotas independientes de 1 MiB, y el primero recibe un `TMPDIR` efímero,
+propio y `0700` bajo `/tmp`. Al alcanzar un límite se termina el grupo de procesos
+correspondiente sin esperar a acumular toda la salida en memoria.
 
 El `finally` detiene primero los hijos acotados, retira los archivos temporales
 y el `gzclient` del preflight, cierra el visor, detiene la sesión y exige
@@ -633,10 +700,13 @@ contenedor tiene que ser el único miembro de una sola red Docker interna y
 privada. El roster no se deduce de `tb3_0`…`tb3_3`: se lee antes y después de
 la tarea en `/api/sessions/{id}/robots`, y se exige igualdad exacta de cuatro
 miembros, ordinales sin huecos, namespaces coherentes y estados `Ready` o
-`Active`. Después se abre el HLS real en una ventana normal de Chrome; no se
-admiten `--headless`, `--disable-gpu` ni el fallback WHEP. El identificador del
-lease se conserva solo en memoria privada para correlacionar el publicador, el
-runtime y su estado autenticado; no se copia al reporte.
+`Active`. Después, el arnés solicita el visor, vincula primero el runtime privado
+con la sesión y solo entonces espera el primer frame HLS decodificado. Este orden
+request → bind → frame impide atribuir un video tardío a otro lease y permite
+conservar un diagnóstico acotado si el frame no llega. La ventana de Chrome es
+normal; no se admiten `--headless`, `--disable-gpu` ni el fallback WHEP. El
+identificador del lease se conserva solo en memoria privada para correlacionar
+el publicador, el runtime y su estado autenticado; no se copia al reporte.
 
 La tarjeta «Transporte colaborativo» se selecciona en el navegador y se
 escriben `X=-3`, `Y=-4` mediante los dos `input[type=number]` reales de React.
@@ -670,6 +740,14 @@ Durante `PUSH` debe observar al menos tres estados consecutivos, durante 0,40 s
 o más, con `current_useful_pusher_count` y
 `current_useful_pusher_ids` iguales al roster autoritativo, además de un aumento
 de progreso mínimo de 0,001.
+
+La salida de este observador ROS se consume de forma incremental, sin esperar a
+que termine el proceso ni acumular un prefijo sin salto de línea. Cada línea se
+limita a 16 KiB y el grafo completo de objetos JSON retenidos como evidencia a
+8 MiB; exceder cualquiera de las dos cotas invalida el recorrido. Al cerrarlo se
+solicita primero la salida cooperativa mediante su marcador privado y, si el
+grupo continúa vivo, se escala de forma acotada `SIGINT` → `SIGTERM` → `SIGKILL`.
+La limpieza solo aprueba cuando desaparece el grupo y terminan ambos lectores.
 
 El smoke anterior podía aceptar `SEARCH` a partir del contador de buscadores sin
 demostrar que sus modelos se hubieran desplazado. El mismo suscriptor integra

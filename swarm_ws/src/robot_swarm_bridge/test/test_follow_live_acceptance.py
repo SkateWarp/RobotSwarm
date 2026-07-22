@@ -80,6 +80,33 @@ class FollowLiveAcceptanceTest(unittest.TestCase):
             expected.issubset(LIVE.RESULT_BEHAVIOR_STATUS_KEYS)
         )
 
+    def test_external_follow_window_is_bounded_and_single_scenario_only(self):
+        follow = next(
+            case for case in LIVE.SCENARIOS
+            if case["name"] == "follow_circular_n3"
+        )
+        formation = next(
+            case for case in LIVE.SCENARIOS
+            if case["behavior"] == "formation"
+        )
+
+        self.assertEqual(
+            0.0, LIVE.validate_follow_active_selection(0, [formation])
+        )
+        self.assertEqual(
+            75.0, LIVE.validate_follow_active_selection(75, [follow])
+        )
+        for seconds, cases in (
+            (14.9, [follow]),
+            (241, [follow]),
+            (121, [follow]),
+            (75, [formation]),
+            (75, [follow, follow]),
+        ):
+            with self.subTest(seconds=seconds, cases=cases):
+                with self.assertRaises(ValueError):
+                    LIVE.validate_follow_active_selection(seconds, cases)
+
 
 if __name__ == "__main__":
     unittest.main()

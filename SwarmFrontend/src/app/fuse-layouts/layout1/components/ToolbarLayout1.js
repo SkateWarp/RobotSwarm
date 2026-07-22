@@ -5,6 +5,7 @@ import Toolbar from "@mui/material/Toolbar";
 import NavbarToggleButton from "app/fuse-layouts/shared-components/NavbarToggleButton";
 import QuickPanelToggleButton from "app/fuse-layouts/shared-components/quickPanel/QuickPanelToggleButton";
 import UserMenu from "app/fuse-layouts/shared-components/UserMenu";
+import Logo from "app/fuse-layouts/shared-components/Logo";
 import clsx from "clsx";
 import { memo } from "react";
 import { useSelector } from "react-redux";
@@ -42,6 +43,12 @@ function ToolbarLayout1(props) {
                                     {config.navbar.style === "style-1" && !navbar.open && (
                                         <NavbarToggleButton className="w-40 h-40 p-0 mx-0" />
                                     )}
+                                </Hidden>
+
+                                <Hidden mdDown>
+                                    <div className="flex items-center mx-12">
+                                        <Logo />
+                                    </div>
                                 </Hidden>
 
                                 <Hidden lgUp>

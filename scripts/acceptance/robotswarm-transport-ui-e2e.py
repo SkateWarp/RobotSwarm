@@ -60,6 +60,14 @@ MAXIMUM_DROPPED_RATIO = 0.10
 MAXIMUM_CHILD_OUTPUT = 1024 * 1024
 MAXIMUM_TASK_DOCUMENT = 512 * 1024
 READ_CHUNK = 64 * 1024
+MAXIMUM_OBSERVER_LINE = 16 * 1024
+MAXIMUM_OBSERVER_EVIDENCE = 8 * 1024 * 1024
+MAXIMUM_OBSERVER_DOCUMENTS = 6000
+OBSERVER_MARKER_GRACE_SECONDS = 2.0
+OBSERVER_SIGNAL_GRACE_SECONDS = 2.0
+OBSERVER_KILL_GRACE_SECONDS = 3.0
+OBSERVER_READER_JOIN_SECONDS = 2.0
+OBSERVER_REMOTE_COMMAND_SECONDS = 8.0
 START_PROBE_QUIET_SECONDS = 0.75
 MINIMUM_PUSH_SAMPLES = 3
 MINIMUM_PUSH_WINDOW_SECONDS = 0.40
@@ -107,6 +115,23 @@ class ProcessOutput:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclasses.dataclass(frozen=True)
+class LocalProcessIdentity:
+    pid: int
+    process_group: int
+    session: int
+    start_ticks: int
+
+    @property
+    def owns_private_group(self) -> bool:
+        return (
+            self.pid > 1
+            and self.pid == self.process_group
+            and self.pid == self.session
+            and self.start_ticks > 0
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -160,6 +185,13 @@ VISIBLE = load_visible_driver()
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def remaining_budget(deadline: float, label: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TransportSmokeError(f"The {label} time budget was exhausted")
+    return remaining
 
 
 def parse_utc_timestamp(value: Any, label: str) -> dt.datetime:
@@ -672,6 +704,99 @@ finally:
         pass
 '''
 
+REMOTE_OBSERVER_STOP_SOURCE = r'''\
+import glob
+import os
+import re
+import stat
+import time
+
+stop_path = os.environ.get('ROBOTSWARM_OBSERVER_STOP_PATH', '')
+if not re.fullmatch(
+    r'/tmp/robotswarm-transport-ui-[0-9a-f]{32}[.]stop', stop_path
+):
+    raise SystemExit(4)
+
+directory = '/tmp'
+filename = stop_path.rsplit('/', 1)[-1]
+directory_flags = os.O_RDONLY | os.O_CLOEXEC
+if hasattr(os, 'O_DIRECTORY'):
+    directory_flags |= os.O_DIRECTORY
+try:
+    directory_fd = os.open(directory, directory_flags)
+except OSError:
+    raise SystemExit(5)
+
+flags = os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC
+if hasattr(os, 'O_NOFOLLOW'):
+    flags |= os.O_NOFOLLOW
+try:
+    marker_fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+    details = os.fstat(marker_fd)
+except OSError:
+    os.close(directory_fd)
+    raise SystemExit(5)
+if (
+    not stat.S_ISREG(details.st_mode)
+    or details.st_uid != os.geteuid()
+    or stat.S_IMODE(details.st_mode) != 0o600
+    or details.st_nlink != 1
+):
+    os.close(marker_fd)
+    os.close(directory_fd)
+    raise SystemExit(5)
+
+needle = stop_path.encode('utf-8')
+
+def observer_count():
+    count = 0
+    for candidate in glob.glob('/proc/[0-9]*/cmdline'):
+        try:
+            with open(candidate, 'rb', buffering=0) as stream:
+                raw = stream.read(65537)
+        except (OSError, IOError):
+            continue
+        if len(raw) <= 65536 and needle in raw.split(b'\0'):
+            count += 1
+    return count
+
+def remove_own_marker():
+    try:
+        current = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    held = os.fstat(marker_fd)
+    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+        return False
+    try:
+        os.unlink(filename, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+deadline = time.monotonic() + 5.0
+result = 'TRANSPORT_OBSERVER_ACTIVE'
+exit_code = 6
+while time.monotonic() < deadline:
+    if observer_count() == 0:
+        if remove_own_marker():
+            result = 'TRANSPORT_OBSERVER_STOPPED'
+            exit_code = 0
+        else:
+            result = 'TRANSPORT_OBSERVER_UNSAFE_MARKER'
+            exit_code = 7
+        break
+    time.sleep(0.05)
+os.close(marker_fd)
+os.close(directory_fd)
+print(result)
+raise SystemExit(exit_code)
+'''
+
 
 class TransportStatusObserver:
     """Keep private ROS evidence that the reduced TaskRun result cannot expose."""
@@ -690,7 +815,11 @@ class TransportStatusObserver:
         self.token = uuid.uuid4().hex
         self.stop_path = f"/tmp/robotswarm-transport-ui-{self.token}.stop"
         self.process: subprocess.Popen[bytes] | None = None
+        self.process_identity: LocalProcessIdentity | None = None
+        self.local_group_terminated = False
+        self.remote_observer_terminated = False
         self.documents: list[dict[str, Any]] = []
+        self.document_bytes = 0
         self.stderr = bytearray()
         self.error: str | None = None
         self.ready = threading.Event()
@@ -726,6 +855,15 @@ class TransportStatusObserver:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        self.process_identity = self._read_process_identity(self.process.pid)
+        if (
+            self.process_identity is None
+            or not self.process_identity.owns_private_group
+        ):
+            self.stop()
+            raise TransportSmokeError(
+                "The private ROS observer did not receive a private local process group"
+            )
         if self.process.stdout is None or self.process.stderr is None:
             raise TransportSmokeError("The private ROS observer has no output pipes")
         self.threads = [
@@ -738,45 +876,139 @@ class TransportStatusObserver:
             self.stop()
             raise TransportSmokeError("The private ROS transport observer did not become ready")
 
+    def _fail(self, message: str) -> None:
+        with self.lock:
+            if self.error is None:
+                self.error = message
+
+    @staticmethod
+    def _bounded_lines(stream: Any) -> Iterable[bytes | None]:
+        """Yield complete lines without ever accumulating an unbounded prefix."""
+        pending = bytearray()
+        dropping = False
+        descriptor = stream.fileno()
+        while True:
+            try:
+                chunk = os.read(descriptor, READ_CHUNK)
+            except OSError:
+                if stream.closed:
+                    return
+                raise
+            if not chunk:
+                break
+            offset = 0
+            while offset < len(chunk):
+                newline = chunk.find(b"\n", offset)
+                end = len(chunk) if newline < 0 else newline
+                if dropping:
+                    if newline < 0:
+                        break
+                    dropping = False
+                    offset = newline + 1
+                    continue
+
+                piece = chunk[offset:end]
+                if len(piece) > MAXIMUM_OBSERVER_LINE - len(pending):
+                    pending.clear()
+                    yield None
+                    if newline < 0:
+                        dropping = True
+                        break
+                    offset = newline + 1
+                    continue
+                pending.extend(piece)
+                if newline < 0:
+                    break
+                yield bytes(pending)
+                pending.clear()
+                offset = newline + 1
+        if pending and not dropping:
+            yield bytes(pending)
+
+    def _handle_stdout_line(self, raw: bytes) -> None:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if line == "TRANSPORT_OBSERVER_READY":
+            self.ready_seen = True
+            self.ready.set()
+            return
+        prefix = "TRANSPORT_OBSERVER_JSON "
+        if not line.startswith(prefix):
+            return
+        try:
+            document = json.loads(line[len(prefix) :])
+        except json.JSONDecodeError:
+            self._fail("The private ROS observer returned malformed evidence")
+            return
+        retained_size = self._retained_size(document)
+        with self.lock:
+            if self.error is not None:
+                return
+            if not isinstance(document, dict):
+                self.error = "The private ROS observer returned invalid evidence"
+            elif (
+                len(self.documents) >= MAXIMUM_OBSERVER_DOCUMENTS
+                or self.document_bytes + retained_size > MAXIMUM_OBSERVER_EVIDENCE
+            ):
+                self.error = "The private ROS observer exceeded its evidence bound"
+            else:
+                self.documents.append(document)
+                self.document_bytes += retained_size
+
+    @staticmethod
+    def _retained_size(value: Any) -> int:
+        """Estimate the complete Python object graph retained for one JSON line."""
+        total = 0
+        pending = [value]
+        seen: set[int] = set()
+        while pending:
+            item = pending.pop()
+            identity = id(item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += sys.getsizeof(item)
+            if isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple)):
+                pending.extend(item)
+        return total
+
     def _read_stdout(self) -> None:
         assert self.process is not None and self.process.stdout is not None
         try:
-            for raw in self.process.stdout:
-                if len(raw) > READ_CHUNK:
-                    with self.lock:
-                        self.error = "The private ROS observer returned an oversized line"
+            for raw in self._bounded_lines(self.process.stdout):
+                if raw is None:
+                    self._fail("The private ROS observer returned an oversized line")
                     continue
-                line = raw.decode("utf-8", errors="replace").strip()
-                if line == "TRANSPORT_OBSERVER_READY":
-                    self.ready_seen = True
-                    self.ready.set()
-                    continue
-                if not line.startswith("TRANSPORT_OBSERVER_JSON "):
-                    continue
-                try:
-                    document = json.loads(line[len("TRANSPORT_OBSERVER_JSON ") :])
-                except json.JSONDecodeError:
-                    with self.lock:
-                        self.error = "The private ROS observer returned malformed evidence"
-                    continue
-                with self.lock:
-                    if not isinstance(document, dict):
-                        self.error = "The private ROS observer returned invalid evidence"
-                    elif len(self.documents) >= 6000:
-                        self.error = "The private ROS observer exceeded its evidence bound"
-                    else:
-                        self.documents.append(document)
+                self._handle_stdout_line(raw)
+        except (OSError, ValueError):
+            if not self.process.stdout.closed:
+                self._fail("The private ROS observer output reader failed")
         finally:
             self.ready.set()
 
     def _read_stderr(self) -> None:
         assert self.process is not None and self.process.stderr is not None
-        for chunk in iter(lambda: self.process.stderr.read(READ_CHUNK), b""):
-            with self.lock:
-                room = max(0, MAXIMUM_CHILD_OUTPUT - len(self.stderr))
-                self.stderr.extend(chunk[:room])
-                if len(chunk) > room:
-                    self.error = "The private ROS observer exceeded its diagnostic bound"
+        try:
+            descriptor = self.process.stderr.fileno()
+            while True:
+                try:
+                    chunk = os.read(descriptor, READ_CHUNK)
+                except OSError:
+                    if self.process.stderr.closed:
+                        return
+                    raise
+                if not chunk:
+                    return
+                with self.lock:
+                    room = max(0, MAXIMUM_CHILD_OUTPUT - len(self.stderr))
+                    self.stderr.extend(chunk[:room])
+                    if len(chunk) > room and self.error is None:
+                        self.error = "The private ROS observer exceeded its diagnostic bound"
+        except (OSError, ValueError):
+            if not self.process.stderr.closed:
+                self._fail("The private ROS observer diagnostic reader failed")
 
     def snapshot(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -799,21 +1031,167 @@ class TransportStatusObserver:
             time.sleep(0.1)
         raise TransportSmokeError("The private ROS observer missed the terminal transport phase")
 
-    def stop(self) -> bool:
-        if self.process is None:
+    @staticmethod
+    def _read_process_identity(pid: int) -> LocalProcessIdentity | None:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+            return None
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as stream:
+                raw = stream.read(8193)
+        except (OSError, ValueError):
+            return None
+        if len(raw) > 8192 or ")" not in raw:
+            return None
+        head, tail = raw.rsplit(")", 1)
+        fields = tail.split()
+        try:
+            recorded_pid = int(head.split(" ", 1)[0])
+            process_group = int(fields[2])
+            session = int(fields[3])
+            start_ticks = int(fields[19])
+        except (IndexError, TypeError, ValueError):
+            return None
+        if recorded_pid != pid:
+            return None
+        return LocalProcessIdentity(pid, process_group, session, start_ticks)
+
+    @classmethod
+    def _identity_matches(cls, expected: LocalProcessIdentity) -> bool:
+        return cls._read_process_identity(expected.pid) == expected
+
+    @classmethod
+    def _private_group_absent(cls, expected: LocalProcessIdentity) -> bool:
+        for candidate in Path("/proc").glob("[0-9]*"):
+            try:
+                pid = int(candidate.name)
+            except ValueError:
+                continue
+            current = cls._read_process_identity(pid)
+            if (
+                current is not None
+                and current.process_group == expected.process_group
+                and current.session == expected.session
+            ):
+                return False
+        try:
+            os.killpg(expected.process_group, 0)
+        except ProcessLookupError:
             return True
-        if self.process.poll() is None:
-            with contextlib.suppress(Exception):
-                self.docker.run(
-                    ["exec", self.container.identifier, "/usr/bin/touch", self.stop_path],
-                    timeout=10,
-                    interruptible=False,
-                )
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            self.process.wait(timeout=12)
+        except (PermissionError, OSError):
+            return False
+        return False
+
+    @classmethod
+    def _wait_for_process_group(
+        cls,
+        process: subprocess.Popen[bytes],
+        identity: LocalProcessIdentity,
+        timeout: float,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            process.poll()
+            if cls._private_group_absent(identity):
+                return True
+            time.sleep(0.05)
+        process.poll()
+        return cls._private_group_absent(identity)
+
+    def _prove_remote_observer_absent(self) -> bool:
+        try:
+            result = self.docker.run(
+                [
+                    "exec",
+                    "--env",
+                    f"ROBOTSWARM_OBSERVER_STOP_PATH={self.stop_path}",
+                    self.container.identifier,
+                    "python3",
+                    "-c",
+                    REMOTE_OBSERVER_STOP_SOURCE,
+                ],
+                timeout=OBSERVER_REMOTE_COMMAND_SECONDS,
+                interruptible=False,
+            )
+        except Exception:
+            return False
+        return (
+            result.returncode == 0
+            and result.stdout.strip() == "TRANSPORT_OBSERVER_STOPPED"
+        )
+
+    def accept_container_absence_proof(self) -> None:
+        """A removed container is conclusive evidence that its observer is gone."""
+        self.remote_observer_terminated = True
+
+    def stop(self) -> bool:
+        process = self.process
+        if process is None:
+            return True
+
+        if not self.remote_observer_terminated:
+            self.remote_observer_terminated = self._prove_remote_observer_absent()
+
+        identity = self.process_identity
+        group_gone = self.local_group_terminated
+        if identity is not None and identity.owns_private_group and not group_gone:
+            group_gone = self._wait_for_process_group(
+                process,
+                identity,
+                OBSERVER_MARKER_GRACE_SECONDS,
+            )
+            for number, grace in (
+                (signal.SIGINT, OBSERVER_SIGNAL_GRACE_SECONDS),
+                (signal.SIGTERM, OBSERVER_SIGNAL_GRACE_SECONDS),
+                (signal.SIGKILL, OBSERVER_KILL_GRACE_SECONDS),
+            ):
+                if group_gone or not self._identity_matches(identity):
+                    break
+                try:
+                    os.killpg(identity.process_group, number)
+                except ProcessLookupError:
+                    pass
+                except (PermissionError, OSError):
+                    break
+                group_gone = self._wait_for_process_group(process, identity, grace)
+        if group_gone:
+            self.local_group_terminated = True
+
+        if not self.remote_observer_terminated:
+            self.remote_observer_terminated = self._prove_remote_observer_absent()
+
+        process.poll()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
         for thread in self.threads:
-            thread.join(timeout=2)
-        return self.process.poll() is not None
+            if thread.ident is not None:
+                thread.join(timeout=OBSERVER_READER_JOIN_SECONDS)
+        readers_stopped = all(
+            thread.ident is None or not thread.is_alive() for thread in self.threads
+        )
+        streams_closed = all(
+            stream is None or stream.closed for stream in (process.stdout, process.stderr)
+        )
+        return (
+            process.poll() is not None
+            and group_gone
+            and self.remote_observer_terminated
+            and readers_stopped
+            and streams_closed
+        )
+
+
+def finish_observer_cleanup(
+    observer: TransportStatusObserver | None,
+    already_exited: bool,
+    cleanup: dict[str, Any],
+) -> bool:
+    if observer is None or already_exited:
+        return True
+    if cleanup.get("containerAbsent") is True:
+        observer.accept_container_absence_proof()
+    return observer.stop()
 
 
 def _compressed(values: Iterable[str]) -> list[str]:
@@ -2607,14 +2985,31 @@ def run_smoke(args: argparse.Namespace) -> int:
         }
 
         viewer_requested = True
-        ui.open_viewer(args.viewer_timeout)
+        viewer_deadline = time.monotonic() + args.viewer_timeout
+        try:
+            ui.request_viewer()
+            binding = active_viewer_runtime(
+                args.viewer_runtime_dir,
+                session_id,
+                timeout=remaining_budget(viewer_deadline, "private viewer startup"),
+                stop_event=stop_event,
+            )
+            ui.wait_viewer_frame(
+                remaining_budget(viewer_deadline, "private viewer startup")
+            )
+        except Exception:
+            try:
+                startup = ui.viewer_startup_state()
+            except Exception:
+                startup = {"diagnosticUnavailable": True}
+            report["viewer"] = {
+                "transport": "HLS",
+                "live": False,
+                "sessionBoundRuntime": binding is not None,
+                "startup": startup,
+            }
+            raise
         viewer = ui.require_interactive_hls()
-        binding = active_viewer_runtime(
-            args.viewer_runtime_dir,
-            session_id,
-            timeout=args.viewer_timeout,
-            stop_event=stop_event,
-        )
         report["viewer"] = {
             "transport": "HLS",
             "live": True,
@@ -2644,12 +3039,13 @@ def run_smoke(args: argparse.Namespace) -> int:
         barrier = require_start_barrier(ui)
 
         # This is the only physical start gesture in the complete harness.
-        ui.click_button(START_BUTTON)
+        start_gesture = ui.click_button(START_BUTTON, require_trusted=True)
         start = read_start_probe(ui, session_id)
         report["start"] = {
             "selectedCard": TASK_TYPE,
             "fields": fields,
             "barrier": barrier,
+            "gesture": start_gesture,
             **start.report,
         }
 
@@ -2756,8 +3152,11 @@ def run_smoke(args: argparse.Namespace) -> int:
                     "complete": False,
                     "error": sanitize_text(str(exc), secrets),
                 }
-            if not observer_exited and observer is not None:
-                observer_exited = observer.stop()
+            observer_exited = finish_observer_cleanup(
+                observer,
+                observer_exited,
+                report["cleanup"],
+            )
             report["cleanup"]["rosObserverExited"] = observer_exited
             report["cleanup"]["complete"] = bool(
                 report["cleanup"].get("complete") and observer_exited

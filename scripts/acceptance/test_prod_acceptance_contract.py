@@ -134,6 +134,23 @@ class ProductionAcceptanceContractTests(unittest.TestCase):
 
         self.assertEqual((409, 200, "stop_committed_first"), result)
 
+    def test_same_session_race_rejects_a_pending_cancellation_refusal(self):
+        user = self.race_user(
+            409,
+            {
+                "message": (
+                    "Wait for the previous task cancellation to finish "
+                    "before starting another task."
+                )
+            },
+        )
+
+        with self.assertRaisesRegex(
+            DRIVER.HarnessFailure,
+            "race_task_conflict_unexpected",
+        ):
+            DRIVER.race_task_start_with_session_stop(user, "session")
+
     def test_same_session_race_rejects_an_unexplained_conflict(self):
         user = self.race_user(
             409,

@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import copy
 import contextlib
+import errno
 import fcntl
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -84,11 +87,13 @@ def passing_n2_result():
                 "robot_assignments": {
                     name: {
                         "role": "payload_push",
+                        "chain_index": index,
+                        "chain_depth": 0,
                         "parent_namespace": None,
                         "notice_received": True,
                         "rendezvous_ready": True,
                     }
-                    for name in names
+                    for index, name in enumerate(names)
                 },
             },
         }
@@ -131,6 +136,62 @@ def passing_n2_result():
     return result
 
 
+def passing_transport_preference_result(robot_count):
+    scenario = next(
+        item for item in DRIVER.SCENARIOS
+        if item.name == f"transport_grf_n{robot_count}"
+    )
+    result = passing_result(scenario)
+    root_count = min(2, robot_count)
+    assignments = {}
+    for index in range(robot_count):
+        name = f"tb3_{index}"
+        if index < root_count:
+            assignments[name] = {
+                "role": "payload_push",
+                "chain_index": index,
+                "chain_depth": 0,
+                "parent_namespace": None,
+            }
+            continue
+        companion_index = index - root_count
+        chain_index = companion_index % root_count
+        depth = companion_index // root_count + 1
+        parent_index = (
+            chain_index
+            if depth == 1
+            else root_count + (depth - 2) * root_count + chain_index
+        )
+        assignments[name] = {
+            "role": "companion_push",
+            "chain_index": chain_index,
+            "chain_depth": depth,
+            "parent_namespace": f"tb3_{parent_index}",
+        }
+    result["behavior_status"] = {
+        "phase": "DONE",
+        "robot_assignments": assignments,
+    }
+    result["metrics"]["transport_participation"] = {
+        robot: {
+            "role": assignment["role"],
+            "declared_parent_namespaces": (
+                []
+                if assignment["role"] == "payload_push"
+                else [assignment["parent_namespace"]]
+            ),
+            "direct_contact_samples": (
+                8 if assignment["role"] == "payload_push" else 0
+            ),
+            "companion_contact_samples": (
+                0 if assignment["role"] == "payload_push" else 8
+            ),
+        }
+        for robot, assignment in assignments.items()
+    }
+    return result
+
+
 def passing_summary():
     return {
         "selected": 1,
@@ -166,7 +227,11 @@ def startup_render_report(
 ):
     return {
         "schema_version": 1,
-        "process": {"pid": 42, "executable": "/usr/bin/gzclient"},
+        "process": {
+            "pid": 42,
+            "executable": "/usr/bin/gzclient",
+            "start_ticks": 987654,
+        },
         "display": {"x11": ":120", "wayland": ""},
         "camera": {
             "name": "gzclient_camera(0)",
@@ -386,7 +451,7 @@ class RosMatrixAcceptanceContractTests(unittest.TestCase):
             "2.90",
         ])
         self.assertEqual(
-            command[-2:], ["--formation-active-seconds", "15.0"]
+            command[-2:], ["--formation-active-seconds", "75.0"]
         )
         self.assertNotIn("--delete-after", command)
         self.assertIn("--task-id", command)
@@ -405,6 +470,7 @@ class RosMatrixAcceptanceContractTests(unittest.TestCase):
             "e" * 32,
         )
         self.assertNotIn("--formation-active-seconds", transport)
+        self.assertNotIn("--follow-active-seconds", transport)
 
     def test_every_formation_gets_the_same_bounded_active_window(self):
         formations = [
@@ -415,8 +481,7 @@ class RosMatrixAcceptanceContractTests(unittest.TestCase):
         self.assertGreaterEqual(DRIVER.MATRIX_FORMATION_ACTIVE_SECONDS, 15.0)
         self.assertGreater(
             DRIVER.MATRIX_FORMATION_ACTIVE_SECONDS,
-            DRIVER.ACTIVE_PROBE_WARMUP_SECONDS
-            + DRIVER.ACTIVE_PROBE_SAMPLE_SECONDS,
+            DRIVER.ACTIVE_PROBE_TIMEOUT_SECONDS,
         )
         for index, scenario in enumerate(formations):
             token = "{:032x}".format(index + 1)
@@ -430,6 +495,31 @@ class RosMatrixAcceptanceContractTests(unittest.TestCase):
             option = command.index("--formation-active-seconds")
             self.assertEqual(
                 "{:.1f}".format(DRIVER.MATRIX_FORMATION_ACTIVE_SECONDS),
+                command[option + 1],
+            )
+
+    def test_every_follow_case_gets_a_window_longer_than_the_gui_probe(self):
+        follow_cases = [
+            scenario for scenario in DRIVER.SCENARIOS
+            if scenario.behavior == "follow"
+        ]
+        self.assertEqual(3, len(follow_cases))
+        self.assertGreater(
+            DRIVER.MATRIX_FOLLOW_ACTIVE_SECONDS,
+            DRIVER.ACTIVE_PROBE_TIMEOUT_SECONDS,
+        )
+        for index, scenario in enumerate(follow_cases):
+            token = "{:032x}".format(index + 20)
+            command = DRIVER.build_acceptance_command(
+                "docker",
+                "b" * 64,
+                scenario.name,
+                "matrix-" + token,
+                token,
+            )
+            option = command.index("--follow-active-seconds")
+            self.assertEqual(
+                "{:.1f}".format(DRIVER.MATRIX_FOLLOW_ACTIVE_SECONDS),
                 command[option + 1],
             )
 
@@ -1025,6 +1115,27 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         ):
             self.assertIn(requirement, source)
 
+    def test_task_activity_failure_codes_are_report_safe(self):
+        docker = DRIVER.DockerHost("docker", threading.Event())
+        container = DRIVER.ContainerHandle("c" * 64, "version")
+        scenario = DRIVER.SCENARIOS_BY_NAME["follow_circular_n3"]
+        for code, reason in (
+            (2, "activity_timeout"),
+            (3, "task_terminal_before_activity"),
+            (9, "probe_protocol_failure"),
+        ):
+            with self.subTest(code=code), mock.patch.object(
+                DRIVER,
+                "run_command",
+                return_value=DRIVER.ProcessOutput(code, "private output", ""),
+            ), self.assertRaisesRegex(DRIVER.MatrixError, reason):
+                docker.wait_task_active(
+                    container,
+                    "matrix-" + "a" * 32,
+                    scenario,
+                    1,
+                )
+
     def test_abort_acceptance_finalizes_state_and_validates_stop_protocol(self):
         docker = DRIVER.DockerHost("docker", threading.Event())
         container = DRIVER.ContainerHandle("c" * 64, "version")
@@ -1305,6 +1416,99 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                 with self.assertRaises(DRIVER.MatrixError):
                     DRIVER.validate_transport_n2_contract(incomplete)
 
+    def test_transport_object_preference_covers_representative_fleet_sizes(self):
+        expected_counts = {
+            1: (1, 0),
+            2: (2, 0),
+            3: (2, 1),
+            4: (2, 2),
+            10: (2, 8),
+        }
+        for robot_count, (root_count, companion_count) in expected_counts.items():
+            with self.subTest(robot_count=robot_count):
+                evidence = DRIVER.validate_transport_object_preference(
+                    passing_transport_preference_result(robot_count),
+                    robot_count,
+                )
+                self.assertTrue(evidence["objectContactPreference"])
+                self.assertEqual(root_count, evidence["payloadRootCount"])
+                self.assertEqual(
+                    companion_count, evidence["companionPusherCount"]
+                )
+
+    def test_transport_object_preference_rejects_role_and_chain_drift(self):
+        one_root = passing_transport_preference_result(3)
+        one_root["behavior_status"]["robot_assignments"]["tb3_1"] = {
+            "role": "companion_push",
+            "chain_index": 0,
+            "chain_depth": 2,
+            "parent_namespace": "tb3_2",
+        }
+        one_root["metrics"]["transport_participation"]["tb3_1"].update(
+            {
+                "role": "companion_push",
+                "declared_parent_namespaces": ["tb3_2"],
+                "direct_contact_samples": 0,
+                "companion_contact_samples": 8,
+            }
+        )
+        with self.assertRaisesRegex(DRIVER.MatrixError, "direct payload contact"):
+            DRIVER.validate_transport_object_preference(one_root, 3)
+
+        three_roots = passing_transport_preference_result(4)
+        three_roots["behavior_status"]["robot_assignments"]["tb3_2"] = {
+            "role": "payload_push",
+            "chain_index": 2,
+            "chain_depth": 0,
+            "parent_namespace": None,
+        }
+        three_roots["metrics"]["transport_participation"]["tb3_2"].update(
+            {
+                "role": "payload_push",
+                "declared_parent_namespaces": [],
+                "direct_contact_samples": 8,
+                "companion_contact_samples": 0,
+            }
+        )
+        with self.assertRaisesRegex(DRIVER.MatrixError, "direct payload contact"):
+            DRIVER.validate_transport_object_preference(three_roots, 4)
+
+        cycle = passing_transport_preference_result(10)
+        assignments = cycle["behavior_status"]["robot_assignments"]
+        assignments["tb3_2"]["parent_namespace"] = "tb3_4"
+        assignments["tb3_4"]["parent_namespace"] = "tb3_2"
+        with self.assertRaises(DRIVER.MatrixError):
+            DRIVER.validate_transport_object_preference(cycle, 10)
+
+        wrong_roster = passing_transport_preference_result(2)
+        wrong_roster["behavior_status"]["robot_assignments"]["tb3_9"] = (
+            wrong_roster["behavior_status"]["robot_assignments"].pop("tb3_1")
+        )
+        with self.assertRaisesRegex(DRIVER.MatrixError, "exact roster"):
+            DRIVER.validate_transport_object_preference(wrong_roster, 2)
+
+    def test_transport_object_preference_requires_physical_contact_by_role(self):
+        missing_root_contact = passing_transport_preference_result(4)
+        missing_root_contact["metrics"]["transport_participation"]["tb3_0"][
+            "direct_contact_samples"
+        ] = 0
+        with self.assertRaisesRegex(DRIVER.MatrixError, "direct object contact"):
+            DRIVER.validate_transport_object_preference(missing_root_contact, 4)
+
+        missing_companion_contact = passing_transport_preference_result(4)
+        missing_companion_contact["metrics"]["transport_participation"]["tb3_2"][
+            "companion_contact_samples"
+        ] = 0
+        with self.assertRaisesRegex(DRIVER.MatrixError, "predecessor contact"):
+            DRIVER.validate_transport_object_preference(missing_companion_contact, 4)
+
+        role_drift = passing_transport_preference_result(3)
+        role_drift["metrics"]["transport_participation"]["tb3_2"]["role"] = (
+            "payload_push"
+        )
+        with self.assertRaises(DRIVER.MatrixError):
+            DRIVER.validate_transport_object_preference(role_drift, 3)
+
     def test_startup_report_is_only_the_gpu_scene_capability_gate(self):
         document = startup_render_report()
         raw = json.dumps(document).encode()
@@ -1337,17 +1541,78 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             report = root / "active-report.json"
             report.write_text(json.dumps(document), encoding="utf-8")
             report.chmod(0o600)
+            raw = report.read_bytes()
+            attestation = DRIVER.ActiveProbeAttestation(
+                hashlib.sha256(raw).hexdigest(),
+                document["process"]["pid"],
+                document["process"]["start_ticks"],
+            )
 
-            evidence = DRIVER.load_active_probe_evidence(report, ":120")
+            evidence = DRIVER.load_active_probe_evidence(
+                report, ":120", attestation
+            )
             self.assertGreaterEqual(evidence.average_fps, 45.0)
             with self.assertRaisesRegex(DRIVER.MatrixError, "different private display"):
-                DRIVER.load_active_probe_evidence(report, ":121")
+                DRIVER.load_active_probe_evidence(report, ":121", attestation)
+
+            replay = DRIVER.ActiveProbeAttestation(
+                attestation.sha256,
+                attestation.process_id,
+                attestation.process_start_ticks + 1,
+            )
+            with self.assertRaisesRegex(DRIVER.MatrixError, "live preflight process"):
+                DRIVER.load_active_probe_evidence(report, ":120", replay)
+
+            changed = DRIVER.ActiveProbeAttestation(
+                "b" * 64,
+                attestation.process_id,
+                attestation.process_start_ticks,
+            )
+            with self.assertRaisesRegex(DRIVER.MatrixError, "live preflight process"):
+                DRIVER.load_active_probe_evidence(report, ":120", changed)
 
             document["render_measurement"]["sample_seconds"] = 4.0
             report.write_text(json.dumps(document), encoding="utf-8")
             report.chmod(0o600)
+            raw = report.read_bytes()
+            attestation = DRIVER.ActiveProbeAttestation(
+                hashlib.sha256(raw).hexdigest(),
+                document["process"]["pid"],
+                document["process"]["start_ticks"],
+            )
             with self.assertRaisesRegex(DRIVER.MatrixError, "sampling window"):
-                DRIVER.load_active_probe_evidence(report, ":120")
+                DRIVER.load_active_probe_evidence(report, ":120", attestation)
+
+    def test_active_report_attestation_is_unique_and_bound_to_stdout(self):
+        digest = "a" * 64
+        output = DRIVER.ProcessOutput(
+            0,
+            "diagnostic\n"
+            + DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
+            + f"{digest} 741 9981\n",
+            "",
+        )
+        attestation = DRIVER.active_probe_attestation(output)
+        self.assertEqual(digest, attestation.sha256)
+        self.assertEqual(741, attestation.process_id)
+        self.assertEqual(9981, attestation.process_start_ticks)
+
+        with self.assertRaisesRegex(DRIVER.MatrixError, "missing or ambiguous"):
+            DRIVER.active_probe_attestation(
+                DRIVER.ProcessOutput(0, output.stdout + output.stdout, "")
+            )
+        with self.assertRaisesRegex(DRIVER.MatrixError, "malformed"):
+            DRIVER.active_probe_attestation(
+                DRIVER.ProcessOutput(
+                    0,
+                    DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX + "not-an-attestation\n",
+                    "",
+                )
+            )
+        with self.assertRaisesRegex(DRIVER.MatrixError, "did not complete"):
+            DRIVER.active_probe_attestation(
+                DRIVER.ProcessOutput(1, output.stdout, "")
+            )
 
     def test_browser_viewer_must_be_live_hls_with_numeric_decoded_fps(self):
         state = {
@@ -1389,7 +1654,16 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
 
     def test_active_probe_command_uses_official_thresholds_and_private_sandbox(self):
         runtime = DRIVER.ActiveProbeRuntime(
-            ("/usr/bin/bwrap", "--share-net", "--bind", "/private", "/viewer", "--"),
+            (
+                "/usr/bin/bwrap",
+                "--share-net",
+                "--bind",
+                "/private",
+                "/viewer",
+                "--chdir",
+                "/viewer",
+                "--",
+            ),
             {
                 "DISPLAY": ":120",
                 "ROS_MASTER_URI": "http://172.20.0.4:11311",
@@ -1408,6 +1682,9 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertIn("/viewer/preflight.py", command)
         self.assertIn("/viewer/probe.so", command)
         self.assertIn("/viewer/report.json", command)
+        self.assertIn("/private/preflight.py", command)
+        self.assertIn("/private/probe.so", command)
+        self.assertLess(command.index("/private/probe.so"), command.index("--chdir"))
         self.assertEqual("45.0", command[command.index("--min-render-fps") + 1])
         self.assertEqual("2.90", command[command.index("--min-real-time-factor") + 1])
         self.assertEqual("5.0", command[command.index("--sample-seconds") + 1])
@@ -1437,11 +1714,31 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                 "ROBOTSWARM_VIEWER_ASSET_ROOT": str(assets),
                 "MESA_D3D12_DEFAULT_ADAPTER_NAME": "NVIDIA",
             }
+            publisher_runtime = DRIVER.BoundViewerPublisher(
+                Path("/proc/999999"), publisher, environment
+            )
+            primary_environment = {
+                "DISPLAY": ":120",
+                "XAUTHORITY": "/viewer/Xauthority",
+                "ROS_MASTER_URI": "http://172.20.0.4:11311",
+                "GAZEBO_MASTER_URI": "http://172.20.0.4:11345",
+                "GZ_IP": "172.20.0.1",
+                "GAZEBO_IP": "172.20.0.1",
+            }
+            primary_runtime = DRIVER.BoundViewerGzclient(
+                Path("/proc/999998"),
+                Path("/usr/bin/gzclient"),
+                primary_environment,
+            )
 
             with mock.patch.object(
                 DRIVER,
                 "bound_viewer_publisher",
-                return_value=(publisher, environment),
+                return_value=publisher_runtime,
+            ), mock.patch.object(
+                DRIVER,
+                "bound_viewer_gzclient",
+                return_value=primary_runtime,
             ), mock.patch.object(
                 DRIVER,
                 "_configured_executable",
@@ -1453,9 +1750,19 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                     container,
                     startup,
                 )
+                probe_home = lease / "matrix-active-probe-home"
+                self.assertTrue(probe_home.is_dir())
+                self.assertEqual(0o700, stat.S_IMODE(probe_home.stat().st_mode))
 
         self.assertEqual(":120", runtime.environment["DISPLAY"])
         self.assertEqual("/viewer/Xauthority", runtime.environment["XAUTHORITY"])
+        self.assertEqual(
+            "/viewer/matrix-active-probe-home", runtime.environment["HOME"]
+        )
+        self.assertEqual(
+            "/viewer/matrix-active-probe-home/.ros",
+            runtime.environment["ROS_HOME"],
+        )
         self.assertEqual(
             "http://172.20.0.4:11311", runtime.environment["ROS_MASTER_URI"]
         )
@@ -1463,13 +1770,251 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             "http://172.20.0.4:11345", runtime.environment["GAZEBO_MASTER_URI"]
         )
         self.assertEqual("172.20.0.1", runtime.environment["GAZEBO_IP"])
+        self.assertEqual(primary_environment, runtime.primary_environment)
         self.assertIn("--unshare-all", runtime.command_prefix)
         self.assertIn("--share-net", runtime.command_prefix)
+
+    def test_primary_viewer_report_binds_to_live_host_gzclient_descendant(self):
+        document = startup_render_report()
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "DISPLAY": ":120",
+                "ROS_MASTER_URI": "http://172.20.0.4:11311",
+                "GAZEBO_MASTER_URI": "http://172.20.0.4:11345",
+            }
+        )
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(30)",
+                "/viewer/plugin.so",
+            ],
+            env=environment,
+        )
+        try:
+            startup = DRIVER.validate_viewer_startup_report(
+                document, json.dumps(document).encode("utf-8")
+            )
+            document["process"]["pid"] = child.pid
+            document["process"]["executable"] = sys.executable
+            publisher = DRIVER.BoundViewerPublisher(
+                Path("/proc") / str(os.getpid()),
+                Path(__file__).resolve(),
+                {
+                    "ROBOTSWARM_VIEWER_GZCLIENT": sys.executable,
+                    "PATH": os.environ.get("PATH", os.defpath),
+                },
+            )
+            bound = DRIVER.bound_viewer_gzclient(publisher, startup)
+            self.assertEqual(child.pid, int(bound.process_path.name))
+            self.assertEqual(Path(sys.executable).resolve(), bound.executable)
+            self.assertEqual(":120", bound.environment["DISPLAY"])
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_active_probe_timeout_allows_visible_d3d12_initialization(self):
+        self.assertEqual(45.0, DRIVER.ACTIVE_PROBE_TIMEOUT_SECONDS)
+        self.assertEqual(2.0, DRIVER.ACTIVE_PROBE_WARMUP_SECONDS)
+        self.assertEqual(5.0, DRIVER.ACTIVE_PROBE_SAMPLE_SECONDS)
+
+    def test_active_probe_workspace_is_exec_mount_staging_and_removes_exact_files(self):
+        workspace = DRIVER.create_active_probe_workspace()
+        try:
+            self.assertEqual(Path("/tmp"), workspace.parent)
+            self.assertEqual(0o700, stat.S_IMODE(workspace.stat().st_mode))
+            (workspace / "matrix-active-gui-preflight.py").write_text(
+                "pass\n", encoding="utf-8"
+            )
+            (workspace / "matrix-active-gui-probe.so").write_bytes(b"probe")
+            self.assertTrue(DRIVER.remove_active_probe_workspace(workspace))
+            self.assertFalse(workspace.exists())
+        finally:
+            if workspace.exists():
+                for child in workspace.iterdir():
+                    child.unlink()
+                workspace.rmdir()
+
+        unexpected = DRIVER.create_active_probe_workspace()
+        try:
+            (unexpected / "unexpected").write_text("keep", encoding="utf-8")
+            self.assertFalse(DRIVER.remove_active_probe_workspace(unexpected))
+            self.assertTrue(unexpected.exists())
+        finally:
+            for child in unexpected.iterdir():
+                child.unlink()
+            unexpected.rmdir()
+
+    def test_active_probe_workspace_removes_itself_when_hardening_fails(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as parent:
+            workspace = Path(parent) / "robotswarm-matrix-probe-injected"
+            workspace.mkdir()
+            with mock.patch.object(
+                DRIVER.tempfile,
+                "mkdtemp",
+                return_value=str(workspace),
+            ), mock.patch.object(
+                DRIVER.Path,
+                "chmod",
+                side_effect=OSError("injected hardening failure"),
+            ):
+                with self.assertRaisesRegex(DRIVER.MatrixError, "secured"):
+                    DRIVER.create_active_probe_workspace()
+            self.assertFalse(workspace.exists())
+
+    def test_active_probe_token_finds_and_stops_sandbox_descendants(self):
+        token = uuid.uuid4().hex
+        environment = dict(os.environ)
+        environment[DRIVER.ACTIVE_PROBE_TOKEN_ENV] = token
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            env=environment,
+        )
+        try:
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not DRIVER.active_probe_processes(
+                token
+            ):
+                time.sleep(0.02)
+            self.assertIn(
+                child.pid,
+                {pid for pid, _start in DRIVER.active_probe_processes(token)},
+            )
+            self.assertTrue(DRIVER.stop_active_probe_processes(token))
+            child.wait(timeout=5)
+            self.assertEqual([], DRIVER.active_probe_processes(token))
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+    def test_active_probe_pidfd_is_opened_before_identity_revalidation(self):
+        token = uuid.uuid4().hex
+        identity = (741, 9981)
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        events = []
+
+        def open_pidfd(process_id):
+            events.append(("open", process_id))
+            return descriptor
+
+        def revalidate(_path, observed_token):
+            events.append(("revalidate", observed_token))
+            return (identity[0], identity[1] + 1)
+
+        with mock.patch.object(
+            DRIVER, "_pidfd_open", side_effect=open_pidfd
+        ), mock.patch.object(
+            DRIVER, "_active_probe_process_identity", side_effect=revalidate
+        ), mock.patch.object(
+            DRIVER, "_pidfd_send_signal"
+        ) as send_signal, mock.patch.object(DRIVER.os, "kill") as numeric_kill:
+            DRIVER._signal_active_probe_process(identity, token, signal.SIGTERM)
+
+        self.assertEqual([("open", identity[0]), ("revalidate", token)], events)
+        send_signal.assert_not_called()
+        numeric_kill.assert_not_called()
+        with self.assertRaises(OSError) as closed:
+            os.fstat(descriptor)
+        self.assertEqual(errno.EBADF, closed.exception.errno)
+
+    def test_active_probe_pidfd_is_closed_after_successful_signal(self):
+        token = uuid.uuid4().hex
+        identity = (741, 9981)
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        with mock.patch.object(
+            DRIVER, "_pidfd_open", return_value=descriptor
+        ), mock.patch.object(
+            DRIVER, "_active_probe_process_identity", return_value=identity
+        ), mock.patch.object(
+            DRIVER, "_pidfd_send_signal"
+        ) as send_signal, mock.patch.object(DRIVER.os, "kill") as numeric_kill:
+            DRIVER._signal_active_probe_process(identity, token, signal.SIGTERM)
+
+        send_signal.assert_called_once_with(descriptor, signal.SIGTERM)
+        numeric_kill.assert_not_called()
+        with self.assertRaises(OSError) as closed:
+            os.fstat(descriptor)
+        self.assertEqual(errno.EBADF, closed.exception.errno)
+
+    def test_active_probe_pidfd_open_enosys_fails_without_numeric_fallback(self):
+        token = uuid.uuid4().hex
+        identity = (741, 9981)
+        unavailable = OSError(errno.ENOSYS, "pidfd_open unavailable")
+        with mock.patch.object(
+            DRIVER, "_pidfd_open", side_effect=unavailable
+        ), mock.patch.object(DRIVER.os, "kill") as numeric_kill:
+            with self.assertRaisesRegex(DRIVER.CleanupError, "bound to a pidfd"):
+                DRIVER._signal_active_probe_process(
+                    identity, token, signal.SIGTERM
+                )
+        numeric_kill.assert_not_called()
+
+    def test_active_probe_pidfd_send_eperm_fails_and_closes_descriptor(self):
+        token = uuid.uuid4().hex
+        identity = (741, 9981)
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        denied = OSError(errno.EPERM, "pidfd_send_signal denied")
+        with mock.patch.object(
+            DRIVER, "_pidfd_open", return_value=descriptor
+        ), mock.patch.object(
+            DRIVER, "_active_probe_process_identity", return_value=identity
+        ), mock.patch.object(
+            DRIVER, "_pidfd_send_signal", side_effect=denied
+        ), mock.patch.object(DRIVER.os, "kill") as numeric_kill:
+            with self.assertRaisesRegex(DRIVER.CleanupError, "signalled"):
+                DRIVER._signal_active_probe_process(
+                    identity, token, signal.SIGKILL
+                )
+
+        numeric_kill.assert_not_called()
+        with self.assertRaises(OSError) as closed:
+            os.fstat(descriptor)
+        self.assertEqual(errno.EBADF, closed.exception.errno)
 
     def test_active_gate_rejects_any_non_overlapping_scenario(self):
         DRIVER.validate_active_overlap(passing_overlap())
         with self.assertRaisesRegex(DRIVER.MatrixError, "complete active sampling"):
             DRIVER.validate_active_overlap(passing_overlap(overlapped=False))
+
+    def test_active_probe_failure_is_classified_without_raw_output(self):
+        timeout = DRIVER.ProcessOutput(
+            1,
+            "",
+            (
+                "Gazebo GUI preflight failed: timed out waiting for rendered "
+                "frames: RobotSwarm GUI probe will write a private path; "
+                "libGL error: private details"
+            ),
+        )
+        exited = DRIVER.ProcessOutput(
+            1,
+            "",
+            "Gazebo GUI preflight failed: gzclient exited with status 255",
+        )
+        unknown = DRIVER.ProcessOutput(7, "opaque stdout", "opaque stderr")
+
+        self.assertEqual(
+            {
+                "category": "render_report_timeout",
+                "diagnosticSignals": ["libgl_error", "probe_plugin_loaded"],
+                "exitCode": 1,
+                "rawDiagnosticRetained": False,
+            },
+            DRIVER.classify_active_probe_failure(timeout),
+        )
+        self.assertEqual(
+            "gzclient_exited_before_report",
+            DRIVER.classify_active_probe_failure(exited)["category"],
+        )
+        classified_unknown = DRIVER.classify_active_probe_failure(unknown)
+        self.assertEqual(
+            "unclassified_preflight_failure",
+            classified_unknown["category"],
+        )
+        self.assertNotIn("opaque", json.dumps(classified_unknown))
 
     def test_case_orders_startup_active_probe_and_post_scenario_roster(self):
         scenario = DRIVER.SCENARIOS[0]
@@ -1538,7 +2083,12 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             events.append("active-concurrent-gate")
             return (
                 child_output(),
-                DRIVER.ProcessOutput(0, "Gazebo GUI preflight passed\n", ""),
+                DRIVER.ProcessOutput(
+                    0,
+                    DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
+                    + f"{'a' * 64} 741 9981\nGazebo GUI preflight passed\n",
+                    "",
+                ),
                 passing_active_video(),
                 passing_overlap(),
             )

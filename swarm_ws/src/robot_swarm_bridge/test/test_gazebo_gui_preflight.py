@@ -18,6 +18,7 @@ from gazebo_gui_preflight import (
     DEFAULT_GPU_PATTERN,
     MAXIMUM_GZCLIENT_LOG_BYTES,
     PreflightError,
+    REPORT_ATTESTATION_PREFIX,
     REPORT_SOURCE,
     RTF_SOURCE,
     _append_log_chunk,
@@ -33,7 +34,11 @@ from gazebo_gui_preflight import (
 def good_report():
     return {
         "schema_version": 1,
-        "process": {"pid": 741, "executable": "/usr/bin/gzclient-11.15.1"},
+        "process": {
+            "pid": 741,
+            "executable": "/usr/bin/gzclient-11.15.1",
+            "start_ticks": 9981,
+        },
         "display": {"x11": ":0", "wayland": "wayland-0"},
         "camera": {
             "name": "gzclient_camera",
@@ -84,7 +89,9 @@ class GazeboGuiPreflightTests(unittest.TestCase):
     def test_accepts_visible_nvidia_client_and_keeps_fps_separate_from_rtf(self):
         report = good_report()
 
-        errors = validate_report(report, expected_pid=741)
+        errors = validate_report(
+            report, expected_pid=741, expected_start_ticks=9981
+        )
 
         self.assertEqual([], errors)
         self.assertNotEqual(
@@ -142,6 +149,18 @@ class GazeboGuiPreflightTests(unittest.TestCase):
         self.assertTrue(any("different gzclient" in error for error in errors))
         self.assertTrue(any("display" in error for error in errors))
 
+    def test_rejects_replayed_pid_from_an_older_process_lifetime(self):
+        report = good_report()
+
+        errors = validate_report(
+            report, expected_pid=741, expected_start_ticks=9982
+        )
+
+        self.assertTrue(any("process lifetime" in error for error in errors))
+        self.assertEqual(
+            "ROBOTSWARM_GUI_REPORT_ATTESTATION ", REPORT_ATTESTATION_PREFIX
+        )
+
     def test_custom_gpu_pattern_must_be_valid(self):
         with self.assertRaises(PreflightError):
             validate_report(good_report(), gpu_pattern="[")
@@ -198,6 +217,10 @@ class GazeboGuiPreflightTests(unittest.TestCase):
 
                 document = {report!r}
                 document['process']['pid'] = os.getpid()
+                raw_stat = Path('/proc/self/stat').read_text(encoding='ascii')
+                document['process']['start_ticks'] = int(
+                    raw_stat[raw_stat.rfind(')') + 2:].split()[19]
+                )
                 private_tmp = Path(os.environ['TMPDIR'])
                 document['test_tmpdir'] = str(private_tmp)
                 document['test_tmpdir_mode'] = stat.S_IMODE(private_tmp.stat().st_mode)
@@ -222,8 +245,9 @@ class GazeboGuiPreflightTests(unittest.TestCase):
                 ]
             )
             with mock.patch.dict(os.environ, {"DISPLAY": ":99"}, clear=False):
-                observed, _ = run_preflight(args)
+                observed, _, digest = run_preflight(args)
             private_tmp = Path(observed["test_tmpdir"])
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
             self.assertEqual(0o700, observed["test_tmpdir_mode"])
             self.assertFalse(private_tmp.exists())
 
@@ -258,6 +282,10 @@ class GazeboGuiPreflightTests(unittest.TestCase):
                         )
                     document = {report!r}
                     document['process']['pid'] = os.getpid()
+                    raw_stat = Path('/proc/self/stat').read_text(encoding='ascii')
+                    document['process']['start_ticks'] = int(
+                        raw_stat[raw_stat.rfind(')') + 2:].split()[19]
+                    )
                     Path(os.environ['ROBOTSWARM_GUI_PROBE_REPORT']).write_text(
                         json.dumps(document), encoding='utf-8'
                     )
@@ -280,8 +308,9 @@ class GazeboGuiPreflightTests(unittest.TestCase):
                 ]
             )
             with mock.patch.dict(os.environ, {"DISPLAY": ":99"}, clear=False):
-                observed, _ = run_preflight(args)
+                observed, _, digest = run_preflight(args)
             self.assertEqual(1, observed["schema_version"])
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
             self.assertTrue(child_marker.is_file())
             self.assertFalse(process_is_live(int(child_marker.read_text())))
 
