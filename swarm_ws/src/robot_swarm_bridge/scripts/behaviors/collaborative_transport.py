@@ -2372,6 +2372,86 @@ class CollaborativeTransport:
             )
         return None
 
+    @staticmethod
+    def _command_requests_motion(command: Twist) -> bool:
+        """Return whether a validated Burger command can move the chassis."""
+        return (
+            float(command.linear.x) != 0.0
+            or float(command.angular.z) != 0.0
+        )
+
+    def _transport_motion_input_error(self):
+        """Recheck every live input immediately before accepting motion."""
+        # Production instances always own these locks. Some focused ROS-free
+        # fixtures construct only the command helper they are exercising.
+        if not all(hasattr(self, name) for name in (
+            'model_lock', 'data_lock', 'model_states_received_at',
+        )):
+            return None
+
+        model_error = self._transport_model_state_error()
+        if model_error is not None:
+            return model_error
+
+        with self.data_lock:
+            namespaces = list(self.robot_namespaces)
+            positions = {
+                namespace: self.robot_positions[namespace].copy()
+                for namespace in namespaces
+                if namespace in self.robot_positions
+            }
+            yaws = {
+                namespace: self.robot_yaws[namespace]
+                for namespace in namespaces
+                if namespace in self.robot_yaws
+            }
+            received_at = dict(getattr(
+                self, 'robot_odom_received_at', {}
+            ))
+        return self._transport_odometry_error(
+            namespaces, positions, yaws, received_at
+        )
+
+    def _reject_stale_motion_inputs(self, expected_epoch: int) -> bool:
+        """Fail the correlated task when its next command lacks fresh input."""
+        input_error = self._transport_motion_input_error()
+        if input_error is None:
+            return False
+        self._fail_transport(
+            input_error + "; all robots were stopped.", expected_epoch
+        )
+        return True
+
+    def _publish_validated_command_locked(
+        self, namespace: str, command: Twist, expected_epoch: int
+    ) -> bool:
+        """Publish one member of a batch already checked under command_lock."""
+        if not self._command_allowed(expected_epoch):
+            return False
+        publisher_method = getattr(self, '_publish_command', None)
+        if (
+            callable(publisher_method)
+            and getattr(publisher_method, '__func__', None)
+            is not CollaborativeTransport._publish_command
+        ):
+            # A few ROS-free controller fixtures replace the final publisher to
+            # inspect ordering. Production instances always use the concrete
+            # publisher branch below.
+            return bool(publisher_method(
+                namespace, command, expected_epoch
+            ))
+        with self.data_lock:
+            pub = self.cmd_vel_pubs.get(namespace)
+            if pub is None:
+                return False
+            if not hasattr(self, 'transport_last_commands'):
+                self.transport_last_commands = {}
+            self.transport_last_commands[namespace] = (
+                float(command.linear.x), float(command.angular.z)
+            )
+            pub.publish(command)
+        return True
+
     def _publish_command(
         self, namespace: str, command: Twist, expected_epoch: int
     ) -> bool:
@@ -2386,17 +2466,14 @@ class CollaborativeTransport:
                     expected_epoch,
                 )
                 return False
-            with self.data_lock:
-                pub = self.cmd_vel_pubs.get(namespace)
-                if pub is None:
-                    return False
-                if not hasattr(self, 'transport_last_commands'):
-                    self.transport_last_commands = {}
-                self.transport_last_commands[namespace] = (
-                    float(command.linear.x), float(command.angular.z)
-                )
-                pub.publish(command)
-            return True
+            if (
+                self._command_requests_motion(command)
+                and self._reject_stale_motion_inputs(expected_epoch)
+            ):
+                return False
+            return self._publish_validated_command_locked(
+                namespace, command, expected_epoch
+            )
 
     def _validate_command_batch(
         self, commands, expected_epoch, publish_order=None
@@ -2413,21 +2490,31 @@ class CollaborativeTransport:
         with command_lock:
             if not self._command_allowed(expected_epoch):
                 return False
+            requests_motion = False
             for namespace in order:
                 if namespace not in commands:
                     error = (
                         "Velocity batch omitted {}".format(namespace)
                     )
                 else:
-                    error = self._command_error(
-                        namespace, commands[namespace]
-                    )
+                    command = commands[namespace]
+                    error = self._command_error(namespace, command)
+                    if error is None:
+                        requests_motion = (
+                            requests_motion
+                            or self._command_requests_motion(command)
+                        )
                 if error is not None:
                     self._fail_transport(
                         error + "; all robots were stopped.",
                         expected_epoch,
                     )
                     return False
+            if (
+                requests_motion
+                and self._reject_stale_motion_inputs(expected_epoch)
+            ):
+                return False
         return True
 
     def _publish_command_batch(
@@ -2435,15 +2522,29 @@ class CollaborativeTransport:
     ) -> bool:
         """Preflight and then publish one complete fleet command batch."""
         order = list(commands) if publish_order is None else list(publish_order)
-        if not self._validate_command_batch(
-            commands, expected_epoch, order
-        ):
-            return False
-        for namespace in order:
-            if not self._publish_command(
-                namespace, commands[namespace], expected_epoch
+        command_lock = getattr(self, 'command_lock', None)
+        if command_lock is None:
+            if not self._validate_command_batch(
+                commands, expected_epoch, order
             ):
                 return False
+            for namespace in order:
+                if not self._publish_command(
+                    namespace, commands[namespace], expected_epoch
+                ):
+                    return False
+            return True
+
+        with command_lock:
+            if not self._validate_command_batch(
+                commands, expected_epoch, order
+            ):
+                return False
+            for namespace in order:
+                if not self._publish_validated_command_locked(
+                    namespace, commands[namespace], expected_epoch
+                ):
+                    return False
         return True
 
     def _queue_or_publish_approach_command(
@@ -6134,20 +6235,20 @@ class CollaborativeTransport:
                 namespace,
             ),
         )
-        if not self._validate_command_batch(
-            planned_commands, expected_epoch, publish_order
-        ):
-            return False
         get_time = getattr(rospy, 'get_time', lambda: 0.0)
-        batch_started_at = float(get_time())
-        published_all = True
-        for namespace in publish_order:
-            command = planned_commands.get(namespace, Twist())
-            # Keep the safety smoother commit in the same epoch as its Twist.
-            # Otherwise a stop can clear the smoother between these operations
-            # and an old control pass can immediately restore stale motion.
-            with self.command_lock:
-                if not self._publish_command(
+        with self.command_lock:
+            if not self._validate_command_batch(
+                planned_commands, expected_epoch, publish_order
+            ):
+                return False
+            batch_started_at = float(get_time())
+            published_all = True
+            for namespace in publish_order:
+                command = planned_commands.get(namespace, Twist())
+                # Keep the safety smoother commit in the same epoch as its
+                # Twist. Otherwise a stop can clear the smoother between these
+                # operations and an old pass can restore stale motion.
+                if not self._publish_validated_command_locked(
                     namespace, command, expected_epoch
                 ):
                     published_all = False
@@ -6164,7 +6265,7 @@ class CollaborativeTransport:
                 )
                 if callable(commit_command):
                     commit_command(command)
-        batch_finished_at = float(get_time())
+            batch_finished_at = float(get_time())
         if not published_all:
             return False
 
@@ -9611,27 +9712,28 @@ class CollaborativeTransport:
                 namespace,
             ),
         )
-        if not self._validate_command_batch(
-            planned_commands, expected_epoch, publish_order
-        ):
-            return False
-        for namespace in publish_order:
-            command = planned_commands.get(namespace, Twist())
-            if not self._publish_command(
-                namespace,
-                command,
-                expected_epoch,
+        with self.command_lock:
+            if not self._validate_command_batch(
+                planned_commands, expected_epoch, publish_order
             ):
                 return False
-            with self.data_lock:
-                avoidance = getattr(
-                    self, 'avoidance_modules', {}
-                ).get(namespace)
-            commit_command = getattr(
-                avoidance, 'commit_published_command', None
-            )
-            if callable(commit_command):
-                commit_command(command)
+            for namespace in publish_order:
+                command = planned_commands.get(namespace, Twist())
+                if not self._publish_validated_command_locked(
+                    namespace,
+                    command,
+                    expected_epoch,
+                ):
+                    return False
+                with self.data_lock:
+                    avoidance = getattr(
+                        self, 'avoidance_modules', {}
+                    ).get(namespace)
+                commit_command = getattr(
+                    avoidance, 'commit_published_command', None
+                )
+                if callable(commit_command):
+                    commit_command(command)
         return True
 
     def _push_phase(self, expected_epoch):

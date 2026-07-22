@@ -2601,6 +2601,163 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertEqual(0.0, command.linear.x)
         self.assertEqual(0.0, command.angular.z)
 
+    def test_transport_rechecks_model_freshness_before_first_batch_twist(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        controller.model_states_timeout_wall_s = 0.75
+        controller.robot_odom_received_at = {
+            namespace: 10.0 for namespace in controller.robot_namespaces
+        }
+        controller._sync_avoidance_snapshot = mock.Mock()
+        controller._publish_status = mock.Mock()
+        controller._publish_markers = mock.Mock()
+        wall_clock = [10.0]
+
+        def delayed_search(expected_epoch):
+            wall_clock[0] = 11.0
+            commands = {}
+            for namespace in controller.robot_namespaces:
+                command = Twist()
+                command.linear.x = 0.12
+                commands[namespace] = command
+            controller._publish_command_batch(
+                commands, expected_epoch, controller.robot_namespaces
+            )
+
+        controller._search_phase = delayed_search
+        with mock.patch.object(
+            ROS["transport"].time,
+            "monotonic",
+            side_effect=lambda: wall_clock[0],
+        ), mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=10.0,
+            create=True,
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED,
+            controller.phase,
+        )
+        self.assertIn("model states became stale", controller.failure_reason)
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertTrue(all(
+                command.linear.x == 0.0 and command.angular.z == 0.0
+                for command in publisher.messages
+            ))
+
+    def test_transport_rechecks_odometry_before_first_batch_twist(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        controller.robot_odom_received_at = {
+            namespace: 10.0 for namespace in controller.robot_namespaces
+        }
+        controller.transport_odom_timeout = 2.0
+        controller._sync_avoidance_snapshot = mock.Mock()
+        controller._publish_status = mock.Mock()
+        controller._publish_markers = mock.Mock()
+        simulation_clock = [10.0]
+
+        def delayed_search(expected_epoch):
+            simulation_clock[0] = 13.0
+            commands = {}
+            for namespace in controller.robot_namespaces:
+                command = Twist()
+                command.angular.z = 0.4
+                commands[namespace] = command
+            controller._publish_command_batch(
+                commands, expected_epoch, controller.robot_namespaces
+            )
+
+        controller._search_phase = delayed_search
+        with mock.patch.object(
+            ROS["transport"].time, "monotonic", return_value=10.0
+        ), mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            side_effect=lambda: simulation_clock[0],
+            create=True,
+        ):
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.FAILED,
+            controller.phase,
+        )
+        self.assertIn("stale: tb3_0, tb3_1", controller.failure_reason)
+        for publisher in controller.cmd_vel_pubs.values():
+            self.assertTrue(publisher.messages)
+            self.assertTrue(all(
+                command.linear.x == 0.0 and command.angular.z == 0.0
+                for command in publisher.messages
+            ))
+
+    def test_transport_zero_batch_is_allowed_with_stale_inputs(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        commands = {
+            namespace: Twist() for namespace in controller.robot_namespaces
+        }
+
+        with mock.patch.object(
+            ROS["transport"].time, "monotonic", return_value=20.0
+        ):
+            published = controller._publish_command_batch(
+                commands,
+                controller.command_epoch,
+                controller.robot_namespaces,
+            )
+
+        self.assertTrue(published)
+        self.assertTrue(controller.is_running)
+        for publisher in controller.cmd_vel_pubs.values():
+            command = publisher.messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+
+    def test_transport_batch_does_not_split_at_the_freshness_boundary(self):
+        controller = self._transport_search_controller(2)
+        controller.model_states_received_at = 10.0
+        controller.model_states_timeout_wall_s = 0.75
+        controller.robot_odom_received_at = {
+            namespace: 10.0 for namespace in controller.robot_namespaces
+        }
+        commands = {}
+        for namespace in controller.robot_namespaces:
+            command = Twist()
+            command.linear.x = 0.12
+            commands[namespace] = command
+
+        samples = iter((10.74, 10.74, 10.76))
+        with mock.patch.object(
+            ROS["transport"].time,
+            "monotonic",
+            side_effect=lambda: next(samples, 10.76),
+        ), mock.patch.object(
+            ROS["transport"].rospy,
+            "get_time",
+            return_value=10.0,
+            create=True,
+        ):
+            published = controller._publish_command_batch(
+                commands,
+                controller.command_epoch,
+                controller.robot_namespaces,
+            )
+
+        self.assertTrue(published)
+        self.assertTrue(controller.is_running)
+        motion_states = [
+            publisher.messages[-1].linear.x > 0.0
+            for publisher in controller.cmd_vel_pubs.values()
+        ]
+        self.assertEqual([True, True], motion_states)
+
     def test_transport_push_uses_the_common_odometry_freshness_gate(self):
         controller = self._transport_search_controller(1)
         controller.phase = ROS["transport"].TransportPhase.PUSH
