@@ -233,6 +233,31 @@ class PayloadLoadProbeTests(unittest.TestCase):
 
         self.assertEqual(8, generation)
 
+    def test_payload_readiness_does_not_reclassify_ros_shutdown(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.lock = PROBE.threading.RLock()
+        probe.stop_requested = False
+        probe.model_states_generation = 4
+        probe.models = {}
+
+        def wait_for(predicate, _timeout, _description):
+            probe.model_states_generation = 5
+            self.assertFalse(predicate())
+            raise RuntimeError('probe stopped while waiting for readiness')
+
+        probe.wait_for = wait_for
+
+        with mock.patch.object(
+            PROBE.rospy, 'is_shutdown', return_value=True, create=True
+        ), self.assertRaisesRegex(RuntimeError, 'probe stopped') as raised:
+            probe.wait_for_model_observations(
+                'transport_object', True, 4, 2, 'stable payload spawn'
+            )
+
+        self.assertNotIsInstance(
+            raised.exception, PROBE._RecoverablePayloadRace
+        )
+
     def test_payload_replacement_retries_a_fresh_disappearance(self):
         class SpawnPose:
             def __init__(self):

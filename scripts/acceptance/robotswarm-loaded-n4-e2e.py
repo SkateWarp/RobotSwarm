@@ -62,6 +62,7 @@ MAXIMUM_PROTOCOL_OUTPUT_BYTES = 16 * 1024 * 1024
 MAXIMUM_PREFLIGHT_OUTPUT_BYTES = 1024 * 1024
 MAXIMUM_PREFLIGHT_SCRIPT_BYTES = 256 * 1024
 MAXIMUM_GUI_PLUGIN_BYTES = 32 * 1024 * 1024
+MAXIMUM_STRUCTURED_FAILURE_DIAGNOSTICS = 16
 MAXIMUM_MASS_SAMPLE_GAP_SECONDS = 1.0
 MAXIMUM_STATUS_SAMPLE_GAP_SECONDS = 1.0
 MAXIMUM_LIVE_MASS_AGE_SECONDS = 0.75
@@ -831,6 +832,17 @@ def _structured_failure_categories(failure: Any) -> list[str]:
     return sorted(categories or {"structured_failure"})
 
 
+def _category_fingerprint(categories: Sequence[str]) -> str:
+    """Fingerprint only the retained, allow-listed diagnostic categories."""
+    encoded = json.dumps(
+        list(categories),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
     protocol_lines = output.stdout.splitlines() if isinstance(output.stdout, str) else []
     marker_lines = output.stderr.splitlines() if isinstance(output.stderr, str) else []
@@ -866,12 +878,16 @@ def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
             for failure in failures:
                 failure_categories = _structured_failure_categories(failure)
                 categories.update(failure_categories)
-                failure_diagnostics.append({
-                    "categories": failure_categories,
-                    "sha256": hashlib.sha256(
-                        str(failure).encode("utf-8", errors="replace")
-                    ).hexdigest(),
-                })
+                if (
+                    len(failure_diagnostics)
+                    < MAXIMUM_STRUCTURED_FAILURE_DIAGNOSTICS
+                ):
+                    failure_diagnostics.append({
+                        "categories": failure_categories,
+                        "categorySha256": _category_fingerprint(
+                            failure_categories
+                        ),
+                    })
         if load_documents[0].get("passed") is not False:
             categories.add("load_result_status_inconsistent")
     elif not load_documents:
@@ -911,6 +927,7 @@ def classify_loaded_probe_failure(output: Any) -> dict[str, Any]:
         "structuredLoadResultCount": len(load_documents),
         "structuredFailureCount": failure_count,
         "structuredFailureDiagnostics": failure_diagnostics,
+        "diagnosticsTruncated": failure_count > len(failure_diagnostics),
         "liveMarkerCounts": marker_counts,
         "rawDiagnosticRetained": False,
     }

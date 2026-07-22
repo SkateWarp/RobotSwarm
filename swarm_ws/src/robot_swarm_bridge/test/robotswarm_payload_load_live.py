@@ -304,6 +304,7 @@ class LoadProbe:
             # remain visible as the original failure.
             if (
                 not self.stop_requested
+                and not rospy.is_shutdown()
                 and fresh_samples > 0
                 and last_present is False
             ):
