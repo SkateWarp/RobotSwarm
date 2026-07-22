@@ -96,14 +96,23 @@ SCENARIOS = [
              shape="triangle", spacing=0.65, timeout=35),
     scenario("formation_square_n5", "formation", 5, "circle",
              shape="square", spacing=0.65, timeout=40),
+    # The production-pattern N=7 baseline reached the moving state after
+    # 156.65 simulated seconds.  At the conservative timeout-sizing floor of
+    # RTF 2.7, 65 wall seconds retain 18.85 simulated seconds of margin.
     scenario("formation_A_n7", "formation", 7, "line",
-             shape="A", spacing=0.55, timeout=45),
+             shape="A", spacing=0.55, timeout=65),
+    # N=8 reached moving mode after 126.05 simulated seconds.  The old
+    # 45-second cap represented only 121.5 seconds at RTF 2.7, so it could
+    # reject a healthy run.  A 55-second cap leaves 22.45 seconds of margin.
     scenario("formation_V_n8", "formation", 8, "grid",
-             shape="V", spacing=0.55, timeout=45),
+             shape="V", spacing=0.55, timeout=55),
     scenario("formation_diamond_n9", "formation", 9, "circle",
              shape="diamond", spacing=0.55, timeout=50),
+    # The production-pattern N=10 baseline reached the moving state after
+    # 208.75 simulated seconds.  An 85-second wall cap at RTF 2.7 covers
+    # 229.5 simulated seconds, leaving 20.75 seconds of explicit margin.
     scenario("formation_S_n10", "formation", 10, "grid",
-             shape="S", spacing=0.55, timeout=55),
+             shape="S", spacing=0.55, timeout=85),
     # Follow cases stop as soon as the leader path clock completes a lap.
     # These wall-time caps include chain assembly and enough margin to finish
     # at the minimum accepted real-time factor.

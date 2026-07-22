@@ -13,7 +13,7 @@
   <arg name="spacing" default="1.0"/>
   <arg name="centroid_speed" default="0.1"/>
   <arg name="centroid_path" default="circular"/>   <!-- circular, linear, waypoints -->
-  <arg name="max_linear_vel" default="0.2"/>
+  <arg name="max_linear_vel" default="0.22"/>
   <arg name="max_angular_vel" default="1.5"/>
   <arg name="path_radius" default="2.5"/>
   <arg name="obstacle_density" default="none"/>

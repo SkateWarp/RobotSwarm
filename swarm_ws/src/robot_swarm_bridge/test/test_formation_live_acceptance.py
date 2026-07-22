@@ -8,6 +8,9 @@ from test_transport_acceptance_metrics import LIVE
 
 
 class FormationLiveAcceptanceTest(unittest.TestCase):
+    FORMATION_TIMEOUT_RTF_FLOOR = 2.7
+    FORMATION_TIMEOUT_MARGIN_SIM_S = 15.0
+
     @staticmethod
     def formation_case():
         return next(
@@ -117,6 +120,28 @@ class FormationLiveAcceptanceTest(unittest.TestCase):
             with self.subTest(seconds=seconds, cases=cases):
                 with self.assertRaises(ValueError):
                     LIVE.validate_formation_active_selection(seconds, cases)
+
+    def test_measured_formation_matrix_keeps_a_simulation_time_margin(self):
+        measured_cases = {
+            "formation_triangle_n3": (15.15, 35),
+            "formation_square_n5": (86.25, 40),
+            "formation_A_n7": (156.65, 65),
+            "formation_V_n8": (126.05, 55),
+            "formation_diamond_n9": (115.20, 50),
+            "formation_S_n10": (208.75, 85),
+        }
+        cases = {case["name"]: case for case in LIVE.SCENARIOS}
+
+        for name, (measured_sim_s, timeout_wall_s) in measured_cases.items():
+            with self.subTest(scenario=name):
+                self.assertEqual(timeout_wall_s, cases[name]["timeout"])
+                available_sim_s = (
+                    cases[name]["timeout"] * self.FORMATION_TIMEOUT_RTF_FLOOR
+                )
+                self.assertGreaterEqual(
+                    available_sim_s - measured_sim_s,
+                    self.FORMATION_TIMEOUT_MARGIN_SIM_S,
+                )
 
 
 if __name__ == "__main__":

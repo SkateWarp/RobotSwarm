@@ -236,6 +236,7 @@ def make_controller():
     controller.route_waypoint_indices = {}
     controller.route_batches = []
     controller.route_batch_index = 0
+    controller.active_placement_plan = None
     controller.assignment_pending = False
     controller._assignment_generation = 0
     controller._slot_reached = {'tb3_0': False}
@@ -266,6 +267,8 @@ def make_controller():
     controller.path_radius = 2.5
     controller.minimum_safe_path_radius = 0.25
     controller.orbit_sample_step = 0.04
+    controller.route_tracking_margin = 0.02
+    controller.route_waypoint_tolerance = 0.08
     controller.centroid_path = formation.CentroidPath.CIRCULAR
     controller.centroid_waypoints = []
     controller.centroid_x = 0.0
@@ -284,7 +287,7 @@ def make_controller():
     controller._initial_formation_acquired = False
     controller._maximum_position_error = 0.0
     controller.control_rate = 20.0
-    controller.max_linear_vel = 0.2
+    controller.max_linear_vel = 0.22
     controller.max_angular_vel = 1.5
 
     controller.pid_linear = {'tb3_0': FakePid()}
@@ -340,10 +343,10 @@ def make_closed_loop_controller(robot_count, shape, spacing):
     controller._settled_duration = 0.0
 
     controller.control_rate = 20.0
-    controller.max_linear_vel = 0.2
+    controller.max_linear_vel = 0.22
     controller.max_angular_vel = 1.5
     controller.pid_linear = {
-        robot_id: formation.PIDController(0.6, 0.01, 0.15, 0.2)
+        robot_id: formation.PIDController(0.6, 0.01, 0.15, 0.22)
         for robot_id in controller.robot_ids
     }
     controller.pid_angular = {
@@ -361,6 +364,70 @@ def make_closed_loop_controller(robot_count, shape, spacing):
     controller._publish_status = lambda *args, **kwargs: None
     controller._publish_markers = lambda *args, **kwargs: None
     return controller, targets
+
+
+def apply_production_spawn_pattern(controller, robot_count, pattern):
+    """Use the same 0.6 m base layouts and safe translation as FleetManager."""
+
+    spawn_spacing = 0.6
+    poses = []
+    if pattern == 'grid':
+        columns = int(math.ceil(math.sqrt(robot_count)))
+        rows = int(math.ceil(robot_count / float(columns)))
+        x_offset = -(columns - 1) * spawn_spacing / 2.0
+        y_offset = -(rows - 1) * spawn_spacing / 2.0
+        poses = [
+            (
+                x_offset + (index % columns) * spawn_spacing,
+                y_offset + (index // columns) * spawn_spacing,
+                0.0,
+            )
+            for index in range(robot_count)
+        ]
+    elif pattern == 'circle':
+        radius = (
+            0.0 if robot_count == 1 else
+            spawn_spacing / (2.0 * math.sin(math.pi / robot_count))
+        )
+        poses = [
+            (
+                radius * math.cos(2.0 * math.pi * index / robot_count),
+                radius * math.sin(2.0 * math.pi * index / robot_count),
+                formation.normalize_angle(
+                    2.0 * math.pi * index / robot_count + math.pi
+                ),
+            )
+            for index in range(robot_count)
+        ]
+    elif pattern == 'line':
+        start_x = -(robot_count - 1) * spawn_spacing / 2.0
+        poses = [
+            (start_x + index * spawn_spacing, 0.0, 0.0)
+            for index in range(robot_count)
+        ]
+    else:
+        raise ValueError('unsupported production spawn pattern')
+
+    center = find_safe_formation_center(
+        [(x, y) for x, y, _yaw in poses],
+        (0.0, 0.0),
+        controller.arena_size,
+        controller.arena_margin,
+        controller.formation_obstacle_clearance,
+        controller.formation_search_step,
+        controller.spawn_exclusion_zones,
+        controller.arena_profile,
+        controller.model_poses,
+    )
+    if center is None:
+        raise AssertionError('production spawn pattern does not fit')
+
+    for robot_id, (x, y, yaw) in zip(controller.robot_ids, poses):
+        controller.robot_poses[robot_id] = Pose(
+            x=center[0] + x,
+            y=center[1] + y,
+        )
+        controller.robot_yaws[robot_id] = yaw
 
 
 class FormationAssignmentTests(unittest.TestCase):
@@ -591,6 +658,14 @@ class FormationAssignmentTests(unittest.TestCase):
         controller.route_waypoint_indices = {first: 0, second: 0}
         controller.route_batches = [[first], [second]]
         controller.route_batch_index = 0
+        controller.active_placement_plan = {
+            'kind': 'static',
+            'arena_size': controller.arena_size,
+            'arena_margin': controller.arena_margin,
+            'obstacle_clearance': controller.formation_obstacle_clearance,
+            'exclusion_zones': controller.spawn_exclusion_zones,
+            'arena_profile': controller.arena_profile,
+        }
 
         controller._control_step(None)
 
@@ -670,6 +745,42 @@ class FormationAssignmentTests(unittest.TestCase):
         self.assertEqual({}, controller.assignments)
         self.assertFalse(controller.orbit_path_validated)
         self.assertIn('full orbit', controller.placement_error)
+
+    def test_live_obstacle_change_during_solver_is_rejected_before_commit(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.spawn_exclusion_zones = [{
+            'name': 'moving_box',
+            'model': 'moving_box',
+            'worlds': ['swarm_arena'],
+            'shape': 'circle',
+            'x': 4.0,
+            'y': 4.0,
+            'radius': 0.10,
+        }]
+        controller.model_poses = {'moving_box': (4.0, 4.0, 0.0)}
+        snapshot = controller._prepare_assignment_locked()
+        original_routes = controller._plan_routes_to_targets
+
+        def move_obstacle_after_planning(snapshot, plan, targets):
+            routes = original_routes(snapshot, plan, targets)
+            controller.model_poses = {
+                'moving_box': (targets[0][0], targets[0][1], 0.0)
+            }
+            return routes
+
+        with mock.patch.object(
+            controller,
+            '_plan_routes_to_targets',
+            side_effect=move_obstacle_after_planning,
+        ):
+            committed = controller._compute_and_commit_assignment(snapshot)
+
+        self.assertFalse(committed)
+        self.assertEqual({}, controller.assignments)
+        self.assertFalse(controller.orbit_path_validated)
+        self.assertIn('live arena changed', controller.placement_error)
+        self.assertEqual([], controller.cmd_vel_pubs['tb3_0'].messages)
 
 
 class FormationPlacementTests(unittest.TestCase):
@@ -990,12 +1101,12 @@ class FormationConvergenceTests(unittest.TestCase):
         (10, 'S', 0.55),
     )
     MOVING_MATRIX_CASES = (
-        (3, 'triangle', 0.65),
-        (5, 'square', 0.65),
-        (7, 'A', 0.55),
-        (8, 'V', 0.55),
-        (9, 'diamond', 0.55),
-        (10, 'S', 0.55),
+        (3, 'triangle', 0.65, 'grid'),
+        (5, 'square', 0.65, 'circle'),
+        (7, 'A', 0.55, 'line'),
+        (8, 'V', 0.55, 'grid'),
+        (9, 'diamond', 0.55, 'circle'),
+        (10, 'S', 0.55, 'grid'),
     )
 
     def test_slots_are_centered_and_keep_requested_clearance(self):
@@ -1171,8 +1282,11 @@ class FormationConvergenceTests(unittest.TestCase):
 
     def test_complete_moving_matrix_has_a_safe_rigid_orbit_at_rtf3(self):
         horizon_steps = int(75.0 * 3.0 * 20.0)
+        minimum_reserve_steps = int(15.0 * 20.0)
 
-        for robot_count, shape, spacing in self.MOVING_MATRIX_CASES:
+        for (
+            robot_count, shape, spacing, spawn_pattern
+        ) in self.MOVING_MATRIX_CASES:
             with self.subTest(robot_count=robot_count, shape=shape):
                 controller, _targets = make_closed_loop_controller(
                     robot_count, shape, spacing
@@ -1188,6 +1302,9 @@ class FormationConvergenceTests(unittest.TestCase):
                     for zone in controller.spawn_exclusion_zones
                     if zone.get('model')
                 }
+                apply_production_spawn_pattern(
+                    controller, robot_count, spawn_pattern
+                )
 
                 snapshot = controller._prepare_assignment_locked()
                 self.assertTrue(
@@ -1261,6 +1378,12 @@ class FormationConvergenceTests(unittest.TestCase):
                         acquired_at = step
 
                 self.assertIsNotNone(acquired_at)
+                self.assertLessEqual(
+                    acquired_at,
+                    horizon_steps - minimum_reserve_steps,
+                    'formation left less than 15 simulated seconds of '
+                    'movement margin inside the 225-second gate',
+                )
                 self.assertEqual(
                     formation.FormationState.MOVING,
                     controller.formation_state,
@@ -1319,6 +1442,92 @@ class FormationConvergenceTests(unittest.TestCase):
 
         self.assertIn('live obstacle', controller.placement_error)
         self.assertEqual(0.0, controller.centroid_time)
+
+    def test_obstacle_entering_an_assembly_route_only_publishes_stop(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.robot_poses['tb3_0'] = Pose(x=-1.0, y=0.0)
+        controller.spawn_exclusion_zones = [{
+            'name': 'moving_box',
+            'model': 'moving_box',
+            'worlds': ['swarm_arena'],
+            'shape': 'circle',
+            'x': 4.0,
+            'y': 4.0,
+            'radius': 0.10,
+        }]
+        controller.model_poses = {'moving_box': (4.0, 4.0, 0.0)}
+        controller.pid_linear['tb3_0'] = formation.PIDController(
+            0.6, 0.01, 0.15, 0.2
+        )
+        controller.pid_angular['tb3_0'] = formation.PIDController(
+            1.2, 0.0, 0.1, 1.5
+        )
+
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(controller._compute_and_commit_assignment(snapshot))
+        route = controller.route_waypoints['tb3_0']
+        next_point = route[0]
+        start = controller.robot_poses['tb3_0'].position
+        controller.model_poses = {
+            'moving_box': (
+                (start.x + next_point[0]) / 2.0,
+                (start.y + next_point[1]) / 2.0,
+                0.0,
+            )
+        }
+        controller.is_running = True
+
+        controller._control_step(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn('remaining entry route', controller.placement_error)
+        messages = controller.cmd_vel_pubs['tb3_0'].messages
+        self.assertTrue(messages)
+        self.assertTrue(all(
+            message.linear.x == 0.0 and message.angular.z == 0.0
+            for message in messages
+        ))
+
+    def test_identical_or_jittered_safe_model_states_do_not_cancel_entry(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.robot_poses['tb3_0'] = Pose(x=-1.0, y=0.0)
+        controller.spawn_exclusion_zones = [{
+            'name': 'moving_box',
+            'model': 'moving_box',
+            'worlds': ['swarm_arena'],
+            'shape': 'circle',
+            'x': 4.0,
+            'y': 4.0,
+            'radius': 0.10,
+        }]
+        controller.model_poses = {'moving_box': (4.0, 4.0, 0.0)}
+        controller.pid_linear['tb3_0'] = formation.PIDController(
+            0.6, 0.01, 0.15, 0.2
+        )
+        controller.pid_angular['tb3_0'] = formation.PIDController(
+            1.2, 0.0, 0.1, 1.5
+        )
+        controller._publish_status = lambda *args, **kwargs: None
+        controller._publish_markers = lambda *args, **kwargs: None
+        snapshot = controller._prepare_assignment_locked()
+        self.assertTrue(controller._compute_and_commit_assignment(snapshot))
+        controller.model_poses = {'moving_box': (4.005, 3.996, 0.002)}
+        controller.is_running = True
+
+        controller._control_step(None)
+
+        self.assertTrue(controller.is_running)
+        self.assertIsNone(controller.placement_error)
+        command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertGreater(
+            abs(command.linear.x) + abs(command.angular.z), 0.0
+        )
 
 
 class FormationLifecycleTests(unittest.TestCase):
