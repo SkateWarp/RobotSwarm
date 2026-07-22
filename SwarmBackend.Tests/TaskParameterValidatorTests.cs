@@ -41,9 +41,11 @@ public sealed class TaskParameterValidatorTests
             {
               "target_x": 3,
               "target_y": -1.5,
+              "arrival_tolerance": 0.25,
               "config": {
                 "target_x": 3,
                 "target_y": -1.5,
+                "arrival_tolerance": 0.25,
                 "transport_planner": "grf"
               }
             }
@@ -90,6 +92,9 @@ public sealed class TaskParameterValidatorTests
     [Theory]
     [InlineData("{ \"target_x\": 4.01 }")]
     [InlineData("{ \"target_y\": false }")]
+    [InlineData("{ \"arrival_tolerance\": 0.14 }")]
+    [InlineData("{ \"arrival_tolerance\": 0.76 }")]
+    [InlineData("{ \"arrival_tolerance\": \"0.25\" }")]
     [InlineData("{ \"config\": { \"transport_planner\": \"legacy\" } }")]
     [InlineData("{ \"config\": { \"transport_planner\": \"unknown\" } }")]
     public void RejectsUnsafeTransportParameters(string json)

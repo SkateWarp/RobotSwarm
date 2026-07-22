@@ -116,6 +116,20 @@ class ModelStates(Message):
         super().__init__(name=[], pose=[])
 
 
+class ModelState(Message):
+    def __init__(self):
+        super().__init__(
+            model_name="",
+            reference_frame="",
+            pose=Pose(),
+            twist=Twist(),
+        )
+
+
+class SetModelState:
+    pass
+
+
 class FakePublisher:
     def __init__(self, *args, **kwargs):
         self.messages = []
@@ -138,6 +152,16 @@ class FakeSubscriber:
 
     def unregister(self):
         self.unregistered = True
+
+
+class FakeServiceProxy:
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+        self.response = Message(success=True, status_message="ok")
+
+    def __call__(self, request):
+        self.requests.append(request)
+        return self.response
 
 
 class FakeTimer:
@@ -210,6 +234,7 @@ def load_ros_scripts():
         "rospy",
         Publisher=FakePublisher,
         Subscriber=FakeSubscriber,
+        ServiceProxy=FakeServiceProxy,
         Timer=FakeTimer,
         Duration=lambda value: value,
         Time=Message(now=lambda: 0.0),
@@ -219,6 +244,7 @@ def load_ros_scripts():
         on_shutdown=lambda *args, **kwargs: None,
         spin=lambda: None,
         sleep=lambda _duration: None,
+        wait_for_service=lambda *args, **kwargs: None,
         loginfo=lambda *args, **kwargs: None,
         logwarn=lambda *args, **kwargs: None,
         logerr=lambda *args, **kwargs: None,
@@ -248,7 +274,12 @@ def load_ros_scripts():
     )
     gazebo_msgs_msg = module(
         "gazebo_msgs.msg",
+        ModelState=ModelState,
         ModelStates=ModelStates,
+    )
+    gazebo_msgs_srv = module(
+        "gazebo_msgs.srv",
+        SetModelState=SetModelState,
     )
     replacements = {
         "rospy": rospy,
@@ -266,8 +297,11 @@ def load_ros_scripts():
             "visualization_msgs", msg=visualization_msgs_msg
         ),
         "visualization_msgs.msg": visualization_msgs_msg,
-        "gazebo_msgs": module("gazebo_msgs", msg=gazebo_msgs_msg),
+        "gazebo_msgs": module(
+            "gazebo_msgs", msg=gazebo_msgs_msg, srv=gazebo_msgs_srv
+        ),
         "gazebo_msgs.msg": gazebo_msgs_msg,
+        "gazebo_msgs.srv": gazebo_msgs_srv,
     }
     previous = {
         name: sys.modules.get(name)
@@ -558,6 +592,32 @@ class OrchestratorLifecycleTests(unittest.TestCase):
             "movement_mode": "static",
             "spacing": 0.7,
         }, config)
+
+    def test_transport_arrival_margin_is_explicit_and_bounded(self):
+        config = ROS["orchestrator"].TaskOrchestrator._validated_task_config(
+            "transport",
+            {
+                "target_x": "-2.5",
+                "target_y": 1.25,
+                "arrival_tolerance": "0.25",
+            },
+            {"transport_planner": "grf"},
+        )
+
+        self.assertEqual({
+            "target_x": -2.5,
+            "target_y": 1.25,
+            "arrival_tolerance": 0.25,
+            "transport_planner": "grf",
+        }, config)
+        with self.assertRaisesRegex(
+            ValueError, "arrival_tolerance must be between"
+        ):
+            ROS["orchestrator"].TaskOrchestrator._validated_task_config(
+                "transport",
+                {"arrival_tolerance": 0.10},
+                {},
+            )
 
     def test_collision_count_uses_contact_state_not_emergency_threat(self):
         orchestrator = make_orchestrator()
@@ -7261,6 +7321,112 @@ class BehaviorLifecycleTests(unittest.TestCase):
         controller._stop_callback(lifecycle_payload("progress-task"))
         self.assertIsNone(controller.transport_initial_target_distance)
         self.assertEqual(0.0, controller.transport_reported_progress)
+
+    def test_transport_start_moves_and_observes_the_gazebo_target_ghost(self):
+        controller = self._transport_search_controller(2)
+        controller.object_position = np.array([1.0, 1.0])
+        controller.default_arrival_tolerance = 0.5
+        controller.arrival_tolerance = 0.5
+        controller.transport_planner = "grf"
+        controller.grf_mcmc_iterations = 60
+        controller.grf_large_fleet_iterations = 12
+        controller._grf_kernels = {}
+        controller.target_marker_name = "target_marker"
+        controller.target_marker_position = None
+        controller.target_marker_synced = False
+        controller.target_marker_command_accepted = False
+        controller.target_marker_sync_tolerance = 0.02
+        controller.target_marker_service_name = "/gazebo/set_model_state"
+        controller.target_marker_service = FakeServiceProxy()
+
+        controller._start_callback(String(data=json.dumps({
+            "task_id": "ghost-task",
+            "target_x": -2.5,
+            "target_y": 1.25,
+            "arrival_tolerance": 0.25,
+            "transport_planner": "grf",
+        })))
+
+        self.assertEqual(0.25, controller.arrival_tolerance)
+        self.assertTrue(controller.target_marker_command_accepted)
+        self.assertFalse(controller.target_marker_synced)
+        marker_command = controller.target_marker_service.requests[-1]
+        self.assertEqual("target_marker", marker_command.model_name)
+        self.assertEqual("world", marker_command.reference_frame)
+        self.assertEqual(-2.5, marker_command.pose.position.x)
+        self.assertEqual(1.25, marker_command.pose.position.y)
+        self.assertEqual(0.0, marker_command.pose.position.z)
+        self.assertEqual(1.0, marker_command.pose.orientation.w)
+
+        payload_pose = Pose()
+        payload_pose.position.x = 1.0
+        payload_pose.position.y = 1.0
+        payload_pose.position.z = 0.1
+        marker_pose = Pose()
+        marker_pose.position.x = -2.5
+        marker_pose.position.y = 1.25
+        models = ModelStates()
+        models.name = ["transport_object", "target_marker"]
+        models.pose = [payload_pose, marker_pose]
+        controller.object_rest_z = 0.1
+        controller.object_z_tolerance = 0.05
+        controller._model_states_callback(models)
+
+        self.assertTrue(controller.target_marker_synced)
+        np.testing.assert_allclose(
+            [-2.5, 1.25], controller.target_marker_position
+        )
+
+    def test_transport_continues_when_gazebo_rejects_the_target_ghost(self):
+        controller = self._transport_search_controller(1)
+        controller.object_position = np.array([1.0, 1.0])
+        controller.default_arrival_tolerance = 0.5
+        controller.arrival_tolerance = 0.5
+        controller.transport_planner = "grf"
+        controller.grf_mcmc_iterations = 60
+        controller.grf_large_fleet_iterations = 12
+        controller._grf_kernels = {}
+        controller.target_marker_position = None
+        controller.target_marker_synced = False
+        controller.target_marker_command_accepted = False
+        controller.target_marker_service_name = "/gazebo/set_model_state"
+        controller.target_marker_service = FakeServiceProxy()
+        controller.target_marker_service.response = Message(
+            success=False,
+            status_message="model does not exist",
+        )
+
+        controller._start_callback(String(data=json.dumps({
+            "task_id": "ghost-rejected-task",
+            "target_x": 2.0,
+            "target_y": 2.0,
+        })))
+
+        self.assertTrue(controller.is_running)
+        self.assertEqual(
+            ROS["transport"].TransportPhase.SEARCH,
+            controller.phase,
+        )
+        self.assertFalse(controller.target_marker_command_accepted)
+        self.assertFalse(controller.target_marker_synced)
+
+    def test_transport_without_arrival_override_restores_its_default(self):
+        controller = self._transport_search_controller(1)
+        controller.object_position = np.array([1.0, 1.0])
+        controller.default_arrival_tolerance = 0.5
+        controller.arrival_tolerance = 0.25
+        controller.transport_planner = "grf"
+        controller.grf_mcmc_iterations = 60
+        controller.grf_large_fleet_iterations = 12
+        controller._grf_kernels = {}
+
+        controller._start_callback(String(data=json.dumps({
+            "task_id": "default-margin-task",
+            "target_x": 2.0,
+            "target_y": 2.0,
+        })))
+
+        self.assertEqual(0.5, controller.arrival_tolerance)
 
     def test_transport_progress_starts_complete_inside_arrival_tolerance(self):
         controller = self._transport_search_controller(1)

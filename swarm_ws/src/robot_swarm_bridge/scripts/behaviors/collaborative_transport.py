@@ -35,7 +35,8 @@ from geometry_msgs.msg import Twist, Point, Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String, Bool
-from gazebo_msgs.msg import ModelStates
+from gazebo_msgs.msg import ModelState, ModelStates
+from gazebo_msgs.srv import SetModelState
 from visualization_msgs.msg import Marker, MarkerArray
 
 # Import obstacle avoidance from core
@@ -200,7 +201,14 @@ class CollaborativeTransport:
         self.mcmc_iterations = rospy.get_param('~mcmc_iterations', 60)
         self.mcmc_sigma = rospy.get_param('~mcmc_sigma', 0.05)
         self.mcmc_burnin = rospy.get_param('~mcmc_burnin', 0.6)
-        self.arrival_tolerance = rospy.get_param('~arrival_tolerance', 0.5)
+        self.default_arrival_tolerance = min(
+            0.75,
+            max(
+                0.15,
+                float(rospy.get_param('~arrival_tolerance', 0.5)),
+            ),
+        )
+        self.arrival_tolerance = self.default_arrival_tolerance
         self.transport_arrival_release_margin = min(
             0.25,
             max(
@@ -1166,6 +1174,11 @@ class CollaborativeTransport:
         self.object_error: Optional[str] = None
         self.failure_reason: Optional[str] = None
         self.model_states_received_at: Optional[float] = None
+        self.target_marker_name = 'target_marker'
+        self.target_marker_position: Optional[np.ndarray] = None
+        self.target_marker_synced = False
+        self.target_marker_command_accepted = False
+        self.target_marker_sync_tolerance = 0.02
         self.object_found = False
         self.obstacle_positions: List[np.ndarray] = []     # list of [x,y]
         self.model_poses: Dict[str, Tuple[float, float, float]] = {}
@@ -1184,6 +1197,12 @@ class CollaborativeTransport:
         )
         self.marker_pub = rospy.Publisher(
             '/transport/markers', MarkerArray, queue_size=1
+        )
+        # A service response confirms that Gazebo accepted the one-shot pose.
+        # ModelStates below provides the separate end-to-end confirmation.
+        self.target_marker_service_name = '/gazebo/set_model_state'
+        self.target_marker_service = rospy.ServiceProxy(
+            self.target_marker_service_name, SetModelState,
         )
 
         # ---- Subscribers (global) -------------------------------------------
@@ -1421,6 +1440,7 @@ class CollaborativeTransport:
             self.model_poses = {}
             object_pose = None
             object_twist = None
+            target_marker_position = None
             for i, name in enumerate(msg.name):
                 px = msg.pose[i].position.x
                 py = msg.pose[i].position.y
@@ -1430,6 +1450,10 @@ class CollaborativeTransport:
                         py,
                         self._quat_to_yaw(msg.pose[i].orientation),
                     )
+                    if name == getattr(
+                        self, 'target_marker_name', 'target_marker'
+                    ):
+                        target_marker_position = np.array([px, py])
                 if name == self.object_name:
                     object_pose = msg.pose[i]
                     twists = getattr(msg, 'twist', ())
@@ -1439,6 +1463,22 @@ class CollaborativeTransport:
                     # Only explicitly named arena obstacles are included.
                     if math.isfinite(px) and math.isfinite(py):
                         self.obstacle_positions.append(np.array([px, py]))
+
+            self.target_marker_position = target_marker_position
+            marker_target = np.array(
+                [
+                    getattr(self, 'target_x', float('nan')),
+                    getattr(self, 'target_y', float('nan')),
+                ],
+                dtype=float,
+            )
+            self.target_marker_synced = bool(
+                target_marker_position is not None
+                and np.all(np.isfinite(marker_target))
+                and float(np.linalg.norm(
+                    target_marker_position - marker_target
+                )) <= getattr(self, 'target_marker_sync_tolerance', 0.02)
+            )
 
             was_found = self.object_found
             self.object_found = False
@@ -1500,6 +1540,43 @@ class CollaborativeTransport:
                     self.object_position[1],
                 )
 
+    def _place_target_marker(self):
+        """Move the collision-free Gazebo ghost to this task's destination."""
+        service = getattr(self, 'target_marker_service', None)
+        service_name = getattr(
+            self, 'target_marker_service_name', '/gazebo/set_model_state'
+        )
+        self.target_marker_command_accepted = False
+        self.target_marker_synced = False
+        if service is None:
+            return
+
+        state = ModelState()
+        state.model_name = getattr(
+            self, 'target_marker_name', 'target_marker'
+        )
+        state.reference_frame = 'world'
+        state.pose.position.x = self.target_x
+        state.pose.position.y = self.target_y
+        state.pose.position.z = 0.0
+        state.pose.orientation.w = 1.0
+        try:
+            rospy.wait_for_service(service_name, timeout=1.0)
+            response = service(state)
+        except Exception as exc:
+            rospy.logwarn(
+                "[transport] could not place the Gazebo target marker: %s",
+                exc,
+            )
+            return
+        if not bool(getattr(response, 'success', False)):
+            rospy.logwarn(
+                "[transport] Gazebo rejected the target marker pose: %s",
+                getattr(response, 'status_message', 'unknown reason'),
+            )
+            return
+        self.target_marker_command_accepted = True
+
     def _start_callback(self, msg):
         with self._control_cycle_mutex():
             self._start_callback_serialized(msg)
@@ -1528,6 +1605,30 @@ class CollaborativeTransport:
                 self.target_x = float(config['target_x'])
             if 'target_y' in config:
                 self.target_y = float(config['target_y'])
+
+            default_tolerance = float(getattr(
+                self,
+                'default_arrival_tolerance',
+                getattr(self, 'arrival_tolerance', 0.5),
+            ))
+            requested_tolerance = config.get(
+                'arrival_tolerance', default_tolerance
+            )
+            try:
+                requested_tolerance = float(requested_tolerance)
+            except (TypeError, ValueError, OverflowError):
+                requested_tolerance = default_tolerance
+            if (
+                not math.isfinite(requested_tolerance)
+                or not 0.15 <= requested_tolerance <= 0.75
+            ):
+                rospy.logwarn(
+                    "[transport] arrival_tolerance must be between "
+                    "0.15 and 0.75 m; using %.2f m",
+                    default_tolerance,
+                )
+                requested_tolerance = default_tolerance
+            self.arrival_tolerance = requested_tolerance
 
             requested_planner = config.get(
                 'transport_planner', config.get('planner')
@@ -1575,6 +1676,7 @@ class CollaborativeTransport:
             self.object_error = None
             self.failure_reason = None
             self.current_task_id = config.get('task_id')
+            self._place_target_marker()
             self._begin_transport_collision_stream(self.current_task_id)
             self.is_running = True
             self.is_paused = False
@@ -9591,6 +9693,14 @@ class CollaborativeTransport:
                 self.object_position.copy()
                 if self.object_position is not None else None
             )
+            marker_position = getattr(
+                self, 'target_marker_position', None
+            )
+            if marker_position is not None:
+                marker_position = marker_position.copy()
+            marker_synced = bool(getattr(
+                self, 'target_marker_synced', False
+            ))
         obj = object_position.tolist() if object_position is not None else [0, 0]
 
         target = [self.target_x, self.target_y]
@@ -9839,6 +9949,24 @@ class CollaborativeTransport:
             ),
             'object_pos': {'x': round(obj[0], 3), 'y': round(obj[1], 3)},
             'target_pos': {'x': target[0], 'y': target[1]},
+            'arrival_tolerance': round(float(getattr(
+                self, 'arrival_tolerance', 0.5
+            )), 3),
+            'target_marker': {
+                'model_name': getattr(
+                    self, 'target_marker_name', 'target_marker'
+                ),
+                'command_accepted': bool(getattr(
+                    self, 'target_marker_command_accepted', False
+                )),
+                'synchronized': marker_synced,
+                'position': (
+                    None if marker_position is None else {
+                        'x': round(float(marker_position[0]), 3),
+                        'y': round(float(marker_position[1]), 3),
+                    }
+                ),
+            },
             'distance_to_target': round(dist, 3),
             'progress': round(progress, 3),
             'planner': self._active_planner,

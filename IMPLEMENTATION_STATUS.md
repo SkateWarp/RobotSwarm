@@ -106,6 +106,16 @@ búsqueda, reunión, formación, seguimiento y transporte; el contacto con la
 carga se trata por separado para que la capa de seguridad no rechace por error
 el empuje previsto.
 
+El destino solicitado por la interfaz también se coloca como un modelo visual
+sin colisión en Gazebo. El servicio confirma que Gazebo aceptó la posición y el
+controlador la contrasta después con `model_states`. El modelo combina una
+huella y una caja translúcida, por lo que aparece en el visor HLS aunque RViz no
+esté abierto. La interfaz permite ajustar entre 0,15 m y 0,75 m el margen de
+llegada; un valor menor exige un recorrido mayor hasta el mismo destino. Este
+ajuste no cambia la masa ni la fricción de la carga cargada de aceptación (0,75
+kg y `mu=0,25`), porque ese perfil conserva la prueba de que un solo Burger no
+sustituye a la flota.
+
 ### Plano de control web
 
 La ruta de control orientada a producción incluye:

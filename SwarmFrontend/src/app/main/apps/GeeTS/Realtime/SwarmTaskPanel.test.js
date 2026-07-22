@@ -1,4 +1,4 @@
-import { describeTransportResult, validateNumberField } from "./SwarmTaskPanel";
+import { buildTransportParameters, describeTransportResult, validateNumberField } from "./SwarmTaskPanel";
 
 describe("task parameter validation", () => {
     it("accepts both boundaries and rejects empty or out-of-range values", () => {
@@ -6,6 +6,20 @@ describe("task parameter validation", () => {
         expect(validateNumberField("2", 0.35, 2, "Separación")).toBe("");
         expect(validateNumberField("", 0.35, 2, "Separación")).toContain("introduce un valor");
         expect(validateNumberField(2.1, 0.35, 2, "Separación")).toContain("entre 0.35 y 2");
+    });
+
+    it("sends the visible destination and its arrival margin to ROS", () => {
+        expect(buildTransportParameters("-2.5", "1.25", "0.25")).toEqual({
+            target_x: -2.5,
+            target_y: 1.25,
+            arrival_tolerance: 0.25,
+            config: {
+                target_x: -2.5,
+                target_y: 1.25,
+                arrival_tolerance: 0.25,
+                transport_planner: "grf",
+            },
+        });
     });
 });
 

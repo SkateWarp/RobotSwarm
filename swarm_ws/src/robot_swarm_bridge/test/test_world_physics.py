@@ -133,6 +133,29 @@ class WorldPhysicsTests(unittest.TestCase):
         self.assertAlmostEqual(0.002, float(decay.findtext('linear')))
         self.assertAlmostEqual(0.005, float(decay.findtext('angular')))
 
+    def test_transport_target_is_a_collision_free_payload_ghost(self):
+        root = ET.parse(WORLDS_DIR / 'swarm_arena.world').getroot()
+        marker = root.find("./world/model[@name='target_marker']")
+        self.assertIsNotNone(marker)
+        self.assertEqual('true', marker.findtext('static').lower())
+        self.assertIsNone(marker.find('./link/collision'))
+
+        footprint = marker.find("./link/visual[@name='target_footprint']")
+        ghost = marker.find("./link/visual[@name='payload_ghost']")
+        self.assertIsNotNone(footprint)
+        self.assertIsNotNone(ghost)
+        self.assertEqual(
+            (0.4, 0.4, 0.2),
+            tuple(float(value) for value in
+                  ghost.findtext('./geometry/box/size').split()),
+        )
+        self.assertEqual('false', footprint.findtext('cast_shadows'))
+        self.assertEqual('false', ghost.findtext('cast_shadows'))
+        self.assertGreater(float(footprint.findtext('transparency')), 0.0)
+        self.assertLess(float(footprint.findtext('transparency')), 1.0)
+        self.assertGreater(float(ghost.findtext('transparency')), 0.0)
+        self.assertLess(float(ghost.findtext('transparency')), 1.0)
+
     def test_loaded_transport_profile_brackets_one_and_four_burgers(self):
         root = ET.parse(
             MODELS_DIR / 'transport_crate_loaded' / 'model.sdf'

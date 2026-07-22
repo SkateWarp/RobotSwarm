@@ -87,6 +87,22 @@ export const validateNumberField = (value, minimum, maximum, label) => {
     return "";
 };
 
+export const buildTransportParameters = (targetX, targetY, arrivalTolerance) => {
+    const target = {
+        target_x: Number(targetX),
+        target_y: Number(targetY),
+        arrival_tolerance: Number(arrivalTolerance),
+    };
+
+    return {
+        ...target,
+        config: {
+            ...target,
+            transport_planner: "grf",
+        },
+    };
+};
+
 const taskColor = (state) => {
     if (state === "Running" || state === "Completed") return "success";
     if (state === "Paused" || state === "Cancelling") return "warning";
@@ -183,6 +199,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
     const [formationSpacing, setFormationSpacing] = useState(0.7);
     const [targetX, setTargetX] = useState(3);
     const [targetY, setTargetY] = useState(3);
+    const [arrivalTolerance, setArrivalTolerance] = useState(0.25);
 
     const activeTask = tasks.find((task) => !TERMINAL_TASK_STATES.has(task.state));
     const latestTask = activeTask || tasks[0];
@@ -208,9 +225,10 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
         } else {
             errors.targetX = validateNumberField(targetX, -4, 4, "Objetivo X");
             errors.targetY = validateNumberField(targetY, -4, 4, "Objetivo Y");
+            errors.arrivalTolerance = validateNumberField(arrivalTolerance, 0.15, 0.75, "Margen de llegada");
         }
         return errors;
-    }, [followDistance, formationSpacing, pathRadius, targetX, targetY, taskType]);
+    }, [arrivalTolerance, followDistance, formationSpacing, pathRadius, targetX, targetY, taskType]);
 
     const validationErrors = Object.values(validation).filter(Boolean);
 
@@ -239,15 +257,7 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
             };
         }
 
-        return {
-            target_x: Number(targetX),
-            target_y: Number(targetY),
-            config: {
-                target_x: Number(targetX),
-                target_y: Number(targetY),
-                transport_planner: "grf",
-            },
-        };
+        return buildTransportParameters(targetX, targetY, arrivalTolerance);
     };
 
     const startTask = () => {
@@ -591,14 +601,30 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                     {...fieldProps(validation.targetY)}
                                 />
                             </Grid>
-                            <Grid item xs={12}>
+                            <Grid item xs={12} sm={6}>
+                                <TextField
+                                    fullWidth
+                                    size="small"
+                                    type="number"
+                                    label="Margen de llegada (m)"
+                                    value={arrivalTolerance}
+                                    inputProps={{ min: 0.15, max: 0.75, step: 0.05 }}
+                                    onChange={(event) => setArrivalTolerance(event.target.value)}
+                                    error={Boolean(validation.arrivalTolerance)}
+                                    helperText={
+                                        validation.arrivalTolerance ||
+                                        "Un margen menor hace que la carga se acerque más al destino."
+                                    }
+                                />
+                            </Grid>
+                            <Grid item xs={12} sm={6}>
                                 <TextField
                                     fullWidth
                                     size="small"
                                     label="Planificador"
                                     value="GRF coordinado"
                                     disabled
-                                    helperText="La flota busca, comunica el hallazgo y converge antes del empuje."
+                                    helperText="La caja fantasma de Gazebo marca el destino elegido."
                                 />
                             </Grid>
                         </Grid>

@@ -395,6 +395,13 @@ class TaskOrchestrator:
                 params.get('target_y', config.get('target_y', 3.0)),
                 'target_y', -4.0, 4.0,
             )
+            arrival_tolerance = cls._number_in_range(
+                params.get(
+                    'arrival_tolerance',
+                    config.get('arrival_tolerance', 0.5),
+                ),
+                'arrival_tolerance', 0.15, 0.75,
+            )
             planner = str(
                 config.get('transport_planner', 'grf')
             ).strip().lower()
@@ -403,6 +410,7 @@ class TaskOrchestrator:
             return {
                 'target_x': target_x,
                 'target_y': target_y,
+                'arrival_tolerance': arrival_tolerance,
                 'transport_planner': planner,
             }
 
