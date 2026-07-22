@@ -224,6 +224,7 @@ def make_controller():
     controller.robot_count = 1
     controller.robot_poses = {'tb3_0': Pose()}
     controller.robot_yaws = {'tb3_0': 0.0}
+    controller.invalid_robot_poses = ()
     controller.odom_received_at = {'tb3_0': None}
     controller.odom_timeout_wall_s = 0.75
     controller.odom_initialization_timeout_wall_s = 5.0
@@ -1666,6 +1667,142 @@ class FormationConvergenceTests(unittest.TestCase):
             command.linear.x == 0.0 and command.angular.z == 0.0
             for command in emitted
         ))
+
+    def test_unexpected_live_data_error_replaces_motion_with_a_stop(self):
+        class MalformedScanAvoidance:
+            def update_robot_positions(self, _positions):
+                pass
+
+            def apply_avoidance(self, _command):
+                raise ValueError('non-finite LaserScan angle metadata')
+
+        controller = self._controller_with_a_positive_entry_command()
+        controller.avoidance['tb3_0'] = MalformedScanAvoidance()
+        previous_count = len(controller.cmd_vel_pubs['tb3_0'].messages)
+
+        controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED, controller.formation_state
+        )
+        self.assertIn('invalid live data', controller.placement_error)
+        self.assertEqual({}, controller.assignments)
+        emitted = controller.cmd_vel_pubs['tb3_0'].messages[previous_count:]
+        self.assertTrue(emitted)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in emitted
+        ))
+
+    def test_non_finite_odometry_after_moving_is_rejected_atomically(self):
+        cases = (
+            ('nan_x', float('nan'), 0.0, None),
+            ('infinite_x', float('inf'), 0.0, None),
+            ('nan_y', 0.0, float('nan'), None),
+            ('infinite_y', 0.0, float('inf'), None),
+            ('nan_yaw', 0.0, 0.0, float('nan')),
+            ('infinite_yaw', 0.0, 0.0, float('inf')),
+        )
+
+        for label, x, y, yaw_override in cases:
+            with self.subTest(case=label):
+                controller = self._controller_with_a_positive_entry_command()
+                controller._initial_formation_acquired = True
+                previous_pose = controller.robot_poses['tb3_0']
+                previous_yaw = controller.robot_yaws['tb3_0']
+                previous_stamp = controller.odom_received_at['tb3_0']
+                previous_count = len(
+                    controller.cmd_vel_pubs['tb3_0'].messages
+                )
+
+                message = Odometry()
+                message.pose.pose.position.x = x
+                message.pose.pose.position.y = y
+                if yaw_override is None:
+                    controller._odom_cb(message, 'tb3_0')
+                else:
+                    with mock.patch.object(
+                        formation,
+                        'quaternion_to_yaw',
+                        return_value=yaw_override,
+                    ):
+                        controller._odom_cb(message, 'tb3_0')
+
+                self.assertEqual(
+                    ('tb3_0',), controller.invalid_robot_poses
+                )
+                self.assertIs(
+                    previous_pose, controller.robot_poses['tb3_0']
+                )
+                self.assertEqual(previous_yaw, controller.robot_yaws['tb3_0'])
+                self.assertEqual(
+                    previous_stamp, controller.odom_received_at['tb3_0']
+                )
+
+                controller._control_loop(None)
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                self.assertEqual(['tb3_0'], controller.stale_odometry)
+                emitted = controller.cmd_vel_pubs['tb3_0'].messages[
+                    previous_count:
+                ]
+                self.assertTrue(emitted)
+                self.assertTrue(all(
+                    command.linear.x == 0.0
+                    and command.angular.z == 0.0
+                    for command in emitted
+                ))
+
+    def test_live_gate_rejects_non_finite_robot_geometry_after_moving(self):
+        cases = (
+            ('nan_x', 'x', float('nan')),
+            ('infinite_x', 'x', float('inf')),
+            ('nan_y', 'y', float('nan')),
+            ('infinite_y', 'y', float('inf')),
+            ('nan_yaw', 'yaw', float('nan')),
+            ('infinite_yaw', 'yaw', float('inf')),
+        )
+
+        for label, field, value in cases:
+            with self.subTest(case=label):
+                controller = self._controller_with_a_positive_entry_command()
+                controller._initial_formation_acquired = True
+                previous_count = len(
+                    controller.cmd_vel_pubs['tb3_0'].messages
+                )
+                if field == 'yaw':
+                    controller.robot_yaws['tb3_0'] = value
+                else:
+                    setattr(
+                        controller.robot_poses['tb3_0'].position,
+                        field,
+                        value,
+                    )
+
+                controller._control_loop(None)
+
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                self.assertIn(
+                    'non-finite planar pose', controller.placement_error
+                )
+                emitted = controller.cmd_vel_pubs['tb3_0'].messages[
+                    previous_count:
+                ]
+                self.assertTrue(emitted)
+                self.assertTrue(all(
+                    command.linear.x == 0.0
+                    and command.angular.z == 0.0
+                    for command in emitted
+                ))
 
 
 class FormationLifecycleTests(unittest.TestCase):

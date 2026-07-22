@@ -438,6 +438,7 @@ class FormationController:
         self.robot_ids: List[str] = []
         self.robot_poses: Dict[str, Optional[Pose]] = {}
         self.robot_yaws: Dict[str, float] = {}
+        self.invalid_robot_poses: Tuple[str, ...] = ()
         self.odom_received_at: Dict[str, Optional[float]] = {}
         self.odom_timeout_wall_s = max(
             0.2, float(rospy.get_param('~odom_timeout_wall_s', 0.75))
@@ -771,11 +772,24 @@ class FormationController:
         """Per-robot odometry callback."""
         pose = msg.pose.pose
         yaw = quaternion_to_yaw(pose.orientation)
+        pose_is_valid = self._planar_robot_pose_is_finite(pose, yaw)
         should_assign = False
         with self.lock:
-            first_update = self.robot_poses.get(robot_id) is None
             if robot_id not in self.robot_poses:
                 return
+            invalid_robots = set(getattr(
+                self, 'invalid_robot_poses', ()
+            ))
+            if not pose_is_valid:
+                # Keep the last valid pose, but make the rejected sample visible
+                # to the same lock-protected gate that publishes cmd_vel.
+                invalid_robots.add(robot_id)
+                self.invalid_robot_poses = tuple(sorted(invalid_robots))
+                return
+
+            first_update = self.robot_poses.get(robot_id) is None
+            invalid_robots.discard(robot_id)
+            self.invalid_robot_poses = tuple(sorted(invalid_robots))
             self.robot_poses[robot_id] = pose
             self.robot_yaws[robot_id] = yaw
             self.odom_received_at[robot_id] = time.monotonic()
@@ -873,6 +887,9 @@ class FormationController:
             self.route_waypoints, self.route_waypoint_indices,
         ):
             store.pop(robot_id, None)
+        invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
+        invalid_robots.discard(robot_id)
+        self.invalid_robot_poses = tuple(sorted(invalid_robots))
 
         rospy.loginfo("Removed robot: %s", robot_id)
 
@@ -1981,12 +1998,52 @@ class FormationController:
         except (TypeError, ValueError, OverflowError):
             return False
 
+    @staticmethod
+    def _planar_robot_pose_is_finite(
+        pose: Optional[Pose], yaw: Optional[float]
+    ) -> bool:
+        """Check the planar odometry values used by the controller."""
+
+        if pose is None:
+            return False
+        try:
+            values = (pose.position.x, pose.position.y, yaw)
+            return all(math.isfinite(float(value)) for value in values)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    def _live_robot_positions_locked(
+        self,
+    ) -> Optional[Dict[str, Tuple[float, float]]]:
+        """Return a finite fleet snapshot, or None for rejected odometry."""
+
+        invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
+        robot_positions = {}
+        for robot_id in self.robot_ids:
+            pose = self.robot_poses.get(robot_id)
+            yaw = self.robot_yaws.get(robot_id)
+            if (
+                robot_id in invalid_robots
+                or not self._planar_robot_pose_is_finite(pose, yaw)
+            ):
+                return None
+            robot_positions[robot_id] = (
+                pose.position.x,
+                pose.position.y,
+            )
+        return robot_positions
+
     def _live_motion_is_safe_locked(
         self,
         world_targets: List[Tuple[float, float]],
         assembling_on_routes: bool,
     ) -> bool:
         """Check the active plan immediately before publishing its batch."""
+
+        robot_ids = tuple(self.robot_ids)
+        robot_positions = self._live_robot_positions_locked()
+        if robot_positions is None:
+            return False
 
         model_poses = dict(self.model_poses)
         if (
@@ -2019,18 +2076,9 @@ class FormationController:
         if not assembling_on_routes:
             return True
 
-        robot_ids = tuple(self.robot_ids)
         slots = [self.assignments.get(robot_id) for robot_id in robot_ids]
         if any(slot is None for slot in slots):
             return False
-        robot_positions = {
-            robot_id: (
-                self.robot_poses[robot_id].position.x,
-                self.robot_poses[robot_id].position.y,
-            )
-            for robot_id in robot_ids
-            if self.robot_poses.get(robot_id) is not None
-        }
         return self._routes_are_safe(
             robot_ids,
             robot_positions,
@@ -2310,7 +2358,32 @@ class FormationController:
                 or self.emergency_stop_active
             ):
                 return
-            self._control_step(event)
+            try:
+                self._control_step(event)
+            except Exception as exc:
+                # A malformed scan or another unexpected live-data value must
+                # not kill rospy's timer thread while its last Twist is active.
+                self.placement_error = (
+                    "Formation control failed on invalid live data; all "
+                    "robots were stopped."
+                )
+                self.formation_state = FormationState.FAILED
+                self._initial_formation_acquired = False
+                self.is_running = False
+                self._cancel_pending_assignment_locked(
+                    clear_assignments=True
+                )
+                self._stop_all_robots()
+                try:
+                    self._publish_status([], 0.0)
+                except Exception as status_exc:
+                    rospy.logerr(
+                        "Formation failure status could not be published: %s",
+                        status_exc,
+                    )
+                rospy.logerr(
+                    "Formation control exception failed closed: %s", exc
+                )
 
     def _control_step(self, event):
         """Main 20 Hz timer callback."""
@@ -2326,9 +2399,19 @@ class FormationController:
                 + ", ".join(stale)
             )
 
+        if not waiting and not stale:
+            with self.lock:
+                live_robot_positions = self._live_robot_positions_locked()
+            if live_robot_positions is None:
+                self.placement_error = (
+                    "Robot odometry contained a non-finite planar pose; all "
+                    "robots were stopped."
+                )
+
         if self.placement_error:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False
+            self._cancel_pending_assignment_locked(clear_assignments=True)
             self._stop_all_robots()
             self._publish_status([], 0.0)
             self.is_running = False
@@ -2355,6 +2438,7 @@ class FormationController:
         if self.placement_error:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False
+            self._cancel_pending_assignment_locked(clear_assignments=True)
             self._stop_all_robots()
             self._publish_status([], 0.0)
             self.is_running = False
@@ -2565,8 +2649,8 @@ class FormationController:
             if not live_motion_is_safe:
                 if live_safety_exception is None:
                     self.placement_error = (
-                        "A live obstacle invalidated the formation orbit, "
-                        "slots, or remaining entry route."
+                        "A live obstacle or invalid robot odometry invalidated "
+                        "the formation orbit, slots, or remaining entry route."
                     )
                 else:
                     self.placement_error = (
@@ -2587,6 +2671,7 @@ class FormationController:
         if self.placement_error:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False
+            self._cancel_pending_assignment_locked(clear_assignments=True)
             self._stop_all_robots()
             self._publish_status([], 0.0)
             self.is_running = False
@@ -2620,8 +2705,12 @@ class FormationController:
     def _odometry_readiness(self, robot_ids, now=None):
         """Split robots into first-message waiters and stale data sources."""
         started_at = getattr(self, 'task_started_at', None)
+        invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
         if started_at is None:
-            return [], []
+            return [], [
+                robot_id for robot_id in robot_ids
+                if robot_id in invalid_robots
+            ]
         if now is None:
             now = time.monotonic()
         timeout = getattr(self, 'odom_timeout_wall_s', 0.75)
@@ -2632,6 +2721,9 @@ class FormationController:
         waiting = []
         stale = []
         for robot_id in robot_ids:
+            if robot_id in invalid_robots:
+                stale.append(robot_id)
+                continue
             stamp = received.get(robot_id)
             if stamp is None:
                 within_initialization_window = (
