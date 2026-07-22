@@ -952,6 +952,98 @@ class FollowLeaderPathTests(unittest.TestCase):
         status = json.loads(controller.status_pub.messages[-1].data)
         self.assertGreater(status["planning_wall_s"], 0.0)
 
+    def test_slow_path_planner_does_not_commit_a_stale_obstacle_scene(self):
+        controller = make_controller(mode="circular", count=1)
+        controller.arena_size = 20.0
+        controller.path_planner_async = True
+        controller.spawn_exclusion_zones = [{
+            "name": "moving_box",
+            "model": "moving_box",
+            "worlds": ["swarm_arena"],
+            "shape": "circle",
+            "x": 8.0,
+            "y": 8.0,
+            "radius": 0.20,
+        }]
+        controller.model_poses = {"moving_box": (8.0, 8.0, 0.0)}
+        planner_started = threading.Event()
+        release_planner = threading.Event()
+        original_builder = controller._build_path_plan
+
+        def slow_builder(snapshot):
+            planner_started.set()
+            release_planner.wait(2.0)
+            return original_builder(snapshot)
+
+        controller._build_path_plan = slow_builder
+        controller._begin_path_planning_locked(list(controller.robot_names))
+        self.assertTrue(planner_started.wait(0.5))
+
+        model_states = ModelStates()
+        model_states.name = ["moving_box"]
+        model_states.pose = [pose_at(1.5, 1.5)]
+        controller._model_states_cb(model_states)
+
+        release_planner.set()
+        controller.path_plan_thread.join(2.0)
+
+        self.assertFalse(controller.path_plan_thread.is_alive())
+        self.assertFalse(controller.path_planning)
+        self.assertFalse(controller.path_anchor_ready)
+        self.assertIsNone(controller.path_error)
+        self.assertFalse(controller._path_fits_arena(
+            controller.leader_mode,
+            controller.path_radius,
+            controller.path_anchor_x,
+            controller.path_anchor_y,
+            controller.path_rotation,
+            controller.path_phase,
+            controller.path_direction,
+        ))
+
+    def test_slow_path_planner_ignores_small_gazebo_pose_jitter(self):
+        controller = make_controller(mode="circular", count=1)
+        controller.arena_size = 20.0
+        controller.path_planner_async = True
+        controller.spawn_exclusion_zones = [{
+            "name": "moving_box",
+            "model": "moving_box",
+            "worlds": ["swarm_arena"],
+            "shape": "circle",
+            "x": 8.0,
+            "y": 8.0,
+            "radius": 0.20,
+        }]
+        controller.model_poses = {"moving_box": (8.0, 8.0, 0.0)}
+        planner_started = threading.Event()
+        release_planner = threading.Event()
+        original_builder = controller._build_path_plan
+
+        def slow_builder(snapshot):
+            planner_started.set()
+            release_planner.wait(2.0)
+            return original_builder(snapshot)
+
+        controller._build_path_plan = slow_builder
+        controller._begin_path_planning_locked(list(controller.robot_names))
+        self.assertTrue(planner_started.wait(0.5))
+
+        jittered_pose = pose_at(8.006, 8.0)
+        jittered_pose.orientation.z = math.sin(0.005)
+        jittered_pose.orientation.w = math.cos(0.005)
+        model_states = ModelStates()
+        model_states.name = ["moving_box"]
+        model_states.pose = [jittered_pose]
+        controller._model_states_cb(model_states)
+
+        release_planner.set()
+        controller.path_plan_thread.join(2.0)
+
+        self.assertFalse(controller.path_plan_thread.is_alive())
+        self.assertFalse(controller.path_planning)
+        self.assertTrue(controller.path_anchor_ready)
+        self.assertIsNone(controller.path_error)
+
     def test_coarse_screen_never_replaces_final_path_verification(self):
         controller = make_controller(mode="circular", count=3)
         controller.arena_size = 10.0

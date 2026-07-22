@@ -57,6 +57,8 @@ FIGURE8_LOBE_LENGTH = 3.048611735
 # between two checks. The configured clearance is much larger than this step.
 PATH_PLACEMENT_SAMPLE_STEP = 0.025
 PATH_PLACEMENT_COARSE_SAMPLES = 72
+MODEL_SCENE_POSITION_TOLERANCE = 0.01
+MODEL_SCENE_YAW_TOLERANCE = 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -928,20 +930,53 @@ class FollowTheLeader:
             rospy.logerr("[follow_leader] Path planner failed: %s", exc)
             result = {'error': 'Path planning failed: {}'.format(exc)}
 
+        validated_model_poses = snapshot['model_poses']
         with self.command_lock:
-            if (
-                snapshot['generation'] != self.path_plan_generation
-                or snapshot['task_id'] != self.current_task_id
-                or tuple(self.robot_names) != snapshot['names']
-                or not self.is_active
-            ):
+            if not self._path_plan_lifecycle_is_current(snapshot):
                 return
+            current_model_poses = self._model_pose_snapshot()
+
+        scene_changed = not self._model_scenes_match(
+            current_model_poses, validated_model_poses
+        )
+        # The search runs outside the command lock on purpose. Gazebo can
+        # report a moving payload or obstacle while it is busy, so verify every
+        # successful result against the freshest coherent scene. An old failure
+        # is also discarded when it no longer describes that scene.
+        if result.get('error'):
+            if scene_changed:
+                result = None
+        elif scene_changed:
+            result = self._revalidate_path_plan_result(
+                snapshot, result, current_model_poses
+            )
+        validated_model_poses = current_model_poses
+
+        with self.command_lock:
+            if not self._path_plan_lifecycle_is_current(snapshot):
+                return
+
+            # Another update may have landed during the unlocked revalidation.
+            # Leave the robots stopped and let the next timer tick replan from
+            # the newest complete scene instead of committing a mixed snapshot.
+            if not self._model_scenes_match(
+                self._model_pose_snapshot(), validated_model_poses
+            ):
+                result = None
 
             self.path_planning = False
             self.path_planning_wall_s = max(
                 0.0, time.monotonic() - snapshot['started_at']
             )
             self.path_planning_started_at = None
+            if result is None:
+                self.path_anchor_ready = False
+                self.path_error = None
+                rospy.logwarn(
+                    "[follow_leader] Scene changed during path planning; "
+                    "replanning"
+                )
+                return
             if result.get('error'):
                 self.path_error = result['error']
                 self.path_anchor_ready = False
@@ -977,6 +1012,81 @@ class FollowTheLeader:
             self.chain_settle_ticks = 0
             self.leader_speed_scale = 0.0
             self.path_error = None
+
+    def _path_plan_lifecycle_is_current(self, snapshot):
+        """Return whether an asynchronous result still belongs to this task."""
+        return (
+            snapshot['generation'] == self.path_plan_generation
+            and snapshot['task_id'] == self.current_task_id
+            and tuple(self.robot_names) == snapshot['names']
+            and self.is_active
+        )
+
+    @staticmethod
+    def _model_scenes_match(first, second):
+        """Ignore sub-centimetre Gazebo jitter when correlating two scenes."""
+        try:
+            if set(first) != set(second):
+                return False
+            for name in first:
+                first_pose = first[name]
+                second_pose = second[name]
+                if len(first_pose) < 3 or len(second_pose) < 3:
+                    return False
+                first_values = tuple(
+                    float(value) for value in first_pose[:3]
+                )
+                second_values = tuple(
+                    float(value) for value in second_pose[:3]
+                )
+                values = first_values + second_values
+                if not all(math.isfinite(value) for value in values):
+                    return False
+                if math.hypot(
+                    first_values[0] - second_values[0],
+                    first_values[1] - second_values[1],
+                ) > MODEL_SCENE_POSITION_TOLERANCE:
+                    return False
+                if abs(normalize_angle(
+                    first_values[2] - second_values[2]
+                )) > MODEL_SCENE_YAW_TOLERANCE:
+                    return False
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        return True
+
+    def _revalidate_path_plan_result(self, snapshot, result, model_poses):
+        """Refresh a completed path against the latest coherent model scene."""
+        if not self._path_fits_arena(
+            snapshot['mode'],
+            result['radius'],
+            result['anchor'][0],
+            result['anchor'][1],
+            result['rotation'],
+            result['phase'],
+            result['direction'],
+            model_poses,
+        ):
+            return None
+
+        refreshed = dict(result)
+        if result['route']:
+            leader = snapshot['names'][0]
+            route = plan_obstacle_aware_route(
+                snapshot['positions'][leader],
+                result['anchor'],
+                self.arena_size,
+                self.arena_margin,
+                self.spawn_obstacle_clearance,
+                self.spawn_exclusion_zones,
+                self.arena_profile,
+                model_poses,
+                circle_samples=8,
+            )
+            if route is None:
+                return None
+            refreshed['route'] = route
+        return refreshed
 
     def _build_path_plan(self, snapshot):
         """Find an anchored lap, or the nearest safely reachable start."""
