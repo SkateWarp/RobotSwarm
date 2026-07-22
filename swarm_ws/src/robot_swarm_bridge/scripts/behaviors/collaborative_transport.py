@@ -36,7 +36,6 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String, Bool
 from gazebo_msgs.msg import ModelState, ModelStates
-from gazebo_msgs.srv import SetModelState
 from visualization_msgs.msg import Marker, MarkerArray
 
 # Import obstacle avoidance from core
@@ -1177,7 +1176,7 @@ class CollaborativeTransport:
         self.target_marker_name = 'target_marker'
         self.target_marker_position: Optional[np.ndarray] = None
         self.target_marker_synced = False
-        self.target_marker_command_accepted = False
+        self.target_marker_command_published = False
         self.target_marker_sync_tolerance = 0.02
         self.object_found = False
         self.obstacle_positions: List[np.ndarray] = []     # list of [x,y]
@@ -1198,11 +1197,11 @@ class CollaborativeTransport:
         self.marker_pub = rospy.Publisher(
             '/transport/markers', MarkerArray, queue_size=1
         )
-        # A service response confirms that Gazebo accepted the one-shot pose.
-        # ModelStates below provides the separate end-to-end confirmation.
-        self.target_marker_service_name = '/gazebo/set_model_state'
-        self.target_marker_service = rospy.ServiceProxy(
-            self.target_marker_service_name, SetModelState,
+        # Queue the visual command without waiting on Gazebo while the task
+        # lifecycle locks are held. ModelStates provides the real confirmation.
+        self.target_marker_pub = rospy.Publisher(
+            '/gazebo/set_model_state', ModelState,
+            queue_size=1, latch=True,
         )
 
         # ---- Subscribers (global) -------------------------------------------
@@ -1542,13 +1541,10 @@ class CollaborativeTransport:
 
     def _place_target_marker(self):
         """Move the collision-free Gazebo ghost to this task's destination."""
-        service = getattr(self, 'target_marker_service', None)
-        service_name = getattr(
-            self, 'target_marker_service_name', '/gazebo/set_model_state'
-        )
-        self.target_marker_command_accepted = False
+        publisher = getattr(self, 'target_marker_pub', None)
+        self.target_marker_command_published = False
         self.target_marker_synced = False
-        if service is None:
+        if publisher is None:
             return
 
         state = ModelState()
@@ -1561,21 +1557,14 @@ class CollaborativeTransport:
         state.pose.position.z = 0.0
         state.pose.orientation.w = 1.0
         try:
-            rospy.wait_for_service(service_name, timeout=1.0)
-            response = service(state)
+            publisher.publish(state)
         except Exception as exc:
             rospy.logwarn(
-                "[transport] could not place the Gazebo target marker: %s",
+                "[transport] could not publish the Gazebo target marker: %s",
                 exc,
             )
             return
-        if not bool(getattr(response, 'success', False)):
-            rospy.logwarn(
-                "[transport] Gazebo rejected the target marker pose: %s",
-                getattr(response, 'status_message', 'unknown reason'),
-            )
-            return
-        self.target_marker_command_accepted = True
+        self.target_marker_command_published = True
 
     def _start_callback(self, msg):
         with self._control_cycle_mutex():
@@ -9956,8 +9945,8 @@ class CollaborativeTransport:
                 'model_name': getattr(
                     self, 'target_marker_name', 'target_marker'
                 ),
-                'command_accepted': bool(getattr(
-                    self, 'target_marker_command_accepted', False
+                'command_published': bool(getattr(
+                    self, 'target_marker_command_published', False
                 )),
                 'synchronized': marker_synced,
                 'position': (

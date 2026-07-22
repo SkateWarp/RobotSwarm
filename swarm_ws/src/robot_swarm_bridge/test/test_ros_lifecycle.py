@@ -126,10 +126,6 @@ class ModelState(Message):
         )
 
 
-class SetModelState:
-    pass
-
-
 class FakePublisher:
     def __init__(self, *args, **kwargs):
         self.messages = []
@@ -152,16 +148,6 @@ class FakeSubscriber:
 
     def unregister(self):
         self.unregistered = True
-
-
-class FakeServiceProxy:
-    def __init__(self, *args, **kwargs):
-        self.requests = []
-        self.response = Message(success=True, status_message="ok")
-
-    def __call__(self, request):
-        self.requests.append(request)
-        return self.response
 
 
 class FakeTimer:
@@ -234,7 +220,6 @@ def load_ros_scripts():
         "rospy",
         Publisher=FakePublisher,
         Subscriber=FakeSubscriber,
-        ServiceProxy=FakeServiceProxy,
         Timer=FakeTimer,
         Duration=lambda value: value,
         Time=Message(now=lambda: 0.0),
@@ -244,7 +229,6 @@ def load_ros_scripts():
         on_shutdown=lambda *args, **kwargs: None,
         spin=lambda: None,
         sleep=lambda _duration: None,
-        wait_for_service=lambda *args, **kwargs: None,
         loginfo=lambda *args, **kwargs: None,
         logwarn=lambda *args, **kwargs: None,
         logerr=lambda *args, **kwargs: None,
@@ -277,10 +261,6 @@ def load_ros_scripts():
         ModelState=ModelState,
         ModelStates=ModelStates,
     )
-    gazebo_msgs_srv = module(
-        "gazebo_msgs.srv",
-        SetModelState=SetModelState,
-    )
     replacements = {
         "rospy": rospy,
         "geometry_msgs": module(
@@ -297,11 +277,8 @@ def load_ros_scripts():
             "visualization_msgs", msg=visualization_msgs_msg
         ),
         "visualization_msgs.msg": visualization_msgs_msg,
-        "gazebo_msgs": module(
-            "gazebo_msgs", msg=gazebo_msgs_msg, srv=gazebo_msgs_srv
-        ),
+        "gazebo_msgs": module("gazebo_msgs", msg=gazebo_msgs_msg),
         "gazebo_msgs.msg": gazebo_msgs_msg,
-        "gazebo_msgs.srv": gazebo_msgs_srv,
     }
     previous = {
         name: sys.modules.get(name)
@@ -893,6 +870,14 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": True,
                 "useful_contributor_count": 3,
                 "useful_contributor_ids": ["tb3_2", "tb3_0", "tb3_1"],
+                "arrival_tolerance": 0.25,
+                "target_marker": {
+                    "model_name": "target_marker",
+                    "command_published": True,
+                    "synchronized": True,
+                    "position": {"x": -2.5, "y": 1.25, "z": 0.0},
+                    "private_diagnostic": "drop-me",
+                },
                 "collision_events": transport_collision_stream(),
                 "discovery": {
                     "event": "payload_found",
@@ -917,6 +902,13 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": True,
                 "useful_contributor_count": 3,
                 "useful_contributor_ids": ["tb3_0", "tb3_1", "tb3_2"],
+                "arrival_tolerance": 0.25,
+                "target_marker": {
+                    "model_name": "target_marker",
+                    "published": True,
+                    "synchronized": True,
+                    "position": {"x": -2.5, "y": 1.25},
+                },
                 "discovery": {
                     "event": "payload_found",
                     "event_id": "task-a:payload-found",
@@ -946,6 +938,13 @@ class OrchestratorLifecycleTests(unittest.TestCase):
                 "all_pushers_confirmed": 1,
                 "useful_contributor_count": True,
                 "useful_contributor_ids": ["tb3_0"],
+                "arrival_tolerance": "0.25",
+                "target_marker": {
+                    "model_name": "../../private-model",
+                    "command_published": "yes",
+                    "synchronized": 1,
+                    "position": {"x": "-2.5", "y": 1.25},
+                },
                 "control_commands": {"tb3_0": {"linear": 0.1}},
                 "collision_events": transport_collision_stream(
                     phase="PUSH"
@@ -957,7 +956,69 @@ class OrchestratorLifecycleTests(unittest.TestCase):
         self.assertIsNone(result["all_pushers_confirmed"])
         self.assertIsNone(result["useful_contributor_count"])
         self.assertIsNone(result["useful_contributor_ids"])
+        self.assertIsNone(result["arrival_tolerance"])
+        self.assertIsNone(result["target_marker"])
         self.assertNotIn("control_commands", result)
+
+    def test_transport_target_marker_failure_stays_optional(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "transport"
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+
+        orchestrator._behavior_status_callback(
+            "transport",
+            String(data=json.dumps({
+                "task_id": "task-a",
+                "phase": "SEARCH",
+                "arrival_tolerance": 0.5,
+                "target_marker": {
+                    "model_name": "target_marker",
+                    "command_published": False,
+                    "synchronized": False,
+                    "position": None,
+                },
+                "collision_events": transport_collision_stream(),
+            })),
+        )
+
+        self.assertEqual(
+            ROS["orchestrator"].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+        result = orchestrator.task_result["transport"]
+        self.assertEqual(0.5, result["arrival_tolerance"])
+        self.assertEqual({
+            "model_name": "target_marker",
+            "published": False,
+            "synchronized": False,
+            "position": None,
+        }, result["target_marker"])
+
+    def test_transport_target_marker_rejects_unbounded_or_incoherent_data(self):
+        valid = {
+            "model_name": "target_marker",
+            "command_published": True,
+            "synchronized": True,
+            "position": {"x": -2.5, "y": 1.25},
+        }
+        malformed = [
+            {**valid, "model_name": "private-model"},
+            {**valid, "command_published": 1},
+            {**valid, "synchronized": "yes"},
+            {**valid, "position": {"x": "-2.5", "y": 1.25}},
+            {**valid, "position": {"x": 4.01, "y": 1.25}},
+            {**valid, "position": {"x": float("nan"), "y": 1.25}},
+            {**valid, "position": None},
+        ]
+        sanitize = (
+            ROS["orchestrator"].TaskOrchestrator
+            ._transport_target_marker
+        )
+
+        for marker in malformed:
+            with self.subTest(marker=marker):
+                self.assertIsNone(sanitize(marker))
 
     def test_stale_or_nested_uncorrelated_discovery_is_not_exposed(self):
         orchestrator = make_orchestrator()
@@ -7334,10 +7395,9 @@ class BehaviorLifecycleTests(unittest.TestCase):
         controller.target_marker_name = "target_marker"
         controller.target_marker_position = None
         controller.target_marker_synced = False
-        controller.target_marker_command_accepted = False
+        controller.target_marker_command_published = False
         controller.target_marker_sync_tolerance = 0.02
-        controller.target_marker_service_name = "/gazebo/set_model_state"
-        controller.target_marker_service = FakeServiceProxy()
+        controller.target_marker_pub = FakePublisher()
 
         controller._start_callback(String(data=json.dumps({
             "task_id": "ghost-task",
@@ -7348,9 +7408,9 @@ class BehaviorLifecycleTests(unittest.TestCase):
         })))
 
         self.assertEqual(0.25, controller.arrival_tolerance)
-        self.assertTrue(controller.target_marker_command_accepted)
+        self.assertTrue(controller.target_marker_command_published)
         self.assertFalse(controller.target_marker_synced)
-        marker_command = controller.target_marker_service.requests[-1]
+        marker_command = controller.target_marker_pub.messages[-1]
         self.assertEqual("target_marker", marker_command.model_name)
         self.assertEqual("world", marker_command.reference_frame)
         self.assertEqual(-2.5, marker_command.pose.position.x)
@@ -7376,8 +7436,24 @@ class BehaviorLifecycleTests(unittest.TestCase):
         np.testing.assert_allclose(
             [-2.5, 1.25], controller.target_marker_position
         )
+        controller.status_pub = FakePublisher()
+        controller._publish_status(
+            ROS["transport"].TransportPhase.SEARCH
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual(0.25, status["arrival_tolerance"])
+        self.assertEqual({
+            "model_name": "target_marker",
+            "command_published": True,
+            "synchronized": True,
+            "position": {"x": -2.5, "y": 1.25},
+        }, status["target_marker"])
 
-    def test_transport_continues_when_gazebo_rejects_the_target_ghost(self):
+    def test_transport_continues_when_the_target_ghost_cannot_be_published(self):
+        class FailingPublisher:
+            def publish(self, _message):
+                raise RuntimeError("publisher unavailable")
+
         controller = self._transport_search_controller(1)
         controller.object_position = np.array([1.0, 1.0])
         controller.default_arrival_tolerance = 0.5
@@ -7388,13 +7464,8 @@ class BehaviorLifecycleTests(unittest.TestCase):
         controller._grf_kernels = {}
         controller.target_marker_position = None
         controller.target_marker_synced = False
-        controller.target_marker_command_accepted = False
-        controller.target_marker_service_name = "/gazebo/set_model_state"
-        controller.target_marker_service = FakeServiceProxy()
-        controller.target_marker_service.response = Message(
-            success=False,
-            status_message="model does not exist",
-        )
+        controller.target_marker_command_published = False
+        controller.target_marker_pub = FailingPublisher()
 
         controller._start_callback(String(data=json.dumps({
             "task_id": "ghost-rejected-task",
@@ -7407,7 +7478,7 @@ class BehaviorLifecycleTests(unittest.TestCase):
             ROS["transport"].TransportPhase.SEARCH,
             controller.phase,
         )
-        self.assertFalse(controller.target_marker_command_accepted)
+        self.assertFalse(controller.target_marker_command_published)
         self.assertFalse(controller.target_marker_synced)
 
     def test_transport_without_arrival_override_restores_its_default(self):

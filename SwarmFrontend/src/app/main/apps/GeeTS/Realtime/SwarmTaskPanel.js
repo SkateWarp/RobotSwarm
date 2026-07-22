@@ -118,6 +118,51 @@ const coordinate = (value) => {
     return Number.isFinite(number) ? number.toFixed(2) : null;
 };
 
+const boundedCoordinate = (value) =>
+    typeof value === "number" && Number.isFinite(value) && value >= -4 && value <= 4 ? value.toFixed(2) : null;
+
+const targetMarkerSummary = (marker, phase) => {
+    if (
+        !marker ||
+        typeof marker !== "object" ||
+        marker.model_name !== "target_marker" ||
+        typeof marker.published !== "boolean" ||
+        typeof marker.synchronized !== "boolean"
+    ) {
+        return null;
+    }
+
+    let position = null;
+    if (marker.position !== null) {
+        if (!marker.position || typeof marker.position !== "object") return null;
+        const x = boundedCoordinate(marker.position.x);
+        const y = boundedCoordinate(marker.position.y);
+        if (x === null || y === null) return null;
+        position = { x, y };
+    }
+    if (marker.synchronized && position === null) return null;
+
+    let summary =
+        phase === "DONE"
+            ? "El marcador visual no pudo enviarse; la tarea no dependía de él"
+            : "No se pudo enviar el marcador visual; el transporte continúa";
+    if (marker.synchronized) {
+        summary = `Destino visual confirmado en Gazebo (${position.x}, ${position.y})`;
+    } else if (marker.published) {
+        summary =
+            phase === "DONE"
+                ? "Destino visual enviado, sin confirmación final de Gazebo"
+                : "Destino visual enviado; esperando confirmación de Gazebo";
+    }
+    return {
+        modelName: "target_marker",
+        published: marker.published,
+        synchronized: marker.synchronized,
+        position,
+        summary,
+    };
+};
+
 export const describeTransportResult = (task) => {
     // Keep the persisted result available for history without implying that
     // robots are still moving after the task pauses, cancels or fails.
@@ -130,6 +175,14 @@ export const describeTransportResult = (task) => {
     const phaseLabel = TRANSPORT_PHASES[phase] || transport.phase || "En curso";
     const searching = finiteInteger(transport.searching_robot_count);
     const contributors = finiteInteger(transport.useful_contributor_count);
+    const arrivalTolerance =
+        typeof transport.arrival_tolerance === "number" &&
+        Number.isFinite(transport.arrival_tolerance) &&
+        transport.arrival_tolerance >= 0.15 &&
+        transport.arrival_tolerance <= 0.75
+            ? transport.arrival_tolerance
+            : null;
+    const targetMarker = targetMarkerSummary(transport.target_marker, phase);
     const { discovery } = transport;
     const notified = Array.isArray(discovery?.notified_robots) ? discovery.notified_robots.length : null;
     const finder = typeof discovery?.finder === "string" ? discovery.finder : "";
@@ -181,6 +234,8 @@ export const describeTransportResult = (task) => {
         finder,
         position,
         notified,
+        arrivalTolerance,
+        targetMarker,
     };
 };
 
@@ -371,6 +426,24 @@ function SwarmTaskPanel({ session, tasks, busy, onStart, onTaskAction }) {
                                         transportResult.contributors !== null
                                             ? `participantes útiles: ${transportResult.contributors}`
                                             : null,
+                                    ]
+                                        .filter(Boolean)
+                                        .join(" · ")}
+                                </Typography>
+                            )}
+                            {(transportResult.arrivalTolerance !== null || transportResult.targetMarker) && (
+                                <Typography
+                                    data-testid="transport-target-status"
+                                    variant="caption"
+                                    sx={{ display: "block", mt: 0.75 }}
+                                >
+                                    {[
+                                        transportResult.arrivalTolerance !== null
+                                            ? `Margen de llegada: ${transportResult.arrivalTolerance.toFixed(
+                                                  2
+                                              )} m`
+                                            : null,
+                                        transportResult.targetMarker?.summary,
                                     ]
                                         .filter(Boolean)
                                         .join(" · ")}
