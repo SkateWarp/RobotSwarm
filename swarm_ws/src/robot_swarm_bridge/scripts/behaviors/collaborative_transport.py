@@ -86,6 +86,8 @@ DEFAULT_COMPRESSION_TRACKING_TOLERANCE = 0.025
 DEFAULT_MODEL_STATES_TIMEOUT_WALL_S = 0.75
 TRANSPORT_COLLISION_EVENT_HISTORY_LIMIT = 128
 TRANSPORT_COLLISION_PROTOCOL_ERROR_LIMIT = 16
+BURGER_MAX_LINEAR_SPEED = 0.22
+BURGER_MAX_ANGULAR_SPEED = 2.84
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1175,7 @@ class CollaborativeTransport:
         self.object_error: Optional[str] = None
         self.failure_reason: Optional[str] = None
         self.model_states_received_at: Optional[float] = None
+        self.model_states_invalid_reason: Optional[str] = None
         self.target_marker_name = 'target_marker'
         self.target_marker_position: Optional[np.ndarray] = None
         self.target_marker_synced = False
@@ -1380,10 +1383,24 @@ class CollaborativeTransport:
     # ======================================================================
 
     def _odom_callback(self, ns: str, msg: Odometry):
-        pos = msg.pose.pose.position
-        yaw = self._quat_to_yaw(msg.pose.pose.orientation)
-        pose_values = (float(pos.x), float(pos.y), float(yaw))
-        if not all(math.isfinite(value) for value in pose_values):
+        try:
+            pose = msg.pose.pose
+            pos = pose.position
+            orientation = pose.orientation
+            quaternion = tuple(
+                float(getattr(orientation, axis))
+                for axis in ('x', 'y', 'z', 'w')
+            )
+            if not all(math.isfinite(value) for value in quaternion):
+                raise ValueError("odometry quaternion is not finite")
+            yaw = self._quat_to_yaw(orientation)
+            pose_values = (float(pos.x), float(pos.y), float(yaw))
+            pose_is_valid = all(
+                math.isfinite(value) for value in pose_values
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pose_is_valid = False
+        if not pose_is_valid:
             rospy.logwarn_throttle(
                 2.0,
                 "[transport] ignoring invalid odometry from {}".format(ns),
@@ -1428,116 +1445,204 @@ class CollaborativeTransport:
                 return
             self.robot_scans[ns] = msg
 
-    def _model_states_callback(self, msg: ModelStates):
-        """Track the transport object and other non-robot models (obstacles)."""
-        received_at = float(time.monotonic())
+    def _reject_model_states_snapshot(self, reason):
+        """Invalidate one explicitly corrupt Gazebo geometry snapshot."""
         with self.model_lock:
-            self.model_states_received_at = (
-                received_at if math.isfinite(received_at) else None
-            )
+            self.model_states_received_at = None
+            self.model_states_invalid_reason = reason
             self.obstacle_positions = []
             self.model_poses = {}
-            object_pose = None
-            object_twist = None
-            target_marker_position = None
-            for i, name in enumerate(msg.name):
-                px = msg.pose[i].position.x
-                py = msg.pose[i].position.y
-                if math.isfinite(px) and math.isfinite(py):
-                    self.model_poses[name] = (
-                        px,
-                        py,
-                        self._quat_to_yaw(msg.pose[i].orientation),
-                    )
-                    if name == getattr(
-                        self, 'target_marker_name', 'target_marker'
-                    ):
-                        target_marker_position = np.array([px, py])
-                if name == self.object_name:
-                    object_pose = msg.pose[i]
-                    twists = getattr(msg, 'twist', ())
-                    if i < len(twists):
-                        object_twist = twists[i]
-                elif name.startswith('obstacle_') or name.startswith('wall_'):
-                    # Only explicitly named arena obstacles are included.
-                    if math.isfinite(px) and math.isfinite(py):
-                        self.obstacle_positions.append(np.array([px, py]))
-
-            self.target_marker_position = target_marker_position
-            marker_target = np.array(
-                [
-                    getattr(self, 'target_x', float('nan')),
-                    getattr(self, 'target_y', float('nan')),
-                ],
-                dtype=float,
-            )
-            self.target_marker_synced = bool(
-                target_marker_position is not None
-                and np.all(np.isfinite(marker_target))
-                and float(np.linalg.norm(
-                    target_marker_position - marker_target
-                )) <= getattr(self, 'target_marker_sync_tolerance', 0.02)
-            )
-
-            was_found = self.object_found
+            self.target_marker_position = None
+            self.target_marker_synced = False
             self.object_found = False
             self.object_position = None
             self.object_velocity = np.zeros(2)
-            self.object_error = None
+            self.object_z = None
+            self.object_error = reason
 
-            if object_pose is None:
-                self.object_z = None
-                self.object_error = "Transport payload is missing from Gazebo"
+        command_lock = getattr(self, 'command_lock', None)
+        if command_lock is None or not hasattr(self, 'command_epoch'):
+            return
+        with command_lock:
+            expected_epoch = self.command_epoch
+            expected_task_id = self.current_task_id
+        failed = self._fail_transport(reason, expected_epoch)
+        if not failed:
+            return
+        with command_lock:
+            with self.phase_lock:
+                still_correlated = self.phase == TransportPhase.FAILED
+            if (
+                self.current_task_id != expected_task_id
+                or self.command_epoch != expected_epoch + 1
+                or not still_correlated
+            ):
+                return
+            try:
+                self._publish_status(
+                    TransportPhase.FAILED,
+                    task_id=expected_task_id,
+                    paused=False,
+                )
+            except Exception as exc:
+                rospy.logerr(
+                    "[transport] invalid model-state status could not be "
+                    "published: %s",
+                    exc,
+                )
+
+    def _model_states_callback(self, msg: ModelStates):
+        """Track one complete Gazebo model-state snapshot atomically."""
+        received_at = float(time.monotonic())
+        try:
+            names = list(getattr(msg, 'name', ()))
+            poses = list(getattr(msg, 'pose', ()))
+        except (TypeError, ValueError):
+            self._reject_model_states_snapshot(
+                "Gazebo model states snapshot was malformed"
+            )
+            return
+        if len(names) != len(poses):
+            self._reject_model_states_snapshot(
+                "Gazebo model states snapshot was truncated"
+            )
+            return
+
+        try:
+            twists = list(getattr(msg, 'twist', ()))
+        except (TypeError, ValueError):
+            twists = []
+
+        model_poses = {}
+        obstacle_positions = []
+        object_record = None
+        target_marker_position = None
+        for index, (name, pose) in enumerate(zip(names, poses)):
+            try:
+                px = float(pose.position.x)
+                py = float(pose.position.y)
+                orientation = pose.orientation
+                quaternion = tuple(
+                    float(getattr(orientation, axis))
+                    for axis in ('x', 'y', 'z', 'w')
+                )
+                yaw = float(self._quat_to_yaw(orientation))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                self._reject_model_states_snapshot(
+                    "Gazebo model states snapshot contained a malformed pose"
+                )
+                return
+            if not all(
+                math.isfinite(value) for value in (px, py, yaw) + quaternion
+            ):
+                self._reject_model_states_snapshot(
+                    "Gazebo model states snapshot contained a non-finite pose"
+                )
                 return
 
-            position = object_pose.position
-            orientation = object_pose.orientation
-            self.object_z = float(position.z)
-            pose_values = (
-                position.x, position.y, position.z,
-                orientation.x, orientation.y,
-                orientation.z, orientation.w,
+            model_poses[name] = (px, py, yaw)
+            if name == getattr(
+                self, 'target_marker_name', 'target_marker'
+            ):
+                target_marker_position = np.array([px, py])
+            if name == self.object_name:
+                try:
+                    pz = float(pose.position.z)
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    self._reject_model_states_snapshot(
+                        "Transport payload pose is not finite"
+                    )
+                    return
+                object_twist = twists[index] if index < len(twists) else None
+                object_record = (
+                    px, py, pz, quaternion, yaw, object_twist
+                )
+            elif name.startswith('obstacle_') or name.startswith('wall_'):
+                obstacle_positions.append(np.array([px, py]))
+
+        marker_target = np.array(
+            [
+                getattr(self, 'target_x', float('nan')),
+                getattr(self, 'target_y', float('nan')),
+            ],
+            dtype=float,
+        )
+        target_marker_synced = bool(
+            target_marker_position is not None
+            and np.all(np.isfinite(marker_target))
+            and float(np.linalg.norm(
+                target_marker_position - marker_target
+            )) <= getattr(self, 'target_marker_sync_tolerance', 0.02)
+        )
+
+        object_found = False
+        object_position = None
+        object_velocity = np.zeros(2)
+        object_error = None
+        object_z = None
+        object_yaw = None
+        if object_record is None:
+            object_error = "Transport payload is missing from Gazebo"
+        else:
+            px, py, object_z, quaternion, object_yaw, object_twist = (
+                object_record
             )
-            quaternion_norm = math.sqrt(
-                orientation.x * orientation.x
-                + orientation.y * orientation.y
-                + orientation.z * orientation.z
-                + orientation.w * orientation.w
-            )
+            quaternion_norm = math.sqrt(sum(
+                value * value for value in quaternion
+            ))
             minimum_z = self.object_rest_z - self.object_z_tolerance
             maximum_z = self.object_rest_z + self.object_z_tolerance
-
-            if not all(math.isfinite(value) for value in pose_values):
-                self.object_error = "Transport payload pose is not finite"
-                return
-            if quaternion_norm < 0.5:
-                self.object_error = "Transport payload orientation is invalid"
-                return
-            if not minimum_z <= position.z <= maximum_z:
-                self.object_error = (
+            if not math.isfinite(object_z):
+                object_error = "Transport payload pose is not finite"
+            elif quaternion_norm < 0.5:
+                object_error = "Transport payload orientation is invalid"
+            elif not minimum_z <= object_z <= maximum_z:
+                object_error = (
                     "Transport payload left the supported floor plane "
                     "(z={:.3f}m, expected {:.3f}..{:.3f}m)".format(
-                        position.z, minimum_z, maximum_z
+                        object_z, minimum_z, maximum_z
                     )
                 )
-                return
+            else:
+                object_position = np.array([px, py])
+                object_found = True
+                if object_twist is not None:
+                    try:
+                        velocity = object_twist.linear
+                        vx = float(velocity.x)
+                        vy = float(velocity.y)
+                    except (
+                        AttributeError, TypeError, ValueError, OverflowError
+                    ):
+                        vx = vy = 0.0
+                    if math.isfinite(vx) and math.isfinite(vy):
+                        object_velocity = np.array([vx, vy])
 
-            self.object_position = np.array([position.x, position.y])
-            if object_twist is not None:
-                velocity = object_twist.linear
-                if math.isfinite(velocity.x) and math.isfinite(velocity.y):
-                    self.object_velocity = np.array([
-                        velocity.x, velocity.y
-                    ])
-            self.object_yaw = self._quat_to_yaw(orientation)
-            self.object_found = True
-            if not was_found:
-                rospy.loginfo(
-                    "[transport] object '%s' detected at (%.2f, %.2f)",
-                    self.object_name,
-                    self.object_position[0],
-                    self.object_position[1],
-                )
+        with self.model_lock:
+            was_found = self.object_found
+            self.model_states_received_at = (
+                received_at if math.isfinite(received_at) else None
+            )
+            self.model_states_invalid_reason = None
+            self.obstacle_positions = obstacle_positions
+            self.model_poses = model_poses
+            self.target_marker_position = target_marker_position
+            self.target_marker_synced = target_marker_synced
+            self.object_found = object_found
+            self.object_position = object_position
+            self.object_velocity = object_velocity
+            self.object_error = object_error
+            self.object_z = object_z
+            if object_found:
+                self.object_yaw = object_yaw
+
+        if object_found and not was_found:
+            rospy.loginfo(
+                "[transport] object '%s' detected at (%.2f, %.2f)",
+                self.object_name,
+                object_position[0],
+                object_position[1],
+            )
 
     def _place_target_marker(self):
         """Move the collision-free Gazebo ghost to this task's destination."""
@@ -2233,12 +2338,53 @@ class CollaborativeTransport:
             and not self.emergency_stop_active
         )
 
+    @staticmethod
+    def _command_error(namespace: str, command: Twist) -> Optional[str]:
+        """Describe a non-finite or physically impossible Burger command."""
+        try:
+            linear = tuple(
+                float(getattr(command.linear, axis))
+                for axis in ('x', 'y', 'z')
+            )
+            angular = tuple(
+                float(getattr(command.angular, axis))
+                for axis in ('x', 'y', 'z')
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return "Velocity command for {} was malformed".format(namespace)
+
+        if not all(math.isfinite(value) for value in linear + angular):
+            return "Velocity command for {} was non-finite".format(namespace)
+
+        epsilon = 1e-9
+        if any(abs(value) > epsilon for value in linear[1:] + angular[:2]):
+            return (
+                "Velocity command for {} requested motion on an unsupported "
+                "Burger axis".format(namespace)
+            )
+        if abs(linear[0]) > BURGER_MAX_LINEAR_SPEED + epsilon:
+            return "Linear velocity command for {} exceeded the Burger limit".format(
+                namespace
+            )
+        if abs(angular[2]) > BURGER_MAX_ANGULAR_SPEED + epsilon:
+            return "Angular velocity command for {} exceeded the Burger limit".format(
+                namespace
+            )
+        return None
+
     def _publish_command(
         self, namespace: str, command: Twist, expected_epoch: int
     ) -> bool:
         """Publish only while the control cycle still owns the active epoch."""
         with self.command_lock:
             if not self._command_allowed(expected_epoch):
+                return False
+            command_error = self._command_error(namespace, command)
+            if command_error is not None:
+                self._fail_transport(
+                    command_error + "; all robots were stopped.",
+                    expected_epoch,
+                )
                 return False
             with self.data_lock:
                 pub = self.cmd_vel_pubs.get(namespace)
@@ -2251,6 +2397,68 @@ class CollaborativeTransport:
                 )
                 pub.publish(command)
             return True
+
+    def _validate_command_batch(
+        self, commands, expected_epoch, publish_order=None
+    ) -> bool:
+        """Reject a bad fleet batch before its first nonzero publication."""
+        order = list(commands) if publish_order is None else list(publish_order)
+        command_lock = getattr(self, 'command_lock', None)
+        if command_lock is None:
+            # ROS-free unit fixtures sometimes replace the publisher method
+            # without constructing the lifecycle locks. Production instances
+            # always take the correlated branch below.
+            return True
+
+        with command_lock:
+            if not self._command_allowed(expected_epoch):
+                return False
+            for namespace in order:
+                if namespace not in commands:
+                    error = (
+                        "Velocity batch omitted {}".format(namespace)
+                    )
+                else:
+                    error = self._command_error(
+                        namespace, commands[namespace]
+                    )
+                if error is not None:
+                    self._fail_transport(
+                        error + "; all robots were stopped.",
+                        expected_epoch,
+                    )
+                    return False
+        return True
+
+    def _publish_command_batch(
+        self, commands, expected_epoch, publish_order=None
+    ) -> bool:
+        """Preflight and then publish one complete fleet command batch."""
+        order = list(commands) if publish_order is None else list(publish_order)
+        if not self._validate_command_batch(
+            commands, expected_epoch, order
+        ):
+            return False
+        for namespace in order:
+            if not self._publish_command(
+                namespace, commands[namespace], expected_epoch
+            ):
+                return False
+        return True
+
+    def _queue_or_publish_approach_command(
+        self, namespace, command, expected_epoch
+    ):
+        """Collect approach output when the phase is building a fleet batch."""
+        pending = getattr(self, '_pending_approach_commands', None)
+        if (
+            isinstance(pending, tuple)
+            and len(pending) == 2
+            and pending[0] == expected_epoch
+        ):
+            pending[1][namespace] = command
+            return True
+        return self._publish_command(namespace, command, expected_epoch)
 
     def _set_phase(
         self, phase: TransportPhase, expected_epoch: int
@@ -2393,6 +2601,11 @@ class CollaborativeTransport:
 
         with self.model_lock:
             received_at = getattr(self, 'model_states_received_at', None)
+            invalid_reason = getattr(
+                self, 'model_states_invalid_reason', None
+            )
+        if invalid_reason:
+            return invalid_reason
         try:
             received_at = float(received_at)
         except (TypeError, ValueError, OverflowError):
@@ -5921,6 +6134,10 @@ class CollaborativeTransport:
                 namespace,
             ),
         )
+        if not self._validate_command_batch(
+            planned_commands, expected_epoch, publish_order
+        ):
+            return False
         get_time = getattr(rospy, 'get_time', lambda: 0.0)
         batch_started_at = float(get_time())
         published_all = True
@@ -7071,6 +7288,9 @@ class CollaborativeTransport:
 
         # Persistent targets make broad, natural arcs.  The shared avoidance
         # layer still owns the final collision and acceleration constraints.
+        planned_commands = {
+            namespace: Twist() for namespace in namespaces
+        }
         for ns in namespaces:
             if ns not in positions or ns not in yaws:
                 continue
@@ -7084,7 +7304,6 @@ class CollaborativeTransport:
             if target is None:
                 # Never leave the previous velocity active after planning
                 # fails.  The empty cached route is retried on the next tick.
-                self._publish_command(ns, Twist(), expected_epoch)
                 continue
             offset = target - positions[ns]
             distance = float(np.linalg.norm(offset))
@@ -7146,7 +7365,11 @@ class CollaborativeTransport:
                         ),
                     )
 
-            self._publish_command(ns, cmd, expected_epoch)
+            planned_commands[ns] = cmd
+
+        self._publish_command_batch(
+            planned_commands, expected_epoch, namespaces
+        )
 
     def _rendezvous_pose_ready(self, position, yaw, target):
         """Check one robot's expanded, off-payload rendezvous gate."""
@@ -7979,7 +8202,9 @@ class CollaborativeTransport:
             reset_motion = getattr(avoidance, 'reset_motion', None)
             if callable(reset_motion):
                 reset_motion()
-            self._publish_command(namespace, command, expected_epoch)
+            self._queue_or_publish_approach_command(
+                namespace, command, expected_epoch
+            )
             return
 
         if not chain_motion:
@@ -8004,7 +8229,9 @@ class CollaborativeTransport:
                 ).get(namespace)
             if avoidance is not None:
                 avoidance.reset_motion()
-            self._publish_command(namespace, Twist(), expected_epoch)
+            self._queue_or_publish_approach_command(
+                namespace, Twist(), expected_epoch
+            )
             return
 
         contact_neighbours, shielded_neighbours, row_neighbours = neighbours
@@ -8118,7 +8345,9 @@ class CollaborativeTransport:
                     object_pos,
                     **avoidance_options
                 )
-        self._publish_command(namespace, command, expected_epoch)
+        self._queue_or_publish_approach_command(
+            namespace, command, expected_epoch
+        )
 
     def _approach_phase(self, expected_epoch):
         """Rendezvous the whole fleet, then form both push lanes together."""
@@ -8254,6 +8483,7 @@ class CollaborativeTransport:
             self.transport_compression_progress = 0.0
             self.transport_compression_updated_at = None
             active_movers = set(targets) - rendezvoused
+            planned_commands = {}
             for namespace in namespaces:
                 target = targets[namespace]
                 ignored_movers = self._rendezvous_route_ignored_namespaces(
@@ -8314,19 +8544,34 @@ class CollaborativeTransport:
                         command = self._chain_staging_command(
                             positions[namespace], yaws[namespace], target
                         )
-                self._publish_concurrent_approach_command(
-                    namespace,
-                    command,
-                    target,
-                    positions,
-                    yaws,
-                    targets,
-                    object_pos,
-                    object_yaw,
-                    neighbours,
-                    expected_epoch,
-                    payload_terminal=payload_terminal,
+                self._pending_approach_commands = (
+                    expected_epoch, planned_commands
                 )
+                try:
+                    self._publish_concurrent_approach_command(
+                        namespace,
+                        command,
+                        target,
+                        positions,
+                        yaws,
+                        targets,
+                        object_pos,
+                        object_yaw,
+                        neighbours,
+                        expected_epoch,
+                        payload_terminal=payload_terminal,
+                    )
+                finally:
+                    self._pending_approach_commands = None
+            if planned_commands and not self._publish_command_batch(
+                planned_commands,
+                expected_epoch,
+                [
+                    namespace for namespace in namespaces
+                    if namespace in planned_commands
+                ],
+            ):
+                return
             rendezvous_count = len(rendezvoused)
             if getattr(
                 self, 'transport_last_rendezvous_log_count', None
@@ -8356,6 +8601,7 @@ class CollaborativeTransport:
         progress = self._advance_transport_compression(
             set(targets), positions, targets, yaws
         )
+        planned_commands = {}
         for namespace in namespaces:
             target = targets[namespace]
             alignment_only = False
@@ -8458,20 +8704,36 @@ class CollaborativeTransport:
                 # bypass it only for this zero-translation heading barrier.
                 alignment_only = True
 
-            self._publish_concurrent_approach_command(
-                namespace,
-                command,
-                target,
-                positions,
-                yaws,
-                targets,
-                object_pos,
-                object_yaw,
-                neighbours,
-                expected_epoch,
-                chain_motion=True,
-                alignment_only=alignment_only,
+            self._pending_approach_commands = (
+                expected_epoch, planned_commands
             )
+            try:
+                self._publish_concurrent_approach_command(
+                    namespace,
+                    command,
+                    target,
+                    positions,
+                    yaws,
+                    targets,
+                    object_pos,
+                    object_yaw,
+                    neighbours,
+                    expected_epoch,
+                    chain_motion=True,
+                    alignment_only=alignment_only,
+                )
+            finally:
+                self._pending_approach_commands = None
+
+        if planned_commands and not self._publish_command_batch(
+            planned_commands,
+            expected_epoch,
+            [
+                namespace for namespace in namespaces
+                if namespace in planned_commands
+            ],
+        ):
+            return
 
         ready_count = len(staged & set(namespaces))
         required_count = len(namespaces)
@@ -8523,12 +8785,12 @@ class CollaborativeTransport:
                 namespace,
             ),
         )
-        for namespace in publish_order:
-            if not self._publish_command(
-                namespace, Twist(), expected_epoch
-            ):
-                return False
-        return True
+        commands = {
+            namespace: Twist() for namespace in publish_order
+        }
+        return self._publish_command_batch(
+            commands, expected_epoch, publish_order
+        )
 
     def _transport_fleet_is_settled(
         self, namespaces, started_at, now
@@ -9349,6 +9611,10 @@ class CollaborativeTransport:
                 namespace,
             ),
         )
+        if not self._validate_command_batch(
+            planned_commands, expected_epoch, publish_order
+        ):
+            return False
         for namespace in publish_order:
             command = planned_commands.get(namespace, Twist())
             if not self._publish_command(
@@ -9356,7 +9622,7 @@ class CollaborativeTransport:
                 command,
                 expected_epoch,
             ):
-                break
+                return False
             with self.data_lock:
                 avoidance = getattr(
                     self, 'avoidance_modules', {}
@@ -9561,8 +9827,41 @@ class CollaborativeTransport:
 
     def _control_loop(self, event):
         with self._control_cycle_mutex():
+            # Starts and normal stops share this cycle mutex. Avoid another
+            # command-lock entry here because terminal-status race tests use
+            # that exact entry as their post-cycle handoff point.
+            expected_epoch = self.command_epoch
+            expected_task_id = self.current_task_id
             try:
-                self._control_loop_serialized(event)
+                try:
+                    self._control_loop_serialized(event)
+                except Exception as exc:
+                    failed = self._fail_transport(
+                        "Transport control failed on invalid live data; all "
+                        "robots were stopped.",
+                        expected_epoch,
+                    )
+                    if failed:
+                        # The serialized loop did not reach its normal status
+                        # epilogue. Publish the terminal state while this task
+                        # identity is still protected from a concurrent start.
+                        with self.command_lock:
+                            try:
+                                self._publish_status(
+                                    TransportPhase.FAILED,
+                                    task_id=expected_task_id,
+                                    paused=False,
+                                )
+                            except Exception as status_exc:
+                                rospy.logerr(
+                                    "[transport] failure status could not be "
+                                    "published: %s",
+                                    status_exc,
+                                )
+                        rospy.logerr(
+                            "[transport] control exception failed closed: %s",
+                            exc,
+                        )
             finally:
                 # An emergency stop deliberately does not wait for this mutex.
                 # Finish its phase-state cleanup once any in-flight pass exits.

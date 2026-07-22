@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 
+import ast
 import json
 import math
 import pathlib
 import threading
 import time
 import unittest
+from unittest import mock
 
 import yaml
 
 from test_ros_lifecycle import (
-    FakeAvoidance, FakePublisher, ModelStates, Pose, ROS, String,
+    FakeAvoidance, FakePublisher, ModelStates, Odometry, Pose, ROS, String,
 )
 
 
@@ -115,6 +117,13 @@ def make_controller(mode="circular", count=3, follow_distance=0.65):
         name: pose_at(0.0, 0.0) for name in controller.robot_names
     }
     controller.yaws = {name: 0.0 for name in controller.robot_names}
+    controller.odom_received_at = {
+        name: time.monotonic() for name in controller.robot_names
+    }
+    controller.invalid_odometry = set()
+    controller.odom_timeout_wall_s = 0.75
+    controller.task_started_at = None
+    controller.stale_odometry = []
     controller.leader_mode = mode
     controller.follow_distance = follow_distance
     controller.max_linear_vel = 0.2
@@ -129,6 +138,7 @@ def make_controller(mode="circular", count=3, follow_distance=0.65):
     controller.spawn_obstacle_clearance = 0.30
     controller.spawn_exclusion_zones = []
     controller.model_poses = {}
+    controller.invalid_model_poses = set()
     controller.path_relocation_step = 0.50
     controller.path_relocation_limit = 128
     controller.path_planner_async = False
@@ -556,6 +566,253 @@ class FollowLeaderPathTests(unittest.TestCase):
         status = json.loads(controller.status_pub.messages[-1].data)
         self.assertEqual("failed", status["state"])
         self.assertEqual(controller.robot_names, status["stale_odometry"])
+        self.assertFalse(controller.is_active)
+
+    def test_non_finite_odometry_is_rejected_as_one_atomic_sample(self):
+        cases = (
+            ("nan_x", "x", float("nan"), None),
+            ("infinite_x", "x", float("inf"), None),
+            ("nan_y", "y", float("nan"), None),
+            ("infinite_y", "y", float("inf"), None),
+            ("nan_yaw", None, 0.0, float("nan")),
+            ("infinite_yaw", None, 0.0, float("inf")),
+        )
+
+        for label, field, value, yaw_override in cases:
+            with self.subTest(case=label):
+                controller = make_controller(mode="manual", count=2)
+                robot = "tb3_0"
+                old_pose = controller.poses[robot]
+                old_yaw = controller.yaws[robot]
+                old_stamp = controller.odom_received_at[robot]
+                message = Odometry()
+                message.pose.pose.position.x = 1.0
+                message.pose.pose.position.y = -0.5
+                if field is not None:
+                    setattr(message.pose.pose.position, field, value)
+
+                if yaw_override is None:
+                    controller._odom_cb(message, robot)
+                else:
+                    with mock.patch.object(
+                        FOLLOW,
+                        "yaw_from_quaternion",
+                        return_value=yaw_override,
+                    ):
+                        controller._odom_cb(message, robot)
+
+                self.assertIs(old_pose, controller.poses[robot])
+                self.assertEqual(old_yaw, controller.yaws[robot])
+                self.assertEqual(old_stamp, controller.odom_received_at[robot])
+                self.assertEqual({robot}, controller.invalid_odometry)
+                self.assertFalse(controller.is_active)
+                self.assertIn("non-finite planar pose", controller.path_error)
+                for publisher in controller.cmd_pubs.values():
+                    self.assertTrue(publisher.messages)
+                    stop = publisher.messages[-1]
+                    self.assertEqual(0.0, stop.linear.x)
+                    self.assertEqual(0.0, stop.angular.z)
+                status = json.loads(controller.status_pub.messages[-1].data)
+                self.assertEqual("follow-test", status["task_id"])
+                self.assertEqual("failed", status["state"])
+
+        for axis, value in (
+            ("x", float("inf")),
+            ("y", float("nan")),
+            ("z", -float("inf")),
+            ("w", float("nan")),
+        ):
+            with self.subTest(quaternion_axis=axis, value=value):
+                controller = make_controller(mode="manual", count=2)
+                robot = "tb3_0"
+                old_pose = controller.poses[robot]
+                old_yaw = controller.yaws[robot]
+                old_stamp = controller.odom_received_at[robot]
+                message = Odometry()
+                setattr(message.pose.pose.orientation, axis, value)
+
+                controller._odom_cb(message, robot)
+
+                self.assertIs(old_pose, controller.poses[robot])
+                self.assertEqual(old_yaw, controller.yaws[robot])
+                self.assertEqual(old_stamp, controller.odom_received_at[robot])
+                self.assertEqual({robot}, controller.invalid_odometry)
+                self.assertFalse(controller.is_active)
+                for publisher in controller.cmd_pubs.values():
+                    self.assertEqual(0.0, publisher.messages[-1].linear.x)
+                    self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+        controller = make_controller(mode="manual", count=1)
+        robot = "tb3_0"
+        old_pose = controller.poses[robot]
+        old_stamp = controller.odom_received_at[robot]
+        malformed = Odometry()
+        malformed.pose.pose.orientation = object()
+
+        controller._odom_cb(malformed, robot)
+
+        self.assertIs(old_pose, controller.poses[robot])
+        self.assertEqual(old_stamp, controller.odom_received_at[robot])
+        self.assertFalse(controller.is_active)
+        self.assertIn("non-finite planar pose", controller.path_error)
+
+    def test_non_finite_live_obstacle_pose_fails_closed(self):
+        cases = (
+            ("nan_x", "x", float("nan"), None),
+            ("infinite_y", "y", float("inf"), None),
+            ("nan_yaw", None, 0.0, float("nan")),
+            ("infinite_yaw", None, 0.0, float("inf")),
+        )
+        for label, field, value, yaw_override in cases:
+            with self.subTest(case=label):
+                controller = make_controller(mode="circular", count=2)
+                controller.spawn_exclusion_zones = [{
+                    "name": "moving_box",
+                    "model": "moving_box",
+                    "shape": "box",
+                    "x": 2.0,
+                    "y": 2.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                }]
+                controller.model_poses = {"moving_box": (2.0, 2.0, 0.0)}
+                pose = pose_at(2.0, 2.0)
+                if field is not None:
+                    setattr(pose.position, field, value)
+                message = ModelStates()
+                message.name = ["moving_box"]
+                message.pose = [pose]
+
+                if yaw_override is None:
+                    controller._model_states_cb(message)
+                else:
+                    with mock.patch.object(
+                        FOLLOW,
+                        "yaw_from_quaternion",
+                        return_value=yaw_override,
+                    ):
+                        controller._model_states_cb(message)
+
+                self.assertEqual(
+                    {"moving_box"}, controller.invalid_model_poses
+                )
+                self.assertNotIn("moving_box", controller.model_poses)
+                self.assertFalse(controller.is_active)
+                self.assertIn("non-finite pose", controller.path_error)
+                for publisher in controller.cmd_pubs.values():
+                    command = publisher.messages[-1]
+                    self.assertEqual(0.0, command.linear.x)
+                    self.assertEqual(0.0, command.angular.z)
+                status = json.loads(controller.status_pub.messages[-1].data)
+                self.assertEqual("follow-test", status["task_id"])
+                self.assertEqual("failed", status["state"])
+
+                truncated = ModelStates()
+                truncated.name = ["moving_box"]
+                truncated.pose = []
+                controller._model_states_cb(truncated)
+                self.assertEqual(
+                    {"moving_box"}, controller.invalid_model_poses
+                )
+
+        for axis, value in (
+            ("x", float("inf")),
+            ("y", float("nan")),
+            ("z", -float("inf")),
+            ("w", float("nan")),
+        ):
+            with self.subTest(model_quaternion_axis=axis, value=value):
+                controller = make_controller(mode="circular", count=2)
+                controller.spawn_exclusion_zones = [{
+                    "name": "moving_box",
+                    "model": "moving_box",
+                }]
+                controller.model_poses = {
+                    "moving_box": (2.0, 2.0, 0.0)
+                }
+                pose = pose_at(2.0, 2.0)
+                setattr(pose.orientation, axis, value)
+                message = ModelStates()
+                message.name = ["moving_box"]
+                message.pose = [pose]
+
+                controller._model_states_cb(message)
+
+                self.assertEqual(
+                    {"moving_box"}, controller.invalid_model_poses
+                )
+                self.assertNotIn("moving_box", controller.model_poses)
+                self.assertFalse(controller.is_active)
+                for publisher in controller.cmd_pubs.values():
+                    self.assertEqual(0.0, publisher.messages[-1].linear.x)
+                    self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+    def test_malicious_avoidance_output_stops_the_complete_follow_batch(self):
+        class MaliciousAvoidance(FakeAvoidance):
+            def __init__(self, bad_value):
+                super().__init__()
+                self.bad_value = bad_value
+
+            def apply_avoidance(self, _command, *args, **kwargs):
+                command = FOLLOW.Twist()
+                command.linear.x = self.bad_value
+                return command
+
+        for bad_value in (float("nan"), float("inf")):
+            with self.subTest(value=bad_value):
+                controller = make_controller(mode="manual", count=2)
+                controller.avoidance["tb3_1"] = MaliciousAvoidance(bad_value)
+
+                controller._control_loop(None)
+
+                self.assertFalse(controller.is_active)
+                self.assertIn("non-finite", controller.path_error)
+                for publisher in controller.cmd_pubs.values():
+                    self.assertEqual(1, len(publisher.messages))
+                    command = publisher.messages[0]
+                    self.assertEqual(0.0, command.linear.x)
+                    self.assertEqual(0.0, command.angular.z)
+                status = json.loads(controller.status_pub.messages[-1].data)
+                self.assertEqual("follow-test", status["task_id"])
+                self.assertEqual("failed", status["state"])
+
+    def test_follow_command_gate_rejects_every_invalid_twist_component(self):
+        cases = (
+            ("linear", "x", float("nan")),
+            ("linear", "y", float("inf")),
+            ("linear", "z", -float("inf")),
+            ("angular", "x", float("nan")),
+            ("angular", "y", float("inf")),
+            ("angular", "z", -float("inf")),
+            ("linear", "y", 0.01),
+            ("linear", "z", -0.01),
+            ("angular", "x", 0.01),
+            ("angular", "y", -0.01),
+            ("linear", "x", FOLLOW.BURGER_MAX_LINEAR_SPEED + 0.01),
+            ("angular", "z", FOLLOW.BURGER_MAX_ANGULAR_SPEED + 0.01),
+        )
+        for vector, axis, value in cases:
+            with self.subTest(vector=vector, axis=axis, value=value):
+                controller = make_controller(mode="manual", count=2)
+                # Exercise the physical Burger ceiling, not the calmer runtime
+                # settings, for the two over-limit cases.
+                controller.max_linear_vel = FOLLOW.BURGER_MAX_LINEAR_SPEED
+                controller.max_angular_vel = FOLLOW.BURGER_MAX_ANGULAR_SPEED
+                command = FOLLOW.Twist()
+                setattr(getattr(command, vector), axis, value)
+
+                published = controller._publish_motion_commands({
+                    "tb3_0": FOLLOW.Twist(),
+                    "tb3_1": command,
+                })
+
+                self.assertFalse(published)
+                self.assertFalse(controller.is_active)
+                for publisher in controller.cmd_pubs.values():
+                    self.assertEqual(1, len(publisher.messages))
+                    stop = publisher.messages[0]
+                    self.assertEqual(0.0, stop.linear.x)
+                    self.assertEqual(0.0, stop.angular.z)
 
     def test_orderly_shutdown_zeroes_every_follower_command(self):
         controller = make_controller(mode="circular", count=3)
@@ -564,10 +821,45 @@ class FollowLeaderPathTests(unittest.TestCase):
 
         self.assertFalse(controller.is_active)
         self.assertFalse(controller.is_paused)
+        self.assertIsNone(controller.path_error)
         for publisher in controller.cmd_pubs.values():
             command = publisher.messages[-1]
             self.assertEqual(0.0, command.linear.x)
             self.assertEqual(0.0, command.angular.z)
+
+    def test_correlated_follow_stop_is_not_reported_as_a_failure(self):
+        controller = make_controller(mode="circular", count=2)
+
+        controller._stop_cb(String(data=json.dumps({
+            "task_id": "follow-test",
+        })))
+        controller._publish_status([])
+
+        self.assertFalse(controller.is_active)
+        self.assertFalse(controller.is_paused)
+        self.assertIsNone(controller.path_error)
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual("follow-test", status["task_id"])
+        self.assertEqual("stopped", status["state"])
+        for publisher in controller.cmd_pubs.values():
+            command = publisher.messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+
+        previous_counts = {
+            name: len(publisher.messages)
+            for name, publisher in controller.cmd_pubs.items()
+        }
+        stale_command = FOLLOW.Twist()
+        stale_command.linear.x = float("nan")
+        self.assertFalse(controller._publish_motion_commands({
+            "tb3_0": stale_command,
+        }))
+        self.assertIsNone(controller.path_error)
+        self.assertEqual(previous_counts, {
+            name: len(publisher.messages)
+            for name, publisher in controller.cmd_pubs.items()
+        })
 
     def test_fleet_growth_reanchors_before_resuming(self):
         controller = make_controller(mode="circular", count=3)
@@ -904,6 +1196,14 @@ class FollowLeaderPathTests(unittest.TestCase):
 
                 self.assertTrue(controller.chain_assembled)
                 self.assertLess(max(errors, default=0.0), 0.18)
+
+    def test_motion_controllers_keep_python38_syntax(self):
+        for filename in ("follow_leader.py", "collaborative_transport.py"):
+            with self.subTest(filename=filename):
+                source = (
+                    PACKAGE_ROOT / "scripts" / "behaviors" / filename
+                ).read_text(encoding="utf-8")
+                ast.parse(source, filename=filename, feature_version=8)
 
 
 if __name__ == "__main__":
