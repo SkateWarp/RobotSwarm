@@ -353,7 +353,12 @@ class LoadProbe:
     def _service_status(response):
         return ' '.join(str(response.status_message or '').lower().split())
 
+    def _raise_if_stopping(self, description):
+        if getattr(self, 'stop_requested', False) or rospy.is_shutdown():
+            raise RuntimeError('probe stopped while ' + description)
+
     def _delete_payload_for_replacement(self):
+        self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
         with self.lock:
             generation = self.model_states_generation
             exists = MODEL_NAME in self.models
@@ -376,6 +381,7 @@ class LoadProbe:
         )
 
     def _spawn_payload(self, model_xml):
+        self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
         pose = Pose()
         pose.position.x = self.args.crate_x
         pose.position.y = self.args.crate_y
@@ -408,10 +414,7 @@ class LoadProbe:
         state.pose.orientation.w = 1.0
         deadline = time.monotonic() + missing_timeout
         while True:
-            if getattr(self, 'stop_requested', False):
-                raise RuntimeError(
-                    'probe stopped while placing {}'.format(name)
-                )
+            self._raise_if_stopping('placing {}'.format(name))
             response = self.set_model_state(state)
             if response.success:
                 return
@@ -423,6 +426,9 @@ class LoadProbe:
                     )
                 )
             if time.monotonic() >= deadline:
+                # Shutdown can begin while the service call is in flight.  It
+                # is an operator/runtime stop, not a disappearing-model race.
+                self._raise_if_stopping('placing {}'.format(name))
                 raise _RecoverablePayloadRace(
                     '{} remained unavailable to SetModelState'.format(name)
                 )
@@ -449,14 +455,20 @@ class LoadProbe:
 
     def replace_payload(self, model_xml):
         for attempt in range(1, PAYLOAD_REPLACEMENT_ATTEMPTS + 1):
+            self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
             try:
                 self._delete_payload_for_replacement()
+                self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
                 self._spawn_payload(model_xml)
+                self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
                 self._place_payload_pose()
                 self.wait_sim(0.5)
                 self.payload_model_xml = model_xml
                 return
             except _RecoverablePayloadRace as exc:
+                # Do not turn a shutdown that raced with Gazebo into another
+                # delete/spawn cycle.
+                self._raise_if_stopping('replacing {}'.format(MODEL_NAME))
                 if attempt >= PAYLOAD_REPLACEMENT_ATTEMPTS:
                     raise RuntimeError(
                         'could not place {}: readiness race persisted after '
@@ -475,6 +487,7 @@ class LoadProbe:
         try:
             self._set_pose(name, x, y, z, 5.0)
         except _RecoverablePayloadRace as exc:
+            self._raise_if_stopping('placing {}'.format(name))
             raise RuntimeError(
                 'could not place {}: model remained unavailable'.format(name)
             ) from exc
@@ -483,6 +496,7 @@ class LoadProbe:
         try:
             self._place_payload_pose()
         except _RecoverablePayloadRace as exc:
+            self._raise_if_stopping('resetting {}'.format(MODEL_NAME))
             model_xml = getattr(self, 'payload_model_xml', None)
             if model_xml is None:
                 raise RuntimeError(

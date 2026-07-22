@@ -25,7 +25,7 @@ def _module(name, **values):
 def _load_probe():
     stubs = {
         'rosnode': _module('rosnode', get_node_names=lambda: []),
-        'rospy': _module('rospy'),
+        'rospy': _module('rospy', is_shutdown=lambda: False),
         'gazebo_msgs': _module('gazebo_msgs'),
         'gazebo_msgs.msg': _module(
             'gazebo_msgs.msg', ModelState=_Message, ModelStates=_Message
@@ -200,6 +200,28 @@ class PayloadLoadProbeTests(unittest.TestCase):
         self.assertEqual(1, probe.set_model_state.call_count)
         sleep.assert_not_called()
 
+    def test_pose_shutdown_is_permanent_before_gazebo_is_called(self):
+        class State:
+            def __init__(self):
+                self.pose = types.SimpleNamespace(
+                    position=types.SimpleNamespace(),
+                    orientation=types.SimpleNamespace(),
+                )
+
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.stop_requested = False
+        probe.set_model_state = mock.Mock()
+
+        with mock.patch.object(PROBE, 'ModelState', State), mock.patch.object(
+            PROBE.rospy, 'is_shutdown', return_value=True
+        ), self.assertRaisesRegex(RuntimeError, 'probe stopped') as raised:
+            probe.set_pose('transport_object', -0.8, -3.0, 0.1)
+
+        self.assertNotIsInstance(
+            raised.exception, PROBE._RecoverablePayloadRace
+        )
+        probe.set_model_state.assert_not_called()
+
     def test_payload_readiness_requires_fresh_consecutive_observations(self):
         probe = object.__new__(PROBE.LoadProbe)
         probe.lock = PROBE.threading.RLock()
@@ -292,6 +314,78 @@ class PayloadLoadProbeTests(unittest.TestCase):
         probe.wait_sim.assert_called_once_with(0.5)
         self.assertEqual('loaded-model', probe.payload_model_xml)
         self.assertEqual(1, probe.log.call_count)
+
+    def test_payload_replacement_does_not_retry_during_ros_shutdown(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.stop_requested = False
+        shutdown = {'active': False}
+        probe._delete_payload_for_replacement = mock.Mock()
+        probe._spawn_payload = mock.Mock()
+
+        def lose_payload_during_shutdown():
+            shutdown['active'] = True
+            raise PROBE._RecoverablePayloadRace('instance disappeared')
+
+        probe._place_payload_pose = mock.Mock(
+            side_effect=lose_payload_during_shutdown
+        )
+        probe.wait_sim = mock.Mock()
+        probe.log = mock.Mock()
+
+        with mock.patch.object(
+            PROBE.rospy, 'is_shutdown',
+            side_effect=lambda: shutdown['active'],
+        ), self.assertRaisesRegex(RuntimeError, 'probe stopped') as raised:
+            probe.replace_payload('loaded-model')
+
+        self.assertNotIsInstance(
+            raised.exception, PROBE._RecoverablePayloadRace
+        )
+        probe._delete_payload_for_replacement.assert_called_once_with()
+        probe._spawn_payload.assert_called_once_with('loaded-model')
+        probe._place_payload_pose.assert_called_once_with()
+        probe.wait_sim.assert_not_called()
+        probe.log.assert_not_called()
+
+    def test_payload_replacement_does_not_touch_gazebo_after_shutdown(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.stop_requested = False
+        probe._delete_payload_for_replacement = mock.Mock()
+        probe._spawn_payload = mock.Mock()
+        probe._place_payload_pose = mock.Mock()
+
+        with mock.patch.object(
+            PROBE.rospy, 'is_shutdown', return_value=True
+        ), self.assertRaisesRegex(RuntimeError, 'probe stopped'):
+            probe.replace_payload('loaded-model')
+
+        probe._delete_payload_for_replacement.assert_not_called()
+        probe._spawn_payload.assert_not_called()
+        probe._place_payload_pose.assert_not_called()
+
+    def test_payload_replacement_does_not_spawn_if_shutdown_follows_delete(self):
+        probe = object.__new__(PROBE.LoadProbe)
+        probe.stop_requested = False
+        shutdown = {'active': False}
+
+        def delete_then_shutdown():
+            shutdown['active'] = True
+
+        probe._delete_payload_for_replacement = mock.Mock(
+            side_effect=delete_then_shutdown
+        )
+        probe._spawn_payload = mock.Mock()
+        probe._place_payload_pose = mock.Mock()
+
+        with mock.patch.object(
+            PROBE.rospy, 'is_shutdown',
+            side_effect=lambda: shutdown['active'],
+        ), self.assertRaisesRegex(RuntimeError, 'probe stopped'):
+            probe.replace_payload('loaded-model')
+
+        probe._delete_payload_for_replacement.assert_called_once_with()
+        probe._spawn_payload.assert_not_called()
+        probe._place_payload_pose.assert_not_called()
 
     def test_payload_replacement_exhaustion_is_sanitized_and_bounded(self):
         class SpawnPose:
