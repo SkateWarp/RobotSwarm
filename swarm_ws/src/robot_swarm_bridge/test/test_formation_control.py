@@ -1657,6 +1657,24 @@ class FormationAssignmentTests(unittest.TestCase):
             {'tb3_0': 0.0},
         )['kind'])
 
+    def test_assignment_snapshot_allows_only_bounded_spawn_yaw_settling(self):
+        controller = make_controller()
+        controller.assignment_yaw_drift_tolerance = 0.15
+        snapshot = controller._prepare_assignment_locked()
+
+        self.assertIsNone(controller._assignment_pose_drift(
+            snapshot,
+            {'tb3_0': (0.002, 0.0)},
+            {'tb3_0': 0.149},
+        ))
+        drift = controller._assignment_pose_drift(
+            snapshot,
+            {'tb3_0': (0.002, 0.0)},
+            {'tb3_0': 0.151},
+        )
+        self.assertEqual('tb3_0', drift['robot'])
+        self.assertEqual(0.151, drift['yaw_drift'])
+
     def test_persistent_pose_churn_exhausts_replan_budget(self):
         controller = make_controller()
         controller.is_running = True

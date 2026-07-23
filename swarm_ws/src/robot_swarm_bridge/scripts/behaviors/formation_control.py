@@ -554,7 +554,7 @@ class FormationController:
         self.assignment_yaw_drift_tolerance = min(
             0.20,
             max(0.05, float(rospy.get_param(
-                '~assignment_yaw_drift_tolerance', 0.10
+                '~assignment_yaw_drift_tolerance', 0.15
             ))),
         )
         # Route and orbit planning can take several seconds for ten robots.
