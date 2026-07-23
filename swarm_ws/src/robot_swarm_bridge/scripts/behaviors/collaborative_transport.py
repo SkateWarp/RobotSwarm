@@ -69,6 +69,7 @@ from robot_swarm_bridge.algorithms.grf_transport import (
     RobotSnapshot,
     Vec2,
 )
+from robot_swarm_bridge.utils.safety_publish import SafetyPublishLane
 
 
 class TransportPhase(Enum):
@@ -1132,9 +1133,25 @@ class CollaborativeTransport:
         self.emergency_stop_active = False
         self.emergency_reset_pending = False
         self.current_task_id = None
+        self._cancelled_task_ids = {}
         self.command_epoch = 0
         self.phase_lock = threading.Lock()
         self.command_lock = threading.RLock()
+        self._safety_stop_lock = threading.Lock()
+        self._emergency_stop_condition = threading.Condition(
+            self._safety_stop_lock
+        )
+        self._safety_zero_inflight = set()
+        self._safety_zero_reassert = set()
+        self._safety_zero_receipts = {}
+        self._safety_publisher_snapshot = ()
+        self._safety_publish_lanes = {}
+        self._safety_publish_lane_factory = SafetyPublishLane
+        self._emergency_stop_generation = 0
+        self._latest_emergency_true_generation = 0
+        self._emergency_true_committed_generation = 0
+        self._emergency_true_pending = set()
+        self._shutdown_started = False
         # Phase methods update a related set of task-state fields.  Keep one
         # complete cycle from overlapping a lifecycle reset; command_epoch
         # remains the fast cancellation gate for individual Twist publishes.
@@ -1255,6 +1272,243 @@ class CollaborativeTransport:
             self.transport_planner,
         )
 
+    def _ensure_safety_fanout(self):
+        """Create emergency fan-out state for lightweight test fixtures."""
+        if not hasattr(self, '_safety_stop_lock'):
+            self._safety_stop_lock = threading.Lock()
+        if not hasattr(self, '_emergency_stop_condition'):
+            self._emergency_stop_condition = threading.Condition(
+                self._safety_stop_lock
+            )
+        if not hasattr(self, '_safety_zero_inflight'):
+            self._safety_zero_inflight = set()
+        if not hasattr(self, '_safety_zero_reassert'):
+            self._safety_zero_reassert = set()
+        if not hasattr(self, '_safety_zero_receipts'):
+            self._safety_zero_receipts = {}
+        if not hasattr(self, '_safety_publisher_snapshot'):
+            self._safety_publisher_snapshot = ()
+        if not hasattr(self, '_safety_publish_lanes'):
+            self._safety_publish_lanes = {}
+        if not hasattr(self, '_safety_publish_lane_factory'):
+            self._safety_publish_lane_factory = SafetyPublishLane
+        if not hasattr(self, '_emergency_stop_generation'):
+            self._emergency_stop_generation = 0
+        if not hasattr(self, '_latest_emergency_true_generation'):
+            self._latest_emergency_true_generation = 0
+        if not hasattr(self, '_emergency_true_committed_generation'):
+            self._emergency_true_committed_generation = 0
+        if not hasattr(self, '_emergency_true_pending'):
+            self._emergency_true_pending = set()
+        if not hasattr(self, '_shutdown_started'):
+            self._shutdown_started = False
+
+    @staticmethod
+    def _report_safety_lane_error(label, action, error):
+        try:
+            rospy.logerr(
+                "[transport] safety lane %s %s: %s", label, action, error
+            )
+        except Exception:
+            pass
+
+    def _register_safety_lane(self, namespace, publisher):
+        """Reserve one worker before an emergency needs the publisher."""
+        self._ensure_safety_fanout()
+        key = id(publisher)
+        with self._safety_stop_lock:
+            current = self._safety_publish_lanes.get(key)
+            if current is not None and current.available:
+                return True
+
+        lane = self._safety_publish_lane_factory(
+            'transport-{}'.format(namespace), self._report_safety_lane_error
+        )
+        if not lane.available:
+            lane.close()
+            return False
+        with self._safety_stop_lock:
+            previous = self._safety_publish_lanes.get(key)
+            self._safety_publish_lanes[key] = lane
+        if previous is not None and previous is not lane:
+            previous.close()
+        return True
+
+    def _discard_safety_lane(self, publisher):
+        self._ensure_safety_fanout()
+        with self._safety_stop_lock:
+            lane = self._safety_publish_lanes.pop(id(publisher), None)
+        if lane is not None:
+            lane.close()
+
+    def _refresh_safety_publisher_snapshot(self, publishers):
+        """Publish an immutable roster without taking the live data lock."""
+        self._ensure_safety_fanout()
+        snapshot = tuple(publishers)
+        with self._safety_stop_lock:
+            self._safety_publisher_snapshot = snapshot
+
+    def _emergency_gate_active(self):
+        self._ensure_safety_fanout()
+        with self._safety_stop_lock:
+            return bool(
+                getattr(self, 'emergency_stop_active', False)
+                or self._shutdown_started
+            )
+
+    def _publish_safety_zero(self, namespace, publisher, key):
+        """Run one zero attempt and leave failures eligible for retry."""
+        accepted = False
+        try:
+            publisher.publish(Twist())
+            accepted = True
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "[transport] emergency zero failed for %s: %s",
+                    namespace,
+                    exc,
+                )
+            except Exception:
+                pass
+        finally:
+            if accepted:
+                data_lock = getattr(self, 'data_lock', None)
+                if data_lock is not None:
+                    with data_lock:
+                        if not hasattr(self, 'transport_last_commands'):
+                            self.transport_last_commands = {}
+                        self.transport_last_commands[namespace] = (0.0, 0.0)
+            retry_after_return = False
+            with self._safety_stop_lock:
+                if accepted:
+                    self._safety_zero_receipts[key] = (
+                        self._safety_zero_receipts.get(key, 0) + 1
+                    )
+                self._safety_zero_inflight.discard(key)
+                if key in self._safety_zero_reassert:
+                    self._safety_zero_reassert.discard(key)
+                    retry_after_return = True
+            if retry_after_return:
+                self._schedule_safety_zeros(((namespace, publisher),))
+
+    def _schedule_safety_zeros(self, publishers=None, reassert=False):
+        """Fan zero commands out on independent, prestarted lanes."""
+        self._ensure_safety_fanout()
+        if publishers is None:
+            with self._safety_stop_lock:
+                publishers = self._safety_publisher_snapshot
+        else:
+            publishers = tuple(publishers)
+
+        scheduled = []
+        for namespace, publisher in publishers:
+            key = (namespace, id(publisher))
+            with self._safety_stop_lock:
+                if key in self._safety_zero_inflight:
+                    if reassert:
+                        self._safety_zero_reassert.add(key)
+                    continue
+                lane = self._safety_publish_lanes.get(id(publisher))
+                self._safety_zero_inflight.add(key)
+
+            callback = (
+                lambda current_namespace=namespace,
+                current_publisher=publisher,
+                current_key=key: self._publish_safety_zero(
+                    current_namespace, current_publisher, current_key
+                )
+            )
+            if lane is not None and lane.submit(callback):
+                scheduled.append(namespace)
+                continue
+
+            started = False
+            for attempt in (1, 2):
+                worker = threading.Thread(
+                    target=callback,
+                    name='transport-safety-zero-{}-{}'.format(
+                        namespace, attempt
+                    ),
+                    daemon=True,
+                )
+                try:
+                    worker.start()
+                    started = True
+                    break
+                except Exception as exc:
+                    try:
+                        rospy.logerr(
+                            "[transport] zero worker %d could not start for "
+                            "%s: %s",
+                            attempt,
+                            namespace,
+                            exc,
+                        )
+                    except Exception:
+                        pass
+            if started:
+                scheduled.append(namespace)
+            else:
+                with self._safety_stop_lock:
+                    self._safety_zero_inflight.discard(key)
+        return scheduled
+
+    def _wait_for_safety_zeros(self, timeout):
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            with self._safety_stop_lock:
+                if not self._safety_zero_inflight:
+                    return True
+            time.sleep(0.005)
+        with self._safety_stop_lock:
+            return not self._safety_zero_inflight
+
+    def _drain_safety_zeros(self, timeout, publishers=None):
+        """Retry a bounded shutdown fan-out until every zero returns."""
+        self._ensure_safety_fanout()
+        if publishers is None:
+            with self._safety_stop_lock:
+                publishers = self._safety_publisher_snapshot
+        publishers = tuple(publishers)
+        with self._safety_stop_lock:
+            required = {}
+            for namespace, publisher in publishers:
+                key = (namespace, id(publisher))
+                receipt = self._safety_zero_receipts.get(key, 0)
+                if key in self._safety_zero_inflight:
+                    # The old zero may have returned before a later positive
+                    # command and only be waiting to record its receipt. Force
+                    # and await one additional zero after that in-flight job.
+                    self._safety_zero_reassert.add(key)
+                    required[key] = receipt + 2
+                else:
+                    required[key] = receipt + 1
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._safety_stop_lock:
+                if all(
+                    self._safety_zero_receipts.get(key, 0) >= count
+                    for key, count in required.items()
+                ):
+                    return {
+                        'confirmed': True,
+                        'failed_robots': [],
+                    }
+            if time.monotonic() >= deadline:
+                with self._safety_stop_lock:
+                    failed = [
+                        key[0] for key, count in required.items()
+                        if self._safety_zero_receipts.get(key, 0) < count
+                    ]
+                return {
+                    'confirmed': False,
+                    'failed_robots': failed,
+                }
+            self._schedule_safety_zeros(publishers)
+            time.sleep(0.005)
+
     # ======================================================================
     # Fleet management
     # ======================================================================
@@ -1278,13 +1532,19 @@ class CollaborativeTransport:
     def _update_fleet_serialized(self, ns_list: List[str]):
         """Synchronise internal bookkeeping with the given namespace list."""
         with self.command_lock:
+            if self._emergency_gate_active() and self._shutdown_started:
+                return
             roster_changed = list(ns_list) != self.robot_namespaces
             if roster_changed and (self.is_running or self.is_paused):
                 # A control pass may still be working from the previous pose
                 # and publisher roster.  Give the changed fleet a new command
                 # epoch so that old pass cannot publish or commit its result.
                 self.command_epoch += 1
-                self._stop_all_robots()
+                publication = self._stop_all_robots()
+                if not publication['confirmed']:
+                    self._apply_stop_failure_locked(
+                        'Fleet change', publication
+                    )
             if not ns_list and (self.is_running or self.is_paused):
                 self.is_running = False
                 self.is_paused = False
@@ -1315,8 +1575,17 @@ class CollaborativeTransport:
     def _setup_robot(self, ns: str):
         """Create subscribers, publishers, and avoidance module for one robot."""
         # Publishers
-        self.cmd_vel_pubs[ns] = rospy.Publisher(
+        publisher = rospy.Publisher(
             f'/{ns}/cmd_vel', Twist, queue_size=1
+        )
+        if not self._register_safety_lane(ns, publisher):
+            publisher.unregister()
+            raise RuntimeError(
+                "Could not reserve the emergency zero lane for {}".format(ns)
+            )
+        self.cmd_vel_pubs[ns] = publisher
+        self._refresh_safety_publisher_snapshot(
+            tuple(self.cmd_vel_pubs.items())
         )
 
         # Subscribers
@@ -1351,23 +1620,20 @@ class CollaborativeTransport:
         rospy.loginfo("[transport] registered robot %s", ns)
 
     def _teardown_robot(self, ns: str):
-        """Remove bookkeeping for a robot that left the fleet."""
+        """Remove a departed robot without trusting its ROS connections."""
         pub = self.cmd_vel_pubs.pop(ns, None)
         if pub is not None:
-            pub.publish(Twist())
-            pub.unregister()
+            # Take the publisher out of future snapshots before disposing it.
+            # An active fleet change has already completed the bounded stop,
+            # so roster cleanup must not block on a disconnected ROS socket.
+            self._refresh_safety_publisher_snapshot(
+                tuple(self.cmd_vel_pubs.items())
+            )
+            self._discard_safety_lane(pub)
 
         odom_sub = self.odom_subs.pop(ns, None)
-        if odom_sub is not None:
-            odom_sub.unregister()
-
         scan_sub = self.scan_subs.pop(ns, None)
-        if scan_sub is not None:
-            scan_sub.unregister()
-
         avoidance = self.avoidance_modules.pop(ns, None)
-        if avoidance is not None:
-            avoidance.shutdown()
 
         for d in (self.robot_positions, self.robot_yaws,
                   self.robot_velocities, self.robot_scans,
@@ -1376,7 +1642,51 @@ class CollaborativeTransport:
         getattr(self, 'transport_last_commands', {}).pop(ns, None)
         if ns in self.robot_namespaces:
             self.robot_namespaces.remove(ns)
+
+        # Structural cleanup above is authoritative. Resource disposal is
+        # detached because rospy unregister/shutdown hooks can block forever
+        # when a robot or ROS master disappeared from the network.
+        for label, resource, method_name in (
+            ('command publisher', pub, 'unregister'),
+            ('odometry subscriber', odom_sub, 'unregister'),
+            ('scan subscriber', scan_sub, 'unregister'),
+            ('avoidance module', avoidance, 'shutdown'),
+        ):
+            if resource is not None:
+                self._dispose_robot_resource(ns, label, resource, method_name)
         rospy.loginfo("[transport] unregistered robot %s", ns)
+
+    @staticmethod
+    def _dispose_robot_resource(ns, label, resource, method_name):
+        """Dispose one ROS resource off the fleet-management lock path."""
+        def dispose():
+            try:
+                getattr(resource, method_name)()
+            except Exception as exc:
+                try:
+                    rospy.logwarn(
+                        "[transport] %s for %s could not be disposed: %s",
+                        label, ns, exc,
+                    )
+                except Exception:
+                    pass
+
+        worker = threading.Thread(
+            target=dispose,
+            name='transport-dispose-{}-{}'.format(ns, method_name),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception as exc:
+            try:
+                rospy.logwarn(
+                    "[transport] disposal worker for %s (%s) could not "
+                    "start: %s",
+                    ns, label, exc,
+                )
+            except Exception:
+                pass
 
     # ======================================================================
     # Subscriber callbacks
@@ -1691,11 +2001,31 @@ class CollaborativeTransport:
             config = json.loads(msg.data) if msg.data else {}
         except (json.JSONDecodeError, AttributeError):
             config = {}
+        if not isinstance(config, dict):
+            config = {}
+        requested_task_id = config.get('task_id')
+        if (
+            not isinstance(requested_task_id, str)
+            or not requested_task_id.strip()
+        ):
+            rospy.logwarn(
+                "[transport] Start rejected because task_id is invalid"
+            )
+            return
 
         with self.command_lock:
-            if self.emergency_stop_active:
+            if self._emergency_gate_active():
                 rospy.logwarn(
-                    "[transport] Start rejected while emergency stop is active"
+                    "[transport] Start rejected while the safety gate is closed"
+                )
+                return
+            if requested_task_id in getattr(
+                self, '_cancelled_task_ids', {}
+            ):
+                rospy.logwarn(
+                    "[transport] Start rejected because task %s was already "
+                    "cancelled",
+                    requested_task_id,
                 )
                 return
             with self.data_lock:
@@ -1777,17 +2107,25 @@ class CollaborativeTransport:
             self._reset_transport_route(reset_control_sequence=True)
             self._reset_search_state()
             self._begin_transport_progress()
-            self.object_error = None
-            self.failure_reason = None
-            self.current_task_id = config.get('task_id')
+            # Pair the activation fields with the independent safety gate. If
+            # shutdown or e-stop wins this short hand-off, this start cannot
+            # restore motion after the terminal latch has already returned.
+            with self._safety_stop_lock:
+                if (
+                    self._shutdown_started
+                    or self.emergency_stop_active
+                ):
+                    return
+                self.object_error = None
+                self.failure_reason = None
+                self.current_task_id = requested_task_id
+                self.is_running = True
+                self.is_paused = False
+                self.command_epoch += 1
+                with self.phase_lock:
+                    self.phase = TransportPhase.SEARCH
             self._place_target_marker()
             self._begin_transport_collision_stream(self.current_task_id)
-            self.is_running = True
-            self.is_paused = False
-            self.command_epoch += 1
-
-            with self.phase_lock:
-                self.phase = TransportPhase.SEARCH
             rospy.loginfo(
                 "[transport] >>> phase SEARCH  target=(%.1f, %.1f) "
                 "planner=%s",
@@ -1799,8 +2137,12 @@ class CollaborativeTransport:
             self._stop_callback_serialized(msg)
 
     def _stop_callback_serialized(self, msg: String):
+        requested_task_id = self._task_id_from_message(msg)
+        if requested_task_id is None:
+            return
         with self.command_lock:
-            if not self._task_command_matches(msg):
+            self._remember_cancelled_task_locked(requested_task_id)
+            if requested_task_id != self.current_task_id:
                 return
             self.is_running = False
             self.is_paused = False
@@ -1819,8 +2161,13 @@ class CollaborativeTransport:
             self.command_epoch += 1
             with self.phase_lock:
                 self.phase = TransportPhase.IDLE
-            self._stop_all_robots()
-        rospy.loginfo("[transport] stopped (IDLE)")
+            publication = self._stop_all_robots()
+            if not publication['confirmed']:
+                self._apply_stop_failure_locked(
+                    'Task stop', publication
+                )
+        if publication['confirmed']:
+            rospy.loginfo("[transport] stopped (IDLE)")
 
     def _pause_callback(self, msg: String):
         with self._control_cycle_mutex():
@@ -1835,8 +2182,13 @@ class CollaborativeTransport:
             self.is_paused = True
             self._reset_transport_route(preserve_approach=True)
             self.command_epoch += 1
-            self._stop_all_robots()
-        rospy.loginfo("[transport] paused")
+            publication = self._stop_all_robots()
+            if not publication['confirmed']:
+                self._apply_stop_failure_locked(
+                    'Task pause', publication
+                )
+        if publication['confirmed']:
+            rospy.loginfo("[transport] paused")
 
     def _resume_callback(self, msg: String):
         with self._control_cycle_mutex():
@@ -1849,7 +2201,7 @@ class CollaborativeTransport:
             if (
                 not self.is_running
                 or not self.is_paused
-                or self.emergency_stop_active
+                or self._emergency_gate_active()
             ):
                 return
             self.is_paused = False
@@ -1857,43 +2209,110 @@ class CollaborativeTransport:
             self.command_epoch += 1
         rospy.loginfo("[transport] resumed")
 
-    def _task_command_matches(self, msg: String) -> bool:
+    @staticmethod
+    def _task_id_from_message(msg: String):
         try:
             payload = json.loads(msg.data) if msg.data else {}
         except (json.JSONDecodeError, AttributeError):
             payload = {}
         requested_id = payload.get('task_id')
-        return bool(requested_id) and requested_id == self.current_task_id
+        if not isinstance(requested_id, str) or not requested_id.strip():
+            return None
+        return requested_id
+
+    def _remember_cancelled_task_locked(self, task_id):
+        cancelled = getattr(self, '_cancelled_task_ids', None)
+        if cancelled is None:
+            self._cancelled_task_ids = {}
+            cancelled = self._cancelled_task_ids
+        if task_id in cancelled:
+            return
+        if len(cancelled) >= 64:
+            cancelled.pop(next(iter(cancelled)))
+        cancelled[task_id] = None
+
+    def _task_command_matches(self, msg: String) -> bool:
+        requested_id = self._task_id_from_message(msg)
+        return requested_id is not None and requested_id == self.current_task_id
 
     def _emergency_stop_callback(self, msg: Bool):
         active = bool(msg.data)
-        with self.command_lock:
-            self.emergency_stop_active = active
-            self.command_epoch += 1
+        self._ensure_safety_fanout()
+        with self._emergency_stop_condition:
+            self._emergency_stop_generation += 1
+            generation = self._emergency_stop_generation
             if active:
-                # Cancel publications and send zeros without waiting for a
-                # possibly expensive GRF cycle to leave its state critical
-                # section.
-                self.emergency_reset_pending = True
+                self._latest_emergency_true_generation = generation
+                self._emergency_true_pending.add(generation)
+                self.emergency_stop_active = True
                 self.is_running = False
                 self.is_paused = False
-                with self.phase_lock:
-                    self.phase = TransportPhase.IDLE
-                self._stop_all_robots()
             else:
-                self.emergency_reset_pending = False
+                required_true_generation = (
+                    self._latest_emergency_true_generation
+                )
         if not active:
+            # Do not let a reset or a new start overtake the command phase of
+            # any preceding True edge. Older True callbacks become harmless
+            # once the newest preceding generation has completed.
+            with self._emergency_stop_condition:
+                while (
+                    any(
+                        pending_generation <= required_true_generation
+                        for pending_generation
+                        in self._emergency_true_pending
+                    )
+                ):
+                    self._emergency_stop_condition.wait()
+            with self.command_lock:
+                with self._emergency_stop_condition:
+                    if generation == self._emergency_stop_generation:
+                        self.emergency_stop_active = False
+                        self.emergency_reset_pending = False
             return
 
-        # Clean immediately when the cycle mutex is free. Otherwise the active
-        # cycle performs the same cleanup in its finally block. Never block
-        # the emergency-stop callback on planner work.
-        cycle_lock = self._control_cycle_mutex()
-        if cycle_lock.acquire(False):
-            try:
-                self._finalize_emergency_reset()
-            finally:
-                cycle_lock.release()
+        # Close the motion gate and start the per-publisher fan-out before
+        # waiting for any lifecycle or planner lock.
+        current_edge = False
+        try:
+            self._schedule_safety_zeros(reassert=True)
+            with self.command_lock:
+                with self._emergency_stop_condition:
+                    current_edge = (
+                        generation == self._emergency_stop_generation
+                    )
+                    latest_true = (
+                        generation
+                        == self._latest_emergency_true_generation
+                    )
+                    if current_edge:
+                        self.emergency_stop_active = True
+                if latest_true:
+                    self.command_epoch += 1
+                    self.emergency_reset_pending = True
+                    self.is_running = False
+                    self.is_paused = False
+                    with self.phase_lock:
+                        self.phase = TransportPhase.IDLE
+                    self._schedule_safety_zeros(reassert=True)
+                    self._reset_avoidance_motion()
+            if current_edge:
+                # Clean immediately when the cycle mutex is free. Otherwise
+                # the active cycle performs the same cleanup in its finally.
+                cycle_lock = self._control_cycle_mutex()
+                if cycle_lock.acquire(False):
+                    try:
+                        self._finalize_emergency_reset()
+                    finally:
+                        cycle_lock.release()
+        finally:
+            with self._emergency_stop_condition:
+                self._emergency_true_committed_generation = max(
+                    self._emergency_true_committed_generation,
+                    generation,
+                )
+                self._emergency_true_pending.discard(generation)
+                self._emergency_stop_condition.notify_all()
         rospy.logwarn("[transport] Emergency stop latched")
 
     def _finalize_emergency_reset(self):
@@ -1913,11 +2332,25 @@ class CollaborativeTransport:
 
     def _shutdown(self):
         """Fail closed when this controller leaves the ROS graph."""
-        with self.command_lock:
+        self._ensure_safety_fanout()
+        with self._safety_stop_lock:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
+            # Do not wait for command_lock here. It may belong to a ROS publish
+            # which never returns. The terminal gate is checked both before and
+            # after every motion publication, so these fields can be closed in
+            # the same atomic hand-off as the latch.
             self.is_running = False
             self.is_paused = False
             self.command_epoch += 1
-            self._stop_all_robots()
+        self._schedule_safety_zeros(reassert=True)
+        publication = self._drain_safety_zeros(0.2)
+        if not publication['confirmed']:
+            rospy.logerr(
+                "[transport] shutdown could not confirm every zero before "
+                "its bounded deadline"
+            )
 
     # ======================================================================
     # Helpers
@@ -2202,18 +2635,46 @@ class CollaborativeTransport:
         return self.transport_reported_progress
 
     def _stop_all_robots(self):
-        stop = Twist()
+        """Confirm ordinary lifecycle zeros before the caller can continue."""
         with self.data_lock:
             publishers = list(self.cmd_vel_pubs.items())
-            avoidance_modules = list(getattr(
-                self, 'avoidance_modules', {}
-            ).values())
             if not hasattr(self, 'transport_last_commands'):
                 self.transport_last_commands = {}
             for namespace, _publisher in publishers:
                 self.transport_last_commands[namespace] = (0.0, 0.0)
-        for _namespace, pub in publishers:
-            pub.publish(stop)
+        timeout = max(0.05, float(getattr(
+            self, 'normal_stop_timeout_wall_s', 0.5
+        )))
+        publication = self._drain_safety_zeros(timeout, publishers)
+        self._reset_avoidance_motion()
+        return publication
+
+    def _apply_stop_failure_locked(
+        self, context, publication, advance_epoch=False
+    ):
+        """Expose a terminal failure when an ordinary zero was not accepted."""
+        failed = publication.get('failed_robots', [])
+        reason = (
+            "{} could not confirm zero velocity for: {}".format(
+                context, ', '.join(failed)
+            )
+        )
+        self.object_error = reason
+        self.failure_reason = reason
+        self.is_running = False
+        self.is_paused = False
+        if advance_epoch:
+            self.command_epoch += 1
+        with self.phase_lock:
+            self.phase = TransportPhase.FAILED
+        rospy.logerr("[transport] %s", reason)
+        return reason
+
+    def _reset_avoidance_motion(self):
+        with self.data_lock:
+            avoidance_modules = list(getattr(
+                self, 'avoidance_modules', {}
+            ).values())
         for avoidance in avoidance_modules:
             reset_motion = getattr(avoidance, 'reset_motion', None)
             if callable(reset_motion):
@@ -2345,7 +2806,7 @@ class CollaborativeTransport:
             self.command_epoch == expected_epoch
             and self.is_running
             and not self.is_paused
-            and not self.emergency_stop_active
+            and not self._emergency_gate_active()
         )
 
     @staticmethod
@@ -2459,7 +2920,10 @@ class CollaborativeTransport:
             self.transport_last_commands[namespace] = (
                 float(command.linear.x), float(command.angular.z)
             )
-            pub.publish(command)
+        pub.publish(command)
+        if self._emergency_gate_active():
+            self._schedule_safety_zeros(reassert=True)
+            return False
         return True
 
     def _publish_command(
@@ -2627,7 +3091,16 @@ class CollaborativeTransport:
             self.command_epoch += 1
             with self.phase_lock:
                 self.phase = TransportPhase.FAILED
-            self._stop_all_robots()
+            publication = self._stop_all_robots()
+            if not publication['confirmed']:
+                reason = (
+                    reason
+                    + " Zero velocity was not accepted for: "
+                    + ', '.join(publication['failed_robots'])
+                    + "."
+                )
+                self.object_error = reason
+                self.failure_reason = reason
         rospy.logerr("[transport] %s  >>> phase FAILED", reason)
         return True
 
@@ -2638,9 +3111,15 @@ class CollaborativeTransport:
                 return False
             self.is_running = False
             self.command_epoch += 1
-            with self.phase_lock:
-                self.phase = TransportPhase.DONE
-            self._stop_all_robots()
+            publication = self._stop_all_robots()
+            if publication['confirmed']:
+                with self.phase_lock:
+                    self.phase = TransportPhase.DONE
+            else:
+                self._apply_stop_failure_locked(
+                    'Transport completion', publication
+                )
+                return False
         rospy.loginfo(
             "[transport] object delivered (dist=%.2f)  >>> phase DONE",
             distance,
@@ -2682,7 +3161,14 @@ class CollaborativeTransport:
         self.transport_last_progress_time = now
         if not self._set_phase(TransportPhase.APPROACH, expected_epoch):
             return False
-        self._stop_all_robots()
+        publication = self._stop_all_robots()
+        if not publication['confirmed']:
+            with self.command_lock:
+                if self.command_epoch == expected_epoch:
+                    self._apply_stop_failure_locked(
+                        'Stall recovery', publication, advance_epoch=True
+                    )
+            return True
         rospy.logwarn(
             "[transport] payload progress stalled at %.2fm; "
             "reassigning contact robots",
@@ -9938,6 +10424,15 @@ class CollaborativeTransport:
     # ======================================================================
 
     def _control_loop(self, event):
+        if self._emergency_gate_active():
+            self._schedule_safety_zeros()
+            cycle_lock = self._control_cycle_mutex()
+            if cycle_lock.acquire(False):
+                try:
+                    self._finalize_emergency_reset()
+                finally:
+                    cycle_lock.release()
+            return
         with self._control_cycle_mutex():
             # Starts and normal stops share this cycle mutex. Avoid another
             # command-lock entry here because terminal-status race tests use

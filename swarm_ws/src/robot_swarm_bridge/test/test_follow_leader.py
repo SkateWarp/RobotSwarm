@@ -12,12 +12,22 @@ from unittest import mock
 import yaml
 
 from test_ros_lifecycle import (
-    FakeAvoidance, FakePublisher, ModelStates, Odometry, Pose, ROS, String,
+    FakeAvoidance, FakePublisher, FakeSafetyLane, FakeSubscriber, ModelStates,
+    Odometry, Pose, ROS, String,
 )
 
 
 FOLLOW = ROS["follow"]
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def wait_until(predicate, timeout=1.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return bool(predicate())
 
 
 def pose_at(x, y):
@@ -177,6 +187,7 @@ def make_controller(mode="circular", count=3, follow_distance=0.65):
     controller.current_waypoint_idx = 0
     controller.waypoints = []
     controller.current_task_id = "follow-test"
+    controller._cancelled_task_ids = {}
     controller.is_active = True
     controller.is_paused = False
     controller.emergency_stop_active = False
@@ -184,9 +195,28 @@ def make_controller(mode="circular", count=3, follow_distance=0.65):
     controller.leader_trace = FOLLOW.ArcLengthTrace(minimum_step=0.015)
     controller.status_pub = FakePublisher()
     controller.marker_pub = FakePublisher()
+    controller._safety_lock = threading.RLock()
+    controller._safety_lane_factory = FakeSafetyLane
+    controller._safety_lanes = {}
+    controller._safety_zero_state = {}
+    controller._safety_publisher_snapshot = ()
+    controller._safety_zero_attempts = 3
+    controller.normal_stop_timeout_wall_s = 0.05
+    controller.removal_stop_timeout_wall_s = 0.05
+    controller.shutdown_stop_timeout_wall_s = 0.05
+    controller._emergency_stop_generation = 0
+    controller._latest_emergency_true_generation = 0
+    controller._emergency_true_committed_generation = 0
+    controller._emergency_true_pending = set()
+    controller._shutdown_started = False
     controller.cmd_pubs = {
         name: FakePublisher() for name in controller.robot_names
     }
+    controller.odom_subs = {
+        name: FakeSubscriber() for name in controller.robot_names
+    }
+    for name, publisher in controller.cmd_pubs.items():
+        controller._register_safety_lane(name, publisher)
     controller.linear_pids = {
         name: FOLLOW.PIDController(1.0, 0.0, 0.3, 0.2)
         for name in controller.robot_names
@@ -199,6 +229,24 @@ def make_controller(mode="circular", count=3, follow_distance=0.65):
         name: FakeAvoidance() for name in controller.robot_names
     }
     return controller
+
+
+def install_prestarted_safety_lanes(controller):
+    """Use the production lane implementation for concurrency tests."""
+    for lane in controller._safety_lanes.values():
+        lane.close()
+    controller._safety_lane_factory = FOLLOW.SafetyPublishLane
+    controller._safety_lanes = {}
+    controller._safety_zero_state = {}
+    controller._safety_publisher_snapshot = ()
+    for name, publisher in controller.cmd_pubs.items():
+        if not controller._register_safety_lane(name, publisher):
+            raise AssertionError("could not start test safety lane")
+
+
+def close_safety_lanes(controller):
+    for lane in tuple(controller._safety_lanes.values()):
+        lane.close()
 
 
 class FollowLeaderPathTests(unittest.TestCase):
@@ -900,6 +948,297 @@ class FollowLeaderPathTests(unittest.TestCase):
                     self.assertEqual(0.0, stop.linear.x)
                     self.assertEqual(0.0, stop.angular.z)
 
+    def test_emergency_stop_fans_out_past_a_blocked_first_publisher(self):
+        class BlockingZeroPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def publish(self, message):
+                self.entered.set()
+                self.release.wait(2.0)
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=2)
+        blocked = BlockingZeroPublisher()
+        healthy = FakePublisher()
+        controller.cmd_pubs = {
+            "tb3_0": blocked,
+            "tb3_1": healthy,
+        }
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            started_at = time.monotonic()
+            controller._emergency_stop_cb(FOLLOW.Bool(data=True))
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(blocked.entered.wait(0.5))
+            self.assertTrue(wait_until(lambda: bool(healthy.messages)))
+            self.assertEqual(0.0, healthy.messages[0].linear.x)
+            self.assertEqual(0.0, healthy.messages[0].angular.z)
+            self.assertTrue(controller.emergency_stop_active)
+            self.assertFalse(controller.is_active)
+        finally:
+            blocked.release.set()
+            wait_until(lambda: bool(blocked.messages))
+            close_safety_lanes(controller)
+
+    def test_emergency_zero_retries_on_its_prestarted_lane(self):
+        class FailOncePublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def publish(self, message):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary zero failure")
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=1)
+        publisher = FailOncePublisher()
+        controller.cmd_pubs = {"tb3_0": publisher}
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            controller._emergency_stop_cb(FOLLOW.Bool(data=True))
+
+            self.assertTrue(wait_until(lambda: bool(publisher.messages)))
+            self.assertGreaterEqual(publisher.calls, 2)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+        finally:
+            close_safety_lanes(controller)
+
+    def test_ordinary_stop_fans_out_and_reports_a_blocked_robot(self):
+        class BlockingZeroPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def publish(self, message):
+                self.entered.set()
+                self.release.wait(2.0)
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=2)
+        blocked = BlockingZeroPublisher()
+        healthy = FakePublisher()
+        controller.cmd_pubs = {
+            "tb3_0": blocked,
+            "tb3_1": healthy,
+        }
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            started_at = time.monotonic()
+            controller._stop_cb(String(data=json.dumps({
+                "task_id": "follow-test",
+            })))
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(blocked.entered.wait(0.5))
+            self.assertTrue(wait_until(lambda: bool(healthy.messages)))
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            self.assertFalse(controller.is_active)
+            self.assertIn("tb3_0", controller.path_error)
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual("failed", status["state"])
+            self.assertIn("tb3_0", status["error"])
+        finally:
+            blocked.release.set()
+            wait_until(lambda: bool(blocked.messages))
+            close_safety_lanes(controller)
+
+    def test_ordinary_stop_retries_until_a_zero_receipt_arrives(self):
+        class FailOncePublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def publish(self, message):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary zero failure")
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=1)
+        publisher = FailOncePublisher()
+        controller.cmd_pubs = {"tb3_0": publisher}
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            controller._stop_cb(String(data=json.dumps({
+                "task_id": "follow-test",
+            })))
+
+            self.assertGreaterEqual(publisher.calls, 2)
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+            self.assertIsNone(controller.path_error)
+        finally:
+            close_safety_lanes(controller)
+
+    def test_bounded_stop_does_not_alias_an_inflight_zero_receipt(self):
+        class SequencedPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.first_entered = threading.Event()
+                self.second_entered = threading.Event()
+                self.release_first = threading.Event()
+                self.release_second = threading.Event()
+
+            def publish(self, message):
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_entered.set()
+                    self.release_first.wait(2.0)
+                elif self.calls == 2:
+                    self.second_entered.set()
+                    self.release_second.wait(2.0)
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=1)
+        controller.normal_stop_timeout_wall_s = 1.0
+        publisher = SequencedPublisher()
+        controller.cmd_pubs = {"tb3_0": publisher}
+        install_prestarted_safety_lanes(controller)
+        result = []
+        drain = threading.Thread(
+            target=lambda: result.append(controller._stop_all())
+        )
+
+        try:
+            controller._queue_safety_zero("tb3_0", publisher)
+            self.assertTrue(publisher.first_entered.wait(0.5))
+            drain.start()
+            self.assertTrue(wait_until(lambda: (
+                controller._safety_zero_state[id(publisher)]["reassert"]
+            )))
+
+            publisher.release_first.set()
+            self.assertTrue(publisher.second_entered.wait(0.5))
+            self.assertTrue(drain.is_alive())
+
+            publisher.release_second.set()
+            drain.join(1.0)
+            self.assertFalse(drain.is_alive())
+            self.assertTrue(result[0]["confirmed"])
+            self.assertGreaterEqual(publisher.calls, 2)
+        finally:
+            publisher.release_first.set()
+            publisher.release_second.set()
+            drain.join(1.0)
+            close_safety_lanes(controller)
+
+    def test_newer_emergency_edge_wins_over_an_older_queued_reset(self):
+        controller = make_controller(mode="manual", count=1)
+        controller.emergency_stop_active = True
+        controller.command_lock.acquire()
+        reset = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(FOLLOW.Bool(data=False),),
+        )
+        emergency = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(FOLLOW.Bool(data=True),),
+        )
+        reset.start()
+        self.assertTrue(wait_until(lambda: (
+            controller._emergency_stop_generation >= 1
+        )))
+        emergency.start()
+        self.assertTrue(wait_until(lambda: (
+            controller._emergency_stop_generation >= 2
+            and controller.emergency_stop_active
+        )))
+
+        controller.command_lock.release()
+        reset.join(1.0)
+        emergency.join(1.0)
+
+        self.assertFalse(reset.is_alive())
+        self.assertFalse(emergency.is_alive())
+        self.assertTrue(controller.emergency_stop_active)
+        self.assertFalse(controller.is_active)
+
+    def test_late_positive_publish_is_followed_by_another_zero(self):
+        class LatePositivePublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.motion_entered = threading.Event()
+                self.release_motion = threading.Event()
+
+            def publish(self, message):
+                requests_motion = (
+                    message.linear.x != 0.0
+                    or message.angular.z != 0.0
+                )
+                if requests_motion:
+                    self.motion_entered.set()
+                    self.release_motion.wait(2.0)
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=1)
+        publisher = LatePositivePublisher()
+        controller.cmd_pubs = {"tb3_0": publisher}
+        install_prestarted_safety_lanes(controller)
+        command = FOLLOW.Twist()
+        command.linear.x = 0.1
+        publication_result = []
+        motion_thread = threading.Thread(
+            target=lambda: publication_result.append(
+                controller._publish_motion_commands({"tb3_0": command})
+            )
+        )
+        stop_thread = threading.Thread(
+            target=lambda: controller._emergency_stop_cb(
+                FOLLOW.Bool(data=True)
+            )
+        )
+
+        try:
+            motion_thread.start()
+            self.assertTrue(publisher.motion_entered.wait(0.5))
+            stop_thread.start()
+            self.assertTrue(wait_until(lambda: any(
+                message.linear.x == 0.0 and message.angular.z == 0.0
+                for message in publisher.messages
+            )))
+
+            publisher.release_motion.set()
+            motion_thread.join(1.0)
+            stop_thread.join(1.0)
+            self.assertFalse(motion_thread.is_alive())
+            self.assertFalse(stop_thread.is_alive())
+            self.assertEqual([False], publication_result)
+            self.assertTrue(wait_until(lambda: (
+                len(publisher.messages) >= 3
+                and publisher.messages[-1].linear.x == 0.0
+                and publisher.messages[-1].angular.z == 0.0
+            )))
+            positive_index = next(
+                index for index, message in enumerate(publisher.messages)
+                if message.linear.x > 0.0
+            )
+            self.assertTrue(any(
+                message.linear.x == 0.0 and message.angular.z == 0.0
+                for message in publisher.messages[positive_index + 1:]
+            ))
+        finally:
+            publisher.release_motion.set()
+            motion_thread.join(1.0)
+            stop_thread.join(1.0)
+            close_safety_lanes(controller)
+
     def test_orderly_shutdown_zeroes_every_follower_command(self):
         controller = make_controller(mode="circular", count=3)
 
@@ -912,6 +1251,209 @@ class FollowLeaderPathTests(unittest.TestCase):
             command = publisher.messages[-1]
             self.assertEqual(0.0, command.linear.x)
             self.assertEqual(0.0, command.angular.z)
+
+    def test_shutdown_fanout_is_bounded_by_a_blocked_first_robot(self):
+        class BlockingZeroPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def publish(self, message):
+                self.entered.set()
+                self.release.wait(2.0)
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=2)
+        blocked = BlockingZeroPublisher()
+        healthy = FakePublisher()
+        controller.cmd_pubs = {
+            "tb3_0": blocked,
+            "tb3_1": healthy,
+        }
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            started_at = time.monotonic()
+            controller._shutdown()
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(controller._shutdown_started)
+            self.assertFalse(controller.is_active)
+            self.assertTrue(blocked.entered.wait(0.5))
+            self.assertTrue(wait_until(lambda: bool(healthy.messages)))
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        finally:
+            blocked.release.set()
+            wait_until(lambda: bool(blocked.messages))
+            close_safety_lanes(controller)
+
+    def test_queued_start_cannot_overtake_terminal_shutdown(self):
+        controller = make_controller(mode="manual", count=1)
+        controller.is_active = False
+        controller.command_lock.acquire()
+        start = threading.Thread(
+            target=controller._start_cb,
+            args=(String(data=json.dumps({
+                "task_id": "late-follow-task",
+                "leader_mode": "manual",
+            })),),
+        )
+        shutdown = threading.Thread(target=controller._shutdown)
+
+        try:
+            start.start()
+            shutdown.start()
+            self.assertTrue(wait_until(lambda: controller._shutdown_started))
+            shutdown.join(0.25)
+            self.assertFalse(shutdown.is_alive())
+            self.assertTrue(controller.cmd_pubs["tb3_0"].messages)
+            stop = controller.cmd_pubs["tb3_0"].messages[-1]
+            self.assertEqual(0.0, stop.linear.x)
+            self.assertEqual(0.0, stop.angular.z)
+        finally:
+            controller.command_lock.release()
+
+        start.join(1.0)
+        shutdown.join(1.0)
+        self.assertFalse(start.is_alive())
+        self.assertFalse(shutdown.is_alive())
+        self.assertTrue(controller._shutdown_started)
+        self.assertFalse(controller.is_active)
+        self.assertFalse(controller.is_paused)
+        self.assertEqual("follow-test", controller.current_task_id)
+
+        add_robot = mock.Mock()
+        controller._add_robot = add_robot
+        controller._sync_fleet(["tb3_0", "tb3_9"])
+        add_robot.assert_not_called()
+        self.assertEqual(["tb3_0"], controller.robot_names)
+
+        controller.is_active = True
+        controller.is_paused = True
+        controller._resume_cb(String(data=json.dumps({
+            "task_id": "follow-test",
+        })))
+        self.assertTrue(controller.is_paused)
+        command = FOLLOW.Twist()
+        command.linear.x = 0.1
+        self.assertFalse(controller._publish_motion_commands({
+            "tb3_0": command,
+        }))
+
+    def test_remove_robot_cleans_state_when_ros_disposal_is_broken(self):
+        class BrokenPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.publish_entered = threading.Event()
+                self.release_publish = threading.Event()
+                self.unregister_entered = threading.Event()
+                self.release_unregister = threading.Event()
+
+            def publish(self, message):
+                self.publish_entered.set()
+                self.release_publish.wait(2.0)
+                super().publish(message)
+
+            def unregister(self):
+                self.unregister_entered.set()
+                self.release_unregister.wait(2.0)
+                raise RuntimeError("disconnected publisher")
+
+        class FailingSubscriber(FakeSubscriber):
+            def __init__(self):
+                super().__init__()
+                self.called = threading.Event()
+
+            def unregister(self):
+                self.called.set()
+                raise RuntimeError("disconnected subscriber")
+
+        controller = make_controller(mode="manual", count=2)
+        publisher = BrokenPublisher()
+        subscriber = FailingSubscriber()
+        avoidance = controller.avoidance["tb3_0"]
+        controller.cmd_pubs["tb3_0"] = publisher
+        controller.odom_subs["tb3_0"] = subscriber
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            started_at = time.monotonic()
+            controller._remove_robot("tb3_0")
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(publisher.publish_entered.wait(0.5))
+            self.assertTrue(publisher.unregister_entered.wait(0.5))
+            self.assertTrue(subscriber.called.wait(0.5))
+            self.assertTrue(wait_until(lambda: avoidance.shutdown_called))
+            self.assertNotIn("tb3_0", controller.robot_names)
+            for values in (
+                controller.cmd_pubs,
+                controller.odom_subs,
+                controller.avoidance,
+                controller.poses,
+                controller.yaws,
+                controller.odom_received_at,
+                controller.linear_pids,
+                controller.angular_pids,
+            ):
+                self.assertNotIn("tb3_0", values)
+            self.assertNotIn(
+                publisher,
+                [pub for _name, pub in controller._safety_publisher_snapshot],
+            )
+        finally:
+            publisher.release_publish.set()
+            publisher.release_unregister.set()
+            close_safety_lanes(controller)
+
+    def test_empty_fleet_cleanup_survives_a_blocked_robot(self):
+        class BlockingZeroPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def publish(self, message):
+                self.entered.set()
+                self.release.wait(2.0)
+                super().publish(message)
+
+        controller = make_controller(mode="manual", count=2)
+        blocked = BlockingZeroPublisher()
+        healthy = FakePublisher()
+        controller.cmd_pubs = {
+            "tb3_0": blocked,
+            "tb3_1": healthy,
+        }
+        install_prestarted_safety_lanes(controller)
+
+        try:
+            started_at = time.monotonic()
+            controller._sync_fleet([])
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(blocked.entered.wait(0.5))
+            self.assertTrue(healthy.messages)
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual([], controller.robot_names)
+            self.assertEqual({}, controller.cmd_pubs)
+            self.assertEqual({}, controller.odom_subs)
+            self.assertEqual({}, controller.avoidance)
+            self.assertEqual({}, controller.poses)
+            self.assertEqual((), controller._safety_publisher_snapshot)
+            self.assertFalse(controller.is_active)
+            self.assertIn("tb3_0", controller.path_error)
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual("failed", status["state"])
+        finally:
+            blocked.release.set()
+            wait_until(lambda: bool(blocked.messages))
+            close_safety_lanes(controller)
 
     def test_correlated_follow_stop_is_not_reported_as_a_failure(self):
         controller = make_controller(mode="circular", count=2)
@@ -946,6 +1488,25 @@ class FollowLeaderPathTests(unittest.TestCase):
             name: len(publisher.messages)
             for name, publisher in controller.cmd_pubs.items()
         })
+
+    def test_stop_before_start_prevents_late_follow_activation(self):
+        controller = make_controller(mode="circular", count=2)
+        future_stop = String(data=json.dumps({
+            "task_id": "cancelled-follow-task",
+        }))
+
+        controller._stop_cb(future_stop)
+        controller.is_active = False
+        controller._start_cb(String(data=json.dumps({
+            "task_id": "cancelled-follow-task",
+            "leader_mode": "circular",
+        })))
+
+        self.assertIn(
+            "cancelled-follow-task", controller._cancelled_task_ids
+        )
+        self.assertFalse(controller.is_active)
+        self.assertEqual("follow-test", controller.current_task_id)
 
     def test_fleet_growth_reanchors_before_resuming(self):
         controller = make_controller(mode="circular", count=3)

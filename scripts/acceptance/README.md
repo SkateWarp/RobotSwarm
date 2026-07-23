@@ -11,14 +11,16 @@ carga y el smoke de transporte desde la interfaz completan los siete recorridos.
 Los arneses visibles no admiten modo headless y fijan el origen de las
 credenciales a `https://rs.zerav.la`.
 
-La ejecución offline vigente aprobó 237/237 contratos: API de producción 17,
-carga N=4 47, responsive 13, matriz ROS 60, secciones 15, transporte desde la
+La ejecución offline vigente aprobó 253/253 contratos: API de producción 17,
+carga N=4 49, responsive 13, matriz ROS 73, secciones 16, transporte desde la
 interfaz 44 y visor multiusuario 41. Este conteo corresponde a las pruebas
 unitarias de los siete instrumentos; no equivale a haber aprobado sus recorridos
 contra un release desplegado. La compuerta N=4 aprobó sobre la base `fbef23e`,
-pero debe repetirse, junto con la matriz productiva completa, sobre el SHA final.
+pero debe repetirse sobre el SHA final. De la matriz normal quedan por repetir
+las seis formaciones corregidas; los cinco tamaños de transporte ya tienen un
+resultado sobre `1448a31`, incluido N=1 con I-139 en el arnés.
 Los resultados de suites de aplicación, CI y postdeploy deben citarse con el SHA
-y el reporte de la ejecución que los produjo, no inferirse a partir de estos 237
+y el reporte de la ejecución que los produjo, no inferirse a partir de estos 253
 contratos.
 
 ## Archivos locales requeridos
@@ -378,6 +380,15 @@ El `render-report.json` se recoge antes del escenario y queda identificado como
 en la escena de arranque y un RTF inicial de 2,90, pero no mide el movimiento del
 algoritmo.
 
+El reporte inicial se copia y valida inmediatamente después de la sonda HLS,
+antes de esperar la tarea ROS. La atestación liga SHA, PID, tick de inicio y
+display al `gzclient` vivo. Si el TTL vence durante un caso largo, el arnés
+sondea de forma acotada la transición `closing` → hueco del DOM → botón de
+apertura; renueva únicamente después de comprobar que el runtime anterior ya no
+existe. El estado del lease nuevo se conserva desde la apertura hasta `finally`,
+incluso si fallan su localización o HLS. Un binding todavía desconocido impide
+declarar la limpieza completa.
+
 La evidencia bajo carga es independiente. El arnés copia desde la imagen
 inmutable el `gazebo_gui_preflight.py` oficial y su plugin, y los ejecuta en un
 segundo `gzclient` visible dentro de un sandbox acotado. Este proceso usa el
@@ -458,9 +469,15 @@ cero colisiones. La comprobación local N=3 también llegó a `DONE`: `tb3_0`
 notificó a los otros dos robots, 3/3 quedaron conectados y acoplados, se
 observaron 274 lotes de control/GRF y alrededor del 99 % de contribución útil
 por robot. El avance fue aproximadamente 0,5005 m, la eficiencia 0,9984, el RTF
-aproximadamente 2,996 y no hubo colisiones ni contactos inesperados. Las
-repeticiones de ambos casos sobre el SHA desplegado siguen pendientes; estos
-resultados locales no deben marcar la matriz productiva como aprobada.
+aproximadamente 2,996 y no hubo colisiones ni contactos inesperados. N=3 volvió
+a aprobar sobre `1448a31`. La primera corrida N=1 aprobó ROS, física y HLS en
+ese despliegue, pero su caso formal se rechazó porque el informe gráfico
+desapareció antes de la lectura tardía. La repetición con I-139 en el arnés
+terminó formalmente `DONE`: avanzó 0,5013 m, mantuvo RTF 2,9962, utilidad 1/1,
+cero colisiones, 58,711 FPS en la sonda activa y 30,164 FPS HLS. El reporte se
+preservó antes de esperar ROS y la limpieza fue completa. Esa corrida terminó
+sin necesitar renovar el lease; la renovación y sus fallos intermedios siguen
+cubiertos por los contratos, no por una afirmación física inventada.
 
 El reporte agregado se escribe atómicamente con modo `0600` y no contiene
 UUID, correos, contraseñas, tokens ni identificadores de lease, contenedor o
@@ -474,7 +491,10 @@ grupo de procesos y el bloque de limpieza de la sesión sigue ejecutándose.
 
 En el bloque `finally` de cada caso se cierra primero el visor, se detiene la
 sesión y se confirma que desaparecieron su contenedor, su red privada, el
-publicador y el directorio runtime del lease. Si alguna comprobación falla, no
+publicador y todos los directorios runtime del lease observados o recuperados.
+Si el binding de una renovación no puede recuperarse mediante el lookup seguro
+acotado, la limpieza falla cerrada aunque la API haya aceptado el cierre. Si
+alguna comprobación falla, no
 se inicia el escenario siguiente y el proceso devuelve 3. Una interrupción por
 Ctrl-C concede tiempo al runner ROS para limpiar, repite la liberación desde el
 control plane y devuelve 130 después de cerrar Chrome y borrar el perfil.
@@ -653,7 +673,7 @@ conexión iguales, ausencia de reutilización y continuidad monotónica. Una
 revisión P2 añadió el gate que exige, antes y después de la captura de `PUSH`,
 FPS decodificados finitos y no inferiores a
 `MATRIX.MINIMUM_BROWSER_VIDEO_FPS`. El caso de 26,9 frente a 27,0 debe fallar.
-La regresión forma parte de los 47/47 contratos vigentes; la evidencia v11 y
+La regresión forma parte de los 49/49 contratos vigentes; la evidencia v11 y
 los contratos aprobaron en sus alcances respectivos. Esta aprobación es local;
 el mismo comando sigue siendo obligatorio sobre el SHA desplegado.
 

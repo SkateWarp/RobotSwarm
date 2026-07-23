@@ -2040,6 +2040,155 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         )
         probe.assert_not_called()
 
+    def test_active_gate_preserves_probe_before_the_scenario_releases_its_lease(self):
+        scenario = DRIVER.SCENARIOS[0]
+        document = startup_render_report()
+        raw = json.dumps(document).encode("utf-8")
+        attestation_line = (
+            DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
+            + f"{hashlib.sha256(raw).hexdigest()} "
+            + f"{document['process']['pid']} "
+            + f"{document['process']['start_ticks']}\n"
+        )
+        probe_output = DRIVER.ProcessOutput(0, attestation_line, "")
+        captured = {}
+        report_captured = threading.Event()
+        docker = mock.Mock()
+        docker.wait_task_active.return_value = {
+            "behavior": scenario.behavior,
+            "behaviorPhase": "",
+            "behaviorState": "moving",
+            "completeFormation": True,
+            "confirmed": True,
+            "taskStatus": "running",
+        }
+        ui = mock.Mock()
+        ui.video_metrics.return_value = passing_video_metrics()
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            report = Path(temporary) / "matrix-active-gui-report.json"
+            report.write_bytes(raw)
+            report.chmod(0o600)
+
+            def run_scenario(
+                _container,
+                _scenario,
+                _timeout,
+                _task_id,
+                _run_token,
+                **kwargs,
+            ):
+                kwargs["on_started"](time.monotonic())
+                if not report_captured.wait(2):
+                    raise AssertionError(
+                        "the report was not captured while the lease existed"
+                    )
+                report.unlink()
+                time.sleep(0.05)
+                kwargs["on_exited"](time.monotonic())
+                return child_output()
+
+            def run_probe(_command, **kwargs):
+                kwargs["on_started"](time.monotonic())
+                kwargs["on_exited"](time.monotonic())
+                return probe_output
+
+            def preserve(output):
+                attestation = DRIVER.active_probe_attestation(output)
+                evidence = DRIVER.load_active_probe_evidence(
+                    report,
+                    ":120",
+                    attestation,
+                )
+                captured["attestation"] = attestation
+                captured["raw"] = evidence.raw
+                report_captured.set()
+
+            docker.run_acceptance.side_effect = run_scenario
+            with mock.patch.object(DRIVER, "run_command", side_effect=run_probe):
+                child, observed_probe, _video, _overlap = (
+                    DRIVER.run_active_scenario_gate(
+                        docker=docker,
+                        container=DRIVER.ContainerHandle("c" * 64, "version"),
+                        scenario=scenario,
+                        scenario_timeout=2,
+                        probe_command=["active-probe"],
+                        probe_environment={},
+                        ui=ui,
+                        stop_event=threading.Event(),
+                        on_probe_completed=preserve,
+                    )
+                )
+
+            self.assertFalse(report.exists())
+            self.assertEqual(raw, captured["raw"])
+            self.assertEqual(
+                hashlib.sha256(raw).hexdigest(),
+                captured["attestation"].sha256,
+            )
+            self.assertIs(probe_output, observed_probe)
+            self.assertEqual(0, child.returncode)
+
+    def test_active_gate_wraps_probe_capture_failure_with_the_ros_protocol(self):
+        scenario = DRIVER.SCENARIOS[0]
+        probe_output = DRIVER.ProcessOutput(0, "probe passed\n", "")
+        child = child_output()
+        capture_attempted = threading.Event()
+        docker = mock.Mock()
+        docker.wait_task_active.return_value = {
+            "behavior": scenario.behavior,
+            "behaviorPhase": "",
+            "behaviorState": "moving",
+            "completeFormation": True,
+            "confirmed": True,
+            "taskStatus": "running",
+        }
+        ui = mock.Mock()
+        ui.video_metrics.return_value = passing_video_metrics()
+
+        def run_scenario(
+            _container,
+            _scenario,
+            _timeout,
+            _task_id,
+            _run_token,
+            **kwargs,
+        ):
+            kwargs["on_started"](time.monotonic())
+            if not capture_attempted.wait(2):
+                raise AssertionError("the probe capture was not attempted")
+            time.sleep(0.05)
+            kwargs["on_exited"](time.monotonic())
+            return child
+
+        def run_probe(_command, **kwargs):
+            kwargs["on_started"](time.monotonic())
+            kwargs["on_exited"](time.monotonic())
+            return probe_output
+
+        def fail_capture(_output):
+            capture_attempted.set()
+            raise DRIVER.MatrixError("synthetic report capture failure")
+
+        docker.run_acceptance.side_effect = run_scenario
+        with mock.patch.object(DRIVER, "run_command", side_effect=run_probe):
+            with self.assertRaises(DRIVER.ActiveScenarioGateError) as raised:
+                DRIVER.run_active_scenario_gate(
+                    docker=docker,
+                    container=DRIVER.ContainerHandle("c" * 64, "version"),
+                    scenario=scenario,
+                    scenario_timeout=2,
+                    probe_command=["active-probe"],
+                    probe_environment={},
+                    ui=ui,
+                    stop_event=threading.Event(),
+                    on_probe_completed=fail_capture,
+                )
+
+        self.assertEqual("probeEvidencePreservation", raised.exception.phase)
+        self.assertIs(child, raised.exception.scenario_output)
+        self.assertIn("synthetic report capture failure", str(raised.exception))
+
     def test_active_probe_failure_is_classified_without_raw_output(self):
         timeout = DRIVER.ProcessOutput(
             1,
@@ -2077,12 +2226,402 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         )
         self.assertNotIn("opaque", json.dumps(classified_unknown))
 
+    def test_post_scenario_viewer_does_not_renew_an_unproven_expiry(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.return_value = {
+            "openButton": False,
+            "privateViewerMounted": False,
+        }
+        ui.require_interactive_hls.side_effect = DRIVER.MatrixError(
+            "synthetic HLS decoder failure"
+        )
+        lease_directory = Path("/tmp/original-viewer-lease")
+        lease = DRIVER.ViewerLeaseState(lease_directory)
+
+        with mock.patch.object(DRIVER, "active_viewer_lease_directory") as bind:
+            with self.assertRaisesRegex(
+                DRIVER.MatrixError, "synthetic HLS decoder failure"
+            ):
+                    DRIVER.require_post_scenario_viewer(
+                        ui,
+                        session_id,
+                        lease,
+                    runtime_dir=Path("/tmp/viewer-runtime"),
+                    timeout=1,
+                    stop_event=threading.Event(),
+                )
+
+        ui.open_viewer.assert_not_called()
+        ui._occupying_sessions.assert_not_called()
+        bind.assert_not_called()
+
+    def test_post_scenario_viewer_waits_from_closing_to_open_button(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.side_effect = [
+            {
+                "closing": True,
+                "openButton": False,
+                "privateViewerMounted": False,
+            },
+            {
+                "closing": False,
+                "openButton": False,
+                "privateViewerMounted": False,
+            },
+            {
+                "closing": False,
+                "openButton": True,
+                "privateViewerMounted": False,
+            },
+        ]
+        ui._occupying_sessions.side_effect = [
+            [{"id": str(session_id)}],
+            [{"id": str(session_id)}],
+        ]
+        ui.require_interactive_hls.return_value = {
+            "hlsInteractive": True,
+            "status": "En vivo",
+            "fps": "Video 29.8 FPS",
+        }
+        stop_event = mock.Mock()
+        stop_event.is_set.return_value = False
+        stop_event.wait.return_value = False
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            old_lease = Path(temporary) / "expired-lease"
+            renewed_lease = Path(temporary) / "renewed-lease"
+            lease = DRIVER.ViewerLeaseState(old_lease)
+            with mock.patch.object(
+                DRIVER,
+                "active_viewer_lease_directory",
+                return_value=renewed_lease,
+            ):
+                state, renewed = DRIVER.require_post_scenario_viewer(
+                    ui,
+                    session_id,
+                    lease,
+                    runtime_dir=Path(temporary),
+                    timeout=1,
+                    stop_event=stop_event,
+                )
+
+        self.assertTrue(renewed)
+        self.assertTrue(state["hlsInteractive"])
+        self.assertEqual(renewed_lease, lease.directory)
+        self.assertEqual(3, ui.viewer_startup_state.call_count)
+        self.assertEqual(2, stop_event.wait.call_count)
+        ui.open_viewer.assert_called_once_with(1)
+
+    def test_post_scenario_viewer_fails_closed_when_closing_never_finishes(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.return_value = {
+            "closing": True,
+            "openButton": False,
+            "privateViewerMounted": False,
+        }
+        lease = DRIVER.ViewerLeaseState(
+            Path("/var/tmp") / f"missing-expired-lease-{uuid.uuid4().hex}"
+        )
+
+        with mock.patch.object(DRIVER, "active_viewer_lease_directory") as bind:
+            with self.assertRaisesRegex(
+                DRIVER.MatrixError, "expired viewer did not finish closing"
+            ):
+                DRIVER.require_post_scenario_viewer(
+                    ui,
+                    session_id,
+                    lease,
+                    runtime_dir=Path("/tmp/viewer-runtime"),
+                    timeout=0.01,
+                    stop_event=threading.Event(),
+                )
+
+        ui.open_viewer.assert_not_called()
+        ui.require_interactive_hls.assert_not_called()
+        ui._occupying_sessions.assert_not_called()
+        bind.assert_not_called()
+
+    def test_post_scenario_viewer_waits_for_late_expired_lease_cleanup(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.return_value = {
+            "openButton": True,
+            "privateViewerMounted": False,
+        }
+        ui._occupying_sessions.side_effect = [
+            [{"id": str(session_id)}],
+            [{"id": str(session_id)}],
+        ]
+        ui.require_interactive_hls.return_value = {
+            "hlsInteractive": True,
+            "status": "En vivo",
+            "fps": "Video 29.8 FPS",
+        }
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            old_lease = Path(temporary) / "expired-lease"
+            renewed_lease = Path(temporary) / "renewed-lease"
+            old_lease.mkdir()
+            lease_state = DRIVER.ViewerLeaseState(old_lease)
+
+            def remove_expired_lease():
+                time.sleep(0.03)
+                old_lease.rmdir()
+
+            remover = threading.Thread(target=remove_expired_lease)
+            remover.start()
+            try:
+                with mock.patch.object(
+                    DRIVER,
+                    "active_viewer_lease_directory",
+                    return_value=renewed_lease,
+                ):
+                    state, renewed = DRIVER.require_post_scenario_viewer(
+                        ui,
+                        session_id,
+                        lease_state,
+                        runtime_dir=Path(temporary),
+                        timeout=1,
+                        stop_event=threading.Event(),
+                    )
+            finally:
+                remover.join(timeout=1)
+
+        self.assertTrue(renewed)
+        self.assertEqual(renewed_lease, lease_state.directory)
+        self.assertTrue(state["hlsInteractive"])
+        ui.open_viewer.assert_called_once_with(1)
+
+    def test_post_scenario_viewer_rejects_persistent_old_lease_cleanup(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.return_value = {
+            "openButton": True,
+            "privateViewerMounted": False,
+        }
+        docker = mock.Mock()
+        docker.resources_absent.return_value = (True, True)
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            old_lease = Path(temporary) / "expired-lease"
+            old_lease.mkdir()
+            lease = DRIVER.ViewerLeaseState(old_lease)
+            with mock.patch.object(
+                DRIVER, "active_viewer_lease_directory"
+            ) as bind:
+                with self.assertRaisesRegex(
+                    DRIVER.MatrixError,
+                    "expired viewer left its private runtime directory behind",
+                ):
+                    DRIVER.require_post_scenario_viewer(
+                        ui,
+                        session_id,
+                        lease,
+                        runtime_dir=Path(temporary),
+                        timeout=0.01,
+                        stop_event=threading.Event(),
+                    )
+
+            with mock.patch.object(
+                DRIVER.time, "monotonic", side_effect=[0.0, 0.0, 1.0]
+            ), mock.patch.object(DRIVER.time, "sleep"), mock.patch.object(
+                DRIVER, "publisher_for_session_exists", return_value=False
+            ):
+                cleanup = DRIVER.wait_for_resource_cleanup(
+                    docker,
+                    session_id,
+                    old_lease,
+                    timeout=0.1,
+                )
+
+        ui.open_viewer.assert_not_called()
+        ui._occupying_sessions.assert_not_called()
+        bind.assert_not_called()
+        self.assertFalse(cleanup["leaseRuntimeAbsent"])
+        self.assertFalse(all(cleanup.values()))
+
+    def test_failed_renewed_hls_keeps_the_new_lease_for_cleanup(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.return_value = {
+            "closing": False,
+            "openButton": True,
+            "privateViewerMounted": False,
+        }
+        ui._occupying_sessions.side_effect = [
+            [{"id": str(session_id)}],
+            [{"id": str(session_id)}],
+        ]
+        ui.require_interactive_hls.side_effect = DRIVER.MatrixError(
+            "synthetic renewed HLS failure"
+        )
+        ui.stop_event = threading.Event()
+        ui.create_requested = True
+        ui.cdp.evaluate.return_value = True
+        ui.stop_created_session.return_value = {"requested": True, "released": True}
+        docker = mock.Mock()
+        docker.resources_absent.return_value = (True, True)
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            old_lease = Path(temporary) / "expired-lease"
+            renewed_lease = Path(temporary) / "renewed-lease"
+            renewed_lease.mkdir()
+            lease = DRIVER.ViewerLeaseState(old_lease)
+            with mock.patch.object(
+                DRIVER,
+                "active_viewer_lease_directory",
+                return_value=renewed_lease,
+            ):
+                with self.assertRaisesRegex(
+                    DRIVER.MatrixError, "synthetic renewed HLS failure"
+                ):
+                    DRIVER.require_post_scenario_viewer(
+                        ui,
+                        session_id,
+                        lease,
+                        runtime_dir=Path(temporary),
+                        timeout=1,
+                        stop_event=threading.Event(),
+                    )
+
+            with mock.patch.object(
+                DRIVER, "close_viewer", return_value={"requested": True, "closed": True}
+            ), mock.patch.object(
+                DRIVER.time, "monotonic", side_effect=[0.0, 0.0, 1.0]
+            ), mock.patch.object(DRIVER.time, "sleep"), mock.patch.object(
+                DRIVER, "publisher_for_session_exists", return_value=False
+            ):
+                cleanup = DRIVER.cleanup_case(
+                    ui,
+                    docker,
+                    session_id,
+                    lease.directory,
+                    timeout=0.1,
+                    lease_binding_known=lease.binding_known,
+                )
+
+        self.assertTrue(lease.binding_known)
+        self.assertEqual(renewed_lease, lease.directory)
+        self.assertTrue(cleanup["leaseBindingKnown"])
+        self.assertFalse(cleanup["leaseRuntimeAbsent"])
+        self.assertFalse(cleanup["complete"])
+
+    def test_failed_renewed_lease_lookup_keeps_cleanup_fail_closed(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui.viewer_startup_state.return_value = {
+            "closing": False,
+            "openButton": True,
+            "privateViewerMounted": False,
+        }
+        ui._occupying_sessions.side_effect = [
+            [{"id": str(session_id)}],
+            [{"id": str(session_id)}],
+        ]
+        ui.stop_event = threading.Event()
+        ui.create_requested = True
+        ui.cdp.evaluate.return_value = False
+        ui.stop_created_session.return_value = {"requested": True, "released": True}
+        lease = DRIVER.ViewerLeaseState(
+            Path("/var/tmp") / f"missing-expired-lease-{uuid.uuid4().hex}"
+        )
+
+        with mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            side_effect=DRIVER.MatrixError("synthetic renewed lease lookup failure"),
+        ):
+            with self.assertRaisesRegex(
+                DRIVER.MatrixError, "synthetic renewed lease lookup failure"
+            ):
+                DRIVER.require_post_scenario_viewer(
+                    ui,
+                    session_id,
+                    lease,
+                    runtime_dir=Path("/tmp/viewer-runtime"),
+                    timeout=1,
+                    stop_event=threading.Event(),
+                )
+
+        with mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            side_effect=DRIVER.MatrixError("synthetic cleanup lookup failure"),
+        ):
+            recovered = DRIVER.recover_viewer_lease_for_cleanup(
+                lease,
+                Path("/tmp/viewer-runtime"),
+                session_id,
+                timeout=0.1,
+            )
+
+        fully_absent = {
+            "containerAbsent": True,
+            "networkAbsent": True,
+            "leaseRuntimeAbsent": True,
+            "viewerPublisherAbsent": True,
+        }
+        with mock.patch.object(
+            DRIVER, "close_viewer", return_value={"requested": True, "closed": True}
+        ), mock.patch.object(
+            DRIVER, "wait_for_resource_cleanup", return_value=fully_absent
+        ):
+            cleanup = DRIVER.cleanup_case(
+                ui,
+                mock.Mock(),
+                session_id,
+                lease.directory,
+                timeout=0.1,
+                lease_binding_known=lease.binding_known,
+            )
+
+        self.assertIsNone(lease.directory)
+        self.assertFalse(recovered)
+        self.assertFalse(lease.binding_known)
+        self.assertFalse(cleanup["leaseBindingKnown"])
+        self.assertFalse(cleanup["leaseRuntimeAbsent"])
+        self.assertFalse(cleanup["complete"])
+
+    def test_cleanup_recovers_a_transiently_unbound_renewed_lease(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        lease = DRIVER.ViewerLeaseState()
+        lease.begin_viewer_request()
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            renewed_lease = Path(temporary) / "renewed-lease"
+            renewed_lease.mkdir()
+            with mock.patch.object(
+                DRIVER,
+                "active_viewer_lease_directory",
+                return_value=renewed_lease,
+            ) as bind:
+                recovered = DRIVER.recover_viewer_lease_for_cleanup(
+                    lease,
+                    Path(temporary),
+                    session_id,
+                    timeout=30,
+                )
+
+        self.assertTrue(recovered)
+        self.assertTrue(lease.binding_known)
+        self.assertEqual(renewed_lease, lease.directory)
+        self.assertEqual(5.0, bind.call_args.kwargs["timeout"])
+        self.assertIsInstance(bind.call_args.kwargs["stop_event"], threading.Event)
+
     def test_case_orders_startup_active_probe_and_post_scenario_roster(self):
         scenario = DRIVER.SCENARIOS[0]
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
         events = []
         ui = mock.Mock()
-        ui._occupying_sessions.side_effect = [[], [{"id": str(session_id)}]]
+        ui._occupying_sessions.side_effect = [
+            [],
+            [{"id": str(session_id)}],
+            [{"id": str(session_id)}],
+            [{"id": str(session_id)}],
+        ]
         ui.wait_ready.return_value = {
             "state": "Ready",
             "activeRobots": scenario.robot_count,
@@ -2091,6 +2630,10 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             "hlsInteractive": True,
             "status": "En vivo",
             "fps": "Video 29.8 FPS",
+        }
+        ui.viewer_startup_state.return_value = {
+            "openButton": True,
+            "privateViewerMounted": False,
         }
         ui.screenshot.return_value = {
             "file": "browser.png",
@@ -2142,14 +2685,20 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
 
         def run_active(**_kwargs):
             events.append("active-concurrent-gate")
+            probe_digest = hashlib.sha256(raw).hexdigest()
+            probe_output = DRIVER.ProcessOutput(
+                0,
+                DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
+                + f"{probe_digest} "
+                + f"{document['process']['pid']} "
+                + f"{document['process']['start_ticks']}\n"
+                + "Gazebo GUI preflight passed\n",
+                "",
+            )
+            _kwargs["on_probe_completed"](probe_output)
             return (
                 child_output(),
-                DRIVER.ProcessOutput(
-                    0,
-                    DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
-                    + f"{'a' * 64} 741 9981\nGazebo GUI preflight passed\n",
-                    "",
-                ),
+                probe_output,
                 passing_active_video(),
                 passing_overlap(),
             )
@@ -2157,7 +2706,10 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
             DRIVER,
             "active_viewer_lease_directory",
-            return_value=Path(temporary),
+            side_effect=[
+                Path(temporary) / "initial-lease",
+                Path(temporary) / "renewed-lease",
+            ],
         ), mock.patch.object(
             DRIVER, "load_viewer_startup_evidence", side_effect=load_startup
         ), mock.patch.object(
@@ -2223,6 +2775,279 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             report["postScenarioFullRoster"]["retainedAcrossScenario"]
         )
         self.assertTrue(report["ros"]["taskCleanupVerified"])
+        self.assertTrue(report["viewer"]["leaseRenewedAfterScenario"])
+        self.assertEqual(2, ui.open_viewer.call_count)
+        self.assertTrue(report["activeScenarioGuiProbe"]["caseCompleted"])
+        self.assertNotIn("activeScenarioGuiProbeCapture", report)
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            report["hashes"]["activeScenarioGuiReportSha256"],
+        )
+
+    def test_successful_probe_capture_is_reported_when_a_later_gate_fails(self):
+        scenario = DRIVER.SCENARIOS[0]
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui._occupying_sessions.side_effect = [[], [{"id": str(session_id)}]]
+        ui.wait_ready.return_value = {
+            "state": "Ready",
+            "activeRobots": scenario.robot_count,
+        }
+        ui.require_interactive_hls.return_value = {
+            "hlsInteractive": True,
+            "status": "En vivo",
+            "fps": "Video 29.8 FPS",
+        }
+        docker = mock.Mock()
+        container = DRIVER.ContainerHandle(
+            "c" * 64, "version", "172.20.0.4", "172.20.0.1"
+        )
+        docker.verify_session.return_value = (container, {"managed": True})
+        docker.verify_full_roster.return_value = {
+            "source": "/gazebo/model_states",
+            "expectedRobots": scenario.robot_count,
+            "observedRobotModels": scenario.robot_count,
+            "exactRoster": True,
+        }
+        document = startup_render_report()
+        raw = json.dumps(document).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        startup = DRIVER.validate_viewer_startup_report(document, raw)
+        active_probe = DRIVER.validate_viewer_startup_report(document, raw)
+        args = argparse.Namespace(
+            ready_timeout=1,
+            viewer_timeout=1,
+            scenario_timeout=1,
+            cleanup_timeout=1,
+            viewer_runtime_dir=Path("/tmp/not-used"),
+            deployment_commit="a" * 40,
+        )
+        cleanup = {
+            "viewerClosed": True,
+            "sessionStopped": True,
+            "workspaceReleased": True,
+            "resourceIdentityKnown": True,
+            "leaseBindingKnown": True,
+            "containerAbsent": True,
+            "networkAbsent": True,
+            "leaseRuntimeAbsent": True,
+            "viewerPublisherAbsent": True,
+            "complete": True,
+        }
+        child = child_output()
+
+        def fail_after_capture(**kwargs):
+            probe_output = DRIVER.ProcessOutput(
+                0,
+                DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
+                + f"{digest} {document['process']['pid']} "
+                + f"{document['process']['start_ticks']}\n",
+                "",
+            )
+            kwargs["on_probe_completed"](probe_output)
+            raise DRIVER.ActiveScenarioGateError(
+                "the final task activity proof failed",
+                "afterVisualSampling",
+                child,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            return_value=Path(temporary),
+        ), mock.patch.object(
+            DRIVER, "load_viewer_startup_evidence", return_value=startup
+        ), mock.patch.object(
+            DRIVER,
+            "active_probe_runtime",
+            return_value=DRIVER.ActiveProbeRuntime((), {}, "/usr/bin/gzclient"),
+        ), mock.patch.object(
+            DRIVER,
+            "prepare_active_probe_inputs",
+            return_value=(
+                Path(temporary) / "preflight.py",
+                Path(temporary) / "probe.so",
+                {
+                    "preflightScriptSha256": "a" * 64,
+                    "probePluginSha256": "b" * 64,
+                },
+            ),
+        ), mock.patch.object(
+            DRIVER, "build_active_probe_command", return_value=["active-probe"]
+        ), mock.patch.object(
+            DRIVER, "run_active_scenario_gate", side_effect=fail_after_capture
+        ), mock.patch.object(
+            DRIVER, "load_active_probe_evidence", return_value=active_probe
+        ), mock.patch.object(
+            DRIVER, "write_bytes_secure"
+        ) as writer, mock.patch.object(
+            DRIVER, "cleanup_case", return_value=cleanup
+        ):
+            report, passed = DRIVER.run_one_case(
+                index=1,
+                scenario=scenario,
+                args=args,
+                ui=ui,
+                docker=docker,
+                evidence_dir=Path(temporary),
+                credentials={"email": "owner@example.test", "password": "secret"},
+                stop_event=threading.Event(),
+            )
+
+            active_name = (
+                DRIVER.case_artifact_prefix(1, scenario)
+                + "-active-scenario-gui-report.json"
+            )
+            writer.assert_any_call(Path(temporary) / active_name, raw)
+
+        self.assertFalse(passed)
+        self.assertEqual("failed", report["status"])
+        self.assertNotIn("activeScenarioGuiProbe", report)
+        capture = report["activeScenarioGuiProbeCapture"]
+        self.assertTrue(capture["capturePreserved"])
+        self.assertFalse(capture["scenarioGatePassed"])
+        self.assertEqual("afterVisualSampling", capture["scenarioGateFailurePhase"])
+        self.assertNotIn("scenarioProcessActiveThroughout", capture)
+        self.assertEqual(digest, report["hashes"]["activeScenarioGuiReportSha256"])
+        self.assertTrue(
+            report["activeScenarioGateFailure"]["childProtocolPreserved"]
+        )
+        self.assertRegex(
+            report["hashes"]["evidenceBundleSha256"], r"^[0-9a-f]{64}$"
+        )
+
+    def test_preserved_probe_marks_gate_passed_when_later_validation_fails(self):
+        scenario = DRIVER.SCENARIOS[0]
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui._occupying_sessions.side_effect = [[], [{"id": str(session_id)}]]
+        ui.wait_ready.return_value = {
+            "state": "Ready",
+            "activeRobots": scenario.robot_count,
+        }
+        ui.require_interactive_hls.return_value = {
+            "hlsInteractive": True,
+            "status": "En vivo",
+            "fps": "Video 29.8 FPS",
+        }
+        docker = mock.Mock()
+        container = DRIVER.ContainerHandle(
+            "c" * 64, "version", "172.20.0.4", "172.20.0.1"
+        )
+        docker.verify_session.return_value = (container, {"managed": True})
+        docker.verify_full_roster.return_value = {
+            "source": "/gazebo/model_states",
+            "expectedRobots": scenario.robot_count,
+            "observedRobotModels": scenario.robot_count,
+            "exactRoster": True,
+        }
+        document = startup_render_report()
+        raw = json.dumps(document).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        startup = DRIVER.validate_viewer_startup_report(document, raw)
+        active_probe = DRIVER.validate_viewer_startup_report(document, raw)
+        args = argparse.Namespace(
+            ready_timeout=1,
+            viewer_timeout=1,
+            scenario_timeout=1,
+            cleanup_timeout=1,
+            viewer_runtime_dir=Path("/tmp/not-used"),
+            deployment_commit="a" * 40,
+        )
+        cleanup = {
+            "viewerClosed": True,
+            "sessionStopped": True,
+            "workspaceReleased": True,
+            "resourceIdentityKnown": True,
+            "leaseBindingKnown": True,
+            "containerAbsent": True,
+            "networkAbsent": True,
+            "leaseRuntimeAbsent": True,
+            "viewerPublisherAbsent": True,
+            "complete": True,
+        }
+
+        def complete_gate(**kwargs):
+            probe_output = DRIVER.ProcessOutput(
+                0,
+                DRIVER.ACTIVE_PROBE_ATTESTATION_PREFIX
+                + f"{digest} {document['process']['pid']} "
+                + f"{document['process']['start_ticks']}\n",
+                "",
+            )
+            kwargs["on_probe_completed"](probe_output)
+            return (
+                child_output(),
+                probe_output,
+                passing_active_video(),
+                passing_overlap(),
+            )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            return_value=Path(temporary) / "initial-lease",
+        ), mock.patch.object(
+            DRIVER, "load_viewer_startup_evidence", return_value=startup
+        ), mock.patch.object(
+            DRIVER,
+            "active_probe_runtime",
+            return_value=DRIVER.ActiveProbeRuntime((), {}, "/usr/bin/gzclient"),
+        ), mock.patch.object(
+            DRIVER,
+            "prepare_active_probe_inputs",
+            return_value=(
+                Path(temporary) / "preflight.py",
+                Path(temporary) / "probe.so",
+                {
+                    "preflightScriptSha256": "a" * 64,
+                    "probePluginSha256": "b" * 64,
+                },
+            ),
+        ), mock.patch.object(
+            DRIVER, "build_active_probe_command", return_value=["active-probe"]
+        ), mock.patch.object(
+            DRIVER, "run_active_scenario_gate", side_effect=complete_gate
+        ), mock.patch.object(
+            DRIVER, "load_active_probe_evidence", return_value=active_probe
+        ), mock.patch.object(
+            DRIVER, "write_bytes_secure"
+        ), mock.patch.object(
+            DRIVER, "active_probe_processes", return_value=[]
+        ), mock.patch.object(
+            DRIVER, "stop_active_probe_processes", return_value=True
+        ), mock.patch.object(
+            DRIVER,
+            "validate_ros_evidence",
+            side_effect=DRIVER.MatrixError("synthetic later validation failure"),
+        ), mock.patch.object(
+            DRIVER, "cleanup_case", return_value=cleanup
+        ):
+            report, passed = DRIVER.run_one_case(
+                index=1,
+                scenario=scenario,
+                args=args,
+                ui=ui,
+                docker=docker,
+                evidence_dir=Path(temporary),
+                credentials={"email": "owner@example.test", "password": "secret"},
+                stop_event=threading.Event(),
+            )
+
+        self.assertFalse(passed)
+        self.assertIn("synthetic later validation failure", report["failure"])
+        self.assertNotIn("activeScenarioGuiProbe", report)
+        capture = report["activeScenarioGuiProbeCapture"]
+        self.assertTrue(capture["capturePreserved"])
+        self.assertTrue(capture["scenarioGatePassed"])
+        self.assertFalse(capture["caseCompleted"])
+        self.assertTrue(capture["scenarioProcessActiveThroughout"])
+        self.assertNotIn("scenarioGateFailurePhase", capture)
+        self.assertEqual(digest, report["hashes"]["activeScenarioGuiReportSha256"])
+        self.assertTrue(report["ros"]["protocolParsed"])
+        self.assertRegex(
+            report["hashes"]["evidenceBundleSha256"], r"^[0-9a-f]{64}$"
+        )
 
     def test_docker_evidence_checks_image_revision_version_and_private_network(self):
         commit = "a" * 40
@@ -2453,7 +3278,7 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertTrue(report["cleanup"]["complete"])
         cleanup_call.assert_called_once()
 
-    def test_failed_ros_gate_retains_sanitized_parsed_protocol_and_hashes(self):
+    def test_failed_probe_capture_retains_sanitized_parsed_protocol_and_hashes(self):
         scenario = DRIVER.SCENARIOS[0]
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
         ui = mock.Mock()
@@ -2551,9 +3376,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             DRIVER,
             "run_active_scenario_gate",
             side_effect=DRIVER.ActiveScenarioGateError(
-                "The correlated ROS task was not active during visual sampling "
-                "(task_terminal_before_activity)",
-                "beforeVisualSampling",
+                "The Gazebo render report is unavailable",
+                "probeEvidencePreservation",
                 failed_child,
             ),
         ), mock.patch.object(
@@ -2582,7 +3406,7 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertFalse(report["ros"]["taskCleanupVerified"])
         self.assertEqual(
             {
-                "phase": "beforeVisualSampling",
+                "phase": "probeEvidencePreservation",
                 "childProtocolAvailable": True,
                 "childProtocolPreserved": True,
             },

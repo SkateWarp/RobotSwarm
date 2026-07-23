@@ -1,12 +1,13 @@
 # Estado de implementación de RobotSwarm
 
-**Fecha del corte:** 2026-07-22
+**Fecha del corte:** 2026-07-23
 
-**Alcance:** estado de producción en `9f49e17` y candidato correctivo local
-integrado hasta `07da8f4`, más los ajustes cinemático y de encuadre del marcador
-preparados en el árbol de trabajo. El SHA definitivo todavía no existe porque debe incluir
-esta documentación y los artefactos pendientes. No
-constituye todavía el acta de cierre.
+**Alcance:** producción observada en
+`1448a31bbbbfd77588bada109947098cc95d9dda`, integrada mediante la PR #106,
+y correcciones locales I-136–I-143 todavía sin publicar. Frontend, backend y
+worker GPU ejecutan el corte de la PR #106; la etiqueta
+`rollback/pre-formation-ghost-9f49e17` conserva la revisión anterior. Este
+documento no constituye todavía el acta de cierre.
 
 La versión anterior de este archivo describía como trabajo futuro pendiente el
 orquestador de tareas, los tres comportamientos, los archivos de lanzamiento,
@@ -22,11 +23,11 @@ fallidos y la evidencia visual, está disponible en
 
 | Capa | Responsabilidad actual | Estado del repositorio |
 | --- | --- | --- |
-| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `9f49e17` publicado por Cloudflare; el candidato añade tolerancia de llegada, estado del marcador de destino y redirecciones de rutas antiguas |
-| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `9f49e17` desplegado y sano; el validador local admite `arrival_tolerance` sin cambiar los contratos existentes |
-| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | `9f49e17` activo; unidad versionada con AF_NETLINK y GPU NVIDIA comprobada |
-| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | Imagen de `9f49e17` activa; `robotswarm-ros:local-final-safe` contiene el candidato local revalidado tras el ajuste de cámara, todavía sin CI, release ni aceptación postdeploy |
-| MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | HLS privado operativo; dos sesiones independientes y una prueba de aceptación cargada se observaron desde Chrome visible |
+| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `1448a31` publicado por Cloudflare, con tolerancia de llegada, estado del marcador y redirecciones heredadas comprobados |
+| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `1448a31` desplegado y sano; `arrival_tolerance` forma parte del contrato productivo |
+| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | `1448a31` activo; unidad versionada con AF_NETLINK y GPU NVIDIA comprobada |
+| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | Imagen inmutable de `1448a31` activa; las correcciones de formación I-136–I-138 permanecen locales hasta el PR correctivo |
+| MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | HLS privado operativo; dos visores independientes, interacción y pantalla completa aprobados en Chrome visible; I-139 endurece localmente la renovación al vencer el TTL |
 
 Las capas utilizan un único ciclo de vida correlacionado en vez de controles
 puntuales separados: el frontend invoca al backend autenticado, el backend
@@ -35,30 +36,38 @@ espacio de nombres ROS privado y ROS informa el estado de la flota y las tareas
 a través del concentrador del worker. El navegador no recibe acceso
 administrativo a Docker, ROS, Gazebo, VNC ni MediaMTX.
 
-Los PR #102–#104 llevaron la base hasta `fbef23e`; el PR #105 integró el
-endurecimiento de aceptación, el orden causal del worker, el parser UTC y la
-restauración del PNG histórico. El `main` resultante,
-`9f49e17435a1ddd6b93b7834b2896d57059616fe`, quedó alineado en frontend,
-backend y worker GPU, y se conserva localmente como
-`rollback/pre-formation-ghost-9f49e17`.
+Los PR #102–#105 llevaron la base hasta `9f49e17`. La PR #106 integró el
+marcador visual cinemático, la tolerancia de llegada, el cierre de las carreras
+de carga y los controles web restantes. Su squash produjo `1448a31`; CI,
+Cloudflare, backend y el despliegue GPU exacto aprobaron. `9f49e17` queda desde
+entonces como rollback histórico.
 
-Sobre `9f49e17` aprobaron la API multiusuario, dos ventanas visibles y el
-recorrido de secciones. Las cuatro anchuras adaptables y la aceptación cargada
-N=4 permanecen vinculadas al corte histórico `fbef23e`. El reintento de la carga
-sobre la base nueva se detuvo antes de la física y permitió detectar la carrera
-de colocación.
+Sobre `1448a31` aprobaron la API multiusuario N=3/N=7, dos Chrome visibles con
+visores privados, interacción y pantalla completa, las cuatro anchuras
+adaptables, seguimiento N=3/N=6/N=10 y transporte N=2/N=3/N=4/N=10. El
+recorrido User y las denegaciones 403 de las rutas Admin también aprobaron. No
+se repitió el recorrido Admin completo porque no se dispone de una credencial
+administrativa autorizada; no se promovió una cuenta mediante SQL.
 
-La matriz posterior mostró además que las formaciones móviles podían terminar
-antes de formar, y que el reemplazo de la carga dependía de una carrera entre
-`delete`, `spawn` y `set_model_state` de Gazebo. La rama correctiva resuelve esos
-puntos, añade el marcador visual de destino, retira dos pantallas de tareas
-conectadas a endpoints antiguos y cierra dos fallos de seguridad encontrados en
-la revisión final. La formación rechaza odometría y estados de modelos no
-finitos, mientras la sonda cargada deja de tocar Gazebo desde que comienza el
-apagado. También se ajustó el marcador a un modelo cinemático para que Gazebo
-refresque su visual sin darle gravedad ni colisión. El conjunto se publicará en
-un solo PR para no gastar ejecuciones innecesarias de GitHub Actions; hasta
-entonces no se le atribuye evidencia productiva.
+La misma aceptación postdeploy halló que las seis formaciones móviles podían
+terminar antes del estado activo y que el caso N=1 perdía el informe gráfico al
+vencer la concesión del visor. I-136–I-138 trasladan el solver fuera del callback
+de odometría, alinean la evasión con la envolvente del Burger y correlacionan
+posición/yaw; permiten hasta dos replans en cero únicamente si la escena sigue
+estable, las poses son finitas y no existe contacto. I-139 conserva el informe
+atestiguado antes de esperar ROS y hace que renovación y limpieza mantengan la
+propiedad del lease incluso ante fallos intermedios. I-140 hace observable y
+fail-closed cualquier publisher que no acepte la parada local. I-141 distingue
+la planificación estacionaria de un heartbeat perdido y calibra la correlación
+de pose al asentamiento normal de Gazebo sin omitir la revalidación geométrica.
+I-142 elimina tres falsos negativos del comisionamiento web sin debilitar los
+gates de concurrencia, video o fullscreen. I-143 separa la liberación segura
+de un corredor de la convergencia estricta del slot para evitar un bloqueo
+entre lotes. El corte exacto
+ya fue revisado de manera independiente, construido como imagen inmutable y
+probado en Gazebo visible con N=3 y N=10. La repetición productiva N=1 también
+aprobó con el arnés corregido. Este conjunto se publicará en un único PR
+correctivo para limitar el gasto de GitHub Actions.
 
 ## Componentes implementados
 
@@ -135,17 +144,22 @@ alcanzan y estabilizan sus posiciones. El controlador conserva rígida la figura
 o letra, valida la huella completa de una órbita circular y, si es necesario,
 reduce el radio dentro de límites explícitos. También planifica las rutas de
 entrada por lotes para evitar cruces y vuelve a comprobar modelos vivos justo
-antes de publicar un lote completo de velocidades. Si la geometría cambia
-entre la instantánea y el commit, se descarta el plan y se emite solamente una
-parada segura; no se intenta continuar con datos obsoletos.
+antes de publicar un lote completo de velocidades. El solver costoso se ejecuta
+en un único worker coalescente, nunca dentro del callback de odometría, y cada
+tarea requiere una muestra posterior a su inicio. Si posición o yaw cambian
+durante el cálculo, el controlador conserva `Twist=0` y permite como máximo dos
+replans desde la pose viva cuando la geometría permanece idéntica y libre de
+contacto. Un obstáculo dinámico, una pose corrupta, contacto o churn persistente
+descartan el plan y fallan cerrados.
 
 La misma frontera se aplica a los datos numéricos. Las poses de odometría con
 `x`, `y` o yaw `NaN`/`Inf` se rechazan de forma atómica y no reemplazan la última
 muestra válida. Cada ciclo vuelve a validar la flota completa y los
 `model_states`, incluso después de entrar en `MOVING`. Si una excepción
 inesperada atraviesa el control vivo, el estado pasa a `FAILED`, se cancelan la
-asignación y la generación del solver pendientes y se publica velocidad cero
-para toda la flota.
+asignación y la generación del solver pendientes y se solicita velocidad cero
+para toda la flota. Si un publisher no confirma esa parada, el estado enumera
+los robots afectados en lugar de afirmar una entrega total.
 
 Los commits `511e47c` y `377a0e3` cerraron cuatro fronteras halladas después de
 esa revisión. El modo adaptativo revalida el objetivo ya deformado; lineal y
@@ -171,12 +185,12 @@ no se considera candidata final. La revisión posterior reprodujo I-128–I-134:
 un plan de seguimiento anclado antes de mover al líder de `(0; 0)` a `(3; 3)`,
 ventanas de frescura que dejaron salir 0,22 m/s y 0,1 m/s, un `ModelStates`
 truncado que ocultó `moving_box`, cuaterniones crudos con `Inf`, ejes no
-holonómicos y nombres duplicados ambiguos. `07da8f4` cierra el grupo con doble
+holonómicos y nombres duplicados ambiguos. `07da8f4` cerró ese grupo histórico con doble
 correlación de la cadena, gates finales de frescura, snapshots persistentes y
 unívocos, filtro por mundo activo, validación cruda de cuaterniones y rechazo de
-ejes incompatibles con el Burger. El corte combinado y la imagen local ya
-aprobaron, incluida la comprobación visual local de I-135; la rama sigue abierta
-porque faltan PR, CI, despliegue y aceptación visible productiva del mismo SHA.
+ejes incompatibles con el Burger. Ese conjunto, incluido I-135, quedó integrado
+en `1448a31`. El delta local vigente es I-136–I-143 y todavía requiere PR, CI,
+despliegue y aceptación visible sobre su propio SHA.
 
 ### Plano de control web
 
@@ -315,7 +329,8 @@ Como la máscara ya excluye carga y cadena declarada, todo contacto filtrado que
 permanece es inesperado en cualquier fase; el atraque se prueba aparte con
 geometría, contactos declarados y GRF. La matriz añade `transport_grf_n2`, cuyo
 contrato exige dos raíces sobre la carga y cero compañeros. Ese caso todavía no
-tiene una corrida física N=2.
+tenía una corrida física en el corte histórico; N=2 aprobó después la
+aceptación física postdeploy sobre `1448a31`.
 
 I-089 corrigió el desfase entre los rótulos del arnés y la navegación real. Las
 seis entradas canónicas son Plantillas, Historial, Control, Robots, Grupos y
@@ -367,8 +382,8 @@ después el rechazo esperado del token vencido. Una captura de producción revel
 además que el contador podía mostrar unos 244 minutos, porque JavaScript
 interpretaba como hora local una fecha .NET sin `Z`. El analizador compartido
 que la normaliza a UTC quedó integrado por el PR #105 y forma parte de
-`9f49e17`. Como el candidato correctivo vuelve a cambiar el bundle, el contador
-se comprobará otra vez después de ese único despliegue.
+`9f49e17` y de `1448a31`. El recorrido postdeploy comprobó nuevamente el bundle;
+la captura específica del contador todavía no se ha seleccionado para el acta.
 
 La primera prueba rápida endurecida de transporte encontró además una carrera
 real del worker: el sondeador alcanzó a persistir `Running` dos segundos antes
@@ -396,10 +411,9 @@ entrada de Gazebo, y deshabilitarlo emite una liberación global. Los arneses
 cargado y de matriz también aplican su umbral compartido
 `MINIMUM_BROWSER_VIDEO_FPS` (actualmente
 27.0) antes de aceptar una captura tomada durante `PUSH`. La corrida de dos
-navegadores ya verificó interacción, pantalla completa y parada independiente
-sobre `fbef23e`; el parser UTC y el endurecimiento instrumental quedaron
-integrados en `9f49e17`, y la repetición final se hará después de publicar el
-candidato correctivo actual.
+navegadores volvió a verificar interacción, pantalla completa, cierre y parada
+independiente sobre `1448a31`. El cierre de una concesión no detuvo la tarea ROS
+de la otra cuenta.
 
 ### Despliegue y endurecimiento del equipo anfitrión
 
@@ -420,10 +434,10 @@ candidato correctivo actual.
 
 ## Evidencia obtenida hasta el momento
 
-Las afirmaciones siguientes corresponden a pruebas ya realizadas. Algunas se
-ejecutaron sobre `fbef23e`, otras sobre `9f49e17` y otras son antecedentes
-locales; ninguna sustituye la aceptación del próximo SHA que incorporará el
-delta aún sin publicar:
+Las afirmaciones siguientes corresponden a pruebas ya realizadas. Se distingue
+la evidencia histórica de `fbef23e`/`9f49e17`, la aceptación postdeploy de
+`1448a31` y el corte local de I-136–I-143. Ningún resultado local se atribuye al
+próximo SHA antes de desplegarlo:
 
 - El registro de trabajo documenta una matriz visible de Gazebo con formaciones,
   letras, seguimiento del líder y transporte colaborativo en puntos
@@ -465,18 +479,24 @@ delta aún sin publicar:
   tercero terminó la sonda antes del marcador GRF; y el siguiente trató la caducidad
   normal de la concesión de cinco minutos como si fuera un fallo final de video.
   Esos resultados sirvieron para corregir el instrumento, no para sumar éxitos.
-- La aceptación API de producción aprobó con dos cuentas, listas de flota
-  N=3/N=7, aislamiento, tareas y limpieza. Dos ventanas Chrome visibles reprodujeron
-  flujos independientes a unos 30 FPS; la tarea A terminó, la B continuó al
-  detener A, y se ejercitaron interacción y pantalla completa. El recorrido
-  Admin visitó Plantillas, Historial, Control, Robots, Grupos y Usuarios,
-  comprobó los puntos de acceso administrativos y eliminó su grupo temporal.
-- El recorrido adaptable de solo lectura sobre `fbef23e` aprobó en 360, 768,
+- La aceptación postdeploy de `1448a31` aprobó con dos cuentas, listas de flota
+  N=3/N=7, aislamiento, tareas y limpieza. Dos ventanas Chrome visibles
+  reprodujeron flujos independientes a unos 30 FPS; la tarea A terminó, la B
+  continuó al detener A, y se ejercitaron interacción y pantalla completa. El
+  recorrido User y las denegaciones Admin aprobaron; no se ejecutó un recorrido
+  Admin completo sin una credencial autorizada.
+- El recorrido adaptable de solo lectura aprobó nuevamente sobre `1448a31` en 360, 768,
   1366 y 1920 px: el panel quedó visible y dentro del área visible, sin
-  desbordamiento horizontal. El
+  desbordamiento horizontal. Como antecedente, el
   [reporte adaptable versionado](docs/assets/commissioning-2026-07/final-fbef23e/responsive-reporte.json),
-  que corresponde únicamente a `fbef23e`, tiene SHA-256
+  que corresponde únicamente al corte anterior `fbef23e`, tiene SHA-256
   `4e587e4d20d91602daf962f4f43e74b92017a4b3c537907517e06e5914739a74`.
+- La matriz postdeploy de `1448a31` aprobó seguimiento N=3/N=6/N=10 y
+  transporte N=2/N=3/N=4/N=10. N=10 transportó 0,5036 m, terminó a 0,4964 m,
+  mantuvo RTF 2,9672, registró 10/10 robots útiles, búsqueda y aviso completos y
+  cero colisiones. Las seis formaciones terminaron antes del gate activo y N=1
+  perdió su informe después del TTL; ambos resultados se rechazaron y abrieron
+  I-136–I-139.
 - El endurecimiento integrado en `9f49e17` separa el protocolo oficial y los
   marcadores vivos en canales distintos, limita líneas y evidencia, usa una
   escritura atómica por marcador y prueba la desaparición de cada observador y
@@ -487,6 +507,50 @@ delta aún sin publicar:
   agrega diagnóstico explícito de MediaSource, SourceBuffer, AVC/H.264, estado
   del video y solicitudes HLS. La rama correctiva posterior conserva esas
   garantías y suma los arreglos físicos descritos en este corte.
+- El corte local vigente de I-136–I-143 aprobó 625/625 pruebas ROS y 253/253
+  contratos de aceptación. Dentro del total ROS, las suites focales terminaron
+  formación 103/103, ciclo de vida 235/235 y seguimiento 47/47. También aprobaron
+  la compilación Python 3.8 y `git diff --check`. La revisión independiente
+  cerró sin hallazgos P0 ni P1. Las regresiones del lease cubren la transición
+  `closing` → hueco DOM → botón, fallos de HLS posteriores a la renovación,
+  binding temporalmente desconocido y limpieza fail-closed. Estas cifras
+  describen el árbol local, no un despliegue.
+- La imagen local posterior a I-141, ID
+  `sha256:3394046cede94cd3855cf8b834546176f48453369b93b0879ad13f75d39b5f48`,
+  aprobó la formación S N=10 visible durante 75,0004 s activos: 10/10
+  asignaciones, error independiente máximo 0,0952 m, aceleración filtrada
+  máxima 0,7039 m/s², separación mínima 0,4025 m, RTF 2,9851 y cero
+  colisiones. La secuencia negativa y el resultado final se conservan en la
+  [evidencia saneada de I-141](docs/assets/commissioning-2026-07/corrective-i141/README.md).
+- El recorrido público final de I-142 aprobó dos Chrome visibles, visores
+  privados, entrada real, fullscreen, tareas concurrentes, cierre/reapertura
+  del visor B y continuidad de B después de detener A. Los streams midieron
+  aproximadamente 30 FPS y cero drops; responsive aprobó cuatro anchuras. La
+  [secuencia saneada](docs/assets/commissioning-2026-07/corrective-i142/README.md)
+  conserva los intentos rechazados y los hashes de los tres aprobados.
+- La reproducción final encontró I-143 antes de publicar: un robot dentro de
+  la histéresis segura de 0,14 m podía retener los corredores siguientes por no
+  haber cruzado aún la tolerancia estricta de 0,09 m. La imagen exacta
+  `sha256:4caa2ea97dc55e3f0e4929568e255fcbea0d6969318522e34f889a6df72691e9`
+  aprobó después S/N=10 con error máximo 0,0936 m, RTF 2,9912 y cero
+  colisiones. La suite completa aprobó 625/625 en 117,379 s. La
+  [evidencia I-143](docs/assets/commissioning-2026-07/corrective-i143/README.md)
+  conserva el diagnóstico antes/después.
+- La imagen exacta del delta, sin montajes de fuentes, tiene ID
+  `sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5`.
+  En ventanas Gazebo no headless, el triángulo N=3 y la S N=10 conservaron el
+  estado `moving` durante 75 s y finalizaron con error independiente máximo de
+  0,0921/0,0974 m; el comportamiento informó 0,0925/0,0981 m. El RTF del
+  algoritmo fue 2,9965/2,9875 y no hubo colisiones. Las sondas concurrentes
+  midieron 58,493/57,507 FPS y RTF 2,996/2,984 sobre D3D12/NVIDIA. El primer
+  intento `llvmpipe` a 6,03 FPS se rechazó y se repitió después de entregar
+  correctamente `/dev/dxg` y las bibliotecas WSL D3D12 al contenedor.
+- El transporte productivo N=1 de `1448a31`, repetido con I-139 en el arnés,
+  terminó `DONE`, desplazó la caja 0,5013 m, mantuvo RTF 2,9962, utilidad 1/1 y
+  cero colisiones. La sonda activa rindió 58,711 FPS y el HLS 30,164 FPS; la
+  limpieza retiró sesión, lease, contenedor, red, perfil y procesos. La corrida
+  no agotó el lease, por lo que prueba la preservación temprana del reporte,
+  no una renovación física; esa rama permanece cubierta por contratos.
 - El freeze provisional anterior a I-117–I-125, integrado hasta `e18926a`, aprobó ROS
   461/461, frontend 164/164 en 30 suites, backend 253/253 con 8 casos
   PostgreSQL opt-in omitidos por diseño y los siete arneses de aceptación
@@ -549,12 +613,14 @@ delta aún sin publicar:
   `robotswarm-ros:local-final-safe`, completó catkin al 100 % y tiene ID
   `sha256:e17579ed83e0c37a9ff9b03817652aeb935573b307801ddc5863d29f2a92ae0d`,
   tamaño 4.231.381.706 bytes y fecha
-  `2026-07-22T04:53:51.679721236Z`. Es un artefacto local exacto, no un release,
-  una ejecución de CI, un despliegue ni un resultado postdeploy.
+  `2026-07-22T04:53:51.679721236Z`. Fue el artefacto local exacto previo a PR
+  #106; se conserva como antecedente y quedó supersedido por el despliegue
+  `1448a31` y por la imagen correctiva `6f1af927…4cb5`.
 - La suite ROS completa se repitió después del ajuste de cámara y de este
   rebuild: aprobó 497/497 pruebas en 109,592 s, con `OK` y RC=0. Esta es la
-  repetición local exacta vigente; sustituye como freeze final al corte de
-  109,460 s, sin borrar su valor de trazabilidad pre-cámara.
+  repetición local exacta histórica de PR #106; sustituyó en su etapa al corte
+  de 109,460 s. El freeze vigente posterior es 576/576 y no borra su valor de
+  trazabilidad pre-cámara.
 - Sobre la imagen anterior al ajuste de cámara se ejecutaron dos aceptaciones
   locales visibles de transporte N=4, ambas con RC=0. El perfil legado, que
   omite el parámetro y conserva tolerancia 0,50 m, desplazó el objeto 0,5022 m,
@@ -630,19 +696,20 @@ delta aún sin publicar:
   pero no el encuadre completo ni una aceptación postdeploy.
 - Las capturas de escritorio Windows/WSLg obtenidas inicialmente con
   `CopyFromScreen` quedaron congeladas o recortadas y se rechazaron. Las sondas
-  posteriores ya produjeron capturas locales limpias mediante el cliente vivo;
-  sigue pendiente sanearlas, versionarlas y repetir el criterio después del
-  despliegue.
+  posteriores produjeron capturas limpias mediante el cliente vivo. La
+  comparación antes/después del marcador y la búsqueda N=4 quedaron saneadas,
+  versionadas y verificadas por SHA-256 bajo
+  `docs/assets/commissioning-2026-07/final-1448a31/`. Otras superficies web y
+  la carga N=4 correctiva siguen pendientes de evidencia final.
 - Después del endurecimiento se comprobaron los puertos de mantenimiento de
   producción: VNC y websockify escuchan en la interfaz de bucle local. Los
   controles de acceso del visor permanecieron desactivados durante la línea
   base inicial y después se habilitaron juntos para la ventana de
   comisionamiento supervisada.
-- Las páginas de administración y el ciclo `StopViewer` están presentes en el
-  paquete público y fueron recorridos nuevamente sobre `9f49e17`. Las capturas
-  aún viven en
-  directorios temporales; antes del acta final deben sanearse, copiarse a
-  `docs/assets/commissioning-2026-07/` y añadirse al manifiesto de hashes.
+- Las páginas User y el ciclo `StopViewer` fueron recorridos nuevamente sobre
+  `1448a31`. Las rutas Admin rechazaron correctamente al usuario normal; el
+  recorrido Admin completo y sus capturas quedan pendientes de una credencial
+  autorizada.
 
 Las mediciones sin procesar, capturas de pantalla, análisis de incidentes y la
 distinción entre corridas negativas y aceptadas se registran en el
@@ -650,40 +717,17 @@ distinción entre corridas negativas y aceptadas se registran en el
 
 ## Trabajo pendiente antes de declarar completo el lanzamiento
 
-1. Conservar la imagen local segura reconstruida y la etiqueta de rollback, y publicar un único PR
-   para consumir un solo ciclo normal de CI. No se volverán a ejecutar jobs
-   remotos solo para repetir pruebas que ya aprobaron localmente.
-2. Después de la integración, comprobar que Cloudflare y los despliegues de
-   backend y worker anuncien exactamente el nuevo SHA. No se atribuirán a ese
-   lanzamiento las pruebas realizadas antes de publicarlo.
-3. Ejecutar primero las seis formaciones corregidas —triángulo N=3, cuadrado
-   N=5, A N=7, V N=8, rombo N=9 y S N=10— y luego la matriz visible completa de
-   seguimiento y transporte N=1/2/3/4/10. El N=4 cargado se repetirá como prueba
-   final, sin rebajar su masa de 0,75 kg ni su fricción `mu=0.25`.
-4. Repetir la prueba rápida de transporte iniciada con un clic confiable desde
-   React y confirmar límites del observador, aviso, movimiento de toda la flota,
-   contribución útil, HLS y limpieza cerrada.
-5. Verificar en producción que una fecha sin `Z` muestre unos cinco minutos y
-   no unas cuatro horas adicionales. Repetir luego las cuatro áreas visibles y
-   una corrida de dos usuarios para comprobar que el cambio no afectó HLS,
-   interacción, pantalla completa ni aislamiento.
-6. Sanear y versionar las capturas reales de Control, Historial, Plantillas,
-   Robots, Grupos, Usuarios, diseño adaptable y carga N=4. La evidencia
-   «antes» del marcador se conserva temporalmente en
-   `/tmp/robotswarm-acceptance/ros-matrix-evidence-20260722T002735Z-3697395/14-transport_grf_n10-browser.png`
-   y la carga previa en
-   `/tmp/robotswarm-acceptance/loaded-n4-evidence-20260722T011035Z-3918620/before-loaded-probe-browser.png`;
-   las capturas «después» se producirán únicamente tras el despliegue correctivo.
-   Las capturas Windows/WSLg producidas con `CopyFromScreen` en la primera
-   sonda quedaron congeladas/recortadas y fueron rechazadas. Las capturas
-   locales limpias de N=4 y de las cuatro esquinas del marcador se conservan
-   temporalmente en `/tmp/robotswarm-local-final-visible-20260722T0444Z/` y
-   `/tmp/robotswarm-local-final-camera-20260722T0454Z/`; todavía deben sanearse
-   y versionarse. Aunque cierran el defecto de encuadre local, no sustituyen la
-   evidencia posterior al despliegue.
-7. Retirar roles, tokens, cuentas, sesiones y perfiles temporales; verificar
-   cero recursos residuales y conservar la etiqueta de reversión hasta que el
-   nuevo lanzamiento permanezca sano.
+1. Publicar un único PR correctivo y consumir un solo ciclo normal de CI.
+2. Integrar únicamente con CI verde y desplegar una sola vez la imagen del SHA
+   de merge exacto, conservando la etiqueta de rollback.
+3. Repetir sobre ese SHA las seis formaciones, transporte N=1, el smoke React
+   N=4 con tolerancia 0,25 m y la carga N=4 de 0,75 kg con `mu=mu2=0.25`.
+4. Confirmar HLS, interacción, marcador, RTF, seguridad, cierre del visor y
+   limpieza final. El recorrido Admin completo solo se hará con una credencial
+   autorizada; no se alterarán roles directamente en la base de datos.
+5. Retirar cuentas, sesiones, perfiles y recursos temporales creados por las
+   pruebas y verificar que no queden leases, contenedores ni procesos
+   residuales.
 
 Hasta completar estos pasos, «implementado» no debe interpretarse como
 «aceptación final de producción aprobada».
@@ -695,7 +739,9 @@ Hasta completar estos pasos, «implementado» no debe interpretarse como
   de Gazebo constituye un trabajo separado.
 - HLS evita UDP/ICE/TURN público, pero añade latencia y envía el contenido
   multimedia a través del proxy del backend.
-- Para el modelo Burger actual, el navegador solo permite visualizar la escena.
+- Para el modelo Burger actual, la capacidad de video es `Scene`, no
+  `RobotCamera`; el visor `Scene` sí permite interacción autorizada con el
+  escritorio privado de Gazebo.
 - La capacidad de sesiones simultáneas debe aceptarse sobre la GPU real de
   producción; el intervalo algorítmico de 1–10 robots no promete diez sesiones
   concurrentes.
@@ -706,11 +752,15 @@ Hasta completar estos pasos, «implementado» no debe interpretarse como
   inventario. No seleccionan las identidades de ejecución exactas dentro de una
   sesión de simulación; la lista del worker es la fuente autoritativa de las
   instancias ROS/Gazebo en vivo.
-- `9f49e17` es la base desplegada y aceptada de forma parcial. Las correcciones
-  locales de formación, carga, destino y rutas heredadas, incluido el ajuste
-  cinemático del marcador y los cierres fail-closed de revisión, no están
-  activas en producción y todavía necesitan CI y aceptación sobre su propio
-  SHA.
+- `1448a31` es la base desplegada. El marcador y la tolerancia ya están activos;
+  las correcciones locales I-136–I-143 todavía necesitan CI, despliegue y
+  aceptación sobre su propio SHA.
+- El grafo ROS se considera privado y confiable. La lista pendiente de ACK queda
+  acotada, pero un proceso ya comprometido dentro del mismo contenedor podría
+  publicar identificadores siempre distintos mientras el socket inverso está
+  bloqueado y acumular callbacks en su lane. Es un riesgo P2 de disponibilidad
+  interno, sin ruta desde el navegador; una defensa adicional sería coalescer
+  globalmente el ACK en un único job.
 - El PNG histórico es rectangular. Se verificó en las superficies web, pero el
   manifiesto PWA aún necesita derivados cuadrados 192×192 y 512×512 para evitar
   encuadre o recorte al instalar, sin sustituir ni alterar el original.

@@ -27,6 +27,7 @@ from sensor_msgs.msg import LaserScan
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.robot_ids import robot_id_sort_key
+from robot_swarm_bridge.utils.safety_publish import SafetyPublishLane
 
 
 class TaskState(Enum):
@@ -68,6 +69,9 @@ class TaskOrchestrator:
     - Fleet:  /fleet/spawn_command, /fleet/delete_command (JSON topics)
     """
 
+    SHUTDOWN_TIMEOUT = 1.0
+    _EMERGENCY_ORDER_INIT_LOCK = threading.Lock()
+
     def __init__(self):
         rospy.init_node('task_orchestrator', anonymous=False)
 
@@ -80,6 +84,7 @@ class TaskOrchestrator:
         self.task_result = None
         self.task_error = None
         self.task_dispatched = False
+        self.task_ever_dispatched = False
         self.task_dispatched_at = None
         self.last_behavior_status_at = None
         self.task_lock = threading.RLock()
@@ -89,6 +94,32 @@ class TaskOrchestrator:
         self.robot_sensor_data = {}
         self.robot_count = 0
         self.emergency_stop_active = False
+        # A behavior shutdown can be blocked in its own rospy publisher. Keep
+        # an independent, process-local command channel latched until this
+        # session ends; a user reset is not allowed to clear this condition.
+        self.supervised_stop_active = False
+        self.supervised_stop_context = None
+        self._supervised_stop_state_started = False
+        self._pending_safety_stop_acks = {}
+        self._safety_ack_publish_inflight = set()
+        self._safety_ack_retry_requested = set()
+        self._shutdown_started = False
+        self._safety_zero_lock = threading.Lock()
+        self._emergency_order_condition = threading.Condition()
+        self._emergency_order_generation = 0
+        self._pending_emergency_true_generations = set()
+        self._safety_zero_inflight = set()
+        self._safety_zero_followups = set()
+        self._safety_zero_receipts = {}
+        self._retired_safety_publishers = {}
+        self._safety_publisher_snapshot = ()
+        self.ordinary_stop_active = False
+        self._ordinary_stop_sequence = 0
+        self._ordinary_stop_operations = {}
+        self._emergency_publication_debts = {}
+        self._emergency_publication_inflight = set()
+        self._safety_fallback_lanes = {}
+        self._safety_fallback_lane_factory = SafetyPublishLane
         self.collision_count = 0
         self.collision_event_sequence = 0
         self.collision_events = deque(
@@ -103,6 +134,13 @@ class TaskOrchestrator:
             1.0,
             float(rospy.get_param('~behavior_status_timeout', 3.0)),
         )
+        self.formation_planning_status_timeout = max(
+            self.behavior_status_timeout,
+            float(rospy.get_param(
+                '~formation_planning_status_timeout', 30.0
+            )),
+        )
+        self.last_behavior_status = None
 
         # The watchdog uses wall-clock monotonic time, not ROS simulation time,
         # so a paused or stalled Gazebo clock cannot suppress the fail-safe.
@@ -151,8 +189,15 @@ class TaskOrchestrator:
 
         # Publishers
         self.status_pub = rospy.Publisher('/swarm/status', String, queue_size=1)
-        self.emergency_stop_pub = rospy.Publisher('/swarm/emergency_stop', Bool, queue_size=1, latch=True)
-        self.leader_cmd_pub = rospy.Publisher('/leader/cmd_vel', Twist, queue_size=1)
+        # Safety publications are synchronous on purpose. A returned publish
+        # must represent a socket write attempt, not only a local queue insert.
+        self.emergency_stop_pub = rospy.Publisher(
+            '/swarm/emergency_stop', Bool, latch=True
+        )
+        self.leader_cmd_pub = rospy.Publisher('/leader/cmd_vel', Twist)
+        self.safety_stop_ack_pub = rospy.Publisher(
+            '/swarm/safety_stop_ack', String, latch=True
+        )
         self.behavior_start_pubs = {
             'follow_leader': rospy.Publisher(
                 '/follow_leader/start', String, queue_size=1
@@ -191,6 +236,26 @@ class TaskOrchestrator:
                 '/transport/resume', String, queue_size=1
             ),
         }
+        fixed_safety_publishers = [
+            ('emergency-stop', self.emergency_stop_pub),
+            ('leader', self.leader_cmd_pub),
+            ('safety-stop-ack', self.safety_stop_ack_pub),
+        ]
+        fixed_safety_publishers.extend(
+            ('behavior-stop-{}'.format(index), publisher)
+            for index, publisher in enumerate(self.behavior_stop_pubs)
+        )
+        fixed_safety_publishers.extend(
+            ('behavior-pause-{}'.format(task_type), publisher)
+            for task_type, publisher in self.behavior_pause_pubs.items()
+        )
+        for label, publisher in fixed_safety_publishers:
+            if not self._register_safety_fallback_lane(label, publisher):
+                raise RuntimeError(
+                    "Could not reserve the {} safety publication lane".format(
+                        label
+                    )
+                )
 
         # Fleet manager interface (topic-based)
         self.fleet_spawn_pub = rospy.Publisher('/fleet/spawn_command', String, queue_size=5)
@@ -207,6 +272,12 @@ class TaskOrchestrator:
             '/swarm/control_heartbeat',
             Empty,
             self._control_heartbeat_callback,
+            queue_size=1,
+        )
+        rospy.Subscriber(
+            '/swarm/safety_stop_request',
+            String,
+            self._safety_stop_request_callback,
             queue_size=1,
         )
         rospy.Subscriber(
@@ -231,9 +302,13 @@ class TaskOrchestrator:
         self.collision_subs = {}
         self.scan_subs = {}
         self.cmd_vel_pubs = {}
+        self._refresh_safety_publisher_snapshot()
 
         # Status broadcast timer (10 Hz)
         self.status_timer = rospy.Timer(rospy.Duration(0.1), self._broadcast_status)
+        self.safety_stop_timer = rospy.Timer(
+            rospy.Duration(0.05), self._safety_stop_zero_timer
+        )
         self._control_watchdog_thread = threading.Thread(
             target=self._control_watchdog_loop,
             name='control-heartbeat-watchdog',
@@ -422,19 +497,36 @@ class TaskOrchestrator:
             active = self.task_state in {
                 TaskState.INITIALIZING, TaskState.RUNNING, TaskState.PAUSED,
             }
-            if active and self.current_task_id != task_id:
-                rospy.logwarn("Rejected task %s: %s", task_id, reason)
+            if active:
+                rospy.logwarn(
+                    "Rejected task %s without changing the active task: %s",
+                    task_id,
+                    reason,
+                )
                 return
-            self.current_task_id = task_id
-            self.current_task_type = task_type
-            self.current_task_config = {}
-            self.task_state = TaskState.FAILED
-            self.task_progress = 0.0
-            self.task_result = None
-            self.task_error = reason
-            self.task_dispatched = False
-            self.task_dispatched_at = None
-            self.last_behavior_status_at = None
+            with self._safety_zero_lock:
+                if (
+                    self._shutdown_started
+                    or self.supervised_stop_active
+                    or self.emergency_stop_active
+                    or self.ordinary_stop_active
+                ):
+                    rospy.logwarn(
+                        "Rejected task %s while the safety latch was closed",
+                        task_id,
+                    )
+                    return
+                self.current_task_id = task_id
+                self.current_task_type = task_type
+                self.current_task_config = {}
+                self.task_state = TaskState.FAILED
+                self.task_progress = 0.0
+                self.task_result = None
+                self.task_error = reason
+                self.task_dispatched = False
+                self.task_ever_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
         rospy.logwarn("Rejected task %s: %s", task_id, reason)
 
     def _handle_start_task(self, params):
@@ -467,7 +559,11 @@ class TaskOrchestrator:
         start_config['task_id'] = task_id
 
         with self.task_lock:
-            if self.emergency_stop_active:
+            if (
+                self.supervised_stop_active
+                or self.emergency_stop_active
+                or self.ordinary_stop_active
+            ):
                 rospy.logwarn(
                     "Cannot start a task while emergency stop is active"
                 )
@@ -490,6 +586,7 @@ class TaskOrchestrator:
                 if (
                     self.task_state == TaskState.INITIALIZING
                     or self.task_dispatched
+                    or self.task_ever_dispatched
                 ):
                     rospy.loginfo(
                         "Ignoring duplicate start for task %s", task_id
@@ -506,35 +603,58 @@ class TaskOrchestrator:
             # reach behavior nodes before the next start message.
             if self.current_task_type is not None and not retry_undispatched:
                 self._handle_stop_task({}, force=True)
+                if not self._wait_for_ordinary_stop(0.2):
+                    rospy.logwarn(
+                        "New task %s is waiting for the previous stop to "
+                        "finish",
+                        task_id,
+                    )
+                    return
 
-            # A new task starts a fresh delivery window.  Keep the global
-            # watermark monotonic, but do not retransmit another task's event
-            # payload throughout this task's lifetime.
-            if not retry_undispatched:
-                self.collision_events.clear()
-                self._reset_transport_collision_consumer_locked()
+            # Pair the final initialization commit with the shutdown gate. A
+            # previous behavior stop may have blocked after the first check;
+            # it must not be able to overwrite a shutdown state on return.
+            with self._safety_zero_lock:
+                if (
+                    self._shutdown_started
+                    or self.supervised_stop_active
+                    or self.emergency_stop_active
+                    or self.ordinary_stop_active
+                ):
+                    return
 
-            self.current_task_id = task_id
-            self.current_task_type = task_type
-            self.current_task_config = start_config
-            self.task_state = TaskState.INITIALIZING
-            self.task_progress = 0.0
-            self.task_result = None
-            self.task_error = None
-            self.task_dispatched = False
-            self.task_dispatched_at = None
-            self.last_behavior_status_at = None
+                # A new task starts a fresh delivery window. Keep the global
+                # watermark monotonic, but do not retransmit another task's
+                # event payload throughout this task's lifetime.
+                if not retry_undispatched:
+                    self.collision_events.clear()
+                    self._reset_transport_collision_consumer_locked()
 
-            sorted_ids = sorted(self.robots.keys(), key=robot_id_sort_key)
-            for i, rid in enumerate(sorted_ids):
-                if task_type == 'follow_leader' and i == 0:
-                    self.robots[rid]['role'] = 'leader'
-                elif task_type == 'formation':
-                    self.robots[rid]['role'] = 'formation_member'
-                elif task_type == 'transport':
-                    self.robots[rid]['role'] = 'transporter'
-                else:
-                    self.robots[rid]['role'] = 'follower'
+                self.current_task_id = task_id
+                self.current_task_type = task_type
+                self.current_task_config = start_config
+                self.task_state = TaskState.INITIALIZING
+                self.task_progress = 0.0
+                self.task_result = None
+                self.task_error = None
+                self.task_dispatched = False
+                if not retry_undispatched:
+                    self.task_ever_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
+
+                sorted_ids = sorted(
+                    self.robots.keys(), key=robot_id_sort_key
+                )
+                for i, rid in enumerate(sorted_ids):
+                    if task_type == 'follow_leader' and i == 0:
+                        self.robots[rid]['role'] = 'leader'
+                    elif task_type == 'formation':
+                        self.robots[rid]['role'] = 'formation_member'
+                    elif task_type == 'transport':
+                        self.robots[rid]['role'] = 'transporter'
+                    else:
+                        self.robots[rid]['role'] = 'follower'
 
         # Let the previous stop reach its subscribers before dispatching the
         # replacement.  This must use wall time because the simulation clock
@@ -562,27 +682,59 @@ class TaskOrchestrator:
             )
             return
 
+        dispatch_error = None
+        late_safety_latch = False
         with self.task_lock:
             if (
                 self.current_task_id != task_id
                 or self.task_state != TaskState.INITIALIZING
+                or self.supervised_stop_active
                 or self.emergency_stop_active
+                or self.ordinary_stop_active
                 or not self.robots
             ):
                 return
             self.task_state = TaskState.RUNNING
+            # Once a start publish is attempted, the same identity must never
+            # be treated as "never dispatched" again. ROS can raise after a
+            # subscriber has already received the message.
+            self.task_ever_dispatched = True
             try:
                 self._publish_current_task()
             except Exception as exc:
+                dispatch_error = exc
                 self.task_state = TaskState.FAILED
                 self.task_error = str(exc)
                 rospy.logerr(
                     "Failed to dispatch task %s: %s", task_id, exc
                 )
-                return
-            self.task_dispatched = True
-            self.task_dispatched_at = self._control_clock()
-            self.last_behavior_status_at = None
+            with self._safety_zero_lock:
+                late_safety_latch = (
+                    self._shutdown_started
+                    or self.supervised_stop_active
+                    or self.emergency_stop_active
+                    or self.ordinary_stop_active
+                )
+                if late_safety_latch:
+                    self.task_state = TaskState.FAILED
+                    self.task_error = (
+                        "Task start returned after the safety latch closed"
+                    )
+                    self.task_dispatched = False
+                    self.task_dispatched_at = None
+                    self.last_behavior_status_at = None
+                elif dispatch_error is None:
+                    self.task_dispatched = True
+                    self.task_dispatched_at = self._control_clock()
+                    self.last_behavior_status_at = None
+
+        if late_safety_latch:
+            self._compensate_late_lifecycle_message(
+                task_id, 'late-start'
+            )
+            return
+        if dispatch_error is not None:
+            return
         rospy.loginfo(f"Started task: {task_type} (ID: {task_id}) config={start_config}")
 
     def _wait_for_behavior_subscriber(self, publisher):
@@ -601,6 +753,17 @@ class TaskOrchestrator:
             time.sleep(0.05)
         return connection_count() > 0
 
+    def _wait_for_ordinary_stop(self, timeout):
+        """Wait briefly without ROS time for a prior lifecycle stop debt."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            with self._safety_zero_lock:
+                if not self.ordinary_stop_active:
+                    return True
+            time.sleep(0.005)
+        with self._safety_zero_lock:
+            return not self.ordinary_stop_active
+
     def _handle_pause_task(self, params):
         with self.task_lock:
             if (
@@ -616,18 +779,33 @@ class TaskOrchestrator:
             if pub is None:
                 return
             self.task_state = TaskState.PAUSED
-            pub.publish(payload)
-            self._stop_all_robots()
+            stop_delivery = self._start_ordinary_stop_publications(
+                'pause',
+                ((self.current_task_type, pub, payload),),
+            )
+            if not stop_delivery['scheduling_confirmed']:
+                self.task_state = TaskState.FAILED
+                self.task_error = (
+                    "Task pause could not schedule every safety publication"
+                )
         rospy.loginfo("Paused task: %s", self.current_task_id)
 
     def _handle_resume_task(self, params):
+        task_id = None
+        publish_error = None
+        late_safety_latch = False
         with self.task_lock:
             if (
                 not self._task_matches(params)
                 or self.task_state != TaskState.PAUSED
             ):
                 return
-            if self.emergency_stop_active or not self.robots:
+            if (
+                self.supervised_stop_active
+                or self.emergency_stop_active
+                or self.ordinary_stop_active
+                or not self.robots
+            ):
                 rospy.logwarn(
                     "Cannot resume task while the fleet is unavailable or stopped"
                 )
@@ -636,14 +814,47 @@ class TaskOrchestrator:
             payload = String(data=json.dumps({
                 'task_id': self.current_task_id,
             }))
+            task_id = self.current_task_id
             pub = self.behavior_resume_pubs.get(self.current_task_type)
             if pub is None:
                 return
             self.task_state = TaskState.RUNNING
-            self.task_dispatched_at = self._control_clock()
-            self.last_behavior_status_at = None
-            pub.publish(payload)
-        rospy.loginfo("Resumed task: %s", self.current_task_id)
+            try:
+                pub.publish(payload)
+            except Exception as exc:
+                publish_error = exc
+            with self._safety_zero_lock:
+                late_safety_latch = (
+                    self._shutdown_started
+                    or self.supervised_stop_active
+                    or self.emergency_stop_active
+                )
+                if late_safety_latch:
+                    self.task_state = TaskState.FAILED
+                    self.task_error = (
+                        "Task resume returned after the safety latch closed"
+                    )
+                    self.task_dispatched = False
+                    self.task_dispatched_at = None
+                    self.last_behavior_status_at = None
+                elif publish_error is not None:
+                    self.task_state = TaskState.FAILED
+                    self.task_error = str(publish_error)
+                else:
+                    self.task_dispatched_at = self._control_clock()
+                    self.last_behavior_status_at = None
+
+        if late_safety_latch:
+            self._compensate_late_lifecycle_message(
+                task_id, 'late-resume'
+            )
+            return
+        if publish_error is not None:
+            rospy.logerr(
+                "Failed to resume task %s: %s", task_id, publish_error
+            )
+            return
+        rospy.loginfo("Resumed task: %s", task_id)
 
     def _handle_stop_task(self, params, force=False):
         with self.task_lock:
@@ -656,11 +867,22 @@ class TaskOrchestrator:
                 )
                 return
 
-            self._signal_stop_behaviors()
-            self._stop_all_robots()
-            self.task_state = TaskState.STOPPED
-            self.task_progress = 0.0
-            self.task_error = None
+            stop_delivery = self._signal_stop_behaviors()
+            with self._safety_zero_lock:
+                if self._shutdown_started or self.supervised_stop_active:
+                    return
+                if not stop_delivery['scheduling_confirmed']:
+                    self.task_state = TaskState.FAILED
+                    self.task_error = (
+                        "Task stop could not schedule every safety publication"
+                    )
+                else:
+                    self.task_state = TaskState.STOPPED
+                    self.task_error = None
+                self.task_progress = 0.0
+                self.task_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
         rospy.loginfo(f"Stopped task: {self.current_task_type}")
 
     def _task_matches(self, params):
@@ -672,49 +894,1121 @@ class TaskOrchestrator:
         if pub is not None:
             pub.publish(String(data=json.dumps(self.current_task_config)))
 
-    def _activate_emergency_stop_locked(self):
-        """Latch the shared emergency-stop path while task_lock is held."""
+    @staticmethod
+    def _report_safety_lane_error(label, action, error):
+        try:
+            rospy.logerr(
+                "Safety publication lane %s %s: %s", label, action, error
+            )
+        except Exception:
+            pass
+
+    def _register_safety_fallback_lane(self, label, publisher):
+        """Reserve a per-publisher worker before shutdown can exhaust threads."""
+        lanes = getattr(self, '_safety_fallback_lanes', None)
+        if lanes is None:
+            self._safety_fallback_lanes = {}
+            lanes = self._safety_fallback_lanes
+        key = id(publisher)
+        current = lanes.get(key)
+        if current is not None and current.available:
+            return True
+        factory = getattr(
+            self, '_safety_fallback_lane_factory', SafetyPublishLane
+        )
+        lane = factory(label, self._report_safety_lane_error)
+        if not lane.available:
+            lane.close()
+            return False
+        lanes[key] = lane
+        return True
+
+    def _discard_safety_fallback_lane(self, publisher):
+        lane = getattr(self, '_safety_fallback_lanes', {}).pop(
+            id(publisher), None
+        )
+        if lane is not None:
+            lane.close()
+
+    def _submit_safety_fallback(self, publisher, callback):
+        lane = getattr(self, '_safety_fallback_lanes', {}).get(id(publisher))
+        return lane is not None and lane.submit(callback)
+
+    @staticmethod
+    def _detached_safety_publish(
+        label, publisher, message, on_return=None
+    ):
+        accepted = False
+        try:
+            publisher.publish(message)
+            accepted = True
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Detached safety publication failed for %s: %s",
+                    label,
+                    exc,
+                )
+            except Exception:
+                pass
+        finally:
+            if on_return is not None:
+                try:
+                    on_return(accepted)
+                except Exception as exc:
+                    try:
+                        rospy.logerr(
+                            "Safety publication completion failed for %s: %s",
+                            label,
+                            exc,
+                        )
+                    except Exception:
+                        pass
+
+    def _start_detached_safety_publish(
+        self, label, publisher, message, on_return=None
+    ):
+        last_error = None
+        for attempt in range(2):
+            worker = threading.Thread(
+                target=self._detached_safety_publish,
+                args=(label, publisher, message, on_return),
+                name='orchestrator-safety-{}-{}'.format(label, attempt + 1),
+                daemon=True,
+            )
+            try:
+                worker.start()
+                return True
+            except Exception as exc:
+                last_error = exc
+                try:
+                    rospy.logerr(
+                        "Could not start detached safety publication for %s "
+                        "(attempt %d): %s",
+                        label,
+                        attempt + 1,
+                        exc,
+                    )
+                except Exception:
+                    pass
+        if self._submit_safety_fallback(
+            publisher,
+            lambda: self._detached_safety_publish(
+                label, publisher, message, on_return
+            ),
+        ):
+            return True
+        if last_error is not None:
+            try:
+                rospy.logerr(
+                    "Detached safety publication was not started for %s: %s",
+                    label,
+                    last_error,
+                )
+            except Exception:
+                pass
+        return False
+
+    def _start_ordinary_stop_publications(self, context, publications):
+        """Keep reasserting zeros until lifecycle stops and a final zero return."""
+        publications = tuple(publications)
+        with self._safety_zero_lock:
+            if self._shutdown_started:
+                return {
+                    'operation': None,
+                    'scheduling_confirmed': False,
+                    'failed_publications': ['shutdown'],
+                    'failed_robots': [],
+                }
+            self._ordinary_stop_sequence += 1
+            operation_id = self._ordinary_stop_sequence
+            self._ordinary_stop_operations[operation_id] = {
+                'task_id': self.current_task_id,
+                'context': context,
+                'pending_publications': set(range(len(publications))),
+                'publications': {
+                    index: publication
+                    for index, publication in enumerate(publications)
+                },
+                'inflight_publications': set(),
+                'failure_reporting': set(),
+                'required_zero_receipts': None,
+            }
+            self.ordinary_stop_active = True
+
+        zero_schedule = self._schedule_safety_zero_batch()
+        failed_publications = []
+        for index, (label, _publisher, _message) in enumerate(publications):
+            if not self._schedule_ordinary_stop_publication(
+                operation_id, index, context
+            ):
+                failed_publications.append(label)
+
+        if not publications:
+            self._arm_ordinary_stop_final_zero(operation_id)
+
+        return {
+            'operation': operation_id,
+            'scheduling_confirmed': (
+                not failed_publications
+                and zero_schedule['scheduling_confirmed']
+            ),
+            'failed_publications': failed_publications,
+            'failed_robots': list(zero_schedule['failed_robots']),
+        }
+
+    def _schedule_ordinary_stop_publication(
+        self, operation_id, publication_index, context='retry'
+    ):
+        """Start or retry one lifecycle stop without allowing duplicates."""
+        with self._safety_zero_lock:
+            operation = self._ordinary_stop_operations.get(operation_id)
+            if operation is None:
+                return True
+            if publication_index not in operation['pending_publications']:
+                return True
+            if publication_index in operation['inflight_publications']:
+                return True
+            publication = operation['publications'][publication_index]
+            operation['inflight_publications'].add(publication_index)
+
+        label, publisher, message = publication
+        completion = (
+            lambda accepted, current_operation=operation_id,
+            current_index=publication_index: (
+                self._ordinary_stop_publish_returned(
+                    current_operation, current_index, accepted
+                )
+            )
+        )
+        started = self._start_detached_safety_publish(
+            '{}-{}'.format(context, label),
+            publisher,
+            message,
+            on_return=completion,
+        )
+        if not started:
+            with self._safety_zero_lock:
+                operation = self._ordinary_stop_operations.get(operation_id)
+                if operation is not None:
+                    operation['inflight_publications'].discard(
+                        publication_index
+                    )
+        return started
+
+    def _ordinary_stop_publish_returned(
+        self, operation_id, publication_index, accepted
+    ):
+        """Advance one ordinary stop only after its ROS publish returned."""
+        should_arm_final_zero = False
+        failure = None
+        with self._safety_zero_lock:
+            operation = self._ordinary_stop_operations.get(operation_id)
+            if operation is None:
+                return
+            operation['inflight_publications'].discard(publication_index)
+            if accepted:
+                operation['pending_publications'].discard(publication_index)
+            else:
+                publication = operation['publications'].get(publication_index)
+                if publication is not None:
+                    operation['failure_reporting'].add(publication_index)
+                    failure = (
+                        operation.get('task_id'),
+                        operation.get('context', 'stop'),
+                        publication[0],
+                    )
+            should_arm_final_zero = (
+                not operation['pending_publications']
+                and operation['required_zero_receipts'] is None
+            )
+        if failure is not None:
+            self._record_ordinary_stop_delivery_failure(
+                operation_id,
+                publication_index,
+                *failure
+            )
+        if should_arm_final_zero:
+            self._arm_ordinary_stop_final_zero(operation_id)
+
+    def _record_ordinary_stop_delivery_failure(
+        self, operation_id, publication_index, task_id, context, label
+    ):
+        """Expose a failed delivery before allowing that stop to retry."""
+        try:
+            with self.task_lock:
+                with self._safety_zero_lock:
+                    operation = self._ordinary_stop_operations.get(
+                        operation_id
+                    )
+                    if (
+                        operation is None
+                        or publication_index
+                        not in operation['failure_reporting']
+                    ):
+                        return
+                    safety_override = (
+                        self._shutdown_started
+                        or self.supervised_stop_active
+                        or self.emergency_stop_active
+                    )
+                    if not safety_override and self.current_task_id == task_id:
+                        self.task_state = TaskState.FAILED
+                        self.task_progress = 0.0
+                        self.task_error = (
+                            "Task {} publication failed for {}; the stop "
+                            "remains latched for retry"
+                        ).format(context.replace('-', ' '), label)
+                        self.task_dispatched = False
+                        self.task_dispatched_at = None
+                        self.last_behavior_status_at = None
+        finally:
+            with self._safety_zero_lock:
+                operation = self._ordinary_stop_operations.get(operation_id)
+                if operation is not None:
+                    operation['failure_reporting'].discard(publication_index)
+
+    def _retry_ordinary_stop_publications(self):
+        """Retry stop messages which never obtained a worker or returned."""
+        with self._safety_zero_lock:
+            pending = tuple(
+                (operation_id, publication_index)
+                for operation_id, operation
+                in self._ordinary_stop_operations.items()
+                for publication_index in operation['pending_publications']
+                if publication_index
+                not in operation['inflight_publications']
+                and publication_index not in operation['failure_reporting']
+            )
+        for operation_id, publication_index in pending:
+            self._schedule_ordinary_stop_publication(
+                operation_id, publication_index
+            )
+
+    def _arm_ordinary_stop_final_zero(self, operation_id):
+        """Require one zero return after every lifecycle stop returned."""
+        with self._safety_zero_lock:
+            operation = self._ordinary_stop_operations.get(operation_id)
+            if (
+                operation is None
+                or operation['pending_publications']
+                or operation['required_zero_receipts'] is not None
+            ):
+                return
+            publishers = tuple(self._safety_publisher_snapshot)
+            required_zero_receipts = {}
+            for robot_id, publisher in publishers:
+                receipt_key = (robot_id, id(publisher))
+                lane_key = receipt_key + ('supervisor',)
+                receipt_count = self._safety_zero_receipts.get(
+                    receipt_key, 0
+                )
+                if lane_key in self._safety_zero_inflight:
+                    # That zero was physically started before every lifecycle
+                    # stop returned. Count it, then require a fresh reassertion
+                    # on the exact same publisher lane.
+                    required_zero_receipts[receipt_key] = receipt_count + 2
+                    self._safety_zero_followups.add(lane_key)
+                else:
+                    required_zero_receipts[receipt_key] = receipt_count + 1
+            operation['required_zero_receipts'] = required_zero_receipts
+
+        self._schedule_safety_zero_batch(publishers)
+        self._complete_ordinary_stop_operations()
+
+    def _complete_ordinary_stop_operations(self):
+        """Release ordinary stop gates whose final zero really returned."""
+        with self._safety_zero_lock:
+            completed = []
+            for operation_id, operation in (
+                self._ordinary_stop_operations.items()
+            ):
+                required = operation['required_zero_receipts']
+                if operation['pending_publications'] or required is None:
+                    continue
+                if all(
+                    self._safety_zero_receipts.get(key, 0) >= count
+                    for key, count in required.items()
+                ):
+                    completed.append(operation_id)
+            for operation_id in completed:
+                self._ordinary_stop_operations.pop(operation_id, None)
+            self.ordinary_stop_active = bool(
+                self._ordinary_stop_operations
+            )
+
+    def _compensate_late_lifecycle_message(self, task_id, context):
+        """Put stops after a start, resume or reset which returned too late."""
+        self._install_emergency_publication_debts(task_id, context)
+        self._schedule_safety_zero_batch()
+
+    def _install_emergency_publication_debts(self, task_id, context):
+        """Keep failed e-stop and behavior-stop messages eligible for retry."""
+        publications = [
+            (
+                ('emergency', id(self.emergency_stop_pub)),
+                '{}-emergency'.format(context),
+                self.emergency_stop_pub,
+                Bool(data=True),
+            ),
+        ]
+        if task_id:
+            stop_message = String(data=json.dumps({'task_id': task_id}))
+            publications.extend(
+                (
+                    ('stop', index, id(publisher)),
+                    '{}-stop-{}'.format(context, index),
+                    publisher,
+                    stop_message,
+                )
+                for index, publisher
+                in enumerate(tuple(self.behavior_stop_pubs))
+            )
+
+        with self._safety_zero_lock:
+            for key, label, publisher, message in publications:
+                self._emergency_publication_debts.setdefault(
+                    key, (label, publisher, message)
+                )
+        self._retry_emergency_publications()
+
+    def _retry_emergency_publications(self):
+        """Retry latched lifecycle messages after worker or publish failure."""
+        with self._safety_zero_lock:
+            pending = tuple(
+                key for key in self._emergency_publication_debts
+                if key not in self._emergency_publication_inflight
+            )
+        for key in pending:
+            self._schedule_emergency_publication(key)
+
+    def _schedule_emergency_publication(self, key):
+        with self._safety_zero_lock:
+            publication = self._emergency_publication_debts.get(key)
+            if publication is None:
+                return True
+            if key in self._emergency_publication_inflight:
+                return True
+            self._emergency_publication_inflight.add(key)
+
+        label, publisher, message = publication
+        completion = lambda accepted: self._emergency_publish_returned(
+            key, accepted
+        )
+        started = self._start_detached_safety_publish(
+            label, publisher, message, on_return=completion
+        )
+        if not started:
+            with self._safety_zero_lock:
+                self._emergency_publication_inflight.discard(key)
+        return started
+
+    def _emergency_publish_returned(self, key, accepted):
+        with self._safety_zero_lock:
+            self._emergency_publication_inflight.discard(key)
+            if accepted:
+                self._emergency_publication_debts.pop(key, None)
+
+    def _ensure_emergency_ordering(self):
+        """Return the ordering condition, including for ``__new__`` tests."""
+        with self._EMERGENCY_ORDER_INIT_LOCK:
+            condition = getattr(
+                self, '_emergency_order_condition', None
+            )
+            if condition is None:
+                condition = threading.Condition()
+                self._emergency_order_condition = condition
+            if not hasattr(self, '_emergency_order_generation'):
+                self._emergency_order_generation = 0
+            if not hasattr(
+                self, '_pending_emergency_true_generations'
+            ):
+                self._pending_emergency_true_generations = set()
+        return condition
+
+    def _watchdog_can_latch_locked(self, now):
+        """Check the watchdog trip predicate under ``_safety_zero_lock``."""
+        if (
+            not self.control_watchdog_enabled
+            or not self.control_heartbeat_seen
+            or self.last_control_heartbeat is None
+            or self.control_watchdog_tripped
+            or self._shutdown_started
+        ):
+            return False
+        return (
+            now - self.last_control_heartbeat
+            > self.control_heartbeat_timeout
+        )
+
+    def _begin_emergency_true(self, watchdog=False, now=None):
+        """Register and latch one True before it can wait for task state."""
+        condition = self._ensure_emergency_ordering()
+        with condition:
+            with self._safety_zero_lock:
+                if watchdog and not self._watchdog_can_latch_locked(now):
+                    return False, None, None
+                if self._shutdown_started:
+                    return False, None, None
+                self._emergency_order_generation += 1
+                generation = self._emergency_order_generation
+                self._pending_emergency_true_generations.add(generation)
+                latched, task_id = self._latch_emergency_stop_locked(
+                    watchdog
+                )
+        return latched, task_id, generation
+
+    def _finish_emergency_true(self, generation):
+        """Release resets that entered after this True was registered."""
+        condition = self._ensure_emergency_ordering()
+        with condition:
+            self._pending_emergency_true_generations.discard(generation)
+            condition.notify_all()
+
+    def _capture_emergency_reset_generation(self):
+        """Wait for True operations that preceded this reset invocation."""
+        condition = self._ensure_emergency_ordering()
+        with condition:
+            generation = self._emergency_order_generation
+            while any(
+                pending <= generation
+                for pending in self._pending_emergency_true_generations
+            ):
+                condition.wait()
+        return generation, condition
+
+    def _latch_emergency_stop_locked(self, watchdog=False):
+        """Close the motion gate while ``_safety_zero_lock`` is held."""
+        if self._shutdown_started:
+            return False, None
         self.emergency_stop_active = True
-        self.emergency_stop_pub.publish(Bool(data=True))
-        self._signal_stop_behaviors()
-        self._stop_all_robots()
-        self.task_state = TaskState.STOPPED
-        self.task_error = None
+        if watchdog:
+            self.control_watchdog_tripped = True
+        return True, self.current_task_id
+
+    def _commit_emergency_stop_state(self):
+        """Reconcile task state after the lock-free safety fan-out began."""
+        with self.task_lock:
+            with self._safety_zero_lock:
+                if (
+                    self._shutdown_started
+                    or self.supervised_stop_active
+                    or not self.emergency_stop_active
+                ):
+                    return False
+                self.task_state = TaskState.STOPPED
+                self.task_error = None
+                self.task_progress = 0.0
+                self.task_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
+        return True
+
+    def _latch_and_publish_emergency_stop(
+        self, context, watchdog=False, now=None
+    ):
+        """Order, latch and commit a True through one shared path."""
+        latched, task_id, generation = self._begin_emergency_true(
+            watchdog=watchdog, now=now
+        )
+        if not latched:
+            return False, False
+        try:
+            self._compensate_late_lifecycle_message(
+                task_id, context
+            )
+            committed = self._commit_emergency_stop_state()
+        finally:
+            self._finish_emergency_true(generation)
+        return True, committed
 
     def _handle_emergency_stop(self, params):
+        latched, committed = self._latch_and_publish_emergency_stop(
+            'emergency-stop'
+        )
+        if latched and committed:
+            rospy.logwarn("EMERGENCY STOP ACTIVATED")
+
+    def _safety_stop_request_callback(self, msg):
+        """Latch a behavior shutdown request before any task lock is taken."""
+        validation_errors = []
+        try:
+            payload = json.loads(msg.data)
+        except (AttributeError, TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            payload = {}
+            validation_errors.append('payload is not a JSON object')
+
+        source = payload.get('source')
+        reason = payload.get('reason')
+        requested_task_id = payload.get('task_id')
+        request_id = payload.get('request_id')
+        active_task_id = self.current_task_id
+        active_task_type = self.current_task_type
+        if source != 'formation':
+            validation_errors.append('source is not formation')
+        if reason != 'shutdown':
+            validation_errors.append('reason is not shutdown')
+        if requested_task_id is not None and (
+            not isinstance(requested_task_id, str)
+            or not requested_task_id
+        ):
+            validation_errors.append('task_id is malformed')
+            requested_task_id = None
+        if requested_task_id != active_task_id:
+            validation_errors.append('task_id does not match the active task')
+        if not isinstance(request_id, str) or not request_id:
+            validation_errors.append('request_id is malformed')
+            request_id = None
+        if active_task_type not in (None, 'formation'):
+            validation_errors.append('active task is not a formation')
+
+        context = {
+            'source': source if isinstance(source, str) else 'unknown',
+            'reason': reason if isinstance(reason, str) else 'invalid_request',
+            'task_id': requested_task_id,
+            'request_id': request_id,
+            'active_task_id': active_task_id,
+            'active_task_type': active_task_type,
+            'valid': not validation_errors,
+        }
+        if validation_errors:
+            context['validation_error'] = '; '.join(validation_errors)[:256]
+
+        with self._safety_zero_lock:
+            if self.supervised_stop_context is None:
+                self.supervised_stop_context = context
+            self.supervised_stop_active = True
+            # Set this atomic gate before task_lock. Start/resume paths consult
+            # both bits before they can dispatch behavior work.
+            self.emergency_stop_active = True
+
+        with self._safety_zero_lock:
+            safety_publishers = tuple(self._safety_publisher_snapshot)
+            required_zero_receipts = {
+                (robot_id, id(publisher)): (
+                    self._safety_zero_receipts.get(
+                        (robot_id, id(publisher)), 0
+                    ) + 1
+                )
+                for robot_id, publisher in safety_publishers
+            }
+        zero_schedule = self._schedule_safety_zero_batch(safety_publishers)
+        state_worker_started = self._start_supervised_state_worker()
+        if request_id is not None:
+            pending = {
+                'request_id': request_id,
+                'valid_request': not validation_errors,
+                'required_zero_receipts': required_zero_receipts,
+                'scheduled_publisher_ids': set(
+                    zero_schedule['scheduled_publisher_ids']
+                ),
+            }
+            if pending['valid_request']:
+                with self._safety_zero_lock:
+                    if len(self._pending_safety_stop_acks) >= 32:
+                        oldest = next(iter(self._pending_safety_stop_acks))
+                        self._pending_safety_stop_acks.pop(oldest, None)
+                    self._pending_safety_stop_acks[request_id] = pending
+            self._schedule_safety_stop_ack(pending)
+
+    def _publish_safety_stop_ack(self, pending):
+        """Publish one correlated ACK and report a live reverse connection."""
+        with self._safety_zero_lock:
+            supervisor_latched = self.supervised_stop_active
+            state_worker_started = (
+                self._supervised_stop_state_started
+                and not self._shutdown_started
+            )
+            supervisor_will_remain_active = (
+                supervisor_latched
+                and state_worker_started
+            )
+            required_receipts = dict(
+                pending.get('required_zero_receipts', {})
+            )
+            scheduled_publishers = set(
+                pending.get('scheduled_publisher_ids', ())
+            )
+            receipt_snapshot = dict(self._safety_zero_receipts)
+        zero_publish_return_count = sum(
+            receipt_snapshot.get(publisher_id, 0) >= required_count
+            for publisher_id, required_count
+            in required_receipts.items()
+        )
+        zero_publications_confirmed = (
+            zero_publish_return_count == len(required_receipts)
+        )
+        scheduling_confirmed = all(
+            publisher_id in scheduled_publishers
+            or receipt_snapshot.get(publisher_id, 0) >= required_count
+            for publisher_id, required_count
+            in required_receipts.items()
+        )
+        accepted = (
+            pending['valid_request']
+            and scheduling_confirmed
+            and zero_publications_confirmed
+            and state_worker_started
+            and supervisor_will_remain_active
+        )
+        message = String(data=json.dumps({
+            'request_id': pending['request_id'],
+            'accepted': accepted,
+            'supervisor_latched': supervisor_latched,
+            'supervisor_will_remain_active': (
+                supervisor_will_remain_active
+            ),
+            'valid_request': pending['valid_request'],
+            'zero_worker_count': len(scheduled_publishers),
+            'zero_target_count': len(required_receipts),
+            'zero_publish_return_count': zero_publish_return_count,
+            'zero_publications_confirmed': zero_publications_confirmed,
+            'state_worker_started': state_worker_started,
+        }))
+        connection_count = getattr(
+            self.safety_stop_ack_pub, 'get_num_connections', None
+        )
+        subscriber_connected = None
+        if callable(connection_count):
+            try:
+                subscriber_connected = connection_count() > 0
+            except Exception:
+                subscriber_connected = None
+        try:
+            self.safety_stop_ack_pub.publish(message)
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Safety-stop acknowledgement failed: %s", exc
+                )
+            except Exception:
+                pass
+            return {'accepted': accepted, 'delivered': False}
+        return {
+            'accepted': accepted,
+            'delivered': subscriber_connected is not False,
+        }
+
+    def _schedule_safety_stop_ack(self, pending):
+        """Coalesce one ACK on its prestarted, publisher-specific lane."""
+        request_id = pending['request_id']
+        with self._safety_zero_lock:
+            if request_id in self._safety_ack_publish_inflight:
+                self._safety_ack_retry_requested.add(request_id)
+                return True
+            self._safety_ack_publish_inflight.add(request_id)
+
+        def publish_ack():
+            acknowledgement = self._publish_safety_stop_ack(pending)
+            reschedule = False
+            with self._safety_zero_lock:
+                current = self._pending_safety_stop_acks.get(request_id)
+                if (
+                    acknowledgement['accepted']
+                    and acknowledgement['delivered']
+                    and current is pending
+                ):
+                    self._pending_safety_stop_acks.pop(request_id, None)
+                    current = None
+                reschedule = (
+                    current is pending
+                    and request_id in self._safety_ack_retry_requested
+                )
+                self._safety_ack_retry_requested.discard(request_id)
+                self._safety_ack_publish_inflight.discard(request_id)
+            if reschedule:
+                self._schedule_safety_stop_ack(pending)
+
+        if self._submit_safety_fallback(
+            self.safety_stop_ack_pub, publish_ack
+        ):
+            return True
+        with self._safety_zero_lock:
+            self._safety_ack_publish_inflight.discard(request_id)
+        try:
+            rospy.logerr(
+                "Safety-stop acknowledgement could not be scheduled for %s",
+                request_id,
+            )
+        except Exception:
+            pass
+        return False
+
+    def _retry_pending_safety_stop_acks(self, zero_schedule=None):
+        """Republish an ACK after scheduling, delivery, or link recovery."""
+        with self._safety_zero_lock:
+            if zero_schedule is not None:
+                recovered_publishers = set(
+                    zero_schedule['scheduled_publisher_ids']
+                )
+                for pending in self._pending_safety_stop_acks.values():
+                    pending['scheduled_publisher_ids'].update(
+                        recovered_publishers
+                    )
+            pending_acks = tuple(self._pending_safety_stop_acks.values())
+        for pending in pending_acks:
+            self._schedule_safety_stop_ack(pending)
+
+    def _start_supervised_state_worker(self):
+        """Reserve one state worker and leave a failed start retryable."""
+        with self._safety_zero_lock:
+            if self._shutdown_started or not self.supervised_stop_active:
+                return False
+            if self._supervised_stop_state_started:
+                return True
+            self._supervised_stop_state_started = True
+
+        for attempt in range(2):
+            worker = threading.Thread(
+                target=self._apply_supervised_stop_state,
+                name='supervised-safety-stop-state',
+                daemon=True,
+            )
+            try:
+                worker.start()
+                return True
+            except Exception as exc:
+                try:
+                    rospy.logerr(
+                        "Could not start supervised-stop state worker "
+                        "(attempt %d): %s",
+                        attempt + 1,
+                        exc,
+                    )
+                except Exception:
+                    pass
+
+        with self._safety_zero_lock:
+            self._supervised_stop_state_started = False
+        return False
+
+    def _apply_supervised_stop_state(self):
+        """Correlate the already-latched safety stop with task lifecycle."""
         with self.task_lock:
-            self._activate_emergency_stop_locked()
-        rospy.logwarn("EMERGENCY STOP ACTIVATED")
+            context = dict(self.supervised_stop_context or {})
+            self.emergency_stop_active = True
+            try:
+                self.emergency_stop_pub.publish(Bool(data=True))
+            except Exception as exc:
+                rospy.logerr(
+                    "Supervised emergency-stop signal failed: %s", exc
+                )
+            try:
+                self._signal_stop_behaviors()
+            except Exception as exc:
+                rospy.logerr(
+                    "Supervised behavior-stop signal failed: %s", exc
+                )
+            if self.current_task_id is None:
+                self.task_state = TaskState.STOPPED
+            else:
+                self.task_state = TaskState.FAILED
+                self.task_error = (
+                    "Independent safety supervisor latched a stop from "
+                    "{} ({})".format(
+                        context.get('source', 'unknown'),
+                        context.get('reason', 'unknown'),
+                    )
+                )
+            self.task_progress = 0.0
+            self.task_dispatched = False
+            self.task_dispatched_at = None
+            self.last_behavior_status_at = None
+
+    def _schedule_safety_zero_batch(self, publishers=None):
+        """Give each independent command socket at most one in-flight zero."""
+        if publishers is None:
+            publishers = tuple(self._safety_publisher_snapshot)
+        else:
+            publishers = tuple(publishers)
+        scheduled_count = 0
+        scheduled_publisher_ids = []
+        failed_robots = []
+        for robot_id, publisher in publishers:
+            if self._schedule_safety_zero(
+                robot_id, publisher, lane='supervisor'
+            ):
+                scheduled_count += 1
+                scheduled_publisher_ids.append(
+                    (robot_id, id(publisher))
+                )
+            else:
+                failed_robots.append(robot_id)
+        return {
+            'requested_count': len(publishers),
+            'scheduled_count': scheduled_count,
+            'scheduled_publisher_ids': scheduled_publisher_ids,
+            'failed_robots': failed_robots,
+            'scheduling_confirmed': not failed_robots,
+        }
+
+    def _schedule_safety_zero(self, robot_id, publisher, lane):
+        """Start one zero attempt unless that exact socket is still busy."""
+        key = (robot_id, id(publisher), lane)
+        with self._safety_zero_lock:
+            if key in self._safety_zero_inflight:
+                return True
+            self._safety_zero_inflight.add(key)
+        last_error = None
+        for attempt in range(2):
+            worker = threading.Thread(
+                target=self._publish_supervised_zero,
+                args=(key, robot_id, publisher),
+                name='supervised-zero-{}-{}'.format(
+                    robot_id, attempt + 1
+                ),
+                daemon=True,
+            )
+            try:
+                worker.start()
+                return True
+            except Exception as exc:
+                last_error = exc
+                try:
+                    rospy.logerr(
+                        "Could not start safety-zero worker for %s "
+                        "(attempt %d): %s",
+                        robot_id,
+                        attempt + 1,
+                        exc,
+                    )
+                except Exception:
+                    pass
+        if self._submit_safety_fallback(
+            publisher,
+            lambda: self._publish_supervised_zero(
+                key, robot_id, publisher
+            ),
+        ):
+            return True
+        with self._safety_zero_lock:
+            self._safety_zero_inflight.discard(key)
+        if last_error is not None:
+            try:
+                rospy.logerr(
+                    "Safety-zero publication was not scheduled for %s: %s",
+                    robot_id,
+                    last_error,
+                )
+            except Exception:
+                pass
+        return False
+
+    def _schedule_retired_safety_zeros(self):
+        """Retry only publishers which still owe a final accepted zero."""
+        with self._safety_zero_lock:
+            retired = tuple(self._retired_safety_publishers.values())
+        for robot_id, publisher in retired:
+            self._schedule_safety_zero(
+                robot_id, publisher, lane='retirement'
+            )
+
+    def _publish_supervised_zero(self, key, robot_id, publisher):
+        accepted = False
+        retired = None
+        schedule_followup = False
+        try:
+            publisher.publish(Twist())
+            accepted = True
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Independent safety zero failed for %s: %s",
+                    robot_id,
+                    exc,
+                )
+            except Exception:
+                pass
+        finally:
+            retired_key = (robot_id, id(publisher))
+            with self._safety_zero_lock:
+                self._safety_zero_inflight.discard(key)
+                if accepted:
+                    self._safety_zero_receipts[retired_key] = (
+                        self._safety_zero_receipts.get(retired_key, 0) + 1
+                    )
+                    retired = self._retired_safety_publishers.pop(
+                        retired_key, None
+                    )
+                    if retired is not None:
+                        self._safety_publisher_snapshot = tuple(
+                            (name, candidate)
+                            for name, candidate
+                            in self._safety_publisher_snapshot
+                            if not (
+                                name == robot_id
+                                and candidate is publisher
+                            )
+                        )
+                if key in self._safety_zero_followups:
+                    self._safety_zero_followups.discard(key)
+                    schedule_followup = True
+        if schedule_followup:
+            self._schedule_safety_zero(
+                robot_id, publisher, lane=key[2]
+            )
+        if retired is not None:
+            try:
+                publisher.unregister()
+            except Exception as exc:
+                try:
+                    rospy.logwarn(
+                        "Retired command publisher for %s could not be "
+                        "unregistered: %s",
+                        robot_id,
+                        exc,
+                    )
+                except Exception:
+                    pass
+            self._discard_safety_fallback_lane(publisher)
+        if accepted:
+            self._retry_pending_safety_stop_acks()
+            self._complete_ordinary_stop_operations()
+
+    def _safety_stop_zero_timer(self, _event):
+        """Reassert zeros while any emergency stop remains latched."""
+        if (
+            self.supervised_stop_active
+            or self.emergency_stop_active
+            or self.ordinary_stop_active
+        ):
+            if self.ordinary_stop_active:
+                self._retry_ordinary_stop_publications()
+            if self.emergency_stop_active:
+                self._retry_emergency_publications()
+            zero_schedule = self._schedule_safety_zero_batch()
+            if self.supervised_stop_active:
+                self._start_supervised_state_worker()
+                self._retry_pending_safety_stop_acks(zero_schedule)
+            if self.ordinary_stop_active:
+                self._complete_ordinary_stop_operations()
+        else:
+            self._schedule_retired_safety_zeros()
 
     def _handle_reset_emergency_stop(self, params):
+        reset_generation, order_condition = (
+            self._capture_emergency_reset_generation()
+        )
+        task_id = None
+        publish_error = None
+        late_safety_latch = False
         with self.task_lock:
-            now = self._control_clock()
-            if (
-                self.control_watchdog_enabled
-                and self.control_heartbeat_seen
-                and self.last_control_heartbeat is not None
-                and now - self.last_control_heartbeat
-                > self.control_heartbeat_timeout
-            ):
-                rospy.logwarn(
-                    "Emergency-stop reset rejected while the control "
-                    "heartbeat is stale"
+            # Keep the supervised-latch check and the local reset commit in
+            # one safety critical section. The request callback never holds
+            # this lock while waiting for task_lock, so this order is acyclic.
+            with order_condition:
+                with self._safety_zero_lock:
+                    if (
+                        self._emergency_order_generation
+                        != reset_generation
+                    ):
+                        rospy.logwarn(
+                            "Emergency-stop reset rejected because a newer "
+                            "stop was latched"
+                        )
+                        return
+                    if self.supervised_stop_active:
+                        rospy.logwarn(
+                            "Emergency-stop reset rejected after a "
+                            "supervised behavior shutdown"
+                        )
+                        return
+                    if not self.emergency_stop_active:
+                        rospy.logwarn(
+                            "Emergency-stop reset ignored because no stop "
+                            "is latched"
+                        )
+                        return
+                    if self._emergency_publication_debts:
+                        rospy.logwarn(
+                            "Emergency-stop reset rejected while stop "
+                            "messages are still pending delivery"
+                        )
+                        return
+                    now = self._control_clock()
+                    if (
+                        self.control_watchdog_enabled
+                        and self.control_heartbeat_seen
+                        and self.last_control_heartbeat is not None
+                        and now - self.last_control_heartbeat
+                        > self.control_heartbeat_timeout
+                    ):
+                        rospy.logwarn(
+                            "Emergency-stop reset rejected while the "
+                            "control heartbeat is stale"
+                        )
+                        return
+                    self.emergency_stop_active = False
+                    self.control_watchdog_tripped = False
+            task_id = self.current_task_id
+            try:
+                self.emergency_stop_pub.publish(Bool(data=False))
+            except Exception as exc:
+                publish_error = exc
+            with order_condition:
+                with self._safety_zero_lock:
+                    late_safety_latch = (
+                        self._shutdown_started
+                        or self.supervised_stop_active
+                        or self.emergency_stop_active
+                        or self._emergency_order_generation
+                        != reset_generation
+                    )
+                    if late_safety_latch or publish_error is not None:
+                        self.emergency_stop_active = True
+                        self.control_watchdog_tripped = True
+                    if late_safety_latch or publish_error is not None:
+                        self.task_state = TaskState.FAILED
+                        self.task_error = (
+                            "Emergency-stop reset returned after the safety "
+                            "latch closed"
+                            if late_safety_latch
+                            else str(publish_error)
+                        )
+                    else:
+                        self.task_state = TaskState.STOPPED
+                        self.task_error = None
+                    self.task_progress = 0.0
+                    self.task_dispatched = False
+                    self.task_dispatched_at = None
+                    self.last_behavior_status_at = None
+            if late_safety_latch or publish_error is not None:
+                self._compensate_late_lifecycle_message(
+                    task_id,
+                    (
+                        'late-reset'
+                        if late_safety_latch
+                        else 'failed-reset'
+                    ),
                 )
-                return
-            self.emergency_stop_active = False
-            self.control_watchdog_tripped = False
-            self.emergency_stop_pub.publish(Bool(data=False))
-            self.task_state = TaskState.STOPPED
-            self.task_progress = 0.0
-            self.task_error = None
-            self._stop_all_robots()
+            zero_schedule = self._stop_all_robots()
+            if not zero_schedule['scheduling_confirmed']:
+                with self._safety_zero_lock:
+                    self.emergency_stop_active = True
+                    self.control_watchdog_tripped = True
+                    self.task_state = TaskState.FAILED
+                    self.task_error = (
+                        "Emergency-stop reset could not schedule every final "
+                        "zero publication"
+                    )
+                late_safety_latch = True
+
+        if late_safety_latch or publish_error is not None:
+            if publish_error is not None:
+                rospy.logerr(
+                    "Emergency-stop reset publication failed: %s",
+                    publish_error,
+                )
+            return
         rospy.logwarn("Emergency stop reset; a new task must be started explicitly")
 
     # ==================== Control-plane Watchdog ====================
 
     def _control_heartbeat_callback(self, _msg):
         """Arm/refresh the worker lease using local monotonic arrival time."""
-        with self.task_lock:
+        with self._safety_zero_lock:
             first_heartbeat = not self.control_heartbeat_seen
             self.control_heartbeat_seen = True
             self.last_control_heartbeat = self._control_clock()
@@ -732,22 +2026,26 @@ class TaskOrchestrator:
         preventing a startup false-positive while the worker/container link is
         still being established.
         """
-        with self.task_lock:
+        current_time = self._control_clock() if now is None else now
+        with self._safety_zero_lock:
             if (
                 not self.control_watchdog_enabled
                 or not self.control_heartbeat_seen
                 or self.last_control_heartbeat is None
                 or self.control_watchdog_tripped
+                or self._shutdown_started
             ):
                 return False
 
-            current_time = self._control_clock() if now is None else now
             age = current_time - self.last_control_heartbeat
             if age <= self.control_heartbeat_timeout:
                 return False
 
-            self.control_watchdog_tripped = True
-            self._activate_emergency_stop_locked()
+        latched, _committed = self._latch_and_publish_emergency_stop(
+            'control-watchdog', watchdog=True, now=current_time
+        )
+        if not latched:
+            return False
 
         rospy.logerr(
             "CONTROL HEARTBEAT LOST (%.1fs > %.1fs); emergency stop latched",
@@ -772,9 +2070,36 @@ class TaskOrchestrator:
 
     def _handle_control_leader(self, params):
         cmd = Twist()
-        cmd.linear.x = max(-0.26, min(0.26, params.get('linear_velocity', 0.0)))
-        cmd.angular.z = max(-1.82, min(1.82, params.get('angular_velocity', 0.0)))
-        self.leader_cmd_pub.publish(cmd)
+        with self._safety_zero_lock:
+            stopped = (
+                self.supervised_stop_active
+                or self.emergency_stop_active
+            )
+        if not stopped:
+            cmd.linear.x = max(
+                -0.26, min(0.26, params.get('linear_velocity', 0.0))
+            )
+            cmd.angular.z = max(
+                -1.82, min(1.82, params.get('angular_velocity', 0.0))
+            )
+        try:
+            self.leader_cmd_pub.publish(cmd)
+        finally:
+            # A request can latch while a previously admitted ROS publish is
+            # blocked. Once that call returns, put a zero after it instead of
+            # letting its late velocity become the final message.
+            if not stopped:
+                with self._safety_zero_lock:
+                    stopped_after_publish = (
+                        self.supervised_stop_active
+                        or self.emergency_stop_active
+                    )
+                if stopped_after_publish:
+                    self._schedule_safety_zero(
+                        'leader',
+                        self.leader_cmd_pub,
+                        lane='manual-compensation',
+                    )
 
     def _handle_get_status(self, params):
         return self._build_status()
@@ -812,10 +2137,9 @@ class TaskOrchestrator:
             for rid in current_ids - new_ids:
                 self._unsubscribe_from_robot(rid)
 
-            self.robot_count = len(robot_ids)
+            self.robot_count = len(self.robots)
             if (
-                current_ids
-                and not new_ids
+                not self.robots
                 and self.current_task_type is not None
                 and self.task_state in (
                     TaskState.INITIALIZING,
@@ -823,14 +2147,31 @@ class TaskOrchestrator:
                     TaskState.PAUSED,
                 )
             ):
-                self._signal_stop_behaviors()
-                self._stop_all_robots()
-                self.task_state = TaskState.STOPPED
-                self.task_progress = 0.0
-                self.task_error = None
+                stop_delivery = self._signal_stop_behaviors()
+                with self._safety_zero_lock:
+                    if (
+                        self._shutdown_started
+                        or self.supervised_stop_active
+                    ):
+                        return
+                    if stop_delivery['scheduling_confirmed']:
+                        self.task_state = TaskState.STOPPED
+                        self.task_error = None
+                    else:
+                        self.task_state = TaskState.FAILED
+                        self.task_error = (
+                            "Fleet loss could not schedule every safety "
+                            "publication"
+                        )
+                    self.task_progress = 0.0
+                    self.task_dispatched = False
+                    self.task_dispatched_at = None
+                    self.last_behavior_status_at = None
+                    cancelled_task_id = self.current_task_id
                 rospy.logwarn(
-                    "Cancelled task %s because the fleet became empty",
-                    self.current_task_id,
+                    "Cancelled task %s because no announced robot could "
+                    "remain active",
+                    cancelled_task_id,
                 )
 
     def _task_complete_callback(self, msg):
@@ -858,6 +2199,7 @@ class TaskOrchestrator:
                 return
 
             self.last_behavior_status_at = self._control_clock()
+            self.last_behavior_status = status
 
             if 'progress' in status:
                 try:
@@ -1090,11 +2432,20 @@ class TaskOrchestrator:
                 or self.task_state != TaskState.RUNNING
             ):
                 return
-            self._signal_stop_behaviors()
-            self._stop_all_robots()
-            self.task_state = TaskState.FAILED
-            self.task_progress = 0.0
-            self.task_error = reason
+            stop_delivery = self._signal_stop_behaviors()
+            with self._safety_zero_lock:
+                if self._shutdown_started or self.supervised_stop_active:
+                    return
+                self.task_state = TaskState.FAILED
+                self.task_progress = 0.0
+                self.task_error = reason
+                if not stop_delivery['scheduling_confirmed']:
+                    self.task_error += (
+                        "; every safety publication could not be scheduled"
+                    )
+                self.task_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
         rospy.logerr("Task %s failed: %s", self.current_task_type, reason)
 
     def _complete_current_task(self, expected_task_id=None):
@@ -1106,27 +2457,54 @@ class TaskOrchestrator:
                 return
             if self.task_state != TaskState.RUNNING:
                 return
-            self._signal_stop_behaviors()
-            self._stop_all_robots()
-            self.task_state = TaskState.COMPLETED
-            self.task_progress = 1.0
-            self.task_error = None
+            stop_delivery = self._signal_stop_behaviors()
+            with self._safety_zero_lock:
+                if self._shutdown_started or self.supervised_stop_active:
+                    return
+                if stop_delivery['scheduling_confirmed']:
+                    self.task_state = TaskState.COMPLETED
+                    self.task_progress = 1.0
+                    self.task_error = None
+                else:
+                    self.task_state = TaskState.FAILED
+                    self.task_progress = 0.0
+                    self.task_error = (
+                        "Task completion could not schedule every safety "
+                        "publication"
+                    )
+                self.task_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
         rospy.loginfo("Task %s completed", self.current_task_type)
 
     def _signal_stop_behaviors(self):
         if not self.current_task_id:
-            return
+            return self._start_ordinary_stop_publications(
+                'task-stop', ()
+            )
         payload = String(data=json.dumps({
             'task_id': self.current_task_id,
         }))
-        for pub in self.behavior_stop_pubs:
-            pub.publish(payload)
+        publications = tuple(
+            ('behavior-{}'.format(index), publisher, payload)
+            for index, publisher in enumerate(tuple(self.behavior_stop_pubs))
+        )
+        return self._start_ordinary_stop_publications(
+            'task-stop', publications
+        )
 
     def _subscribe_to_robot(self, robot_id):
+        with self._safety_zero_lock:
+            if self._shutdown_started or self.supervised_stop_active:
+                rospy.logwarn(
+                    "Ignoring robot %s after the safety latch closed",
+                    robot_id,
+                )
+                return
         if robot_id in self.robots:
             return
 
-        self.robots[robot_id] = {
+        robot_state = {
             'pose': Pose(), 'velocity': Twist(),
             'status': 'active', 'threat_level': 0.0,
             'collision_active': False,
@@ -1137,30 +2515,107 @@ class TaskOrchestrator:
             'subscribed_at': self._control_clock(),
             'role': 'follower',
         }
-        self.robot_sensor_data[robot_id] = {}
-        self.cmd_vel_pubs[robot_id] = rospy.Publisher(
-            f'/{robot_id}/cmd_vel', Twist, queue_size=1
-        )
+        command_pub = None
+        subscribers = {}
+        try:
+            # This publisher only carries safety zeros. Synchronous delivery
+            # keeps shutdown from mistaking a local queue insert for a socket
+            # write.
+            command_pub = rospy.Publisher(f'/{robot_id}/cmd_vel', Twist)
+            if not self._register_safety_fallback_lane(
+                robot_id, command_pub
+            ):
+                raise RuntimeError(
+                    "the safety publication lane could not be reserved"
+                )
+            subscribers['odom'] = rospy.Subscriber(
+                f'/{robot_id}/odom', Odometry,
+                lambda msg, rid=robot_id: self._odom_cb(rid, msg), queue_size=1
+            )
+            subscribers['threat'] = rospy.Subscriber(
+                f'/{robot_id}/threat_level', Float32,
+                lambda msg, rid=robot_id: self._threat_cb(rid, msg),
+                queue_size=1,
+            )
+            subscribers['collision'] = rospy.Subscriber(
+                f'/{robot_id}/collision_state', Bool,
+                lambda msg, rid=robot_id: self._collision_cb(rid, msg),
+                queue_size=1,
+            )
+            subscribers['scan'] = rospy.Subscriber(
+                f'/{robot_id}/scan', LaserScan,
+                lambda msg, rid=robot_id: self._scan_cb(rid, msg), queue_size=1
+            )
+        except Exception as exc:
+            for subscriber in subscribers.values():
+                try:
+                    subscriber.unregister()
+                except Exception:
+                    pass
+            if command_pub is not None:
+                self._discard_safety_fallback_lane(command_pub)
+                try:
+                    command_pub.unregister()
+                except Exception:
+                    pass
+            rospy.logerr("Could not subscribe to robot %s: %s", robot_id, exc)
+            return
 
-        self.odom_subs[robot_id] = rospy.Subscriber(
-            f'/{robot_id}/odom', Odometry,
-            lambda msg, rid=robot_id: self._odom_cb(rid, msg), queue_size=1
-        )
-        self.threat_subs[robot_id] = rospy.Subscriber(
-            f'/{robot_id}/threat_level', Float32,
-            lambda msg, rid=robot_id: self._threat_cb(rid, msg), queue_size=1
-        )
-        self.collision_subs[robot_id] = rospy.Subscriber(
-            f'/{robot_id}/collision_state', Bool,
-            lambda msg, rid=robot_id: self._collision_cb(rid, msg),
-            queue_size=1,
-        )
-        self.scan_subs[robot_id] = rospy.Subscriber(
-            f'/{robot_id}/scan', LaserScan,
-            lambda msg, rid=robot_id: self._scan_cb(rid, msg), queue_size=1
+        installed = False
+        with self._safety_zero_lock:
+            if (
+                not self._shutdown_started
+                and not self.supervised_stop_active
+                and robot_id not in self.robots
+            ):
+                self.robots[robot_id] = robot_state
+                self.robot_sensor_data[robot_id] = {}
+                self.cmd_vel_pubs[robot_id] = command_pub
+                self.odom_subs[robot_id] = subscribers['odom']
+                self.threat_subs[robot_id] = subscribers['threat']
+                self.collision_subs[robot_id] = subscribers['collision']
+                self.scan_subs[robot_id] = subscribers['scan']
+                self._refresh_safety_publisher_snapshot_locked()
+                installed = True
+
+        if installed:
+            return
+
+        # Resources created during a closing safety gate were never exposed as
+        # command sources, so they carry no motion debt. Dispose of them rather
+        # than letting a late robot escape the immutable shutdown snapshot.
+        for subscriber in subscribers.values():
+            try:
+                subscriber.unregister()
+            except Exception:
+                pass
+        try:
+            command_pub.unregister()
+        except Exception:
+            pass
+        self._discard_safety_fallback_lane(command_pub)
+        rospy.logwarn(
+            "Discarded robot %s because the safety latch closed during setup",
+            robot_id,
         )
 
     def _unsubscribe_from_robot(self, robot_id):
+        # Keep the command socket reachable until one zero has been accepted.
+        # Removing it from the active fleet first is safe because the previous
+        # immutable snapshot still contains it until the retired entry is
+        # installed below.
+        command_pub = self.cmd_vel_pubs.pop(robot_id, None)
+        if command_pub is not None:
+            key = (robot_id, id(command_pub))
+            with self._safety_zero_lock:
+                self._retired_safety_publishers[key] = (
+                    robot_id, command_pub
+                )
+            self._refresh_safety_publisher_snapshot()
+            self._schedule_safety_zero(
+                robot_id, command_pub, lane='retirement'
+            )
+
         for subs_dict in [
             self.odom_subs,
             self.threat_subs,
@@ -1170,12 +2625,30 @@ class TaskOrchestrator:
             sub = subs_dict.pop(robot_id, None)
             if sub:
                 sub.unregister()
-        command_pub = self.cmd_vel_pubs.pop(robot_id, None)
-        if command_pub is not None:
-            command_pub.publish(Twist())
-            command_pub.unregister()
         self.robots.pop(robot_id, None)
         self.robot_sensor_data.pop(robot_id, None)
+
+    def _refresh_safety_publisher_snapshot(self):
+        """Replace the lock-free roster without dropping stop debts."""
+        with self._safety_zero_lock:
+            self._refresh_safety_publisher_snapshot_locked()
+
+    def _refresh_safety_publisher_snapshot_locked(self):
+        """Refresh the immutable safety roster while its lock is held."""
+        active = list(self.cmd_vel_pubs.items())
+        leader_publisher = getattr(self, 'leader_cmd_pub', None)
+        if leader_publisher is not None:
+            active.append(('leader', leader_publisher))
+        candidates = active + list(
+            self._retired_safety_publishers.values()
+        )
+        unique = {}
+        for name, publisher in candidates:
+            unique[(name, id(publisher))] = (name, publisher)
+        self._safety_publisher_snapshot = tuple(sorted(
+            unique.values(),
+            key=lambda item: (item[0], id(item[1])),
+        ))
 
     def _odom_cb(self, robot_id, msg):
         with self.task_lock:
@@ -1585,6 +3058,34 @@ class TaskOrchestrator:
             dispatched_at = getattr(self, 'task_dispatched_at', None)
             last_status_at = getattr(self, 'last_behavior_status_at', None)
             behavior_timeout = getattr(self, 'behavior_status_timeout', 3.0)
+            last_behavior_status = getattr(
+                self, 'last_behavior_status', None
+            )
+            # Formation planning deliberately keeps every cmd_vel at zero.
+            # Routed placement grows with the fleet and can exceed the short
+            # moving-behavior heartbeat window. A correlated FORMING status
+            # therefore gets one bounded planning window; as soon as any
+            # assignment exists, the normal fail-fast timeout applies again.
+            if (
+                self.current_task_type == 'formation'
+                and isinstance(last_behavior_status, dict)
+                and str(last_behavior_status.get('task_id') or '')
+                == str(self.current_task_id or '')
+                and last_behavior_status.get('state') == 'forming'
+                and not last_behavior_status.get('robot_assignments')
+            ):
+                robot_count = max(0, int(getattr(
+                    self, 'robot_count', 0
+                )))
+                scaled_planning_timeout = 5.0 + 1.5 * robot_count
+                behavior_timeout = min(
+                    getattr(
+                        self,
+                        'formation_planning_status_timeout',
+                        30.0,
+                    ),
+                    max(behavior_timeout, scaled_planning_timeout),
+                )
             status_reference = (
                 last_status_at if last_status_at is not None else dispatched_at
             )
@@ -1675,6 +3176,12 @@ class TaskOrchestrator:
             }
             robot_count = self.robot_count
             emergency_stop_active = self.emergency_stop_active
+            supervised_stop_active = self.supervised_stop_active
+            supervised_stop_context = (
+                dict(self.supervised_stop_context)
+                if isinstance(self.supervised_stop_context, dict)
+                else None
+            )
             collision_count = self.collision_count
             collision_event_sequence = self.collision_event_sequence
             collision_events = [
@@ -1725,6 +3232,10 @@ class TaskOrchestrator:
             'robots': robots_list,
             'robot_count': robot_count,
             'emergency_stop': emergency_stop_active,
+            'supervised_stop': {
+                'active': supervised_stop_active,
+                'context': supervised_stop_context,
+            },
             'collisions': collision_count,
             'collision_metric': 'per_robot_geometric_contact_episodes',
             'collision_events': {
@@ -1755,27 +3266,165 @@ class TaskOrchestrator:
         }
 
     def _stop_all_robots(self):
-        stop = Twist()
-        for pub in self.cmd_vel_pubs.values():
-            pub.publish(stop)
+        """Fan out zeros so a blocked socket cannot hide a healthy robot."""
+        return self._schedule_safety_zero_batch()
 
     def _shutdown(self):
-        """Stop active behaviors and the wall-clock watchdog on shutdown."""
-        try:
-            self._signal_stop_behaviors()
-        finally:
-            try:
-                self._stop_all_robots()
-            finally:
-                self._control_watchdog_stop.set()
-                watchdog_thread = getattr(
-                    self, '_control_watchdog_thread', None
+        """Fan out final zeros without trusting any one ROS socket."""
+        timeout = max(0.0, float(self.SHUTDOWN_TIMEOUT))
+        deadline = time.monotonic() + timeout
+
+        # This gate is deliberately independent of task_lock. A behavior-state
+        # callback may be blocked there while ROS is already shutting down.
+        with self._safety_zero_lock:
+            self._shutdown_started = True
+            self.supervised_stop_active = True
+            self.emergency_stop_active = True
+            self._supervised_stop_state_started = True
+            shutdown_task_id = self.current_task_id
+            shutdown_task_type = self.current_task_type
+            self.task_state = (
+                TaskState.STOPPED
+                if shutdown_task_id is None
+                else TaskState.FAILED
+            )
+            self.task_progress = 0.0
+            self.task_dispatched = False
+            self.task_dispatched_at = None
+            self.last_behavior_status_at = None
+            if shutdown_task_id is not None:
+                self.task_error = (
+                    "Task orchestrator shut down under a latched safety stop"
                 )
-                if (
-                    watchdog_thread is not None
-                    and watchdog_thread is not threading.current_thread()
-                ):
-                    watchdog_thread.join(timeout=1.0)
+            if self.supervised_stop_context is None:
+                self.supervised_stop_context = {
+                    'source': 'task_orchestrator',
+                    'reason': 'shutdown',
+                    'task_id': shutdown_task_id,
+                    'active_task_id': shutdown_task_id,
+                    'active_task_type': shutdown_task_type,
+                    'valid': True,
+                }
+            command_publishers = tuple(self._safety_publisher_snapshot)
+
+        watchdog_stop = getattr(self, '_control_watchdog_stop', None)
+        if watchdog_stop is None:
+            watchdog_stop = threading.Event()
+            self._control_watchdog_stop = watchdog_stop
+        watchdog_stop.set()
+
+        attempts = []
+        failed_to_start = []
+
+        def start_publish(label, publisher, message):
+            finished = threading.Event()
+
+            def publish():
+                try:
+                    publisher.publish(message)
+                except Exception as exc:
+                    try:
+                        rospy.logerr(
+                            "Shutdown publication failed for %s: %s",
+                            label,
+                            exc,
+                        )
+                    except Exception:
+                        pass
+                finally:
+                    finished.set()
+
+            started = False
+            last_error = None
+            for attempt in range(2):
+                worker = threading.Thread(
+                    target=publish,
+                    name='orchestrator-shutdown-{}-{}'.format(
+                        label, attempt + 1
+                    ),
+                    daemon=True,
+                )
+                try:
+                    worker.start()
+                    started = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    try:
+                        rospy.logerr(
+                            "Could not start shutdown publication for %s "
+                            "(attempt %d): %s",
+                            label,
+                            attempt + 1,
+                            exc,
+                        )
+                    except Exception:
+                        pass
+            if not started and self._submit_safety_fallback(
+                publisher, publish
+            ):
+                started = True
+            if not started:
+                failed_to_start.append(label)
+                finished.set()
+                try:
+                    rospy.logerr(
+                        "Shutdown publication was not started for %s: %s",
+                        label,
+                        last_error,
+                    )
+                except Exception:
+                    pass
+            attempts.append((label, finished))
+
+        # Start every command attempt before touching behavior publishers.
+        # A blocked first robot therefore cannot prevent healthy robots from
+        # receiving their independent zero during the same shutdown window.
+        for robot_id, publisher in command_publishers:
+            start_publish(robot_id, publisher, Twist())
+
+        start_publish(
+            'emergency-stop',
+            self.emergency_stop_pub,
+            Bool(data=True),
+        )
+
+        if shutdown_task_id:
+            stop_message = String(data=json.dumps({
+                'task_id': shutdown_task_id,
+            }))
+            for index, publisher in enumerate(tuple(self.behavior_stop_pubs)):
+                start_publish(
+                    'behavior-stop-{}'.format(index),
+                    publisher,
+                    stop_message,
+                )
+
+        for _label, finished in attempts:
+            finished.wait(max(0.0, deadline - time.monotonic()))
+
+        unfinished = list(failed_to_start)
+        unfinished.extend(
+            label for label, finished in attempts if not finished.is_set()
+        )
+        if unfinished:
+            try:
+                rospy.logerr(
+                    "Shutdown deadline expired before publication returned "
+                    "for: %s",
+                    ', '.join(unfinished),
+                )
+            except Exception:
+                pass
+
+        watchdog_thread = getattr(self, '_control_watchdog_thread', None)
+        if (
+            watchdog_thread is not None
+            and watchdog_thread is not threading.current_thread()
+        ):
+            watchdog_thread.join(timeout=max(
+                0.0, deadline - time.monotonic()
+            ))
 
 
 if __name__ == '__main__':
