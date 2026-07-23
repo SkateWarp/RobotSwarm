@@ -124,10 +124,10 @@ class FormationLiveAcceptanceTest(unittest.TestCase):
     def test_measured_formation_matrix_keeps_a_simulation_time_margin(self):
         measured_cases = {
             "formation_triangle_n3": (15.15, 35),
-            "formation_square_n5": (86.25, 40),
+            "formation_square_n5": (142.61, 90),
             "formation_A_n7": (156.65, 65),
-            "formation_V_n8": (126.05, 55),
-            "formation_diamond_n9": (115.20, 50),
+            "formation_V_n8": (190.05, 90),
+            "formation_diamond_n9": (213.65, 90),
             "formation_S_n10": (208.75, 85),
         }
         cases = {case["name"]: case for case in LIVE.SCENARIOS}

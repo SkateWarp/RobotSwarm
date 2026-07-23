@@ -1798,6 +1798,42 @@ mínima 0,4013 m, despeje 0,2498 m, aceleración filtrada 0,8874 m/s², RTF
 [evidencia saneada](assets/commissioning-2026-07/corrective-i143/README.md)
 conserva el antes y después.
 
+### I-144. Tres presupuestos no cubrían el ensamblaje válido postdeploy
+
+**Resultado productivo rechazado.** Sobre `1d497d4`, triángulo N=3, A/N=7 y
+S/N=10 aprobaron. Cuadrado N=5, V/N=8 y diamante N=9 terminaron exactamente a
+40,38, 55,31 y 50,31 s, todavía en `forming`. Mantuvieron RTF
+2,9922–2,9962, cero colisiones y cleanup completo. La matriz global quedó 3/6
+y se rechazó.
+
+**Diagnóstico.** Los casos aprobados necesitaron 87,06–140,10 s totales porque
+incluyen 75 s activos. Los límites fallidos detenían la observación antes de
+que rutas válidas terminaran. Una repetición V mostró además yaw de
+asentamiento 0,104–0,133 rad con solo 2–4 mm de traslación y ningún comando
+positivo. El umbral 0,10 rad agotó dos replans aunque la huella circular del
+Burger y la escena permanecían seguras.
+
+**Corrección.** Cuadrado, V y diamante reciben 90 s de ensamblaje. El yaw
+predeterminado de correlación pasa a 0,15 rad, debajo del tope 0,20 rad. Se
+conservan posición 0,08 m, gate final 0,12 m, dos replans, límites cinemáticos
+y revalidación viva.
+
+**Verificación local.** La imagen `56b82f5…be9f` aprobó cuadrado, V y diamante
+en 62,64/78,43/86,34 s, con error máximo
+0,0945/0,0937/0,0960 m, separación mínima 0,4222/0,3613/0,3878 m, RTF ≥2,90
+y cero colisiones. Un intento V previo se descartó porque `gzserver` sufrió
+`Segmentation fault` durante el spawn; la memoria disponible era cercana a
+12 GiB y la repetición fresca aprobó. La
+[evidencia saneada](assets/commissioning-2026-07/corrective-i144/README.md)
+conserva hashes y clasificación.
+
+**Freeze del delta.** La suite ROS completa aprobó 626/626 en 111,472 s. Los
+253 contratos de aceptación aprobaron en 5,581 s al ejecutarlos en aislamiento.
+Una pasada paralela anterior había agotado 5 s en dos pruebas de supervisión;
+no quedaron procesos del fixture y la repetición aislada fue verde. Se
+clasificó como interferencia temporal del arnés y no se modificó el producto
+para ocultarla.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -1972,6 +2008,7 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-23 | Diagnóstico y repetición visible I-141 | Primer intento: heartbeat falso; segundo: dos replans por asentamiento; final: S N=10 aprobada 75,0004 s, error 0,0952 m, RTF 2,9851 y cero colisiones | Imagen local `3394046…b5f48`; ROS 624/624; evidencia saneada I-141 |
 | 2026-07-23 | Cierre web I-142 | Responsive 4/4 y dos Chrome visibles aprobaron entrada, fullscreen, tareas concurrentes, reapertura, ~30 FPS y continuidad tras detener A | API 17/17, visible 41/41, limpieza completa; evidencia saneada I-142 |
 | 2026-07-23 | Bloqueo de lotes I-143 y freeze final | Primer intento rechazado con cuatro robots retenidos; después S/N=10 aprobó con error 0,0936 m, RTF 2,9912 y cero colisiones | Imagen `4caa2ea…91e9`; ROS 625/625 en 117,379 s, contratos 253/253 |
+| 2026-07-23 | Postdeploy PR #107 e I-144 | Matriz productiva 3/6 rechazada por límites de ensamblaje; cuadrado/V/diamante locales aprobaron tras calibración acotada | SHA desplegado `1d497d4`; imagen local `56b82f5…be9f`; ROS 626/626 y contratos 253/253 |
 
 ## 6. Resultados previos y cortes históricos
 

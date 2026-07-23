@@ -843,6 +843,14 @@ histéresis, aunque todavía no cumpla la tolerancia estricta de convergencia.
 El candidato exacto aprobó S/N=10 con error máximo 0,0936 m, RTF 2,9912 y cero
 colisiones. Los umbrales finales de precisión y seguridad no cambiaron.
 
+La primera repetición sobre `1d497d4` aprobó triángulo, A y S, pero rechazó
+cuadrado, V y diamante al alcanzar sus presupuestos históricos antes de la
+ventana activa. I-144 eleva solo esos tres límites a 90 s y admite hasta
+0,15 rad de yaw de asentamiento sin movimiento comandado. Las tres repeticiones
+locales aprobaron en 62,64–86,34 s con error ≤0,0960 m, RTF ≥2,90 y cero
+colisiones. El plan sigue abierto hasta integrar el parche mínimo y repetir la
+matriz sobre su SHA.
+
 1. Publicar código, contratos y documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar
    evidencia.

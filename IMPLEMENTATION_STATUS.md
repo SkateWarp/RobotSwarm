@@ -3,9 +3,9 @@
 **Fecha del corte:** 2026-07-23
 
 **Alcance:** producción observada en
-`1448a31bbbbfd77588bada109947098cc95d9dda`, integrada mediante la PR #106,
-y correcciones locales I-136–I-143 todavía sin publicar. Frontend, backend y
-worker GPU ejecutan el corte de la PR #106; la etiqueta
+`1d497d4ac33c41416b48300475434a0d11e92d50`, integrada mediante la PR #107,
+y corrección local I-144 todavía sin publicar. Frontend, backend y
+worker GPU ejecutan el corte de la PR #107; la etiqueta
 `rollback/pre-formation-ghost-9f49e17` conserva la revisión anterior. Este
 documento no constituye todavía el acta de cierre.
 
@@ -536,6 +536,14 @@ próximo SHA antes de desplegarlo:
   colisiones. La suite completa aprobó 625/625 en 117,379 s. La
   [evidencia I-143](docs/assets/commissioning-2026-07/corrective-i143/README.md)
   conserva el diagnóstico antes/después.
+- La primera matriz visible posterior a PR #107 aprobó 3/6 formaciones y fue
+  rechazada. I-144 amplía únicamente los presupuestos de cuadrado/V/diamante a
+  90 s y calibra el yaw de asentamiento a 0,15 rad. La imagen local exacta
+  aprobó las tres filas en 62,64/78,43/86,34 s, con errores
+  0,0945/0,0937/0,0960 m, RTF ≥2,90 y cero colisiones. La
+  [evidencia I-144](docs/assets/commissioning-2026-07/corrective-i144/README.md)
+  distingue el 3/6 productivo, el segfault ambiental y los aprobados locales.
+  El freeze del delta aprobó 626/626 pruebas ROS y 253/253 contratos.
 - La imagen exacta del delta, sin montajes de fuentes, tiene ID
   `sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5`.
   En ventanas Gazebo no headless, el triángulo N=3 y la S N=10 conservaron el
