@@ -223,6 +223,26 @@ class ActiveProbeAttestation:
 
 
 @dataclasses.dataclass(frozen=True)
+class ActiveProbeCapture:
+    attestation: ActiveProbeAttestation
+    evidence: GazeboGuiEvidence
+
+
+@dataclasses.dataclass
+class ViewerLeaseState:
+    directory: Path | None = None
+    binding_known: bool = True
+
+    def begin_viewer_request(self) -> None:
+        self.directory = None
+        self.binding_known = False
+
+    def bind(self, directory: Path) -> None:
+        self.directory = directory
+        self.binding_known = True
+
+
+@dataclasses.dataclass(frozen=True)
 class BoundViewerPublisher:
     process_path: Path
     executable: Path
@@ -3439,8 +3459,9 @@ def run_active_scenario_gate(
     probe_environment: dict[str, str],
     ui: Any,
     stop_event: threading.Event,
+    on_probe_completed: Callable[[ProcessOutput], None] | None = None,
 ) -> tuple[ProcessOutput, ProcessOutput, dict[str, Any], dict[str, Any]]:
-    """Run the official GUI probe wholly inside the live scenario interval."""
+    """Run the probe inside the scenario and preserve its report before waiting."""
     cancel_event = threading.Event()
     scenario_run = TimedCommand()
     probe_run = TimedCommand()
@@ -3450,6 +3471,7 @@ def run_active_scenario_gate(
     task_active_after: dict[str, Any] | None = None
     task_active_before_at: float | None = None
     task_active_after_at: float | None = None
+    probe_completion_error: Exception | None = None
     gate_phase = "scenarioStartup"
 
     def run_scenario() -> None:
@@ -3529,6 +3551,19 @@ def run_active_scenario_gate(
             stop_event,
             ACTIVE_PROBE_TIMEOUT_SECONDS + 20,
         )
+        if (
+            probe_run.output is not None
+            and probe_run.output.returncode == 0
+            and on_probe_completed is not None
+        ):
+            try:
+                on_probe_completed(probe_run.output)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                # Preserve the existing contract: a report problem must not
+                # discard the ROS protocol that is still being produced.
+                probe_completion_error = exc
         gate_phase = "afterVisualSampling"
         task_active_after = docker.wait_task_active(
             container,
@@ -3580,6 +3615,12 @@ def run_active_scenario_gate(
         or task_active_after_at is None
     ):
         raise MatrixError("The concurrent acceptance evidence is incomplete")
+    if probe_completion_error is not None:
+        raise ActiveScenarioGateError(
+            str(probe_completion_error),
+            "probeEvidencePreservation",
+            scenario_run.output,
+        ) from probe_completion_error
     scenario_spans_probe = (
         scenario_run.started <= probe_run.started
         and scenario_run.finished >= probe_run.finished
@@ -3691,6 +3732,115 @@ def require_one_session_uuid(ui: Any) -> uuid.UUID:
     if parsed.version not in {1, 2, 3, 4, 5}:
         raise MatrixError("The account session has an invalid private identifier")
     return parsed
+
+
+def require_post_scenario_viewer(
+    ui: Any,
+    session_id: uuid.UUID,
+    lease: ViewerLeaseState,
+    *,
+    runtime_dir: Path,
+    timeout: float,
+    stop_event: threading.Event,
+) -> tuple[dict[str, Any], bool]:
+    """Renew only a viewer that the UI proves is no longer mounted."""
+    if not lease.binding_known or lease.directory is None:
+        raise MatrixError("The current viewer lease binding is unknown")
+    expired_directory = lease.directory
+    transition_deadline = time.monotonic() + min(timeout, 10.0)
+    state = ui.viewer_startup_state()
+
+    def closing_transition(snapshot: Any) -> bool:
+        return (
+            isinstance(snapshot, dict)
+            and snapshot.get("closing") is True
+            and snapshot.get("privateViewerMounted") is False
+            and snapshot.get("openButton") is False
+        )
+
+    def viewer_mounted(snapshot: Any) -> bool:
+        return (
+            isinstance(snapshot, dict)
+            and snapshot.get("privateViewerMounted") is True
+        )
+
+    def renewal_ready(snapshot: Any) -> bool:
+        return (
+            isinstance(snapshot, dict)
+            and snapshot.get("openButton") is True
+            and snapshot.get("privateViewerMounted") is False
+            and snapshot.get("closing") is not True
+        )
+
+    waiting_for_close = closing_transition(state)
+    while waiting_for_close and not (
+        viewer_mounted(state) or renewal_ready(state)
+    ):
+        if stop_event.is_set():
+            raise KeyboardInterrupt
+        remaining = transition_deadline - time.monotonic()
+        if remaining <= 0:
+            raise MatrixError("The expired viewer did not finish closing")
+        if stop_event.wait(min(0.1, remaining)):
+            raise KeyboardInterrupt
+        state = ui.viewer_startup_state()
+
+    if stop_event.is_set():
+        raise KeyboardInterrupt
+    if viewer_mounted(state):
+        return ui.require_interactive_hls(), False
+
+    if not renewal_ready(state):
+        return ui.require_interactive_hls(), False
+
+    while expired_directory.exists() or expired_directory.is_symlink():
+        if stop_event.is_set():
+            raise KeyboardInterrupt
+        remaining = transition_deadline - time.monotonic()
+        if remaining <= 0:
+            raise MatrixError(
+                "The expired viewer left its private runtime directory behind"
+            )
+        if stop_event.wait(min(0.1, remaining)):
+            raise KeyboardInterrupt
+    if require_one_session_uuid(ui) != session_id:
+        raise MatrixError("The expired viewer is no longer bound to the same session")
+    lease.begin_viewer_request()
+    ui.open_viewer(timeout)
+    if require_one_session_uuid(ui) != session_id:
+        raise MatrixError("The renewed viewer changed simulation session")
+    renewed_directory = active_viewer_lease_directory(
+        runtime_dir,
+        session_id,
+        timeout=timeout,
+        stop_event=stop_event,
+    )
+    lease.bind(renewed_directory)
+    if renewed_directory == expired_directory:
+        raise MatrixError("The expired viewer did not issue a fresh private lease")
+    return ui.require_interactive_hls(), True
+
+
+def recover_viewer_lease_for_cleanup(
+    lease: ViewerLeaseState,
+    runtime_dir: Path,
+    session_id: uuid.UUID,
+    timeout: float,
+) -> bool:
+    """Retry a failed binding before closing the browser viewer."""
+    if lease.binding_known:
+        return True
+    try:
+        directory = active_viewer_lease_directory(
+            runtime_dir,
+            session_id,
+            timeout=min(timeout, 5.0),
+            stop_event=threading.Event(),
+        )
+    except Exception:
+        return False
+    lease.bind(directory)
+    return True
 
 
 def decoded_hls_fps(state: dict[str, Any]) -> float:
@@ -3846,7 +3996,11 @@ def wait_for_resource_cleanup(
         latest = {
             "containerAbsent": container_absent,
             "networkAbsent": network_absent,
-            "leaseRuntimeAbsent": lease_directory is None or not lease_directory.exists(),
+            "leaseRuntimeAbsent": lease_directory is None
+            or (
+                not lease_directory.exists()
+                and not lease_directory.is_symlink()
+            ),
             "viewerPublisherAbsent": not publisher_for_session_exists(session_id),
         }
         if all(latest.values()):
@@ -3862,6 +4016,7 @@ def cleanup_case(
     lease_directory: Path | None,
     *,
     timeout: float,
+    lease_binding_known: bool | None = None,
 ) -> dict[str, Any]:
     """Close viewer first, then release the session and prove host cleanup."""
     cleanup_session_id = session_id
@@ -3891,7 +4046,12 @@ def cleanup_case(
         )
     except Exception:
         viewer_was_present = lease_directory is not None
-    lease_identity_known = lease_directory is not None or not viewer_was_present
+    inferred_lease_identity = lease_directory is not None or not viewer_was_present
+    lease_identity_known = (
+        inferred_lease_identity
+        if lease_binding_known is None
+        else lease_binding_known
+    )
 
     result: dict[str, Any] = {
         "viewerClosed": False,
@@ -4088,9 +4248,10 @@ def run_one_case(
         "hashes": {},
     }
     session_id: uuid.UUID | None = None
-    lease_directory: Path | None = None
+    viewer_lease = ViewerLeaseState()
     probe_workspace: Path | None = None
     probe_token: str | None = None
+    active_probe_capture: ActiveProbeCapture | None = None
     interrupted = False
     try:
         if ui._occupying_sessions():
@@ -4104,19 +4265,21 @@ def run_one_case(
         )
         case_report["container"] = container_evidence
 
+        viewer_lease.begin_viewer_request()
         ui.open_viewer(args.viewer_timeout)
-        initial_viewer = ui.require_interactive_hls()
-        case_report["viewer"] = {
-            "transport": "HLS",
-            "interactive": True,
-            "decodedFps": decoded_hls_fps(initial_viewer),
-        }
         lease_directory = active_viewer_lease_directory(
             args.viewer_runtime_dir,
             session_id,
             timeout=args.viewer_timeout,
             stop_event=stop_event,
         )
+        viewer_lease.bind(lease_directory)
+        initial_viewer = ui.require_interactive_hls()
+        case_report["viewer"] = {
+            "transport": "HLS",
+            "interactive": True,
+            "decodedFps": decoded_hls_fps(initial_viewer),
+        }
 
         startup = load_viewer_startup_evidence(
             lease_directory / "render-report.json"
@@ -4166,6 +4329,73 @@ def run_one_case(
             probe_plugin,
             probe_report_path,
         )
+        active_probe_name = (
+            case_artifact_prefix(index, scenario)
+            + "-active-scenario-gui-report.json"
+        )
+        expected_probe_display = str(
+            (startup.document.get("display") or {}).get("x11") or ""
+        )
+
+        def preserve_active_probe(output: ProcessOutput) -> None:
+            nonlocal active_probe_capture
+            attestation = active_probe_attestation(output)
+            evidence = load_active_probe_evidence(
+                probe_report_path,
+                expected_probe_display,
+                attestation,
+            )
+            write_bytes_secure(evidence_dir / active_probe_name, evidence.raw)
+            active_probe_capture = ActiveProbeCapture(attestation, evidence)
+
+        def record_preserved_probe(
+            key: str,
+            *,
+            scenario_gate_passed: bool,
+            scenario_process_active: bool | None = None,
+            failure_phase: str | None = None,
+            case_completed: bool = False,
+        ) -> bool:
+            if active_probe_capture is None:
+                return False
+            active_probe = active_probe_capture.evidence
+            metadata = {
+                "phase": "duringScenarioProcess",
+                "scope": (
+                    "officialGazeboGuiPreflightUnderScenarioLoad"
+                    if scenario_gate_passed
+                    else "officialGazeboGuiPreflightCapturedBeforeScenarioGate"
+                ),
+                "officialPreflight": True,
+                "capturePreserved": True,
+                "scenarioGatePassed": scenario_gate_passed,
+                "caseCompleted": case_completed,
+                "samePrivateDisplayAndMaster": True,
+                "file": active_probe_name,
+                "exitCode": 0,
+                "adapter": redact_text(active_probe.adapter),
+                "nvidiaD3d12": True,
+                "minimumFps": MINIMUM_STARTUP_SCENE_FPS,
+                "averageFps": active_probe.average_fps,
+                "postRenderFps": active_probe.post_render_fps,
+                "minimumRealTimeFactor": MINIMUM_REAL_TIME_FACTOR,
+                "realTimeFactor": active_probe.real_time_factor,
+                "warmupSeconds": ACTIVE_PROBE_WARMUP_SECONDS,
+                "sampleSeconds": ACTIVE_PROBE_SAMPLE_SECONDS,
+                "visualMotionMeasured": False,
+            }
+            if scenario_gate_passed:
+                metadata["scenarioProcessActiveThroughout"] = (
+                    scenario_process_active
+                )
+            else:
+                metadata["scenarioGateFailurePhase"] = failure_phase or "unknown"
+            case_report[key] = metadata
+            case_report["hashes"]["activeScenarioGuiReportSha256"] = (
+                active_probe_capture.attestation.sha256
+            )
+            return True
+
         roster_before = docker.verify_full_roster(container, scenario.robot_count)
         try:
             child, probe_output, video, overlap = run_active_scenario_gate(
@@ -4177,6 +4407,7 @@ def run_one_case(
                 probe_environment=runtime.environment,
                 ui=ui,
                 stop_event=stop_event,
+                on_probe_completed=preserve_active_probe,
             )
         except ActiveScenarioGateError as gate_error:
             gate_failure = {
@@ -4198,8 +4429,20 @@ def run_one_case(
                 )
             else:
                 gate_failure["childProtocolPreserved"] = True
+            record_preserved_probe(
+                "activeScenarioGuiProbeCapture",
+                scenario_gate_passed=False,
+                failure_phase=gate_error.phase,
+            )
             case_report["activeScenarioGateFailure"] = gate_failure
             raise
+        record_preserved_probe(
+            "activeScenarioGuiProbeCapture",
+            scenario_gate_passed=True,
+            scenario_process_active=overlap[
+                "scenarioProcessActiveThroughoutProbe"
+            ],
+        )
         if active_probe_processes(probe_token):
             raise CleanupError("The active GUI probe sandbox left a live process")
         ros = record_ros_protocol(
@@ -4219,40 +4462,8 @@ def run_one_case(
             )
             raise MatrixError("The official active Gazebo GUI preflight failed")
 
-        probe_attestation = active_probe_attestation(probe_output)
-        active_probe = load_active_probe_evidence(
-            probe_report_path,
-            str((startup.document.get("display") or {}).get("x11") or ""),
-            probe_attestation,
-        )
-        active_probe_name = (
-            case_artifact_prefix(index, scenario)
-            + "-active-scenario-gui-report.json"
-        )
-        write_bytes_secure(evidence_dir / active_probe_name, active_probe.raw)
-        active_probe_sha = hashlib.sha256(active_probe.raw).hexdigest()
-        case_report["activeScenarioGuiProbe"] = {
-            "phase": "duringScenarioProcess",
-            "scope": "officialGazeboGuiPreflightUnderScenarioLoad",
-            "officialPreflight": True,
-            "samePrivateDisplayAndMaster": True,
-            "file": active_probe_name,
-            "exitCode": probe_output.returncode,
-            "adapter": redact_text(active_probe.adapter),
-            "nvidiaD3d12": True,
-            "minimumFps": MINIMUM_STARTUP_SCENE_FPS,
-            "averageFps": active_probe.average_fps,
-            "postRenderFps": active_probe.post_render_fps,
-            "minimumRealTimeFactor": MINIMUM_REAL_TIME_FACTOR,
-            "realTimeFactor": active_probe.real_time_factor,
-            "warmupSeconds": ACTIVE_PROBE_WARMUP_SECONDS,
-            "sampleSeconds": ACTIVE_PROBE_SAMPLE_SECONDS,
-            "scenarioProcessActiveThroughout": overlap[
-                "scenarioProcessActiveThroughoutProbe"
-            ],
-            "visualMotionMeasured": False,
-        }
-        case_report["hashes"]["activeScenarioGuiReportSha256"] = active_probe_sha
+        if active_probe_capture is None:
+            raise MatrixError("The active Gazebo GUI report was not preserved")
 
         # Persist the bounded, sanitized protocol before applying pass/fail
         # gates.  A functional failure must keep its useful diagnostics.
@@ -4280,7 +4491,17 @@ def run_one_case(
             scenario.robot_count, min(args.ready_timeout, 60)
         )
         roster_after = docker.verify_full_roster(container, scenario.robot_count)
-        final_viewer = ui.require_interactive_hls()
+        final_viewer, lease_renewed = (
+            require_post_scenario_viewer(
+                ui,
+                session_id,
+                viewer_lease,
+                runtime_dir=args.viewer_runtime_dir,
+                timeout=args.viewer_timeout,
+                stop_event=stop_event,
+            )
+        )
+        case_report["viewer"]["leaseRenewedAfterScenario"] = lease_renewed
         case_report["viewer"]["decodedFpsAfterScenario"] = decoded_hls_fps(final_viewer)
         case_report["postScenarioFullRoster"] = {
             "phase": "afterTaskCleanupBeforeSessionCleanup",
@@ -4300,6 +4521,15 @@ def run_one_case(
         clean_screenshot = screenshot_evidence(screenshot)
         case_report["browserScreenshot"] = clean_screenshot
         case_report["hashes"]["browserPngSha256"] = clean_screenshot["sha256"]
+        case_report.pop("activeScenarioGuiProbeCapture", None)
+        record_preserved_probe(
+            "activeScenarioGuiProbe",
+            scenario_gate_passed=True,
+            scenario_process_active=overlap[
+                "scenarioProcessActiveThroughoutProbe"
+            ],
+            case_completed=True,
+        )
         case_report["status"] = "passed"
     except KeyboardInterrupt:
         interrupted = True
@@ -4319,19 +4549,28 @@ def run_one_case(
             # Session cleanup still has to run when this kernel cannot provide
             # the only process-safe signalling primitive accepted here.
             active_probe_process_absent = False
+        if session_id is not None and not viewer_lease.binding_known:
+            recover_viewer_lease_for_cleanup(
+                viewer_lease,
+                args.viewer_runtime_dir,
+                session_id,
+                args.cleanup_timeout,
+            )
         try:
             cleanup = cleanup_case(
                 ui,
                 docker,
                 session_id,
-                lease_directory,
+                viewer_lease.directory,
                 timeout=args.cleanup_timeout,
+                lease_binding_known=viewer_lease.binding_known,
             )
         except Exception as exc:
             cleanup = {
                 "viewerClosed": False,
                 "sessionStopped": False,
                 "workspaceReleased": False,
+                "leaseBindingKnown": False,
                 "containerAbsent": False,
                 "networkAbsent": False,
                 "leaseRuntimeAbsent": False,

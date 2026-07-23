@@ -8,6 +8,7 @@ import pathlib
 import random
 import sys
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -128,6 +129,8 @@ class ModelState(Message):
 
 class FakePublisher:
     def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
         self.messages = []
         self.unregistered = False
         self.connections = 1
@@ -140,6 +143,104 @@ class FakePublisher:
 
     def get_num_connections(self):
         return self.connections
+
+
+class BlockingPublisher(FakePublisher):
+    def __init__(self, release):
+        super().__init__()
+        self.release = release
+        self.entered = threading.Event()
+        self.calls = 0
+        self.calls_lock = threading.Lock()
+
+    def publish(self, message):
+        with self.calls_lock:
+            self.calls += 1
+        self.entered.set()
+        self.release.wait(1.0)
+        super().publish(message)
+
+
+class FirstPublishBlockingPublisher(FakePublisher):
+    """Hold the first command while later safety commands remain writable."""
+
+    def __init__(self, release):
+        super().__init__()
+        self.release = release
+        self.entered = threading.Event()
+        self.calls = 0
+        self.calls_lock = threading.Lock()
+
+    def publish(self, message):
+        with self.calls_lock:
+            self.calls += 1
+            call_number = self.calls
+        if call_number == 1:
+            self.entered.set()
+            self.release.wait(1.0)
+        super().publish(message)
+
+
+class BlockingFalsePublisher(FakePublisher):
+    """Hold only an emergency reset, while later True messages stay writable."""
+
+    def __init__(self, release):
+        super().__init__()
+        self.release = release
+        self.entered = threading.Event()
+
+    def publish(self, message):
+        if getattr(message, 'data', None) is False:
+            self.entered.set()
+            self.release.wait(1.0)
+        super().publish(message)
+
+
+class BlockingTruePublisher(FakePublisher):
+    """Hold an emergency latch so reset ordering can be tested."""
+
+    def __init__(self, release):
+        super().__init__()
+        self.release = release
+        self.entered = threading.Event()
+
+    def publish(self, message):
+        if getattr(message, 'data', None) is True:
+            self.entered.set()
+            self.release.wait(1.0)
+        super().publish(message)
+
+
+class FailOncePublisher(FakePublisher):
+    """Raise on the first publish and accept the next one."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.first_failure_returned = threading.Event()
+
+    def publish(self, message):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_failure_returned.set()
+            raise RuntimeError('temporary publish failure')
+        super().publish(message)
+
+
+class FakeSafetyLane:
+    def __init__(self, _label, _error_logger=None):
+        self.available = True
+        self.closed = False
+
+    def submit(self, callback):
+        if self.closed:
+            return False
+        callback()
+        return True
+
+    def close(self):
+        self.closed = True
+        self.available = False
 
 
 class FakeSubscriber:
@@ -199,6 +300,28 @@ class ExitHookLock:
         self._exit_count += 1
         if self._exit_count == self._exit_number:
             self._hook()
+
+
+class WaiterAwareRLock:
+    """RLock exposing when another operation has started to acquire it."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.acquire_attempted = threading.Event()
+
+    def acquire(self, *args, **kwargs):
+        self.acquire_attempted.set()
+        return self._lock.acquire(*args, **kwargs)
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.release()
 
 
 def module(name, **attributes):
@@ -414,8 +537,31 @@ def make_orchestrator(task_id="task-a"):
     orchestrator.task_result = None
     orchestrator.task_error = None
     orchestrator.task_dispatched = False
+    orchestrator.task_ever_dispatched = False
     orchestrator.task_lock = threading.RLock()
     orchestrator.emergency_stop_active = False
+    orchestrator.supervised_stop_active = False
+    orchestrator.supervised_stop_context = None
+    orchestrator._supervised_stop_state_started = False
+    orchestrator._pending_safety_stop_acks = {}
+    orchestrator._safety_ack_publish_inflight = set()
+    orchestrator._safety_ack_retry_requested = set()
+    orchestrator._shutdown_started = False
+    orchestrator._safety_zero_lock = threading.Lock()
+    orchestrator._emergency_order_condition = threading.Condition()
+    orchestrator._emergency_order_generation = 0
+    orchestrator._pending_emergency_true_generations = set()
+    orchestrator._safety_zero_inflight = set()
+    orchestrator._safety_zero_followups = set()
+    orchestrator._safety_zero_receipts = {}
+    orchestrator._retired_safety_publishers = {}
+    orchestrator.ordinary_stop_active = False
+    orchestrator._ordinary_stop_sequence = 0
+    orchestrator._ordinary_stop_operations = {}
+    orchestrator._emergency_publication_debts = {}
+    orchestrator._emergency_publication_inflight = set()
+    orchestrator._safety_fallback_lanes = {}
+    orchestrator._safety_fallback_lane_factory = FakeSafetyLane
     orchestrator.robots = {
         "tb3_0": {
             "pose": Pose(),
@@ -440,11 +586,14 @@ def make_orchestrator(task_id="task-a"):
     )
     orchestrator.safety_status_timeout = 1.0
     orchestrator.emergency_stop_pub = FakePublisher()
+    orchestrator.safety_stop_ack_pub = FakePublisher()
     orchestrator.odom_subs = {"tb3_0": FakeSubscriber()}
     orchestrator.threat_subs = {"tb3_0": FakeSubscriber()}
     orchestrator.collision_subs = {"tb3_0": FakeSubscriber()}
     orchestrator.scan_subs = {"tb3_0": FakeSubscriber()}
     orchestrator.cmd_vel_pubs = {"tb3_0": FakePublisher()}
+    orchestrator.leader_cmd_pub = FakePublisher()
+    orchestrator._refresh_safety_publisher_snapshot()
     orchestrator.behavior_start_pubs = {
         "follow_leader": FakePublisher(),
         "formation": FakePublisher(),
@@ -453,19 +602,32 @@ def make_orchestrator(task_id="task-a"):
     orchestrator.behavior_stop_pubs = [
         FakePublisher(), FakePublisher(), FakePublisher()
     ]
+    orchestrator._register_safety_fallback_lane(
+        'safety-stop-ack', orchestrator.safety_stop_ack_pub
+    )
     orchestrator.behavior_pause_pubs = {}
     orchestrator.behavior_resume_pubs = {}
-    orchestrator._stop_all_robots = lambda: None
+    orchestrator._stop_all_robots = lambda: {
+        'requested_count': 0,
+        'scheduled_count': 0,
+        'scheduled_publisher_ids': [],
+        'failed_robots': [],
+        'scheduling_confirmed': True,
+    }
     orchestrator.control_watchdog_enabled = True
     orchestrator.behavior_connection_timeout = 0.1
     orchestrator.behavior_status_timeout = 3.0
+    orchestrator.formation_planning_status_timeout = 30.0
     orchestrator.task_dispatched_at = None
     orchestrator.last_behavior_status_at = None
+    orchestrator.last_behavior_status = None
     orchestrator.control_heartbeat_timeout = 10.0
     orchestrator.control_heartbeat_seen = False
     orchestrator.last_control_heartbeat = None
     orchestrator.control_watchdog_tripped = False
     orchestrator._control_clock = lambda: 0.0
+    orchestrator._control_watchdog_stop = threading.Event()
+    orchestrator._control_watchdog_thread = None
     return orchestrator
 
 
@@ -782,6 +944,67 @@ class OrchestratorLifecycleTests(unittest.TestCase):
         task_id, error = orchestrator._runtime_health_error()
 
         self.assertEqual("task-a", task_id)
+        self.assertIn("Behavior status heartbeat became stale", error)
+
+    def test_runtime_health_allows_bounded_large_formation_planning(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "formation"
+        orchestrator.robot_count = 10
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator.task_dispatched_at = 0.0
+        orchestrator.last_behavior_status_at = 0.0
+        orchestrator.last_behavior_status = {
+            "task_id": "task-a",
+            "state": "forming",
+            "robot_assignments": {},
+        }
+        orchestrator._control_clock = lambda: 11.0
+        for robot in orchestrator.robots.values():
+            robot["last_odom_at"] = 11.0
+            robot["last_scan_at"] = 11.0
+
+        _, error = orchestrator._runtime_health_error()
+
+        self.assertIsNone(error)
+
+        orchestrator._control_clock = lambda: 20.1
+        _, error = orchestrator._runtime_health_error()
+        self.assertIn("Behavior status heartbeat became stale", error)
+
+    def test_runtime_health_keeps_short_timeout_after_assignment(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "formation"
+        orchestrator.robot_count = 10
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator.task_dispatched_at = 0.0
+        orchestrator.last_behavior_status_at = 0.0
+        orchestrator.last_behavior_status = {
+            "task_id": "task-a",
+            "state": "forming",
+            "robot_assignments": {"tb3_0": {"slot": 0}},
+        }
+        orchestrator._control_clock = lambda: 3.1
+
+        _, error = orchestrator._runtime_health_error()
+
+        self.assertIn("Behavior status heartbeat became stale", error)
+
+    def test_runtime_health_does_not_reuse_a_previous_planning_grace(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = "formation"
+        orchestrator.robot_count = 10
+        orchestrator.task_state = ROS["orchestrator"].TaskState.RUNNING
+        orchestrator.task_dispatched_at = 0.0
+        orchestrator.last_behavior_status_at = None
+        orchestrator.last_behavior_status = {
+            "task_id": "previous-task",
+            "state": "forming",
+            "robot_assignments": {},
+        }
+        orchestrator._control_clock = lambda: 3.1
+
+        _, error = orchestrator._runtime_health_error()
+
         self.assertIn("Behavior status heartbeat became stale", error)
 
     def test_runtime_health_fails_on_stale_odom_or_lidar(self):
@@ -1168,6 +1391,35 @@ class OrchestratorLifecycleTests(unittest.TestCase):
             orchestrator.behavior_start_pubs["follow_leader"].messages
         )
 
+    def test_invalid_same_task_redelivery_keeps_the_active_task_running(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_progress = 0.42
+        orchestrator.task_dispatched = True
+        zero_count = len(orchestrator.cmd_vel_pubs['tb3_0'].messages)
+
+        orchestrator._handle_start_task({
+            'task_id': 'task-a',
+            'task_type': 'follow_leader',
+            'config': {'radius': 99.0},
+        })
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+        self.assertEqual(0.42, orchestrator.task_progress)
+        self.assertTrue(orchestrator.task_dispatched)
+        self.assertIsNone(orchestrator.task_error)
+        self.assertFalse(any(
+            publisher.messages
+            for publisher in orchestrator.behavior_stop_pubs
+        ))
+        self.assertEqual(
+            zero_count,
+            len(orchestrator.cmd_vel_pubs['tb3_0'].messages),
+        )
+
     def test_undispatched_same_task_can_be_redelivered(self):
         orchestrator = make_orchestrator()
 
@@ -1279,15 +1531,679 @@ class OrchestratorLifecycleTests(unittest.TestCase):
 
 
 class ControlHeartbeatWatchdogTests(unittest.TestCase):
+    @staticmethod
+    def wait_until(predicate, timeout=0.5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.005)
+        return predicate()
+
+    def test_normal_stop_fans_out_past_a_blocked_command_socket(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        orchestrator.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        orchestrator._refresh_safety_publisher_snapshot()
+        orchestrator._stop_all_robots = types.MethodType(
+            ROS['orchestrator'].TaskOrchestrator._stop_all_robots,
+            orchestrator,
+        )
+
+        try:
+            self.assertTrue(self.wait_until(lambda: (
+                not orchestrator._safety_zero_inflight
+            )))
+            orchestrator._handle_stop_task({'task_id': 'task-a'})
+            self.assertTrue(blocked.entered.wait(0.5))
+            self.assertTrue(self.wait_until(lambda: healthy.messages))
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            self.assertEqual(
+                ROS['orchestrator'].TaskState.STOPPED,
+                orchestrator.task_state,
+            )
+        finally:
+            release_blocked.set()
+            self.assertTrue(self.wait_until(lambda: (
+                not orchestrator._safety_zero_inflight
+            )))
+
+    def test_manual_emergency_preempts_a_blocked_resume(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.PAUSED
+        orchestrator.task_dispatched = True
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        orchestrator.behavior_resume_pubs = {'follow_leader': blocked}
+        orchestrator.cmd_vel_pubs = {'tb3_0': healthy}
+        orchestrator._refresh_safety_publisher_snapshot()
+        resume = threading.Thread(
+            target=orchestrator._handle_resume_task,
+            args=({'task_id': 'task-a'},),
+        )
+        emergency = threading.Thread(
+            target=orchestrator._handle_emergency_stop,
+            args=({},),
+        )
+
+        resume.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+        try:
+            emergency.start()
+            self.assertTrue(self.wait_until(lambda: (
+                orchestrator.emergency_stop_active
+                and orchestrator.emergency_stop_pub.messages
+                and orchestrator.emergency_stop_pub.messages[-1].data is True
+                and healthy.messages
+            )))
+            self.assertTrue(resume.is_alive())
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        finally:
+            release_blocked.set()
+            resume.join(1.0)
+            emergency.join(1.0)
+
+        self.assertFalse(resume.is_alive())
+        self.assertFalse(emergency.is_alive())
+
+    def test_watchdog_preempts_a_blocked_resume(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.PAUSED
+        orchestrator.task_dispatched = True
+        orchestrator.control_heartbeat_seen = True
+        orchestrator.last_control_heartbeat = 10.0
+        orchestrator.control_heartbeat_timeout = 1.0
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        orchestrator.behavior_resume_pubs = {'follow_leader': blocked}
+        orchestrator.cmd_vel_pubs = {'tb3_0': healthy}
+        orchestrator._refresh_safety_publisher_snapshot()
+        resume = threading.Thread(
+            target=orchestrator._handle_resume_task,
+            args=({'task_id': 'task-a'},),
+        )
+        watchdog = threading.Thread(
+            target=orchestrator._check_control_watchdog,
+            kwargs={'now': 12.0},
+        )
+
+        resume.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+        try:
+            watchdog.start()
+            self.assertTrue(self.wait_until(lambda: (
+                orchestrator.control_watchdog_tripped
+                and orchestrator.emergency_stop_active
+                and orchestrator.emergency_stop_pub.messages
+                and orchestrator.emergency_stop_pub.messages[-1].data is True
+                and healthy.messages
+            )))
+            self.assertTrue(resume.is_alive())
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        finally:
+            release_blocked.set()
+            resume.join(1.0)
+            watchdog.join(1.0)
+
+        self.assertFalse(resume.is_alive())
+        self.assertFalse(watchdog.is_alive())
+
+    def test_pause_debt_blocks_resume_until_its_final_zero_returns(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        release_pause = threading.Event()
+        blocked_pause = BlockingPublisher(release_pause)
+        resume_publisher = FakePublisher()
+        orchestrator.behavior_pause_pubs = {
+            'follow_leader': blocked_pause,
+        }
+        orchestrator.behavior_resume_pubs = {
+            'follow_leader': resume_publisher,
+        }
+
+        orchestrator._handle_pause_task({'task_id': 'task-a'})
+        self.assertTrue(blocked_pause.entered.wait(0.5))
+        self.assertTrue(orchestrator.ordinary_stop_active)
+
+        orchestrator._handle_resume_task({'task_id': 'task-a'})
+        self.assertFalse(resume_publisher.messages)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.PAUSED,
+            orchestrator.task_state,
+        )
+
+        release_pause.set()
+        self.assertTrue(self.wait_until(lambda: (
+            not orchestrator.ordinary_stop_active
+        )))
+        orchestrator._handle_resume_task({'task_id': 'task-a'})
+        self.assertTrue(resume_publisher.messages)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+
+    def test_ordinary_stop_reasserts_zero_already_returning_from_socket(self):
+        orchestrator = make_orchestrator()
+
+        class CountingPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def publish(self, message):
+                self.calls += 1
+                super().publish(message)
+
+        publisher = CountingPublisher()
+        receipt_key = ('tb3_0', id(publisher))
+        lane_key = receipt_key + ('supervisor',)
+        operation_id = 1
+        orchestrator._safety_publisher_snapshot = (
+            ('tb3_0', publisher),
+        )
+        orchestrator._ordinary_stop_sequence = operation_id
+        orchestrator._ordinary_stop_operations[operation_id] = {
+            'task_id': 'task-a',
+            'context': 'pause',
+            'pending_publications': set(),
+            'publications': {},
+            'inflight_publications': set(),
+            'failure_reporting': set(),
+            'required_zero_receipts': {receipt_key: 2},
+        }
+        orchestrator.ordinary_stop_active = True
+
+        # Model a zero which has returned from the ROS socket but is still
+        # waiting to record its receipt behind the safety lock. The stop debt
+        # must not mistake that old return for its final, causal zero.
+        with orchestrator._safety_zero_lock:
+            orchestrator._safety_zero_inflight.add(lane_key)
+            orchestrator._safety_zero_followups.add(lane_key)
+            returning_zero = threading.Thread(
+                target=orchestrator._publish_supervised_zero,
+                args=(lane_key, 'tb3_0', publisher),
+            )
+            returning_zero.start()
+            self.assertTrue(self.wait_until(lambda: publisher.calls == 1))
+
+        returning_zero.join(1.0)
+        self.assertFalse(returning_zero.is_alive())
+        self.assertTrue(self.wait_until(lambda: (
+            publisher.calls == 2
+            and orchestrator._safety_zero_receipts.get(receipt_key) == 2
+            and not orchestrator.ordinary_stop_active
+        )))
+        self.assertEqual(0.0, publisher.messages[-1].linear.x)
+        self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+    def test_replacement_start_waits_for_the_previous_stop_debt(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        release_stop = threading.Event()
+        blocked_stop = BlockingPublisher(release_stop)
+        orchestrator.behavior_stop_pubs[0] = blocked_stop
+        new_task = {
+            'task_id': 'task-b',
+            'task_type': 'formation',
+        }
+
+        orchestrator._handle_start_task(new_task)
+        self.assertTrue(blocked_stop.entered.is_set())
+        self.assertTrue(orchestrator.ordinary_stop_active)
+        self.assertEqual('task-a', orchestrator.current_task_id)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.STOPPED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(
+            orchestrator.behavior_start_pubs['formation'].messages
+        )
+
+        release_stop.set()
+        self.assertTrue(self.wait_until(lambda: (
+            not orchestrator.ordinary_stop_active
+        )))
+        orchestrator._handle_start_task(new_task)
+        self.assertEqual('task-b', orchestrator.current_task_id)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+        self.assertTrue(
+            orchestrator.behavior_start_pubs['formation'].messages
+        )
+
+    def test_unscheduled_stop_fails_closed_and_retries_from_the_timer(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        original_start = threading.Thread.start
+
+        def reject_initial_stop_workers(worker):
+            if (
+                worker.name.startswith('orchestrator-safety-task-stop')
+                or worker.name.startswith('supervised-zero-')
+            ):
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            ROS['orchestrator'].threading.Thread,
+            'start',
+            new=reject_initial_stop_workers,
+        ):
+            orchestrator._handle_stop_task({'task_id': 'task-a'})
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertTrue(orchestrator.ordinary_stop_active)
+        self.assertIn('could not schedule', orchestrator.task_error)
+
+        orchestrator._safety_stop_zero_timer(None)
+        self.assertTrue(self.wait_until(lambda: (
+            not orchestrator.ordinary_stop_active
+        )))
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+
+    def test_failed_stop_publish_leaves_the_operation_ready_for_retry(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        failing_publisher = FailOncePublisher()
+        orchestrator.behavior_stop_pubs = [failing_publisher]
+
+        orchestrator._handle_stop_task({'task_id': 'task-a'})
+        operation_id = orchestrator._ordinary_stop_sequence
+
+        self.assertTrue(failing_publisher.first_failure_returned.wait(0.5))
+        self.assertTrue(self.wait_until(lambda: (
+            0 not in orchestrator._ordinary_stop_operations[
+                operation_id
+            ]['inflight_publications']
+            and orchestrator.task_state
+            == ROS['orchestrator'].TaskState.FAILED
+        )))
+        self.assertTrue(orchestrator.ordinary_stop_active)
+        self.assertIn('publication failed', orchestrator.task_error)
+        self.assertIn(
+            0,
+            orchestrator._ordinary_stop_operations[
+                operation_id
+            ]['pending_publications'],
+        )
+
+        orchestrator._retry_ordinary_stop_publications()
+
+        self.assertTrue(self.wait_until(lambda: (
+            failing_publisher.calls == 2
+            and not orchestrator.ordinary_stop_active
+        )))
+        self.assertEqual(1, len(failing_publisher.messages))
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+
+    def test_formation_shutdown_latches_independent_periodic_zeros(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        command_publisher = orchestrator.cmd_vel_pubs['tb3_0']
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'shutdown-request-1',
+        }))
+
+        orchestrator._safety_stop_request_callback(request)
+
+        self.assertTrue(orchestrator.supervised_stop_active)
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertTrue(orchestrator.supervised_stop_context['valid'])
+        acknowledgement = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertEqual(
+            'shutdown-request-1', acknowledgement['request_id']
+        )
+        self.assertTrue(acknowledgement['accepted'])
+        self.assertTrue(acknowledgement['supervisor_latched'])
+        self.assertTrue(
+            acknowledgement['supervisor_will_remain_active']
+        )
+        self.assertTrue(acknowledgement['valid_request'])
+        self.assertTrue(self.wait_until(lambda: command_publisher.messages))
+        self.assertEqual(0.0, command_publisher.messages[-1].linear.x)
+        self.assertTrue(self.wait_until(lambda: (
+            orchestrator.task_state
+            == ROS['orchestrator'].TaskState.FAILED
+        )))
+        self.assertIn('formation', orchestrator.task_error)
+
+        first_zero_count = len(command_publisher.messages)
+        self.assertTrue(self.wait_until(
+            lambda: not orchestrator._safety_zero_inflight
+        ))
+        orchestrator._safety_stop_zero_timer(None)
+        self.assertTrue(self.wait_until(
+            lambda: len(command_publisher.messages) > first_zero_count
+        ))
+        orchestrator._handle_reset_emergency_stop({})
+        self.assertTrue(orchestrator.supervised_stop_active)
+        self.assertTrue(orchestrator.emergency_stop_active)
+
+    def test_supervisor_ack_waits_for_zero_publish_to_return(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        release_zero = threading.Event()
+        blocked = BlockingPublisher(release_zero)
+        orchestrator.cmd_vel_pubs = {'tb3_0': blocked}
+        orchestrator._refresh_safety_publisher_snapshot()
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'blocked-zero-receipt',
+        }))
+
+        try:
+            orchestrator._safety_stop_request_callback(request)
+            self.assertTrue(blocked.entered.wait(0.5))
+            acknowledgements = [
+                json.loads(message.data)
+                for message in orchestrator.safety_stop_ack_pub.messages
+            ]
+            self.assertFalse(any(
+                acknowledgement['accepted']
+                for acknowledgement in acknowledgements
+            ))
+            self.assertFalse(
+                acknowledgements[-1]['zero_publications_confirmed']
+            )
+        finally:
+            release_zero.set()
+
+        self.assertTrue(self.wait_until(lambda: any(
+            json.loads(message.data).get('accepted') is True
+            for message in orchestrator.safety_stop_ack_pub.messages
+        )))
+        acknowledgement = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertTrue(acknowledgement['zero_publications_confirmed'])
+        self.assertEqual(
+            acknowledgement['zero_target_count'],
+            acknowledgement['zero_publish_return_count'],
+        )
+
+    def test_blocked_ack_never_blocks_periodic_zero_reassertion(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        release_ack = threading.Event()
+        blocked_ack = BlockingPublisher(release_ack)
+        ack_lane = ROS['orchestrator'].SafetyPublishLane(
+            'test-blocked-ack'
+        )
+        self.assertTrue(ack_lane.available)
+        orchestrator.safety_stop_ack_pub = blocked_ack
+        orchestrator._safety_fallback_lanes[id(blocked_ack)] = ack_lane
+        command_publisher = orchestrator.cmd_vel_pubs['tb3_0']
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'blocked-ack-link',
+        }))
+
+        try:
+            started_at = time.monotonic()
+            orchestrator._safety_stop_request_callback(request)
+            self.assertLess(time.monotonic() - started_at, 0.2)
+            self.assertTrue(blocked_ack.entered.wait(0.5))
+            self.assertTrue(self.wait_until(lambda: (
+                command_publisher.messages
+                and not orchestrator._safety_zero_inflight
+            )))
+            first_zero_count = len(command_publisher.messages)
+
+            for _ in range(3):
+                timer_started = time.monotonic()
+                orchestrator._safety_stop_zero_timer(None)
+                self.assertLess(time.monotonic() - timer_started, 0.2)
+                self.assertTrue(self.wait_until(lambda: (
+                    len(command_publisher.messages) > first_zero_count
+                    and not orchestrator._safety_zero_inflight
+                )))
+                first_zero_count = len(command_publisher.messages)
+
+            self.assertEqual(1, blocked_ack.calls)
+            self.assertEqual(
+                {'blocked-ack-link'},
+                orchestrator._safety_ack_publish_inflight,
+            )
+        finally:
+            release_ack.set()
+
+        self.assertTrue(self.wait_until(lambda: (
+            'blocked-ack-link'
+            not in orchestrator._safety_ack_publish_inflight
+        )))
+        ack_lane.close()
+
+    def test_malformed_supervisor_request_fails_closed(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        command_publisher = orchestrator.cmd_vel_pubs['tb3_0']
+
+        orchestrator._safety_stop_request_callback(String(data='{broken'))
+
+        self.assertTrue(orchestrator.supervised_stop_active)
+        self.assertTrue(orchestrator.emergency_stop_active)
+        context = orchestrator.supervised_stop_context
+        self.assertFalse(context['valid'])
+        self.assertIn('JSON object', context['validation_error'])
+        self.assertFalse(orchestrator.safety_stop_ack_pub.messages)
+        self.assertTrue(self.wait_until(lambda: command_publisher.messages))
+        self.assertEqual(0.0, command_publisher.messages[-1].linear.x)
+
+    def test_supervised_state_worker_start_failure_is_retryable(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'state-worker-retry',
+        }))
+        original_start = threading.Thread.start
+        failed_once = []
+
+        def fail_first_state_worker(worker):
+            if (
+                worker.name == 'supervised-safety-stop-state'
+                and len(failed_once) < 2
+            ):
+                failed_once.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            ROS['orchestrator'].threading.Thread,
+            'start',
+            new=fail_first_state_worker,
+        ):
+            orchestrator._safety_stop_request_callback(request)
+            self.assertEqual(2, len(failed_once))
+            self.assertFalse(orchestrator._supervised_stop_state_started)
+            acknowledgement = json.loads(
+                orchestrator.safety_stop_ack_pub.messages[-1].data
+            )
+            self.assertFalse(acknowledgement['accepted'])
+            self.assertFalse(acknowledgement['state_worker_started'])
+            orchestrator._safety_stop_zero_timer(None)
+
+        self.assertTrue(self.wait_until(lambda: (
+            orchestrator.task_state == ROS['orchestrator'].TaskState.FAILED
+        )))
+        self.assertTrue(orchestrator._supervised_stop_state_started)
+        self.assertGreaterEqual(
+            len(orchestrator.safety_stop_ack_pub.messages), 2
+        )
+        acknowledgement = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertEqual('state-worker-retry', acknowledgement['request_id'])
+        self.assertTrue(acknowledgement['accepted'])
+        self.assertTrue(acknowledgement['state_worker_started'])
+        self.assertEqual({}, orchestrator._pending_safety_stop_acks)
+
+    def test_zero_worker_start_failure_republishes_positive_ack_on_retry(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'zero-worker-retry',
+        }))
+        original_start = threading.Thread.start
+        failed_starts = []
+
+        def fail_robot_zero_workers(worker):
+            if (
+                worker.name.startswith('supervised-zero-tb3_0-')
+                and len(failed_starts) < 2
+            ):
+                failed_starts.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            ROS['orchestrator'].threading.Thread,
+            'start',
+            new=fail_robot_zero_workers,
+        ):
+            orchestrator._safety_stop_request_callback(request)
+            self.assertEqual(2, len(failed_starts))
+            first_ack = json.loads(
+                orchestrator.safety_stop_ack_pub.messages[-1].data
+            )
+            self.assertFalse(first_ack['accepted'])
+            self.assertIn('zero-worker-retry', (
+                orchestrator._pending_safety_stop_acks
+            ))
+            orchestrator._safety_stop_zero_timer(None)
+
+        final_ack = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertEqual('zero-worker-retry', final_ack['request_id'])
+        self.assertTrue(final_ack['accepted'])
+        self.assertEqual(
+            final_ack['zero_target_count'],
+            final_ack['zero_publish_return_count'],
+        )
+        self.assertTrue(final_ack['zero_publications_confirmed'])
+        self.assertEqual({}, orchestrator._pending_safety_stop_acks)
+
+    def test_request_after_shutdown_never_receives_a_positive_ack(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        with orchestrator._safety_zero_lock:
+            orchestrator._shutdown_started = True
+            orchestrator._supervised_stop_state_started = True
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'request-after-shutdown',
+        }))
+
+        orchestrator._safety_stop_request_callback(request)
+
+        acknowledgement = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertFalse(acknowledgement['accepted'])
+        self.assertFalse(acknowledgement['state_worker_started'])
+        self.assertFalse(
+            acknowledgement['supervisor_will_remain_active']
+        )
+        orchestrator._safety_stop_zero_timer(None)
+        final_ack = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertFalse(final_ack['accepted'])
+        self.assertFalse(final_ack['supervisor_will_remain_active'])
+
+    def test_positive_ack_is_republished_after_reverse_link_connects(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        orchestrator.safety_stop_ack_pub.connections = 0
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'late-ack-link',
+        }))
+
+        orchestrator._safety_stop_request_callback(request)
+
+        first_ack = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertTrue(first_ack['accepted'])
+        self.assertIn(
+            'late-ack-link', orchestrator._pending_safety_stop_acks
+        )
+
+        orchestrator.safety_stop_ack_pub.connections = 1
+        orchestrator._safety_stop_zero_timer(None)
+
+        self.assertGreaterEqual(
+            len(orchestrator.safety_stop_ack_pub.messages), 2
+        )
+        final_ack = json.loads(
+            orchestrator.safety_stop_ack_pub.messages[-1].data
+        )
+        self.assertEqual('late-ack-link', final_ack['request_id'])
+        self.assertTrue(final_ack['accepted'])
+        self.assertEqual({}, orchestrator._pending_safety_stop_acks)
+
     def test_constructor_starts_and_shutdown_stops_wall_watchdog(self):
         orchestrator = ROS["orchestrator"].TaskOrchestrator()
         self.assertTrue(orchestrator._control_watchdog_thread.is_alive())
         self.assertFalse(orchestrator.control_heartbeat_seen)
+        self.assertTrue(orchestrator.safety_stop_ack_pub.kwargs['latch'])
+        self.assertNotIn(
+            'queue_size', orchestrator.safety_stop_ack_pub.kwargs
+        )
 
         orchestrator._shutdown()
 
         self.assertFalse(orchestrator._control_watchdog_thread.is_alive())
-        self.assertFalse(orchestrator.emergency_stop_active)
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertTrue(orchestrator.supervised_stop_active)
 
     def test_orderly_shutdown_stops_behaviors_and_zeroes_every_robot(self):
         orchestrator = make_orchestrator()
@@ -1306,7 +2222,894 @@ class ControlHeartbeatWatchdogTests(unittest.TestCase):
         command = orchestrator.cmd_vel_pubs["tb3_0"].messages[-1]
         self.assertEqual(0.0, command.linear.x)
         self.assertEqual(0.0, command.angular.z)
+        leader_command = orchestrator.leader_cmd_pub.messages[-1]
+        self.assertEqual(0.0, leader_command.linear.x)
+        self.assertEqual(0.0, leader_command.angular.z)
         self.assertTrue(orchestrator._control_watchdog_stop.is_set())
+
+    def test_shutdown_fanout_survives_blocked_command_and_behavior_pubs(self):
+        orchestrator = make_orchestrator()
+        release_command = threading.Event()
+        release_behavior = threading.Event()
+        blocked_command = BlockingPublisher(release_command)
+        healthy_command = FakePublisher()
+        blocked_behavior = BlockingPublisher(release_behavior)
+        healthy_behaviors = [FakePublisher(), FakePublisher()]
+        orchestrator.cmd_vel_pubs = {
+            'tb3_0': blocked_command,
+            'tb3_1': healthy_command,
+        }
+        orchestrator.behavior_stop_pubs = [
+            blocked_behavior,
+            *healthy_behaviors,
+        ]
+        orchestrator._refresh_safety_publisher_snapshot()
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+
+        started_at = time.monotonic()
+        try:
+            orchestrator._shutdown()
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(blocked_command.entered.is_set())
+            self.assertTrue(blocked_behavior.entered.is_set())
+            self.assertTrue(healthy_command.messages)
+            command = healthy_command.messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+            for publisher in healthy_behaviors:
+                payload = json.loads(publisher.messages[-1].data)
+                self.assertEqual('task-a', payload['task_id'])
+            self.assertTrue(orchestrator.supervised_stop_active)
+            self.assertTrue(orchestrator.emergency_stop_active)
+            self.assertTrue(orchestrator._control_watchdog_stop.is_set())
+        finally:
+            release_command.set()
+            release_behavior.set()
+
+    def test_shutdown_fanout_continues_after_one_thread_start_failure(self):
+        orchestrator = make_orchestrator()
+        first = FakePublisher()
+        healthy = FakePublisher()
+        orchestrator.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': healthy,
+        }
+        orchestrator._refresh_safety_publisher_snapshot()
+        original_start = threading.Thread.start
+        failed_once = []
+
+        def fail_first_command_worker(worker):
+            if (
+                worker.name == 'orchestrator-shutdown-tb3_0-1'
+                and not failed_once
+            ):
+                failed_once.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            ROS['orchestrator'].threading.Thread,
+            'start',
+            new=fail_first_command_worker,
+        ):
+            orchestrator._shutdown()
+
+        self.assertEqual(1, len(failed_once))
+        self.assertTrue(first.messages)
+        self.assertEqual(0.0, first.messages[-1].linear.x)
+        self.assertEqual(0.0, first.messages[-1].angular.z)
+        self.assertTrue(healthy.messages)
+        self.assertEqual(0.0, healthy.messages[-1].linear.x)
+        self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        self.assertTrue(orchestrator.emergency_stop_pub.messages[-1].data)
+        for publisher in orchestrator.behavior_stop_pubs:
+            self.assertTrue(publisher.messages)
+
+    def test_shutdown_reaches_later_targets_after_both_start_attempts_fail(self):
+        orchestrator = make_orchestrator()
+        first = FakePublisher()
+        healthy = FakePublisher()
+        orchestrator.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': healthy,
+        }
+        orchestrator._refresh_safety_publisher_snapshot()
+        fallback_lane = ROS['orchestrator'].SafetyPublishLane(
+            'test-tb3-0'
+        )
+        self.assertTrue(fallback_lane.available)
+        orchestrator._safety_fallback_lanes[id(first)] = fallback_lane
+        original_start = threading.Thread.start
+        failures = []
+
+        def fail_first_command_workers(worker):
+            if worker.name.startswith('orchestrator-shutdown-tb3_0-'):
+                failures.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        try:
+            with mock.patch.object(
+                ROS['orchestrator'].threading.Thread,
+                'start',
+                new=fail_first_command_workers,
+            ):
+                orchestrator._shutdown()
+        finally:
+            fallback_lane.close()
+
+        self.assertEqual(2, len(failures))
+        self.assertTrue(first.messages)
+        self.assertEqual(0.0, first.messages[-1].linear.x)
+        self.assertEqual(0.0, first.messages[-1].angular.z)
+        self.assertTrue(healthy.messages)
+        self.assertEqual(0.0, healthy.messages[-1].linear.x)
+        self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        self.assertTrue(orchestrator.emergency_stop_pub.messages[-1].data)
+
+    def test_shutdown_during_previous_stop_cannot_restore_initializing(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        release_stop = threading.Event()
+        blocked_stop = BlockingPublisher(release_stop)
+        orchestrator.behavior_stop_pubs[0] = blocked_stop
+        new_start = orchestrator.behavior_start_pubs['formation']
+        start = threading.Thread(
+            target=orchestrator._handle_start_task,
+            args=({
+                'task_id': 'replacement-task',
+                'task_type': 'formation',
+            },),
+        )
+
+        start.start()
+        self.assertTrue(blocked_stop.entered.wait(0.5))
+        try:
+            orchestrator._shutdown()
+        finally:
+            release_stop.set()
+            start.join(1.0)
+
+        self.assertFalse(start.is_alive())
+        self.assertEqual('task-a', orchestrator.current_task_id)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertFalse(new_start.messages)
+
+    def test_shutdown_after_start_postcheck_keeps_final_failed_state(self):
+        orchestrator = make_orchestrator(task_id=None)
+        orchestrator.current_task_type = None
+        orchestrator.current_task_config = {}
+        orchestrator.task_state = ROS['orchestrator'].TaskState.IDLE
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        orchestrator._safety_zero_lock = ExitHookLock(
+            2, orchestrator._shutdown
+        )
+
+        orchestrator._handle_start_task({
+            'task_id': 'postcheck-start',
+            'task_type': 'follow_leader',
+        })
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertIsNone(orchestrator.task_dispatched_at)
+        self.assertIsNone(orchestrator.last_behavior_status_at)
+        self.assertIn('shut down', orchestrator.task_error)
+
+    def test_shutdown_after_resume_postcheck_clears_dispatch_metadata(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.PAUSED
+        orchestrator.task_dispatched = True
+        orchestrator.task_dispatched_at = 5.0
+        orchestrator.behavior_resume_pubs = {
+            'follow_leader': FakePublisher(),
+        }
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        orchestrator._safety_zero_lock = ExitHookLock(
+            1, orchestrator._shutdown
+        )
+
+        orchestrator._handle_resume_task({'task_id': 'task-a'})
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertIsNone(orchestrator.task_dispatched_at)
+        self.assertIsNone(orchestrator.last_behavior_status_at)
+        self.assertIn('shut down', orchestrator.task_error)
+
+    def test_shutdown_after_reset_postcheck_preserves_latched_failure(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        orchestrator.emergency_stop_active = True
+        orchestrator.task_dispatched = True
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        orchestrator._safety_zero_lock = ExitHookLock(
+            2, orchestrator._shutdown
+        )
+
+        orchestrator._handle_reset_emergency_stop({})
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertIsNone(orchestrator.task_dispatched_at)
+        self.assertIn('shut down', orchestrator.task_error)
+        self.assertFalse(orchestrator.emergency_stop_pub.messages[0].data)
+        self.assertTrue(orchestrator.emergency_stop_pub.messages[-1].data)
+
+    def test_shutdown_behavior_stops_keep_the_latched_task_id(self):
+        orchestrator = make_orchestrator()
+        original_start = threading.Thread.start
+        injected = []
+
+        def reject_during_shutdown(worker):
+            if (
+                worker.name == 'orchestrator-shutdown-emergency-stop-1'
+                and not injected
+            ):
+                injected.append(worker.name)
+                orchestrator._record_rejected_task(
+                    'bad-task', 'formation', 'invalid test task'
+                )
+            return original_start(worker)
+
+        with mock.patch.object(
+            ROS['orchestrator'].threading.Thread,
+            'start',
+            new=reject_during_shutdown,
+        ):
+            orchestrator._shutdown()
+
+        self.assertEqual(1, len(injected))
+        self.assertEqual('task-a', orchestrator.current_task_id)
+        for publisher in orchestrator.behavior_stop_pubs:
+            payload = json.loads(publisher.messages[-1].data)
+            self.assertEqual('task-a', payload['task_id'])
+
+    def test_late_start_after_shutdown_is_followed_by_behavior_stops(self):
+        orchestrator = make_orchestrator(task_id=None)
+        orchestrator.current_task_type = None
+        orchestrator.current_task_config = {}
+        orchestrator.task_state = ROS['orchestrator'].TaskState.IDLE
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        release_start = threading.Event()
+        start_publisher = BlockingPublisher(release_start)
+        orchestrator.behavior_start_pubs['follow_leader'] = start_publisher
+        start = threading.Thread(
+            target=orchestrator._handle_start_task,
+            args=({
+                'task_id': 'late-start-task',
+                'task_type': 'follow_leader',
+            },),
+        )
+
+        start.start()
+        self.assertTrue(start_publisher.entered.wait(0.7))
+        try:
+            orchestrator._shutdown()
+            stop_counts = [
+                len(publisher.messages)
+                for publisher in orchestrator.behavior_stop_pubs
+            ]
+        finally:
+            release_start.set()
+            start.join(1.0)
+
+        self.assertFalse(start.is_alive())
+        self.assertTrue(start_publisher.messages)
+        self.assertTrue(self.wait_until(lambda: all(
+            len(publisher.messages) > previous
+            for publisher, previous in zip(
+                orchestrator.behavior_stop_pubs, stop_counts
+            )
+        )))
+        for publisher in orchestrator.behavior_stop_pubs:
+            payload = json.loads(publisher.messages[-1].data)
+            self.assertEqual('late-start-task', payload['task_id'])
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertTrue(orchestrator.emergency_stop_pub.messages[-1].data)
+
+    def test_late_resume_after_shutdown_is_followed_by_behavior_stops(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.PAUSED
+        orchestrator.task_dispatched = True
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        release_resume = threading.Event()
+        resume_publisher = BlockingPublisher(release_resume)
+        orchestrator.behavior_resume_pubs = {
+            'follow_leader': resume_publisher,
+        }
+        resume = threading.Thread(
+            target=orchestrator._handle_resume_task,
+            args=({'task_id': 'task-a'},),
+        )
+
+        resume.start()
+        self.assertTrue(resume_publisher.entered.wait(0.5))
+        try:
+            orchestrator._shutdown()
+            stop_counts = [
+                len(publisher.messages)
+                for publisher in orchestrator.behavior_stop_pubs
+            ]
+        finally:
+            release_resume.set()
+            resume.join(1.0)
+
+        self.assertFalse(resume.is_alive())
+        self.assertTrue(resume_publisher.messages)
+        self.assertTrue(self.wait_until(lambda: all(
+            len(publisher.messages) > previous
+            for publisher, previous in zip(
+                orchestrator.behavior_stop_pubs, stop_counts
+            )
+        )))
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertTrue(orchestrator.emergency_stop_pub.messages[-1].data)
+
+    def test_late_reset_after_shutdown_restores_true_as_final_signal(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        orchestrator.task_dispatched = True
+        orchestrator.emergency_stop_active = True
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        release_reset = threading.Event()
+        release_command = threading.Event()
+        emergency_publisher = BlockingFalsePublisher(release_reset)
+        command_publisher = BlockingPublisher(release_command)
+        orchestrator.emergency_stop_pub = emergency_publisher
+        orchestrator.cmd_vel_pubs = {'tb3_0': command_publisher}
+        orchestrator._refresh_safety_publisher_snapshot()
+        orchestrator._stop_all_robots = types.MethodType(
+            ROS['orchestrator'].TaskOrchestrator._stop_all_robots,
+            orchestrator,
+        )
+        reset = threading.Thread(
+            target=orchestrator._handle_reset_emergency_stop,
+            args=({},),
+        )
+
+        reset.start()
+        self.assertTrue(emergency_publisher.entered.wait(0.5))
+        try:
+            orchestrator._shutdown()
+            self.assertTrue(any(
+                message.data is True
+                for message in emergency_publisher.messages
+            ))
+        finally:
+            release_reset.set()
+            self.assertTrue(self.wait_until(lambda: (
+                emergency_publisher.messages
+                and emergency_publisher.messages[-1].data is True
+            )))
+            self.assertTrue(reset.is_alive())
+            release_command.set()
+            reset.join(1.0)
+
+        self.assertFalse(reset.is_alive())
+        self.assertTrue(self.wait_until(lambda: (
+            emergency_publisher.messages
+            and emergency_publisher.messages[-1].data is True
+        )))
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertTrue(orchestrator.control_watchdog_tripped)
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+
+    def test_late_completion_cannot_overwrite_shutdown_failure(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        release_stop = threading.Event()
+        blocked_stop = BlockingPublisher(release_stop)
+        orchestrator.behavior_stop_pubs[0] = blocked_stop
+        completion = threading.Thread(
+            target=orchestrator._complete_current_task,
+            args=('task-a',),
+        )
+
+        completion.start()
+        self.assertTrue(blocked_stop.entered.wait(0.5))
+        try:
+            orchestrator._shutdown()
+        finally:
+            release_stop.set()
+            completion.join(1.0)
+
+        self.assertFalse(completion.is_alive())
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.FAILED,
+            orchestrator.task_state,
+        )
+        self.assertEqual(0.0, orchestrator.task_progress)
+        self.assertFalse(orchestrator.task_dispatched)
+
+    def test_emergency_fanout_continues_when_signal_publisher_blocks(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        release_signal = threading.Event()
+        blocked_signal = BlockingPublisher(release_signal)
+        orchestrator.emergency_stop_pub = blocked_signal
+
+        try:
+            started_at = time.monotonic()
+            orchestrator._handle_emergency_stop({})
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(blocked_signal.entered.wait(0.5))
+            self.assertTrue(self.wait_until(lambda: all(
+                publisher.messages
+                for publisher in orchestrator.behavior_stop_pubs
+            )))
+            command_publisher = orchestrator.cmd_vel_pubs['tb3_0']
+            self.assertTrue(self.wait_until(lambda: (
+                command_publisher.messages
+                and command_publisher.messages[-1].linear.x == 0.0
+            )))
+            self.assertEqual(
+                ROS['orchestrator'].TaskState.STOPPED,
+                orchestrator.task_state,
+            )
+        finally:
+            release_signal.set()
+
+    def test_emergency_signal_publish_failures_remain_pending_for_retry(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        emergency_publisher = FailOncePublisher()
+        stop_publishers = [FailOncePublisher() for _ in range(3)]
+        orchestrator.emergency_stop_pub = emergency_publisher
+        orchestrator.behavior_stop_pubs = stop_publishers
+
+        orchestrator._handle_emergency_stop({})
+
+        publishers = [emergency_publisher] + stop_publishers
+        self.assertTrue(self.wait_until(lambda: all(
+            publisher.calls == 1 for publisher in publishers
+        )))
+        self.assertTrue(orchestrator._emergency_publication_debts)
+        self.assertTrue(all(
+            not publisher.messages for publisher in publishers
+        ))
+
+        deadline = time.monotonic() + 0.5
+        while (
+            orchestrator._emergency_publication_debts
+            and time.monotonic() < deadline
+        ):
+            orchestrator._safety_stop_zero_timer(None)
+            time.sleep(0.005)
+
+        self.assertFalse(orchestrator._emergency_publication_debts)
+        self.assertTrue(emergency_publisher.messages[-1].data)
+        for publisher in stop_publishers:
+            payload = json.loads(publisher.messages[-1].data)
+            self.assertEqual('task-a', payload['task_id'])
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.STOPPED,
+            orchestrator.task_state,
+        )
+
+    def test_older_reset_cannot_clear_a_newer_emergency_true(self):
+        orchestrator = make_orchestrator()
+        orchestrator.emergency_stop_active = True
+        task_lock = WaiterAwareRLock()
+        orchestrator.task_lock = task_lock
+        reset = threading.Thread(
+            target=orchestrator._handle_reset_emergency_stop,
+            args=({},),
+        )
+        emergency = threading.Thread(
+            target=orchestrator._handle_emergency_stop,
+            args=({},),
+        )
+
+        task_lock.acquire()
+        task_lock.acquire_attempted.clear()
+        try:
+            reset.start()
+            self.assertTrue(task_lock.acquire_attempted.wait(0.5))
+
+            emergency.start()
+            self.assertTrue(self.wait_until(lambda: (
+                orchestrator._emergency_order_generation == 1
+                and orchestrator._pending_emergency_true_generations
+            )))
+            self.assertTrue(self.wait_until(lambda: (
+                not orchestrator._emergency_publication_debts
+            )))
+            self.assertTrue(reset.is_alive())
+            self.assertTrue(emergency.is_alive())
+        finally:
+            task_lock.release()
+            reset.join(1.0)
+            emergency.join(1.0)
+
+        self.assertFalse(reset.is_alive())
+        self.assertFalse(emergency.is_alive())
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertFalse(any(
+            message.data is False
+            for message in orchestrator.emergency_stop_pub.messages
+        ))
+        self.assertFalse(
+            orchestrator._pending_emergency_true_generations
+        )
+
+    def test_emergency_true_then_reset_false_precede_a_new_start(self):
+        orchestrator = make_orchestrator()
+        release_false = threading.Event()
+        publication_order = []
+
+        class OrderedEmergencyPublisher(BlockingFalsePublisher):
+            def publish(self, message):
+                super().publish(message)
+                publication_order.append(('emergency', message.data))
+
+        class OrderedStartPublisher(FakePublisher):
+            def publish(self, message):
+                super().publish(message)
+                task = json.loads(message.data)
+                publication_order.append(('start', task['task_id']))
+
+        emergency_publisher = OrderedEmergencyPublisher(release_false)
+        start_publisher = OrderedStartPublisher()
+        orchestrator.emergency_stop_pub = emergency_publisher
+        orchestrator.behavior_start_pubs['formation'] = start_publisher
+
+        orchestrator._handle_emergency_stop({})
+        self.assertTrue(self.wait_until(lambda: (
+            not orchestrator._emergency_publication_debts
+        )))
+        self.assertEqual([('emergency', True)], publication_order)
+
+        task_lock = WaiterAwareRLock()
+        orchestrator.task_lock = task_lock
+        reset = threading.Thread(
+            target=orchestrator._handle_reset_emergency_stop,
+            args=({},),
+        )
+        start = threading.Thread(
+            target=orchestrator._handle_start_task,
+            args=({
+                'task_id': 'ordered-replacement',
+                'task_type': 'formation',
+            },),
+        )
+
+        reset.start()
+        self.assertTrue(emergency_publisher.entered.wait(0.5))
+        task_lock.acquire_attempted.clear()
+        start.start()
+        self.assertTrue(task_lock.acquire_attempted.wait(0.5))
+        self.assertFalse(start_publisher.messages)
+
+        release_false.set()
+        reset.join(1.0)
+        start.join(1.0)
+
+        self.assertFalse(reset.is_alive())
+        self.assertFalse(start.is_alive())
+        self.assertEqual([
+            ('emergency', True),
+            ('emergency', False),
+            ('start', 'ordered-replacement'),
+        ], publication_order)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+
+    def test_reset_waits_until_the_emergency_true_message_returns(self):
+        orchestrator = make_orchestrator()
+        release_true = threading.Event()
+        emergency_publisher = BlockingTruePublisher(release_true)
+        orchestrator.emergency_stop_pub = emergency_publisher
+
+        orchestrator._handle_emergency_stop({})
+        self.assertTrue(emergency_publisher.entered.wait(0.5))
+        self.assertTrue(orchestrator.emergency_stop_active)
+
+        orchestrator._handle_reset_emergency_stop({})
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertFalse(any(
+            message.data is False
+            for message in emergency_publisher.messages
+        ))
+
+        release_true.set()
+        self.assertTrue(self.wait_until(lambda: (
+            not orchestrator._emergency_publication_debts
+        )))
+        orchestrator._handle_reset_emergency_stop({})
+
+        self.assertFalse(orchestrator.emergency_stop_active)
+        self.assertFalse(emergency_publisher.messages[-1].data)
+
+    def test_spurious_reset_does_not_stop_a_running_task(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        orchestrator.task_ever_dispatched = True
+        zero_count = len(orchestrator.cmd_vel_pubs['tb3_0'].messages)
+
+        orchestrator._handle_reset_emergency_stop({})
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.RUNNING,
+            orchestrator.task_state,
+        )
+        self.assertTrue(orchestrator.task_dispatched)
+        self.assertFalse(orchestrator.emergency_stop_pub.messages)
+        self.assertEqual(
+            zero_count,
+            len(orchestrator.cmd_vel_pubs['tb3_0'].messages),
+        )
+
+    def test_stale_start_cannot_revive_a_task_after_emergency_reset(self):
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        orchestrator.task_ever_dispatched = True
+
+        orchestrator._handle_emergency_stop({})
+        self.assertTrue(self.wait_until(lambda: (
+            not orchestrator._emergency_publication_debts
+        )))
+        orchestrator._handle_reset_emergency_stop({})
+        start_count = len(
+            orchestrator.behavior_start_pubs['follow_leader'].messages
+        )
+
+        orchestrator._handle_start_task({
+            'task_id': 'task-a',
+            'task_type': 'follow_leader',
+        })
+
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.STOPPED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertEqual(
+            start_count,
+            len(orchestrator.behavior_start_pubs['follow_leader'].messages),
+        )
+
+    def test_detached_safety_publish_retries_a_thread_start_failure(self):
+        orchestrator = make_orchestrator()
+        publisher = FakePublisher()
+        original_start = threading.Thread.start
+        failed_once = []
+
+        def fail_first_detached_worker(worker):
+            if (
+                worker.name == 'orchestrator-safety-retry-signal-1'
+                and not failed_once
+            ):
+                failed_once.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            ROS['orchestrator'].threading.Thread,
+            'start',
+            new=fail_first_detached_worker,
+        ):
+            started = orchestrator._start_detached_safety_publish(
+                'retry-signal', publisher, Bool(data=True)
+            )
+
+        self.assertTrue(started)
+        self.assertEqual(1, len(failed_once))
+        self.assertTrue(self.wait_until(lambda: publisher.messages))
+        self.assertTrue(publisher.messages[-1].data)
+
+    def test_detached_safety_publish_uses_prestarted_lane_when_threads_fail(self):
+        orchestrator = make_orchestrator()
+        publisher = FakePublisher()
+        fallback_lane = ROS['orchestrator'].SafetyPublishLane(
+            'test-detached-signal'
+        )
+        self.assertTrue(fallback_lane.available)
+        orchestrator._safety_fallback_lanes[id(publisher)] = fallback_lane
+        original_start = threading.Thread.start
+        failed_starts = []
+
+        def fail_detached_workers(worker):
+            if worker.name.startswith(
+                'orchestrator-safety-persistent-signal-'
+            ):
+                failed_starts.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        try:
+            with mock.patch.object(
+                ROS['orchestrator'].threading.Thread,
+                'start',
+                new=fail_detached_workers,
+            ):
+                started = orchestrator._start_detached_safety_publish(
+                    'persistent-signal', publisher, Bool(data=True)
+                )
+            self.assertTrue(started)
+            self.assertEqual(2, len(failed_starts))
+            self.assertTrue(self.wait_until(lambda: publisher.messages))
+            self.assertTrue(publisher.messages[-1].data)
+        finally:
+            fallback_lane.close()
+
+    def test_safety_lane_never_accepts_a_job_behind_close_sentinel(self):
+        lane = ROS['orchestrator'].SafetyPublishLane('submit-close-race')
+        self.assertTrue(lane.available)
+        callback_ran = threading.Event()
+        enqueue_entered = threading.Event()
+        release_enqueue = threading.Event()
+        original_put = lane._jobs.put_nowait
+
+        def blocking_put(item):
+            if item is not None:
+                enqueue_entered.set()
+                release_enqueue.wait(0.5)
+            original_put(item)
+
+        lane._jobs.put_nowait = blocking_put
+        submit_result = []
+        submit = threading.Thread(
+            target=lambda: submit_result.append(
+                lane.submit(callback_ran.set)
+            )
+        )
+        close = threading.Thread(target=lane.close)
+        submit.start()
+        self.assertTrue(enqueue_entered.wait(0.5))
+        close.start()
+        self.assertTrue(close.is_alive())
+
+        release_enqueue.set()
+        submit.join(0.5)
+        close.join(0.5)
+
+        self.assertEqual([True], submit_result)
+        self.assertTrue(callback_ran.wait(0.5))
+        self.assertFalse(lane.available)
+
+    def test_robot_announced_after_shutdown_is_not_added_to_stop_snapshot(self):
+        orchestrator = make_orchestrator()
+        orchestrator._shutdown()
+        original_snapshot = tuple(orchestrator._safety_publisher_snapshot)
+
+        orchestrator._robot_list_callback(String(data='tb3_0,tb3_1'))
+
+        self.assertNotIn('tb3_1', orchestrator.robots)
+        self.assertNotIn('tb3_1', orchestrator.cmd_vel_pubs)
+        self.assertEqual(1, orchestrator.robot_count)
+        self.assertEqual(
+            original_snapshot,
+            orchestrator._safety_publisher_snapshot,
+        )
+
+    def test_shutdown_during_robot_setup_discards_all_late_resources(self):
+        orchestrator = make_orchestrator()
+        orchestrator.SHUTDOWN_TIMEOUT = 0.08
+        publisher_entered = threading.Event()
+        release_publisher = threading.Event()
+        created_publishers = []
+        created_subscribers = []
+        original_publisher = ROS['orchestrator'].rospy.Publisher
+        original_subscriber = ROS['orchestrator'].rospy.Subscriber
+
+        def blocking_publisher(topic, *args, **kwargs):
+            if topic != '/tb3_1/cmd_vel':
+                return original_publisher(topic, *args, **kwargs)
+            publisher_entered.set()
+            release_publisher.wait(1.0)
+            publisher = FakePublisher()
+            created_publishers.append(publisher)
+            return publisher
+
+        def recording_subscriber(*args, **kwargs):
+            subscriber = original_subscriber(*args, **kwargs)
+            created_subscribers.append(subscriber)
+            return subscriber
+
+        with mock.patch.object(
+            ROS['orchestrator'].rospy,
+            'Publisher',
+            side_effect=blocking_publisher,
+        ), mock.patch.object(
+            ROS['orchestrator'].rospy,
+            'Subscriber',
+            side_effect=recording_subscriber,
+        ):
+            roster = threading.Thread(
+                target=orchestrator._robot_list_callback,
+                args=(String(data='tb3_0,tb3_1'),),
+            )
+            roster.start()
+            self.assertTrue(publisher_entered.wait(0.5))
+            try:
+                orchestrator._shutdown()
+            finally:
+                release_publisher.set()
+                roster.join(1.0)
+
+        self.assertFalse(roster.is_alive())
+        self.assertEqual(1, len(created_publishers))
+        self.assertTrue(created_publishers[0].unregistered)
+        self.assertEqual(4, len(created_subscribers))
+        self.assertTrue(all(
+            subscriber.unregistered for subscriber in created_subscribers
+        ))
+        self.assertNotIn('tb3_1', orchestrator.robots)
+        self.assertNotIn('tb3_1', orchestrator.cmd_vel_pubs)
+        self.assertFalse(any(
+            robot_id == 'tb3_1'
+            for robot_id, _publisher
+            in orchestrator._safety_publisher_snapshot
+        ))
+
+    def test_failed_replacement_roster_cancels_a_task_with_no_robots(self):
+        class UnavailableLane:
+            def __init__(self, _label, _error_logger=None):
+                self.available = False
+
+            def close(self):
+                pass
+
+        orchestrator = make_orchestrator()
+        orchestrator.task_state = ROS['orchestrator'].TaskState.RUNNING
+        orchestrator.task_dispatched = True
+        orchestrator._safety_fallback_lane_factory = UnavailableLane
+
+        orchestrator._robot_list_callback(String(data='tb3_1'))
+
+        self.assertEqual({}, orchestrator.robots)
+        self.assertEqual({}, orchestrator.cmd_vel_pubs)
+        self.assertEqual(0, orchestrator.robot_count)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.STOPPED,
+            orchestrator.task_state,
+        )
+        self.assertFalse(orchestrator.task_dispatched)
+        self.assertIsNone(orchestrator.task_dispatched_at)
+        self.assertIsNone(orchestrator.last_behavior_status_at)
 
     def test_emergency_zero_publish_does_not_wait_on_ros_clock(self):
         orchestrator = make_orchestrator()
@@ -1333,9 +3136,169 @@ class ControlHeartbeatWatchdogTests(unittest.TestCase):
 
         orchestrator._unsubscribe_from_robot("tb3_0")
 
-        self.assertTrue(publisher.messages)
-        self.assertTrue(publisher.unregistered)
+        self.assertTrue(self.wait_until(lambda: publisher.messages))
+        self.assertTrue(self.wait_until(lambda: publisher.unregistered))
         self.assertNotIn("tb3_0", orchestrator.cmd_vel_pubs)
+
+    def test_removed_publisher_remains_a_stop_debt_until_zero_is_accepted(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        release = threading.Event()
+        publisher = BlockingPublisher(release)
+        orchestrator.cmd_vel_pubs['tb3_0'] = publisher
+        orchestrator._refresh_safety_publisher_snapshot()
+
+        try:
+            orchestrator._unsubscribe_from_robot('tb3_0')
+            self.assertTrue(publisher.entered.wait(0.5))
+            self.assertTrue(any(
+                name == 'tb3_0' and candidate is publisher
+                for name, candidate
+                in orchestrator._safety_publisher_snapshot
+            ))
+            self.assertIn(
+                ('tb3_0', id(publisher)),
+                orchestrator._retired_safety_publishers,
+            )
+
+            orchestrator._safety_stop_request_callback(String(data=json.dumps({
+                'source': 'formation',
+                'reason': 'shutdown',
+                'task_id': 'task-a',
+                'request_id': 'retired-publisher-request',
+            })))
+            self.assertTrue(self.wait_until(lambda: publisher.calls >= 2))
+            self.assertFalse(publisher.unregistered)
+        finally:
+            release.set()
+
+        self.assertTrue(self.wait_until(lambda: publisher.unregistered))
+        self.assertTrue(self.wait_until(lambda: not any(
+            candidate is publisher
+            for _name, candidate in orchestrator._safety_publisher_snapshot
+        )))
+
+    def test_reset_and_supervised_request_have_one_atomic_order(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        orchestrator.emergency_stop_active = True
+        clock_entered = threading.Event()
+        release_clock = threading.Event()
+        callback_finished = threading.Event()
+
+        def blocking_clock():
+            clock_entered.set()
+            release_clock.wait(0.5)
+            return 10.0
+
+        orchestrator._control_clock = blocking_clock
+        reset = threading.Thread(
+            target=orchestrator._handle_reset_emergency_stop,
+            args=({},),
+        )
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'reset-race-request',
+        }))
+
+        def latch_request():
+            orchestrator._safety_stop_request_callback(request)
+            callback_finished.set()
+
+        callback = threading.Thread(target=latch_request)
+        reset.start()
+        self.assertTrue(clock_entered.wait(0.5))
+        callback.start()
+        self.assertFalse(callback_finished.wait(0.03))
+
+        release_clock.set()
+        reset.join(0.5)
+        callback.join(0.5)
+        self.assertFalse(reset.is_alive())
+        self.assertFalse(callback.is_alive())
+        self.assertTrue(orchestrator.supervised_stop_active)
+        self.assertTrue(orchestrator.emergency_stop_active)
+        self.assertTrue(self.wait_until(lambda: (
+            orchestrator.emergency_stop_pub.messages
+            and orchestrator.emergency_stop_pub.messages[-1].data is True
+        )))
+        self.assertFalse(orchestrator.emergency_stop_pub.messages[0].data)
+
+    def test_supervised_latch_blocks_start_resume_and_manual_motion(self):
+        orchestrator = make_orchestrator()
+        orchestrator.supervised_stop_active = True
+        # The supervised bit is authoritative even if another callback has
+        # not yet mirrored it into the ordinary emergency-stop flag.
+        orchestrator.emergency_stop_active = False
+
+        start_publisher = orchestrator.behavior_start_pubs['follow_leader']
+        orchestrator._handle_start_task({
+            'task_id': 'must-not-start',
+            'task_type': 'follow_leader',
+        })
+        self.assertFalse(start_publisher.messages)
+
+        resume_publisher = FakePublisher()
+        orchestrator.behavior_resume_pubs = {
+            'follow_leader': resume_publisher,
+        }
+        orchestrator.task_state = ROS['orchestrator'].TaskState.PAUSED
+        orchestrator._handle_resume_task({'task_id': 'task-a'})
+        self.assertFalse(resume_publisher.messages)
+        self.assertEqual(
+            ROS['orchestrator'].TaskState.PAUSED,
+            orchestrator.task_state,
+        )
+
+        orchestrator._handle_control_leader({
+            'linear_velocity': 0.22,
+            'angular_velocity': 0.5,
+        })
+        command = orchestrator.leader_cmd_pub.messages[-1]
+        self.assertEqual(0.0, command.linear.x)
+        self.assertEqual(0.0, command.angular.z)
+
+    def test_late_manual_leader_command_is_followed_by_a_zero(self):
+        orchestrator = make_orchestrator()
+        orchestrator.current_task_type = 'formation'
+        release = threading.Event()
+        leader_publisher = BlockingPublisher(release)
+        orchestrator.leader_cmd_pub = leader_publisher
+        orchestrator._refresh_safety_publisher_snapshot()
+        manual = threading.Thread(
+            target=orchestrator._handle_control_leader,
+            args=({
+                'linear_velocity': 0.22,
+                'angular_velocity': 0.5,
+            },),
+        )
+        manual.start()
+        self.assertTrue(leader_publisher.entered.wait(0.5))
+
+        orchestrator._safety_stop_request_callback(String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'task_id': 'task-a',
+            'request_id': 'leader-race-request',
+        })))
+        self.assertTrue(self.wait_until(lambda: leader_publisher.calls >= 2))
+
+        release.set()
+        manual.join(0.5)
+        self.assertFalse(manual.is_alive())
+        self.assertTrue(self.wait_until(lambda: (
+            leader_publisher.calls >= 3
+            and not orchestrator._safety_zero_inflight
+        )))
+        self.assertTrue(any(
+            command.linear.x > 0.0
+            for command in leader_publisher.messages
+        ))
+        final_command = leader_publisher.messages[-1]
+        self.assertEqual(0.0, final_command.linear.x)
+        self.assertEqual(0.0, final_command.angular.z)
 
     def test_watchdog_waits_for_first_heartbeat_then_latches_estop(self):
         orchestrator = make_orchestrator()
@@ -1386,6 +3349,39 @@ class ControlHeartbeatWatchdogTests(unittest.TestCase):
 
 
 class BehaviorLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _transport_estop_controller(publishers):
+        controller = ROS['transport'].CollaborativeTransport.__new__(
+            ROS['transport'].CollaborativeTransport
+        )
+        controller.command_lock = threading.RLock()
+        controller.control_cycle_lock = threading.Lock()
+        controller.data_lock = threading.Lock()
+        controller.phase_lock = threading.Lock()
+        controller.current_task_id = 'transport-estop-test'
+        controller.command_epoch = 4
+        controller.is_running = True
+        controller.is_paused = False
+        controller.emergency_stop_active = False
+        controller.emergency_reset_pending = False
+        controller.phase = ROS['transport'].TransportPhase.PUSH
+        controller.robot_namespaces = list(publishers)
+        controller.robot_count = len(publishers)
+        controller.cmd_vel_pubs = dict(publishers)
+        controller.avoidance_modules = {
+            namespace: FakeAvoidance() for namespace in publishers
+        }
+        controller.transport_last_commands = {}
+        controller.normal_stop_timeout_wall_s = 0.05
+        controller._finalize_emergency_reset = lambda: None
+        controller._ensure_safety_fanout()
+        for namespace, publisher in publishers.items():
+            controller._register_safety_lane(namespace, publisher)
+        controller._refresh_safety_publisher_snapshot(
+            tuple(publishers.items())
+        )
+        return controller
+
     @staticmethod
     def _transport_layout_controller():
         controller = ROS["transport"].CollaborativeTransport.__new__(
@@ -1461,6 +3457,13 @@ class BehaviorLifecycleTests(unittest.TestCase):
         controller.cmd_vel_pubs = {
             namespace: FakePublisher() for namespace in namespaces
         }
+        controller._ensure_safety_fanout()
+        controller._safety_publish_lane_factory = FakeSafetyLane
+        for namespace, publisher in controller.cmd_vel_pubs.items():
+            controller._register_safety_lane(namespace, publisher)
+        controller._refresh_safety_publisher_snapshot(
+            tuple(controller.cmd_vel_pubs.items())
+        )
         controller.avoidance_modules = {
             namespace: FakeAvoidance() for namespace in namespaces
         }
@@ -7378,7 +9381,10 @@ class BehaviorLifecycleTests(unittest.TestCase):
         controller.transport_chain_released = {"tb3_1"}
         phases = []
         controller._set_phase = lambda phase, _epoch: phases.append(phase) or True
-        controller._stop_all_robots = lambda: None
+        controller._stop_all_robots = lambda: {
+            'confirmed': True,
+            'failed_robots': [],
+        }
 
         with mock.patch.object(
             ROS["transport"].rospy, "get_time", return_value=23.0,
@@ -7791,6 +9797,22 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertIsNone(controller.transport_initial_target_distance)
         self.assertEqual(0.0, controller.transport_reported_progress)
 
+    def test_stop_before_start_prevents_late_transport_activation(self):
+        controller = self._transport_search_controller(2)
+        cancelled_task_id = 'cancelled-transport-task'
+
+        controller._stop_callback(lifecycle_payload(cancelled_task_id))
+        controller.is_running = False
+        controller._start_callback(String(data=json.dumps({
+            'task_id': cancelled_task_id,
+            'target_x': 1.0,
+            'target_y': 2.0,
+        })))
+
+        self.assertIn(cancelled_task_id, controller._cancelled_task_ids)
+        self.assertFalse(controller.is_running)
+        self.assertEqual('search-task', controller.current_task_id)
+
     def test_transport_start_moves_and_observes_the_gazebo_target_ghost(self):
         controller = self._transport_search_controller(2)
         controller.object_position = np.array([1.0, 1.0])
@@ -8112,10 +10134,23 @@ class BehaviorLifecycleTests(unittest.TestCase):
                     zero_published.set()
 
         with controller.data_lock:
+            old_publishers = list(controller.cmd_vel_pubs.values())
             controller.cmd_vel_pubs = {
                 namespace: StopAwarePublisher()
                 for namespace in controller.robot_namespaces
             }
+            replacement_publishers = tuple(
+                controller.cmd_vel_pubs.items()
+            )
+        for publisher in old_publishers:
+            controller._discard_safety_lane(publisher)
+        for namespace, publisher in replacement_publishers:
+            self.assertTrue(controller._register_safety_lane(
+                namespace, publisher
+            ))
+        controller._refresh_safety_publisher_snapshot(
+            replacement_publishers
+        )
 
         phase_entered = threading.Event()
         release_phase = threading.Event()
@@ -8153,6 +10188,329 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertTrue(estop_finished.is_set())
         self.assertEqual(set(), controller.transport_engaged)
         self.assertFalse(controller.is_running)
+        for _namespace, publisher in replacement_publishers:
+            controller._discard_safety_lane(publisher)
+
+    def test_transport_estop_fanout_bypasses_a_blocked_publisher(self):
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        })
+
+        try:
+            started_at = time.monotonic()
+            controller._emergency_stop_callback(Bool(data=True))
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(blocked.entered.wait(0.5))
+            deadline = time.monotonic() + 0.5
+            while not healthy.messages and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(healthy.messages)
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            self.assertTrue(controller.emergency_stop_active)
+            self.assertFalse(controller.is_running)
+        finally:
+            release_blocked.set()
+            controller._wait_for_safety_zeros(1.0)
+            controller._discard_safety_lane(blocked)
+            controller._discard_safety_lane(healthy)
+
+    def test_transport_estop_retries_a_zero_publish_exception(self):
+        publisher = FailOncePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+
+        try:
+            controller._emergency_stop_callback(Bool(data=True))
+            self.assertTrue(publisher.first_failure_returned.wait(0.5))
+            deadline = time.monotonic() + 0.5
+            while not publisher.messages and time.monotonic() < deadline:
+                controller._control_loop(None)
+                time.sleep(0.005)
+            self.assertTrue(publisher.messages)
+            self.assertGreaterEqual(publisher.calls, 2)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+        finally:
+            controller._wait_for_safety_zeros(1.0)
+            controller._discard_safety_lane(publisher)
+
+    def test_transport_normal_stop_retries_before_returning(self):
+        publisher = FailOncePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+
+        try:
+            controller._stop_all_robots()
+            self.assertEqual(2, publisher.calls)
+            self.assertEqual(1, len(publisher.messages))
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+        finally:
+            controller._discard_safety_lane(publisher)
+
+    def test_transport_completion_fails_when_zero_is_never_accepted(self):
+        class AlwaysFailPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def publish(self, _message):
+                self.calls += 1
+                raise RuntimeError('publisher remains disconnected')
+
+        publisher = AlwaysFailPublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+        controller.object_error = None
+        controller.failure_reason = None
+
+        try:
+            completed = controller._complete_transport(0.1, 4)
+
+            self.assertFalse(completed)
+            self.assertGreaterEqual(publisher.calls, 3)
+            self.assertFalse(controller.is_running)
+            self.assertEqual(5, controller.command_epoch)
+            self.assertEqual(
+                ROS['transport'].TransportPhase.FAILED,
+                controller.phase,
+            )
+            self.assertIn('could not confirm zero', controller.failure_reason)
+        finally:
+            controller._discard_safety_lane(publisher)
+
+    def test_transport_shutdown_retries_a_transient_zero_failure(self):
+        publisher = FailOncePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+
+        try:
+            controller._shutdown()
+
+            self.assertGreaterEqual(publisher.calls, 2)
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+        finally:
+            controller._discard_safety_lane(publisher)
+
+    def test_transport_shutdown_does_not_wait_for_a_blocked_motion_publish(self):
+        release_motion = threading.Event()
+        blocked = FirstPublishBlockingPublisher(release_motion)
+        healthy = FakePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        })
+        command = Twist()
+        command.linear.x = 0.1
+        motion_result = []
+
+        def publish_motion():
+            with controller.command_lock:
+                motion_result.append(
+                    controller._publish_validated_command_locked(
+                        'tb3_0', command, 4
+                    )
+                )
+
+        motion = threading.Thread(target=publish_motion)
+        shutdown = threading.Thread(target=controller._shutdown)
+        motion.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+
+        try:
+            shutdown.start()
+            deadline = time.monotonic() + 0.5
+            while not healthy.messages and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(healthy.messages)
+            shutdown.join(0.5)
+            self.assertFalse(shutdown.is_alive())
+            self.assertTrue(motion.is_alive())
+            self.assertFalse(controller.is_running)
+            self.assertTrue(controller._shutdown_started)
+        finally:
+            release_motion.set()
+            motion.join(1.0)
+            shutdown.join(1.0)
+            controller._wait_for_safety_zeros(1.0)
+            controller._discard_safety_lane(blocked)
+            controller._discard_safety_lane(healthy)
+
+        self.assertFalse(motion.is_alive())
+        self.assertEqual([False], motion_result)
+        self.assertEqual(0.0, blocked.messages[-1].linear.x)
+        self.assertEqual(0.0, blocked.messages[-1].angular.z)
+
+    def test_transport_normal_stop_does_not_complete_before_zero_returns(self):
+        release = threading.Event()
+        publisher = BlockingPublisher(release)
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+        finished = threading.Event()
+
+        def stop_robots():
+            controller._stop_all_robots()
+            finished.set()
+
+        stop = threading.Thread(target=stop_robots)
+
+        stop.start()
+        self.assertTrue(publisher.entered.wait(0.5))
+        self.assertFalse(finished.is_set())
+        try:
+            release.set()
+            stop.join(1.0)
+        finally:
+            release.set()
+            stop.join(1.0)
+            controller._discard_safety_lane(publisher)
+
+        self.assertFalse(stop.is_alive())
+        self.assertTrue(finished.is_set())
+        self.assertEqual(0.0, publisher.messages[-1].linear.x)
+
+    def test_transport_normal_stop_reaches_a_healthy_publisher_in_parallel(self):
+        release = threading.Event()
+        blocked = BlockingPublisher(release)
+        healthy = FakePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        })
+        result = []
+        stop = threading.Thread(
+            target=lambda: result.append(controller._stop_all_robots())
+        )
+
+        try:
+            stop.start()
+            self.assertTrue(blocked.entered.wait(0.5))
+            deadline = time.monotonic() + 0.5
+            while not healthy.messages and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(healthy.messages)
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        finally:
+            release.set()
+            stop.join(1.0)
+            controller._discard_safety_lane(blocked)
+            controller._discard_safety_lane(healthy)
+
+        self.assertFalse(stop.is_alive())
+        self.assertTrue(result)
+
+    def test_transport_stop_receipt_follows_an_inflight_zero_and_late_motion(self):
+        publisher = FakePublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+        controller.data_lock.acquire()
+        drain_result = []
+        drain = None
+
+        try:
+            controller._schedule_safety_zeros()
+            deadline = time.monotonic() + 0.5
+            while not publisher.messages and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(publisher.messages)
+
+            late_motion = Twist()
+            late_motion.linear.x = 0.1
+            publisher.publish(late_motion)
+            drain = threading.Thread(
+                target=lambda: drain_result.append(
+                    controller._drain_safety_zeros(0.5)
+                )
+            )
+            drain.start()
+            time.sleep(0.03)
+            self.assertTrue(drain.is_alive())
+        finally:
+            controller.data_lock.release()
+            if drain is not None:
+                drain.join(1.0)
+            controller._discard_safety_lane(publisher)
+
+        self.assertFalse(drain.is_alive())
+        self.assertEqual([True], [result['confirmed'] for result in drain_result])
+        self.assertGreaterEqual(len(publisher.messages), 3)
+        self.assertTrue(any(
+            message.linear.x > 0.0 for message in publisher.messages
+        ))
+        self.assertEqual(0.0, publisher.messages[-1].linear.x)
+        self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+    def test_transport_late_positive_command_is_followed_by_a_zero(self):
+        release_motion = threading.Event()
+        publisher = FirstPublishBlockingPublisher(release_motion)
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+        command = Twist()
+        command.linear.x = 0.1
+        results = []
+
+        def publish_motion():
+            with controller.command_lock:
+                results.append(controller._publish_validated_command_locked(
+                    'tb3_0', command, 4
+                ))
+
+        motion = threading.Thread(target=publish_motion)
+        emergency = threading.Thread(
+            target=controller._emergency_stop_callback,
+            args=(Bool(data=True),),
+        )
+        motion.start()
+        self.assertTrue(publisher.entered.wait(0.5))
+
+        try:
+            emergency.start()
+            deadline = time.monotonic() + 0.5
+            while not publisher.messages and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            release_motion.set()
+            motion.join(1.0)
+            emergency.join(1.0)
+            self.assertFalse(motion.is_alive())
+            self.assertFalse(emergency.is_alive())
+            deadline = time.monotonic() + 0.5
+            while (
+                publisher.messages[-1].linear.x != 0.0
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.005)
+        finally:
+            release_motion.set()
+            motion.join(1.0)
+            emergency.join(1.0)
+            controller._wait_for_safety_zeros(1.0)
+            controller._discard_safety_lane(publisher)
+
+        self.assertEqual([False], results)
+        self.assertTrue(any(
+            message.linear.x > 0.0 for message in publisher.messages
+        ))
+        self.assertEqual(0.0, publisher.messages[-1].linear.x)
+        self.assertEqual(0.0, publisher.messages[-1].angular.z)
 
     def test_transport_stale_stop_and_empty_fleet_cancel_epoch(self):
         controller = ROS["transport"].CollaborativeTransport.__new__(
@@ -8200,6 +10558,84 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertEqual([], controller.robot_namespaces)
         self.assertTrue(old_pub.unregistered)
         self.assertTrue(old_pub.messages)
+
+    def test_transport_teardown_cleans_roster_when_disposal_blocks_or_fails(self):
+        release = threading.Event()
+
+        class BlockingDisposalPublisher(FakePublisher):
+            def __init__(self):
+                super().__init__()
+                self.disposal_started = threading.Event()
+
+            def unregister(self):
+                self.disposal_started.set()
+                release.wait(1.0)
+                self.unregistered = True
+
+        class FailingSubscriber(FakeSubscriber):
+            def unregister(self):
+                raise RuntimeError('subscriber is disconnected')
+
+        class FailingAvoidance(FakeAvoidance):
+            def shutdown(self):
+                raise RuntimeError('avoidance shutdown failed')
+
+        publisher = BlockingDisposalPublisher()
+        controller = self._transport_estop_controller({
+            'tb3_0': publisher,
+        })
+        controller.odom_subs = {'tb3_0': FailingSubscriber()}
+        controller.scan_subs = {'tb3_0': FailingSubscriber()}
+        controller.avoidance_modules = {'tb3_0': FailingAvoidance()}
+        controller.robot_positions = {'tb3_0': np.zeros(2)}
+        controller.robot_yaws = {'tb3_0': 0.0}
+        controller.robot_velocities = {'tb3_0': np.zeros(2)}
+        controller.robot_scans = {'tb3_0': object()}
+        controller.robot_odom_received_at = {'tb3_0': 1.0}
+        controller.transport_last_commands = {'tb3_0': (0.0, 0.0)}
+
+        started_at = time.monotonic()
+        try:
+            controller._teardown_robot('tb3_0')
+            elapsed = time.monotonic() - started_at
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(publisher.disposal_started.wait(0.5))
+            self.assertEqual([], controller.robot_namespaces)
+            self.assertEqual({}, controller.cmd_vel_pubs)
+            self.assertEqual({}, controller.odom_subs)
+            self.assertEqual({}, controller.scan_subs)
+            self.assertEqual({}, controller.avoidance_modules)
+            self.assertEqual({}, controller.robot_positions)
+            self.assertEqual({}, controller.robot_yaws)
+            self.assertEqual({}, controller.robot_velocities)
+            self.assertEqual({}, controller.robot_scans)
+            self.assertEqual({}, controller.robot_odom_received_at)
+            self.assertEqual({}, controller.transport_last_commands)
+            self.assertEqual((), controller._safety_publisher_snapshot)
+            self.assertNotIn(
+                id(publisher), controller._safety_publish_lanes
+            )
+        finally:
+            release.set()
+
+    def test_transport_shutdown_rejects_late_start_and_fleet_changes(self):
+        controller = self._transport_search_controller(1)
+        original_task_id = controller.current_task_id
+        original_roster = list(controller.robot_namespaces)
+
+        controller._shutdown()
+        controller._start_callback(String(data=json.dumps({
+            'task_id': 'after-shutdown',
+            'target_x': 1.0,
+            'target_y': 1.0,
+        })))
+        controller._update_fleet(['tb3_9'])
+
+        self.assertTrue(controller._shutdown_started)
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.is_paused)
+        self.assertEqual(original_task_id, controller.current_task_id)
+        self.assertEqual(original_roster, controller.robot_namespaces)
 
     def test_transport_active_roster_change_cancels_epoch_and_stops_old_fleet(self):
         controller = ROS["transport"].CollaborativeTransport.__new__(

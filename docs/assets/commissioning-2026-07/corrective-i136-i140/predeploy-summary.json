@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "observedDateUtc": "2026-07-22",
+  "baseDeployment": "1448a31bbbbfd77588bada109947098cc95d9dda",
+  "candidateImage": {
+    "id": "sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5",
+    "builtFromExactTree": true,
+    "sourceMounts": false,
+    "catkinBuildPassed": true
+  },
+  "regression": {
+    "rosGlobal": { "passed": 576, "failed": 0 },
+    "formation": { "passed": 96, "failed": 0 },
+    "lifecycle": { "passed": 205, "failed": 0 },
+    "followLeader": { "passed": 47, "failed": 0 },
+    "acceptanceContracts": { "passed": 253, "failed": 0 },
+    "python38CompilePassed": true,
+    "diffCheckPassed": true
+  },
+  "independentReview": {
+    "p0": 0,
+    "p1": 0
+  },
+  "visibleFormations": [
+    {
+      "scenario": "formation_triangle_n3",
+      "robots": 3,
+      "activeWindowSeconds": 75.0346,
+      "maximumFinalTargetErrorMeters": 0.0921,
+      "reportedMaximumPositionErrorMeters": 0.0925,
+      "collisions": 0,
+      "algorithmRealTimeFactor": 2.9965,
+      "cameraFps": 58.493,
+      "postRenderFps": 62.494,
+      "probeRealTimeFactor": 2.996,
+      "renderer": "D3D12 (NVIDIA GeForce RTX 3080)",
+      "reportSha256": "d3588e03f9ce326b7846083aff925beb4ed5027b79d906e3851c2433cf9febd5"
+    },
+    {
+      "scenario": "formation_S_n10",
+      "robots": 10,
+      "activeWindowSeconds": 75.0411,
+      "maximumFinalTargetErrorMeters": 0.0974,
+      "reportedMaximumPositionErrorMeters": 0.0981,
+      "collisions": 0,
+      "algorithmRealTimeFactor": 2.9875,
+      "cameraFps": 57.507,
+      "postRenderFps": 62.514,
+      "probeRealTimeFactor": 2.984,
+      "renderer": "D3D12 (NVIDIA GeForce RTX 3080)",
+      "reportSha256": "2e93c6f4569fcc36d8491b30205448d3f8b6b7f1da05accd8d4ddd6cc7e9c4f1"
+    }
+  ],
+  "productionTransportN1": {
+    "deployment": "1448a31bbbbfd77588bada109947098cc95d9dda",
+    "correctedHarnessUsed": true,
+    "taskOutcome": "completed",
+    "objectDisplacementMeters": 0.5013,
+    "usefulPushers": "1/1",
+    "collisions": 0,
+    "algorithmRealTimeFactor": 2.9962,
+    "activeCameraFps": 58.711,
+    "activePostRenderFps": 62.552,
+    "activeProbeRealTimeFactor": 2.996,
+    "hlsDecodedFps": 30.164,
+    "reportPreservedBeforeRosWait": true,
+    "leaseRenewalObserved": false,
+    "cleanupComplete": true,
+    "reportSha256": "73fe58883ddd90beea37bcd1f9a5e795c97f9881a0bd5923a01b3ed8c7e13870",
+    "browserScreenshotSha256": "0784d2dbbccd2363deecd1fac246018aba96c75dd41ab1e6f1521d17fedbd851"
+  },
+  "scope": "Las formaciones prueban el candidato local exacto. N=1 prueba el arnés corregido contra la imagen productiva anterior; no convierte I-136–I-140 en evidencia postdeploy."
+}

@@ -100,12 +100,160 @@ class FakePublisher:
     def __init__(self):
         self.messages = []
         self.unregistered = False
+        self.connections = 1
 
     def publish(self, message):
         self.messages.append(message)
 
     def unregister(self):
         self.unregistered = True
+
+    def get_num_connections(self):
+        return self.connections
+
+
+class SafetyRequestPublisher(FakePublisher):
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+
+    def publish(self, message):
+        super().publish(message)
+        request = json.loads(message.data)
+        self.controller._safety_stop_ack_cb(String(data=json.dumps({
+            'request_id': request['request_id'],
+            'accepted': True,
+            'supervisor_latched': True,
+            'supervisor_will_remain_active': True,
+            'valid_request': True,
+            'zero_publications_confirmed': True,
+        })))
+
+
+class FakeSafetyLane:
+    def __init__(self, _label, _error_logger=None):
+        self.available = True
+        self.closed = False
+
+    def submit(self, callback):
+        if self.closed:
+            return False
+        callback()
+        return True
+
+    def close(self):
+        self.closed = True
+        self.available = False
+
+
+class FlakyPublisher(FakePublisher):
+    def __init__(self, failures=1):
+        super().__init__()
+        self.failures_remaining = failures
+        self.calls = 0
+
+    def publish(self, message):
+        self.calls += 1
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            raise RuntimeError('publisher disconnected')
+        super().publish(message)
+
+
+class BlockingPublisher(FakePublisher):
+    def __init__(self, release):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = release
+
+    def publish(self, message):
+        self.entered.set()
+        self.release.wait(1.0)
+        super().publish(message)
+
+
+class FirstPublishBlockingPublisher(FakePublisher):
+    def __init__(self, release):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = release
+        self.calls = 0
+        self.calls_lock = threading.Lock()
+
+    def publish(self, message):
+        with self.calls_lock:
+            call_index = self.calls
+            self.calls += 1
+        if call_index == 0:
+            self.entered.set()
+            self.release.wait(1.0)
+        super().publish(message)
+
+
+class LateCompensationFailingPublisher(FakePublisher):
+    def __init__(self, release):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = release
+        self.calls = 0
+        self.calls_lock = threading.Lock()
+
+    def publish(self, message):
+        with self.calls_lock:
+            call_index = self.calls
+            self.calls += 1
+        if call_index == 0:
+            self.entered.set()
+            self.release.wait(1.0)
+        elif call_index == 2:
+            raise RuntimeError('late compensation socket rejected zero')
+        super().publish(message)
+
+
+class LateCompensationBlockingPublisher(FakePublisher):
+    def __init__(self, release_motion, release_compensation):
+        super().__init__()
+        self.motion_entered = threading.Event()
+        self.compensation_entered = threading.Event()
+        self.release_motion = release_motion
+        self.release_compensation = release_compensation
+        self.calls = 0
+        self.calls_lock = threading.Lock()
+
+    def publish(self, message):
+        with self.calls_lock:
+            call_index = self.calls
+            self.calls += 1
+        if call_index == 0:
+            self.motion_entered.set()
+            self.release_motion.wait(1.0)
+        elif call_index == 2:
+            self.compensation_entered.set()
+            self.release_compensation.wait(1.0)
+        super().publish(message)
+
+
+class StatusReassertionBlockingPublisher(FakePublisher):
+    def __init__(self, release_regular, release_reassertion):
+        super().__init__()
+        self.regular_entered = threading.Event()
+        self.reassertion_entered = threading.Event()
+        self.release_regular = release_regular
+        self.release_reassertion = release_reassertion
+        self.calls = 0
+        self.calls_lock = threading.Lock()
+
+    def publish(self, message):
+        with self.calls_lock:
+            call_index = self.calls
+            self.calls += 1
+        if call_index == 0:
+            self.regular_entered.set()
+            self.release_regular.wait(1.0)
+        elif call_index == 2:
+            self.reassertion_entered.set()
+            self.release_reassertion.wait(1.0)
+        super().publish(message)
 
 
 class FakeResource:
@@ -228,7 +376,11 @@ def make_controller():
     controller.is_running = False
     controller.is_paused = False
     controller.emergency_stop_active = False
+    controller._emergency_stop_generation = 0
+    controller._latest_emergency_true_generation = 0
+    controller._emergency_true_pending = set()
     controller.current_task_id = None
+    controller._cancelled_task_ids = {}
     controller.formation_state = formation.FormationState.IDLE
 
     controller.robot_ids = ['tb3_0']
@@ -237,8 +389,9 @@ def make_controller():
     controller.robot_yaws = {'tb3_0': 0.0}
     controller.invalid_robot_poses = ()
     controller.odom_received_at = {'tb3_0': None}
+    controller.odom_confirmed_for_task = {'tb3_0': False}
     controller.odom_timeout_wall_s = 0.75
-    controller.odom_initialization_timeout_wall_s = 5.0
+    controller.odom_initialization_timeout_wall_s = 10.0
     controller.task_started_at = None
     controller.stale_odometry = []
     controller.waiting_for_odometry = []
@@ -251,6 +404,34 @@ def make_controller():
     controller.active_placement_plan = None
     controller.assignment_pending = False
     controller._assignment_generation = 0
+    controller.live_replan_limit = 2
+    controller._live_replan_attempts = 0
+    controller._stop_publication_attempt = 0
+    controller._last_stop_publication = None
+    controller._stop_publication_lock = threading.RLock()
+    controller._stop_result_lock = threading.RLock()
+    controller._emergency_stop_condition = threading.Condition(
+        controller._stop_result_lock
+    )
+    controller._command_publisher_sequence = 0
+    controller._command_publisher_generations = {}
+    controller._stop_publication_debts = {}
+    controller._safety_fallback_lanes = {}
+    controller._safety_fallback_lane_factory = FakeSafetyLane
+    controller._shutdown_publisher_snapshot = ()
+    controller._shutdown_started = False
+    controller._shutdown_publication = None
+    controller._shutdown_status_delivery = None
+    controller._shutdown_supervisor_delivery = None
+    controller._safety_stop_ack_lock = threading.Lock()
+    controller._safety_stop_ack_waiters = {}
+    controller._motion_publish_inflight = set()
+    controller._shutdown_motion_inflight = frozenset()
+    controller.assignment_pose_drift_tolerance = 0.02
+    controller.assignment_yaw_drift_tolerance = 0.05
+    controller._assignment_worker_stop = threading.Event()
+    controller._assignment_worker_wakeup = threading.Event()
+    controller._assignment_worker = None
     controller._slot_reached = {'tb3_0': False}
     controller._settled_duration = 0.0
     controller.position_tolerance = 0.09
@@ -271,6 +452,7 @@ def make_controller():
     ]
     controller.model_poses = {}
     controller.invalid_model_poses = ()
+    controller.invalid_avoidance_limits = ()
     controller.placement_error = None
 
     controller.formation_type = 'line'
@@ -302,13 +484,20 @@ def make_controller():
     controller.control_rate = 20.0
     controller.max_linear_vel = 0.22
     controller.max_angular_vel = 1.5
+    controller._motion_limits_valid = True
 
     controller.pid_linear = {'tb3_0': FakePid()}
     controller.pid_angular = {'tb3_0': FakePid()}
     controller.cmd_vel_pubs = {'tb3_0': FakePublisher()}
     controller.status_pub = FakePublisher()
+    controller.safety_stop_request_pub = SafetyRequestPublisher(controller)
+    controller._register_safety_fallback_lane(
+        'supervisor-request', controller.safety_stop_request_pub
+    )
     controller._odom_subs = {}
     controller.avoidance = {}
+    with controller.lock:
+        controller._refresh_shutdown_publisher_snapshot_locked()
     return controller
 
 
@@ -459,6 +648,409 @@ def apply_production_spawn_pattern(controller, robot_count, pattern):
 
 
 class FormationAssignmentTests(unittest.TestCase):
+    def test_last_first_odometry_does_not_run_the_planner_inline(self):
+        controller = make_controller()
+        controller.robot_poses['tb3_0'] = None
+        controller.odom_received_at['tb3_0'] = None
+        controller.assignment_pending = True
+        controller.task_started_at = time.monotonic() - 1.0
+        planner_entered = threading.Event()
+        release_planner = threading.Event()
+        callback_finished = threading.Event()
+
+        def blocking_planner(_snapshot):
+            planner_entered.set()
+            release_planner.wait(2.0)
+            return False
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+
+        with mock.patch.object(
+            controller,
+            '_compute_and_commit_assignment',
+            side_effect=blocking_planner,
+        ):
+            worker.start()
+            next_sample = None
+            try:
+                controller._odom_cb(Odometry(), 'tb3_0')
+                self.assertTrue(planner_entered.wait(1.0))
+
+                def publish_next_sample():
+                    controller._odom_cb(Odometry(), 'tb3_0')
+                    callback_finished.set()
+
+                next_sample = threading.Thread(target=publish_next_sample)
+                next_sample.start()
+                self.assertTrue(
+                    callback_finished.wait(0.25),
+                    'a route solve blocked the next odometry callback',
+                )
+                self.assertTrue(
+                    controller.odom_confirmed_for_task['tb3_0']
+                )
+            finally:
+                release_planner.set()
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                if next_sample is not None:
+                    next_sample.join(1.0)
+                worker.join(1.0)
+
+        self.assertIsNotNone(next_sample)
+        self.assertFalse(next_sample.is_alive())
+        self.assertFalse(worker.is_alive())
+
+    def test_assignment_worker_coalesces_wakeups_during_a_solve(self):
+        controller = make_controller()
+        controller.assignment_pending = True
+        first_planner_entered = threading.Event()
+        release_first_planner = threading.Event()
+        second_plan_finished = threading.Event()
+        calls = []
+
+        def prepare_snapshot():
+            return {'generation': len(calls) + 1}
+
+        def compute_snapshot(snapshot):
+            calls.append(snapshot['generation'])
+            if len(calls) == 1:
+                first_planner_entered.set()
+                release_first_planner.wait(2.0)
+            else:
+                second_plan_finished.set()
+            return True
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+
+        with mock.patch.object(
+            controller,
+            '_prepare_assignment_locked',
+            side_effect=prepare_snapshot,
+        ), mock.patch.object(
+            controller,
+            '_compute_and_commit_assignment',
+            side_effect=compute_snapshot,
+        ):
+            worker.start()
+            try:
+                controller._request_pending_assignment()
+                self.assertTrue(first_planner_entered.wait(1.0))
+                controller._request_pending_assignment()
+                controller._request_pending_assignment()
+                controller._request_pending_assignment()
+                release_first_planner.set()
+                self.assertTrue(second_plan_finished.wait(1.0))
+                time.sleep(0.05)
+            finally:
+                release_first_planner.set()
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([1, 2], calls)
+
+    def test_assignment_worker_survives_prepare_and_compute_exceptions(self):
+        controller = make_controller()
+        controller.assignment_pending = True
+        controller.is_running = True
+        prepare_failed = threading.Event()
+        compute_failed = threading.Event()
+        recovered = threading.Event()
+        prepare_calls = []
+        compute_calls = []
+
+        def prepare_snapshot():
+            prepare_calls.append(len(prepare_calls) + 1)
+            controller._assignment_generation += 1
+            generation = controller._assignment_generation
+            if len(prepare_calls) == 1:
+                prepare_failed.set()
+                raise RuntimeError('broken snapshot')
+            return {'generation': generation}
+
+        def compute_snapshot(_snapshot):
+            compute_calls.append(len(compute_calls) + 1)
+            if len(compute_calls) == 1:
+                compute_failed.set()
+                raise RuntimeError('broken solver')
+            controller.assignment_pending = False
+            recovered.set()
+            return True
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+
+        with mock.patch.object(
+            controller,
+            '_prepare_assignment_locked',
+            side_effect=prepare_snapshot,
+        ), mock.patch.object(
+            controller,
+            '_compute_and_commit_assignment',
+            side_effect=compute_snapshot,
+        ):
+            worker.start()
+            try:
+                controller._request_pending_assignment()
+                self.assertTrue(prepare_failed.wait(1.0))
+                self.assertFalse(controller.is_running)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                self.assertFalse(controller.assignment_pending)
+                self.assertTrue(worker.is_alive())
+                deadline = time.monotonic() + 1.0
+                while (
+                    not controller.status_pub.messages
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.005)
+                prepare_status = json.loads(
+                    controller.status_pub.messages[-1].data
+                )
+                self.assertEqual('failed', prepare_status['state'])
+                self.assertIn('snapshot preparation', prepare_status['error'])
+                prepare_status_count = len(controller.status_pub.messages)
+
+                with controller.command_lock:
+                    controller.assignment_pending = True
+                    controller.is_running = True
+                controller._request_pending_assignment()
+                self.assertTrue(compute_failed.wait(1.0))
+                deadline = time.monotonic() + 1.0
+                while controller.assignment_pending and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                while (
+                    len(controller.status_pub.messages) <= prepare_status_count
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.005)
+                self.assertFalse(controller.assignment_pending)
+                self.assertFalse(controller.is_running)
+                self.assertTrue(worker.is_alive())
+                compute_status = json.loads(
+                    controller.status_pub.messages[-1].data
+                )
+                self.assertEqual('failed', compute_status['state'])
+                self.assertIn('plan computation', compute_status['error'])
+
+                with controller.command_lock:
+                    controller.assignment_pending = True
+                    controller.is_running = True
+                controller._request_pending_assignment()
+                self.assertTrue(recovered.wait(1.0))
+            finally:
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([1, 2, 3], prepare_calls)
+        self.assertEqual([1, 2], compute_calls)
+
+    def test_assignment_worker_failure_stops_all_publishers_best_effort(self):
+        class RaisingPublisher:
+            def __init__(self):
+                self.calls = 0
+
+            def publish(self, _message):
+                self.calls += 1
+                raise RuntimeError('publisher disconnected')
+
+        controller = make_controller()
+        first = FakePublisher()
+        broken = RaisingPublisher()
+        last = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': broken,
+            'tb3_2': last,
+        }
+        controller.status_pub = RaisingPublisher()
+        controller.assignment_pending = True
+        controller.is_running = True
+        prepare_entered = threading.Event()
+
+        def broken_prepare():
+            controller._assignment_generation += 1
+            prepare_entered.set()
+            raise RuntimeError('planner input failed')
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+        with mock.patch.object(
+            controller,
+            '_prepare_assignment_locked',
+            side_effect=broken_prepare,
+        ):
+            worker.start()
+            try:
+                controller._request_pending_assignment()
+                self.assertTrue(prepare_entered.wait(1.0))
+                deadline = time.monotonic() + 1.0
+                while controller.assignment_pending and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertFalse(controller.assignment_pending)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                self.assertTrue(worker.is_alive())
+            finally:
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, broken.calls)
+        self.assertEqual(1, controller.status_pub.calls)
+        self.assertEqual(1, len(first.messages))
+        self.assertEqual(1, len(last.messages))
+        for command in (first.messages[-1], last.messages[-1]):
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+        self.assertIn(
+            'Zero-velocity publication was not accepted for: tb3_1',
+            controller.placement_error,
+        )
+
+    def test_stale_worker_exception_does_not_fail_a_new_generation(self):
+        controller = make_controller()
+        controller._assignment_generation = 8
+        controller.is_running = True
+        controller.formation_state = formation.FormationState.MOVING
+
+        self.assertFalse(controller._fail_assignment_worker(
+            RuntimeError('obsolete plan failed'),
+            'plan computation',
+            expected_generation=7,
+        ))
+
+        self.assertTrue(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.MOVING,
+            controller.formation_state,
+        )
+        self.assertIsNone(controller.placement_error)
+        self.assertEqual([], controller.cmd_vel_pubs['tb3_0'].messages)
+
+    def test_shutdown_invalidates_an_assignment_worker_result(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.assignment_pending = True
+        controller.is_running = True
+        planner_entered = threading.Event()
+        release_planner = threading.Event()
+
+        def blocking_routes(snapshot, _plan, targets):
+            planner_entered.set()
+            release_planner.wait(2.0)
+            start = snapshot['robot_positions'][0]
+            return [0], {snapshot['robot_ids'][0]: [start, targets[0]]}
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+
+        with mock.patch.object(
+            controller,
+            '_plan_routes_to_targets',
+            side_effect=blocking_routes,
+        ):
+            worker.start()
+            shutdown = None
+            try:
+                controller._request_pending_assignment()
+                self.assertTrue(planner_entered.wait(1.0))
+
+                shutdown = threading.Thread(target=controller._shutdown)
+                shutdown.start()
+                time.sleep(0.05)
+                release_planner.set()
+            finally:
+                release_planner.set()
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                if shutdown is not None:
+                    shutdown.join(1.0)
+                worker.join(1.0)
+
+        self.assertIsNotNone(shutdown)
+        self.assertFalse(shutdown.is_alive())
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(controller.is_running)
+        self.assertEqual({}, controller.assignments)
+        self.assertFalse(controller.assignment_pending)
+        command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertEqual(0.0, command.linear.x)
+        self.assertEqual(0.0, command.angular.z)
+
+    def test_shutdown_waits_past_the_old_timeout_for_the_worker(self):
+        controller = make_controller()
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.assignment_pending = True
+        controller.is_running = True
+        planner_entered = threading.Event()
+        release_planner = threading.Event()
+
+        def blocking_compute(_snapshot):
+            planner_entered.set()
+            release_planner.wait(3.0)
+            return False
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+
+        with mock.patch.object(
+            controller,
+            '_compute_and_commit_assignment',
+            side_effect=blocking_compute,
+        ):
+            worker.start()
+            shutdown = None
+            try:
+                controller._request_pending_assignment()
+                self.assertTrue(planner_entered.wait(1.0))
+                shutdown = threading.Thread(target=controller._shutdown)
+                shutdown.start()
+                shutdown.join(1.1)
+                self.assertTrue(
+                    shutdown.is_alive(),
+                    'shutdown returned while the planner was still alive',
+                )
+                self.assertTrue(worker.is_alive())
+                release_planner.set()
+                shutdown.join(1.0)
+            finally:
+                release_planner.set()
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                if shutdown is not None:
+                    shutdown.join(1.0)
+                worker.join(1.0)
+
+        self.assertIsNotNone(shutdown)
+        self.assertFalse(shutdown.is_alive())
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+
     def test_open_moving_paths_keep_a_live_safe_placement_plan(self):
         for centroid_path in (
             formation.CentroidPath.LINEAR,
@@ -577,6 +1169,12 @@ class FormationAssignmentTests(unittest.TestCase):
             )
             start_thread.start()
             self.assertTrue(solver_entered.wait(1.0))
+            planning_status = json.loads(
+                controller.status_pub.messages[-1].data
+            )
+            self.assertEqual('task-current', planning_status['task_id'])
+            self.assertEqual('forming', planning_status['state'])
+            self.assertEqual({}, planning_status['robot_assignments'])
 
             def emergency_stop():
                 controller._emergency_stop_cb(Bool(data=True))
@@ -790,6 +1388,46 @@ class FormationAssignmentTests(unittest.TestCase):
             (second_command.linear.x, second_command.angular.z),
         )
 
+    def test_route_batch_releases_inside_safe_hysteresis_band(self):
+        controller, targets = make_closed_loop_controller(2, 'line', 1.0)
+        first, second = controller.robot_ids
+        controller.movement_mode = formation.MovementMode.STATIC
+        controller.route_waypoints = {
+            first: [targets[controller.assignments[first]]],
+            second: [targets[controller.assignments[second]]],
+        }
+        controller.route_waypoint_indices = {first: 0, second: 0}
+        controller.route_batches = [[first], [second]]
+        controller.route_batch_index = 0
+        controller.active_placement_plan = {
+            'kind': 'static',
+            'arena_size': controller.arena_size,
+            'arena_margin': controller.arena_margin,
+            'obstacle_clearance': controller.formation_obstacle_clearance,
+            'exclusion_zones': controller.spawn_exclusion_zones,
+            'arena_profile': controller.arena_profile,
+        }
+
+        first_target = targets[controller.assignments[first]]
+        clearance_error = (
+            controller.position_tolerance
+            + controller.position_release_tolerance
+        ) / 2.0
+        controller.robot_poses[first].position.x = (
+            first_target[0] + clearance_error
+        )
+        controller.robot_poses[first].position.y = first_target[1]
+
+        controller._control_step(None)
+
+        self.assertFalse(controller._slot_reached[first])
+        self.assertEqual(1, controller.route_batch_index)
+        second_command = controller.cmd_vel_pubs[second].messages[-1]
+        self.assertNotEqual(
+            (0.0, 0.0),
+            (second_command.linear.x, second_command.angular.z),
+        )
+
     def test_impossible_spacing_reports_a_correlated_failure(self):
         controller = make_controller()
         controller.robot_ids = [f'tb3_{index}' for index in range(10)]
@@ -880,6 +1518,239 @@ class FormationAssignmentTests(unittest.TestCase):
         self.assertIn('live arena changed', controller.placement_error)
         self.assertEqual([], controller.cmd_vel_pubs['tb3_0'].messages)
 
+    def test_live_pose_drift_queues_one_bounded_replan(self):
+        controller = make_controller()
+        controller.is_running = True
+        controller.movement_mode = formation.MovementMode.STATIC
+        controller.robot_poses['tb3_0'] = Pose(x=0.4355, y=0.0)
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.spawn_exclusion_zones = [{
+            'name': 'flat_wall',
+            'worlds': ['swarm_arena'],
+            'shape': 'box',
+            'x': -0.5,
+            'y': 0.0,
+            'width': 1.0,
+            'height': 4.0,
+        }]
+        snapshot = controller._prepare_assignment_locked()
+        controller.robot_poses['tb3_0'] = Pose(x=0.2965, y=0.0)
+        routes = {'tb3_0': [(0.4355, 0.0), (0.4355, 0.0)]}
+
+        with mock.patch.object(
+            controller,
+            '_plan_routed_static_assignment',
+            return_value=(
+                (0.4355, 0.0), [(0.4355, 0.0)], [0], routes
+            ),
+        ), mock.patch.object(
+            controller,
+            '_placement_plan_is_live_safe',
+            return_value=False,
+        ):
+            committed = controller._compute_and_commit_assignment(snapshot)
+
+        self.assertFalse(committed)
+        self.assertTrue(controller.is_running)
+        self.assertIsNone(controller.placement_error)
+        self.assertEqual(formation.FormationState.FORMING,
+                         controller.formation_state)
+        self.assertEqual(1, controller._live_replan_attempts)
+        self.assertEqual(
+            {
+                'gate': 'assignment_pose_snapshot',
+                'kind': 'drift',
+                'robot': 'tb3_0',
+                'position_drift': 0.139,
+                'yaw_drift': 0.0,
+                'stage': 'assignment_commit',
+            },
+            controller._last_live_safety_failure,
+        )
+        self.assertTrue(controller.assignment_pending)
+        self.assertEqual({}, controller.assignments)
+        self.assertTrue(controller._assignment_worker_wakeup.is_set())
+        command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertEqual(0.0, command.linear.x)
+        self.assertEqual(0.0, command.angular.z)
+
+    def test_live_replan_is_not_queued_after_a_failed_stop_publication(self):
+        controller = make_controller()
+        controller.current_task_id = 'replan-stop-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        first = FakePublisher()
+        broken = FlakyPublisher(failures=10)
+        controller.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': broken,
+        }
+
+        with mock.patch.object(
+            controller, '_live_poses_can_be_replanned', return_value=True
+        ):
+            scheduled = controller._schedule_live_replan_locked(
+                {}, {}, {}, {'gate': 'route', 'robot': 'tb3_0'}
+            )
+
+        self.assertFalse(scheduled)
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertFalse(controller._assignment_worker_wakeup.is_set())
+        self.assertEqual(0, controller._live_replan_attempts)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertEqual(1, len(first.messages))
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('replan-stop-task', status['task_id'])
+        self.assertEqual('failed', status['state'])
+        self.assertEqual(
+            {
+                'task_id': 'replan-stop-task',
+                'attempt': 1,
+                'reason': 'live_replan',
+                'requested_count': 2,
+                'accepted_count': 1,
+                'failed_robots': ['tb3_1'],
+                'unconfirmed_publishers': [{
+                    'robot_id': 'tb3_1',
+                    'publisher_generation': 3,
+                    'task_id': 'replan-stop-task',
+                    'reason': 'live_replan',
+                    'first_attempt': 1,
+                    'last_attempt': 1,
+                }],
+                'publication_confirmed': False,
+            },
+            status['stop_publication'],
+        )
+
+    def test_assignment_snapshot_correlates_position_and_yaw(self):
+        controller = make_controller()
+        snapshot = controller._prepare_assignment_locked()
+
+        position_drift = controller._assignment_pose_drift(
+            snapshot,
+            {'tb3_0': (0.139, 0.0)},
+            {'tb3_0': 0.0},
+        )
+        self.assertEqual('tb3_0', position_drift['robot'])
+        self.assertEqual(0.139, position_drift['position_drift'])
+
+        yaw_drift = controller._assignment_pose_drift(
+            snapshot,
+            {'tb3_0': (0.0, 0.0)},
+            {'tb3_0': 0.051},
+        )
+        self.assertEqual(0.051, yaw_drift['yaw_drift'])
+
+        self.assertIsNone(controller._assignment_pose_drift(
+            snapshot,
+            {'tb3_0': (0.01, 0.0)},
+            {'tb3_0': 0.04},
+        ))
+        self.assertEqual('invalid', controller._assignment_pose_drift(
+            snapshot,
+            {'tb3_0': (float('nan'), 0.0)},
+            {'tb3_0': 0.0},
+        )['kind'])
+
+    def test_persistent_pose_churn_exhausts_replan_budget(self):
+        controller = make_controller()
+        controller.is_running = True
+        controller.movement_mode = formation.MovementMode.STATIC
+        controller.robot_poses['tb3_0'] = Pose(x=0.4355, y=0.0)
+        controller.formation_offsets = [(0.0, 0.0)]
+        controller.spawn_exclusion_zones = [{
+            'name': 'flat_wall',
+            'worlds': ['swarm_arena'],
+            'shape': 'box',
+            'x': -0.5,
+            'y': 0.0,
+            'width': 1.0,
+            'height': 4.0,
+        }]
+
+        for attempt in range(3):
+            old_x = controller.robot_poses['tb3_0'].position.x
+            snapshot = controller._prepare_assignment_locked()
+            new_x = 0.2965 if old_x > 0.40 else 0.4355
+            controller.robot_poses['tb3_0'] = Pose(x=new_x, y=0.0)
+            routes = {'tb3_0': [(old_x, 0.0), (0.60, 0.0)]}
+            with mock.patch.object(
+                controller,
+                '_plan_routed_static_assignment',
+                return_value=((0.60, 0.0), [(0.60, 0.0)], [0], routes),
+            ):
+                committed = controller._compute_and_commit_assignment(
+                    snapshot
+                )
+            self.assertFalse(committed)
+            if attempt < controller.live_replan_limit:
+                self.assertTrue(controller.assignment_pending)
+                self.assertIsNone(controller.placement_error)
+
+        self.assertEqual(
+            controller.live_replan_limit,
+            controller._live_replan_attempts,
+        )
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual(formation.FormationState.FAILED,
+                         controller.formation_state)
+        self.assertIn('live arena changed', controller.placement_error)
+
+        controller._control_step(None)
+
+        self.assertFalse(controller.is_running)
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('failed', status['state'])
+        self.assertIn('live arena changed', status['error'])
+
+    def test_live_replan_rejects_contact_corruption_and_moved_geometry(self):
+        controller = make_controller()
+        controller.is_running = True
+        wall = {
+            'name': 'flat_wall',
+            'model': 'wall',
+            'worlds': ['swarm_arena'],
+            'shape': 'box',
+            'x': -0.5,
+            'y': 0.0,
+            'width': 1.0,
+            'height': 4.0,
+        }
+        plan = {
+            'arena_size': 10.0,
+            'arena_margin': 0.35,
+            'arena_profile': 'swarm_arena',
+            'exclusion_zones': (wall,),
+            'model_poses': {'wall': (-0.5, 0.0, 0.0)},
+        }
+        good_models = {'wall': (-0.5, 0.0, 0.0)}
+
+        unsafe_starts = (
+            {'tb3_0': (0.10, 0.0)},
+            {'tb3_0': (float('nan'), 0.0)},
+        )
+        for positions in unsafe_starts:
+            with self.subTest(positions=positions):
+                self.assertFalse(controller._live_poses_can_be_replanned(
+                    plan, positions, good_models
+                ))
+
+        self.assertFalse(controller._live_poses_can_be_replanned(
+            plan,
+            {'tb3_0': (0.2965, 0.0)},
+            {'wall': (-0.49, 0.0, 0.0)},
+        ))
+
+        controller._live_replan_attempts = controller.live_replan_limit
+        self.assertFalse(controller._live_poses_can_be_replanned(
+            plan, {'tb3_0': (0.2965, 0.0)}, good_models
+        ))
+
 
 class FormationPlacementTests(unittest.TestCase):
     SHAPES = (
@@ -934,6 +1805,32 @@ class FormationPlacementTests(unittest.TestCase):
             SPAWN_SETTINGS['spawn_obstacle_clearance'],
             SPAWN_SETTINGS['spawn_exclusion_zones'],
             'swarm_arena',
+        ))
+
+    def test_2965_mm_buffer_jitter_only_allows_clearance_gain(self):
+        wall = [{
+            'name': 'flat_wall',
+            'worlds': ['swarm_arena'],
+            'shape': 'box',
+            'x': -0.5,
+            'y': 0.0,
+            'width': 1.0,
+            'height': 4.0,
+        }]
+        start = (0.2965, 0.0)
+
+        self.assertTrue(straight_route_is_safe(
+            start, (0.60, 0.0), 0.30, wall, 'swarm_arena'
+        ))
+        self.assertFalse(straight_route_is_safe(
+            start, (0.2965, 1.0), 0.30, wall, 'swarm_arena'
+        ))
+        self.assertFalse(straight_route_is_safe(
+            start, (-0.20, 0.0), 0.30, wall, 'swarm_arena'
+        ))
+        self.assertFalse(straight_route_is_safe(
+            (float('nan'), 0.0), (0.60, 0.0),
+            0.30, wall, 'swarm_arena',
         ))
 
     def test_live_ten_robot_s_plan_is_safe_and_bounded(self):
@@ -2297,6 +3194,7 @@ class FormationConvergenceTests(unittest.TestCase):
         controller = self._prepared_positive_entry_controller()
         controller.task_started_at = 10.0
         controller.odom_received_at = {'tb3_0': 10.0}
+        controller.odom_confirmed_for_task = {'tb3_0': True}
         clock = [10.0]
 
         def expire_during_live_geometry(*_args, **_kwargs):
@@ -2327,6 +3225,155 @@ class FormationConvergenceTests(unittest.TestCase):
 
 
 class FormationLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def wait_until(predicate, timeout=0.5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.005)
+        return predicate()
+
+    def test_obstacle_steering_uses_the_formation_velocity_envelope(self):
+        class DenseSteeringAvoidance:
+            def __init__(self, _robot_id):
+                self.max_linear_velocity = 0.22
+                self.max_angular_velocity = 2.84
+                self.max_linear_acceleration = 0.47
+                self.max_angular_acceleration = 2.7
+                self.smoothing_alpha = 0.37
+
+            def apply_avoidance(self, _command):
+                safe = Twist()
+                safe.linear.x = max(
+                    -self.max_linear_velocity,
+                    min(self.max_linear_velocity, 0.2),
+                )
+                # Dense neighbouring robots request a stronger turn than the
+                # formation controller permits.
+                safe.angular.z = max(
+                    -self.max_angular_velocity,
+                    min(self.max_angular_velocity, 2.4),
+                )
+                return safe
+
+        controller = make_controller()
+        with mock.patch.object(
+            formation,
+            'ObstacleAvoidance',
+            DenseSteeringAvoidance,
+        ), mock.patch.object(
+            formation.rospy,
+            'Publisher',
+            side_effect=lambda *_args, **_kwargs: FakePublisher(),
+            create=True,
+        ), mock.patch.object(
+            formation.rospy,
+            'Subscriber',
+            side_effect=lambda *_args, **_kwargs: FakeResource(),
+            create=True,
+        ):
+            controller._add_robot('tb3_1')
+
+        avoidance = controller.avoidance['tb3_1']
+        self.assertNotIn('tb3_1', controller.invalid_avoidance_limits)
+        self.assertEqual(0.22, avoidance.max_linear_velocity)
+        self.assertEqual(1.5, avoidance.max_angular_velocity)
+        self.assertEqual(0.47, avoidance.max_linear_acceleration)
+        self.assertEqual(2.7, avoidance.max_angular_acceleration)
+        self.assertEqual(0.37, avoidance.smoothing_alpha)
+        safe = avoidance.apply_avoidance(Twist())
+        self.assertLessEqual(abs(safe.linear.x), 0.22)
+        self.assertLessEqual(abs(safe.angular.z), 1.5)
+
+    def test_invalid_avoidance_or_owner_limits_lock_both_axes(self):
+        class ConfigurableAvoidance:
+            max_linear_velocity = 0.22
+            max_angular_velocity = 2.84
+
+        cases = (
+            ('nan', 'max_angular_velocity', float('nan')),
+            ('infinite', 'max_linear_velocity', float('inf')),
+            ('negative', 'max_angular_velocity', -0.1),
+        )
+        for label, field, value in cases:
+            with self.subTest(case=label):
+                controller = make_controller()
+                avoidance = ConfigurableAvoidance()
+                setattr(avoidance, field, value)
+
+                self.assertFalse(
+                    controller._align_avoidance_motion_limits(avoidance)
+                )
+                self.assertEqual(0.0, avoidance.max_linear_velocity)
+                self.assertEqual(0.0, avoidance.max_angular_velocity)
+
+        controller = make_controller()
+        controller._motion_limits_valid = False
+        avoidance = ConfigurableAvoidance()
+        self.assertFalse(
+            controller._align_avoidance_motion_limits(avoidance)
+        )
+        self.assertEqual(0.0, avoidance.max_linear_velocity)
+        self.assertEqual(0.0, avoidance.max_angular_velocity)
+        self.assertIsNone(controller._validated_motion_command(Twist()))
+
+        controller = make_controller()
+        controller.is_running = True
+        now = time.monotonic()
+        controller.task_started_at = now - 0.1
+        controller.odom_received_at = {'tb3_0': now}
+        controller.odom_confirmed_for_task = {'tb3_0': True}
+        controller.invalid_avoidance_limits = ('tb3_0',)
+
+        controller._control_step(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn(
+            'Obstacle-avoidance velocity limits were invalid',
+            controller.placement_error,
+        )
+
+    def test_start_rejects_a_missing_or_invalid_task_id(self):
+        controller = make_controller()
+
+        controller._start_cb(String(data=json.dumps({
+            'formation_type': 'triangle',
+        })))
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 42,
+        })))
+
+        self.assertFalse(controller.is_running)
+        self.assertIsNone(controller.current_task_id)
+        self.assertEqual(
+            formation.FormationState.IDLE,
+            controller.formation_state,
+        )
+
+    def test_stop_arriving_before_start_tombstones_the_task(self):
+        controller = make_controller()
+        controller.current_task_id = 'older-task'
+        stop = String(data=json.dumps({'task_id': 'cancelled-task'}))
+
+        controller._stop_cb(stop)
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 'cancelled-task',
+            'formation_type': 'line',
+        })))
+
+        self.assertIn('cancelled-task', controller._cancelled_task_ids)
+        self.assertFalse(controller.is_running)
+        self.assertEqual('older-task', controller.current_task_id)
+        self.assertEqual(
+            formation.FormationState.IDLE,
+            controller.formation_state,
+        )
+
     def test_orderly_shutdown_zeroes_every_formation_command(self):
         controller = make_controller()
         controller.is_running = True
@@ -2341,12 +3388,353 @@ class FormationLifecycleTests(unittest.TestCase):
             command = publisher.messages[-1]
             self.assertEqual(0.0, command.linear.x)
             self.assertEqual(0.0, command.angular.z)
+        self.assertTrue(controller.safety_stop_request_pub.messages)
+        request = json.loads(
+            controller.safety_stop_request_pub.messages[-1].data
+        )
+        self.assertEqual('formation', request['source'])
+        self.assertEqual('shutdown', request['reason'])
+        self.assertIsInstance(request['request_id'], str)
+        self.assertTrue(request['request_id'])
+        self.assertTrue(
+            controller._shutdown_supervisor_delivery[
+                'acknowledgement_received'
+            ]
+        )
+        self.assertTrue(
+            controller._shutdown_supervisor_delivery[
+                'publication_confirmed'
+            ]
+        )
+
+    def test_supervisor_request_without_a_subscriber_is_not_confirmed(self):
+        controller = make_controller()
+        controller.safety_stop_request_pub = FakePublisher()
+        controller.safety_stop_request_pub.connections = 0
+
+        delivery = controller._request_supervised_shutdown_stop(
+            time.monotonic() + 0.03
+        )
+
+        self.assertTrue(delivery['attempted'])
+        self.assertFalse(delivery['subscriber_connected'])
+        self.assertFalse(delivery['acknowledgement_received'])
+        self.assertFalse(delivery['publication_confirmed'])
+        self.assertIn('no ROS subscriber', delivery['error'])
+
+    def test_supervisor_ack_for_another_request_is_ignored(self):
+        controller = make_controller()
+        publisher = FakePublisher()
+
+        def publish_with_wrong_ack(_publisher, message):
+            FakePublisher.publish(publisher, message)
+            controller._safety_stop_ack_cb(String(data=json.dumps({
+                'request_id': 'another-request',
+                'accepted': True,
+                'supervisor_latched': True,
+            })))
+
+        publisher.publish = types.MethodType(
+            publish_with_wrong_ack, publisher
+        )
+        controller.safety_stop_request_pub = publisher
+
+        delivery = controller._request_supervised_shutdown_stop(
+            time.monotonic() + 0.03
+        )
+
+        self.assertTrue(delivery['publication_returned'])
+        self.assertFalse(delivery['acknowledgement_received'])
+        self.assertFalse(delivery['publication_confirmed'])
+        self.assertIn('acknowledgement', delivery['error'])
+
+    def test_blocked_supervisor_request_is_bounded_and_reported(self):
+        controller = make_controller()
+        controller.current_task_id = 'blocked-supervisor-request'
+        controller.is_running = True
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release = threading.Event()
+        request_publisher = BlockingPublisher(release)
+        controller.safety_stop_request_pub = request_publisher
+
+        started_at = time.monotonic()
+        try:
+            controller._shutdown()
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(request_publisher.entered.is_set())
+            delivery = controller._shutdown_supervisor_delivery
+            self.assertTrue(delivery['attempted'])
+            self.assertFalse(delivery['publication_confirmed'])
+            self.assertIn('deadline', delivery['error'])
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual('failed', status['state'])
+            self.assertFalse(
+                status['supervisor_stop_request'][
+                    'publication_confirmed'
+                ]
+            )
+            self.assertIn('safety-stop request', status['error'])
+            command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+        finally:
+            release.set()
+
+    def test_supervisor_request_uses_prestarted_lane_if_threads_fail(self):
+        controller = make_controller()
+        publisher = controller.safety_stop_request_pub
+        fallback_lane = formation.SafetyPublishLane(
+            'test-supervisor-request'
+        )
+        self.assertTrue(fallback_lane.available)
+        controller._safety_fallback_lanes[id(publisher)] = fallback_lane
+        original_start = threading.Thread.start
+        failed_starts = []
+
+        def fail_request_workers(worker):
+            if worker.name.startswith(
+                'formation-supervised-stop-request-'
+            ):
+                failed_starts.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        try:
+            with mock.patch.object(
+                formation.threading.Thread,
+                'start',
+                new=fail_request_workers,
+            ):
+                delivery = controller._request_supervised_shutdown_stop(
+                    time.monotonic() + 0.2
+                )
+            self.assertEqual(2, len(failed_starts))
+            self.assertTrue(delivery['publication_returned'])
+            self.assertTrue(delivery['acknowledgement_received'])
+            self.assertTrue(delivery['publication_confirmed'])
+        finally:
+            fallback_lane.close()
+
+    def test_stop_failure_is_correlated_and_a_retry_remains_idempotent(self):
+        controller = make_controller()
+        controller.current_task_id = 'correlated-stop-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        first = FakePublisher()
+        flaky = FlakyPublisher(failures=1)
+        controller.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': flaky,
+        }
+        command = String(data=json.dumps({
+            'task_id': 'correlated-stop-task'
+        }))
+
+        controller._stop_cb(command)
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.is_paused)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        failed_status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('correlated-stop-task', failed_status['task_id'])
+        self.assertEqual('failed', failed_status['state'])
+        self.assertIn(
+            'Zero-velocity publication was not accepted',
+            failed_status['error'],
+        )
+        self.assertEqual(
+            {
+                'task_id': 'correlated-stop-task',
+                'attempt': 1,
+                'reason': 'task_stop',
+                'requested_count': 2,
+                'accepted_count': 1,
+                'failed_robots': ['tb3_1'],
+                'unconfirmed_publishers': [{
+                    'robot_id': 'tb3_1',
+                    'publisher_generation': 3,
+                    'task_id': 'correlated-stop-task',
+                    'reason': 'task_stop',
+                    'first_attempt': 1,
+                    'last_attempt': 1,
+                }],
+                'publication_confirmed': False,
+            },
+            failed_status['stop_publication'],
+        )
+
+        controller._stop_cb(command)
+
+        self.assertEqual(
+            formation.FormationState.STOPPED,
+            controller.formation_state,
+        )
+        recovered_status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('stopped', recovered_status['state'])
+        self.assertNotIn('error', recovered_status)
+        self.assertEqual(2, recovered_status['stop_publication']['attempt'])
+        self.assertTrue(
+            recovered_status['stop_publication']['publication_confirmed']
+        )
+        self.assertEqual([], recovered_status['stop_publication']['failed_robots'])
+        self.assertEqual(2, len(first.messages))
+        self.assertEqual(2, flaky.calls)
+        self.assertEqual(1, len(flaky.messages))
+
+    def test_pause_and_emergency_stop_fail_without_claiming_stopped(self):
+        cases = (
+            (
+                'pause',
+                'task_pause',
+                lambda controller: controller._pause_cb(String(
+                    data=json.dumps({'task_id': controller.current_task_id})
+                )),
+            ),
+            (
+                'emergency',
+                'emergency_stop',
+                lambda controller: controller._emergency_stop_cb(
+                    Bool(data=True)
+                ),
+            ),
+        )
+        for label, reason, invoke in cases:
+            with self.subTest(command=label):
+                controller = make_controller()
+                controller.current_task_id = 'lifecycle-stop-task'
+                controller.is_running = True
+                controller.robot_ids = ['tb3_0', 'tb3_1']
+                controller.cmd_vel_pubs = {
+                    'tb3_0': FakePublisher(),
+                    'tb3_1': FlakyPublisher(failures=10),
+                }
+
+                invoke(controller)
+
+                self.assertFalse(controller.is_running)
+                self.assertFalse(controller.is_paused)
+                self.assertEqual(
+                    formation.FormationState.FAILED,
+                    controller.formation_state,
+                )
+                status = json.loads(controller.status_pub.messages[-1].data)
+                self.assertEqual('failed', status['state'])
+                self.assertNotEqual('stopped', status['state'])
+                self.assertEqual(reason, status['stop_publication']['reason'])
+                self.assertFalse(
+                    status['stop_publication']['publication_confirmed']
+                )
+                self.assertEqual(
+                    ['tb3_1'], status['stop_publication']['failed_robots']
+                )
+
+    def test_start_does_not_erase_an_unconfirmed_previous_stop(self):
+        controller = make_controller()
+        controller.current_task_id = 'old-task'
+        controller._last_stop_publication = {
+            'task_id': 'old-task',
+            'attempt': 3,
+            'reason': 'task_stop',
+            'requested_count': 1,
+            'accepted_count': 0,
+            'failed_robots': ['tb3_0'],
+            'publication_confirmed': False,
+        }
+
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 'new-task',
+            'formation_type': 'line',
+        })))
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual('old-task', controller.current_task_id)
+        self.assertEqual(
+            'old-task', controller._last_stop_publication['task_id']
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('old-task', status['task_id'])
+        self.assertFalse(
+            status['stop_publication']['publication_confirmed']
+        )
+
+    def test_shutdown_is_bounded_and_does_not_claim_worker_exit(self):
+        controller = make_controller()
+        controller.current_task_id = 'bounded-shutdown-task'
+        controller.is_running = True
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.02
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def blocked_worker():
+            worker_started.set()
+            release_worker.wait(1.0)
+
+        worker = threading.Thread(target=blocked_worker)
+        controller._assignment_worker = worker
+        worker.start()
+        self.assertTrue(worker_started.wait(0.5))
+        started_at = time.monotonic()
+        try:
+            controller._shutdown()
+            elapsed = time.monotonic() - started_at
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(worker.is_alive())
+            self.assertTrue(controller._assignment_worker_stop.is_set())
+            self.assertEqual(
+                formation.FormationState.FAILED,
+                controller.formation_state,
+            )
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual('failed', status['state'])
+            self.assertIn(
+                'bounded shutdown deadline', status['error']
+            )
+            self.assertTrue(
+                status['stop_publication']['publication_confirmed']
+            )
+        finally:
+            release_worker.set()
+            worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+
+    def test_shutdown_publishes_command_socket_failure_without_hanging(self):
+        controller = make_controller()
+        controller.current_task_id = 'shutdown-stop-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.cmd_vel_pubs = {
+            'tb3_0': FakePublisher(),
+            'tb3_1': FlakyPublisher(failures=10),
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        controller._shutdown()
+
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('shutdown-stop-task', status['task_id'])
+        self.assertEqual('failed', status['state'])
+        self.assertEqual('shutdown', status['stop_publication']['reason'])
+        self.assertFalse(
+            status['stop_publication']['publication_confirmed']
+        )
 
     def test_stale_odometry_is_reported_after_the_start_grace_period(self):
         controller = make_controller()
         controller.task_started_at = 10.0
         controller.odom_timeout_wall_s = 0.5
         controller.odom_received_at = {'tb3_0': 10.0}
+        controller.odom_confirmed_for_task = {'tb3_0': True}
 
         self.assertEqual(
             ['tb3_0'], controller._stale_odometry(['tb3_0'], now=10.6)
@@ -2358,24 +3746,39 @@ class FormationLifecycleTests(unittest.TestCase):
     def test_never_received_odometry_gets_a_bounded_startup_grace(self):
         controller = make_controller()
         controller.task_started_at = 10.0
-        controller.odom_initialization_timeout_wall_s = 5.0
+        controller.odom_initialization_timeout_wall_s = 10.0
         controller.odom_received_at = {'tb3_0': None}
+        controller.odom_confirmed_for_task = {'tb3_0': False}
 
         self.assertEqual(
             (['tb3_0'], []),
-            controller._odometry_readiness(['tb3_0'], now=14.9),
+            controller._odometry_readiness(['tb3_0'], now=20.0),
         )
         self.assertEqual(
             ([], ['tb3_0']),
-            controller._odometry_readiness(['tb3_0'], now=15.1),
+            controller._odometry_readiness(['tb3_0'], now=20.0001),
         )
 
-    def test_previously_live_odometry_keeps_the_strict_stale_timeout(self):
+    def test_prestart_sample_waits_for_one_sample_from_the_new_task(self):
         controller = make_controller()
         controller.task_started_at = 10.0
         controller.odom_timeout_wall_s = 0.75
-        controller.odom_initialization_timeout_wall_s = 5.0
+        controller.odom_initialization_timeout_wall_s = 10.0
+        controller.odom_received_at = {'tb3_0': 9.9}
+        controller.odom_confirmed_for_task = {'tb3_0': False}
+
+        self.assertEqual(
+            (['tb3_0'], []),
+            controller._odometry_readiness(['tb3_0'], now=19.9),
+        )
+
+    def test_first_post_start_sample_enables_the_strict_stale_timeout(self):
+        controller = make_controller()
+        controller.task_started_at = 10.0
+        controller.odom_timeout_wall_s = 0.75
+        controller.odom_initialization_timeout_wall_s = 10.0
         controller.odom_received_at = {'tb3_0': 10.1}
+        controller.odom_confirmed_for_task = {'tb3_0': True}
 
         self.assertEqual(
             ([], ['tb3_0']),
@@ -2391,6 +3794,9 @@ class FormationLifecycleTests(unittest.TestCase):
         controller.robot_poses = {'tb3_0': Pose(), 'tb3_1': None}
         controller.robot_yaws = {'tb3_0': 0.0, 'tb3_1': 0.0}
         controller.odom_received_at = {'tb3_0': 11.5, 'tb3_1': None}
+        controller.odom_confirmed_for_task = {
+            'tb3_0': True, 'tb3_1': False,
+        }
         controller.cmd_vel_pubs['tb3_1'] = FakePublisher()
 
         with mock.patch.object(formation.time, 'monotonic', return_value=12.0):
@@ -2415,8 +3821,9 @@ class FormationLifecycleTests(unittest.TestCase):
         controller.is_running = True
         controller.task_started_at = 10.0
         controller.odom_received_at = {'tb3_0': None}
+        controller.odom_confirmed_for_task = {'tb3_0': False}
 
-        with mock.patch.object(formation.time, 'monotonic', return_value=15.1):
+        with mock.patch.object(formation.time, 'monotonic', return_value=20.0001):
             controller._control_step(None)
 
         self.assertFalse(controller.is_running)
@@ -2426,6 +3833,40 @@ class FormationLifecycleTests(unittest.TestCase):
         status = json.loads(controller.status_pub.messages[-1].data)
         self.assertEqual(['tb3_0'], status['stale_odometry'])
         self.assertIn('tb3_0', status['error'])
+
+    def test_control_failure_reports_an_unaccepted_stop_publication(self):
+        controller = make_controller()
+        controller.current_task_id = 'control-stop-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_poses['tb3_1'] = Pose()
+        controller.robot_yaws['tb3_1'] = 0.0
+        controller.cmd_vel_pubs = {
+            'tb3_0': FakePublisher(),
+            'tb3_1': FlakyPublisher(failures=10),
+        }
+        controller.placement_error = 'Synthetic control failure.'
+
+        controller._control_step(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('control-stop-task', status['task_id'])
+        self.assertEqual('failed', status['state'])
+        self.assertEqual(
+            'control_failure', status['stop_publication']['reason']
+        )
+        self.assertFalse(
+            status['stop_publication']['publication_confirmed']
+        )
+        self.assertIn(
+            'Zero-velocity publication was not accepted for: tb3_1',
+            status['error'],
+        )
 
     def test_lifecycle_commands_require_the_exact_nonempty_task_id(self):
         controller = make_controller()
@@ -2471,6 +3912,346 @@ class FormationLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(len(publisher.messages), 1)
 
+    def test_emergency_stop_reaches_healthy_robot_past_blocked_socket(self):
+        controller = make_controller()
+        controller.current_task_id = 'emergency-fanout-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.EMERGENCY_STOP_TIMEOUT = 0.05
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        started_at = time.monotonic()
+        try:
+            controller._emergency_stop_cb(Bool(data=True))
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(blocked.entered.is_set())
+            self.assertTrue(healthy.messages)
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            self.assertEqual(
+                formation.FormationState.FAILED,
+                controller.formation_state,
+            )
+            self.assertIn('tb3_0', controller.placement_error)
+        finally:
+            release_blocked.set()
+
+    def test_regular_stop_reaches_healthy_robot_past_blocked_socket(self):
+        controller = make_controller()
+        controller.current_task_id = 'regular-fanout-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.EMERGENCY_STOP_TIMEOUT = 0.05
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        try:
+            started_at = time.monotonic()
+            controller._stop_cb(String(data=json.dumps({
+                'task_id': 'regular-fanout-task',
+            })))
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(blocked.entered.is_set())
+            self.assertTrue(healthy.messages)
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            self.assertEqual(
+                formation.FormationState.FAILED,
+                controller.formation_state,
+            )
+            self.assertIn('tb3_0', controller.placement_error)
+        finally:
+            release_blocked.set()
+
+    def test_emergency_stop_preempts_a_regular_stop_waiting_on_its_lock(self):
+        controller = make_controller()
+        controller.current_task_id = 'regular-stop-lock-race'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.EMERGENCY_STOP_TIMEOUT = 0.4
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        regular_stop = threading.Thread(
+            target=controller._stop_cb,
+            args=(String(data=json.dumps({
+                'task_id': 'regular-stop-lock-race',
+            })),),
+        )
+        emergency_stop = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=True),),
+        )
+        regular_stop.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+        self.assertTrue(self.wait_until(lambda: healthy.messages))
+        first_zero_count = len(healthy.messages)
+
+        try:
+            emergency_stop.start()
+            self.assertTrue(self.wait_until(lambda: (
+                controller.emergency_stop_active
+                and len(healthy.messages) > first_zero_count
+            )))
+            self.assertTrue(regular_stop.is_alive())
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        finally:
+            release_blocked.set()
+            regular_stop.join(1.0)
+            emergency_stop.join(1.0)
+
+        self.assertFalse(regular_stop.is_alive())
+        self.assertFalse(emergency_stop.is_alive())
+        self.assertTrue(controller.emergency_stop_active)
+
+    def test_start_waiting_on_pose_lock_cannot_outlive_emergency_stop(self):
+        controller = make_controller()
+        controller.current_task_id = 'old-formation'
+        controller.EMERGENCY_STOP_TIMEOUT = 0.1
+        controller.lock.acquire()
+        start = threading.Thread(
+            target=controller._start_cb,
+            args=(String(data=json.dumps({
+                'task_id': 'new-formation',
+                'formation_type': 'triangle',
+            })),),
+        )
+        emergency = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=True),),
+        )
+        start.start()
+
+        start_has_command_lock = False
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if not controller.command_lock.acquire(blocking=False):
+                start_has_command_lock = True
+                break
+            controller.command_lock.release()
+            time.sleep(0.005)
+        self.assertTrue(start_has_command_lock)
+
+        try:
+            emergency.start()
+            self.assertTrue(self.wait_until(lambda: (
+                controller.emergency_stop_active
+            )))
+        finally:
+            controller.lock.release()
+            start.join(1.0)
+            emergency.join(1.0)
+
+        self.assertFalse(start.is_alive())
+        self.assertFalse(emergency.is_alive())
+        self.assertTrue(controller.emergency_stop_active)
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.is_paused)
+        self.assertEqual(
+            formation.FormationState.STOPPED,
+            controller.formation_state,
+        )
+        self.assertEqual('old-formation', controller.current_task_id)
+
+        controller._emergency_stop_cb(Bool(data=False))
+        self.assertFalse(controller.emergency_stop_active)
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.STOPPED,
+            controller.formation_state,
+        )
+
+    def test_newer_emergency_edge_wins_over_an_older_queued_reset(self):
+        controller = make_controller()
+        controller.emergency_stop_active = True
+        controller.command_lock.acquire()
+        reset = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=False),),
+        )
+        emergency = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=True),),
+        )
+        reset.start()
+        self.assertTrue(self.wait_until(lambda: (
+            controller._emergency_stop_generation >= 1
+        )))
+        emergency.start()
+        self.assertTrue(self.wait_until(lambda: (
+            controller._emergency_stop_generation >= 2
+            and controller.emergency_stop_active
+        )))
+
+        controller.command_lock.release()
+        reset.join(1.0)
+        emergency.join(1.0)
+
+        self.assertFalse(reset.is_alive())
+        self.assertFalse(emergency.is_alive())
+        self.assertTrue(controller.emergency_stop_active)
+        self.assertFalse(controller.is_running)
+        self.assertEqual(
+            formation.FormationState.STOPPED,
+            controller.formation_state,
+        )
+
+    def test_reset_waits_for_every_preceding_emergency_callback(self):
+        controller = make_controller()
+        controller.current_task_id = 'formation-before-estop'
+        controller.is_running = True
+        controller.EMERGENCY_STOP_TIMEOUT = 0.1
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        call_lock = threading.Lock()
+        call_count = [0]
+        stop_from_snapshot = controller._stop_from_shutdown_snapshot
+
+        def controlled_stop(*args, **kwargs):
+            with call_lock:
+                call_count[0] += 1
+                current_call = call_count[0]
+            if current_call == 1:
+                first_entered.set()
+                release_first.wait(1.0)
+            return stop_from_snapshot(*args, **kwargs)
+
+        controller._stop_from_shutdown_snapshot = controlled_stop
+        first = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=True),),
+        )
+        second = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=True),),
+        )
+        reset = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=False),),
+        )
+
+        first.start()
+        self.assertTrue(first_entered.wait(0.5))
+        second.start()
+        second.join(1.0)
+        self.assertFalse(second.is_alive())
+        self.assertTrue(first.is_alive())
+
+        reset.start()
+        self.assertTrue(self.wait_until(lambda: (
+            controller._emergency_stop_generation >= 3
+        )))
+        time.sleep(0.03)
+        self.assertTrue(reset.is_alive())
+
+        try:
+            release_first.set()
+            first.join(1.0)
+            reset.join(1.0)
+        finally:
+            release_first.set()
+            first.join(1.0)
+            reset.join(1.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(reset.is_alive())
+        self.assertEqual(set(), controller._emergency_true_pending)
+        self.assertFalse(controller.emergency_stop_active)
+        self.assertFalse(controller.is_running)
+
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 'formation-after-reset',
+            'formation_type': 'triangle',
+        })))
+        self.assertEqual(
+            'formation-after-reset', controller.current_task_id
+        )
+        self.assertTrue(controller.is_running)
+
+    def test_late_motion_after_emergency_stop_is_rezeroed(self):
+        controller = make_controller()
+        controller.current_task_id = 'emergency-late-motion'
+        controller.is_running = True
+        controller.EMERGENCY_STOP_TIMEOUT = 0.1
+        release_blocked = threading.Event()
+        blocked = BlockingPublisher(release_blocked)
+        controller.cmd_vel_pubs = {'tb3_0': blocked}
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        command = Twist()
+        command.linear.x = 0.22
+        batch_results = []
+
+        def publish_motion():
+            with controller.command_lock:
+                with controller.lock:
+                    batch_results.append(
+                        controller._publish_motion_batch_locked({
+                            'tb3_0': command,
+                        })
+                    )
+
+        motion = threading.Thread(target=publish_motion)
+        emergency_stop = threading.Thread(
+            target=controller._emergency_stop_cb,
+            args=(Bool(data=True),),
+        )
+        motion.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+
+        try:
+            emergency_stop.start()
+            self.assertTrue(self.wait_until(lambda: (
+                controller.emergency_stop_active
+            )))
+        finally:
+            release_blocked.set()
+            motion.join(1.0)
+            emergency_stop.join(1.0)
+
+        self.assertFalse(motion.is_alive())
+        self.assertFalse(emergency_stop.is_alive())
+        self.assertEqual([False], batch_results)
+        self.assertTrue(any(
+            message.linear.x > 0.0 for message in blocked.messages
+        ))
+        self.assertTrue(self.wait_until(lambda: (
+            blocked.messages
+            and blocked.messages[-1].linear.x == 0.0
+            and blocked.messages[-1].angular.z == 0.0
+        )))
+
     def test_empty_fleet_cancels_task_and_tears_down_robot_resources(self):
         controller = make_controller()
         controller.current_task_id = 'task-current'
@@ -2504,6 +4285,1008 @@ class FormationLifecycleTests(unittest.TestCase):
         })))
         self.assertFalse(controller.is_running)
         self.assertFalse(controller.is_paused)
+
+    def test_empty_fleet_keeps_failed_stop_correlated_to_the_task(self):
+        controller = make_controller()
+        controller.current_task_id = 'empty-fleet-stop-task'
+        controller.is_running = True
+        broken = FlakyPublisher(failures=10)
+        controller.cmd_vel_pubs = {'tb3_0': broken}
+
+        controller._fleet_list_cb(String(data=''))
+
+        self.assertEqual('empty-fleet-stop-task', controller.current_task_id)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertEqual([], controller.robot_ids)
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('empty-fleet-stop-task', status['task_id'])
+        self.assertEqual('failed', status['state'])
+        self.assertEqual(
+            'empty-fleet-stop-task',
+            status['stop_publication']['task_id'],
+        )
+        self.assertFalse(
+            status['stop_publication']['publication_confirmed']
+        )
+
+    def test_partial_fleet_change_does_not_replan_after_stop_failure(self):
+        controller = make_controller()
+        controller.current_task_id = 'fleet-change-stop-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.robot_poses['tb3_1'] = Pose()
+        controller.robot_yaws['tb3_1'] = 0.0
+        controller.odom_received_at['tb3_1'] = time.monotonic()
+        controller.odom_confirmed_for_task['tb3_1'] = True
+        controller.pid_linear['tb3_1'] = FakePid()
+        controller.pid_angular['tb3_1'] = FakePid()
+        controller._odom_subs['tb3_1'] = FakeResource()
+        controller.avoidance['tb3_1'] = FakeResource()
+        controller.cmd_vel_pubs = {
+            'tb3_0': FakePublisher(),
+            'tb3_1': FlakyPublisher(failures=10),
+        }
+
+        with mock.patch.object(
+            controller, '_recompute_formation_locked'
+        ) as replan:
+            controller._fleet_list_cb(String(data='tb3_0'))
+
+        replan.assert_not_called()
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual(['tb3_0'], controller.robot_ids)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('failed', status['state'])
+        self.assertEqual(
+            'fleet_change', status['stop_publication']['reason']
+        )
+        self.assertFalse(
+            status['stop_publication']['publication_confirmed']
+        )
+
+    def test_fleet_resize_keeps_the_failed_publisher_debt_until_it_recovers(self):
+        controller = make_controller()
+        controller.current_task_id = 'resize-stop-task'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.robot_poses['tb3_1'] = Pose()
+        controller.robot_yaws['tb3_1'] = 0.0
+        controller.odom_received_at['tb3_1'] = time.monotonic()
+        controller.odom_confirmed_for_task['tb3_1'] = True
+        controller.pid_linear['tb3_1'] = FakePid()
+        controller.pid_angular['tb3_1'] = FakePid()
+        controller._odom_subs['tb3_1'] = FakeResource()
+        controller.avoidance['tb3_1'] = FakeResource()
+        healthy = FakePublisher()
+        broken = FlakyPublisher(failures=3)
+        controller.cmd_vel_pubs = {
+            'tb3_0': healthy,
+            'tb3_1': broken,
+        }
+
+        with mock.patch.object(
+            controller, '_recompute_formation_locked', return_value=None
+        ):
+            controller._fleet_list_cb(String(data='tb3_0'))
+
+        first_status = json.loads(controller.status_pub.messages[-1].data)
+        first_debt = first_status['stop_publication'][
+            'unconfirmed_publishers'
+        ][0]
+        generation = first_debt['publisher_generation']
+        self.assertEqual('tb3_1', first_debt['robot_id'])
+        self.assertEqual('resize-stop-task', first_debt['task_id'])
+        self.assertEqual('fleet_change', first_debt['reason'])
+        self.assertFalse(broken.unregistered)
+        self.assertEqual(1, broken.calls)
+        self.assertEqual(['tb3_0'], controller.robot_ids)
+
+        old_task_stop = String(data=json.dumps({
+            'task_id': 'resize-stop-task'
+        }))
+        controller._stop_cb(old_task_stop)
+        reduced_status = json.loads(
+            controller.status_pub.messages[-1].data
+        )
+        self.assertFalse(
+            reduced_status['stop_publication']['publication_confirmed']
+        )
+        self.assertEqual(
+            ['tb3_1'], reduced_status['stop_publication']['failed_robots']
+        )
+        self.assertEqual(
+            2, reduced_status['stop_publication']['requested_count']
+        )
+        self.assertEqual(
+            generation,
+            reduced_status['stop_publication'][
+                'unconfirmed_publishers'
+            ][0]['publisher_generation'],
+        )
+
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 'must-not-start'
+        })))
+        self.assertFalse(controller.is_running)
+        self.assertEqual('resize-stop-task', controller.current_task_id)
+
+        retained_avoidance = types.SimpleNamespace(
+            max_linear_velocity=0.22,
+            max_angular_velocity=2.84,
+            shutdown=lambda: None,
+        )
+        with mock.patch.object(
+            formation.rospy, 'Publisher', create=True
+        ) as create_publisher, mock.patch.object(
+            formation.rospy,
+            'Subscriber',
+            return_value=FakeResource(),
+            create=True,
+        ), mock.patch.object(
+            formation,
+            'ObstacleAvoidance',
+            return_value=retained_avoidance,
+        ), mock.patch.object(
+            controller, '_recompute_formation_locked', return_value=None
+        ):
+            controller._fleet_list_cb(String(data='tb3_0,tb3_1'))
+
+        create_publisher.assert_not_called()
+        self.assertIs(broken, controller.cmd_vel_pubs['tb3_1'])
+        self.assertFalse(broken.unregistered)
+        self.assertEqual(3, broken.calls)
+        self.assertEqual(2, len(controller._command_publisher_generations))
+        self.assertEqual(1, len(controller._stop_publication_debts))
+
+        broken.failures_remaining = 0
+        controller._stop_cb(old_task_stop)
+        recovered_status = json.loads(
+            controller.status_pub.messages[-1].data
+        )
+        self.assertTrue(
+            recovered_status['stop_publication']['publication_confirmed']
+        )
+        self.assertEqual(
+            [], recovered_status['stop_publication'][
+                'unconfirmed_publishers'
+            ]
+        )
+        self.assertEqual({}, controller._stop_publication_debts)
+        self.assertIs(broken, controller.cmd_vel_pubs['tb3_1'])
+        self.assertFalse(broken.unregistered)
+
+        with mock.patch.object(
+            controller, '_prepare_assignment_locked', return_value=None
+        ):
+            controller._start_cb(String(data=json.dumps({
+                'task_id': 'recovered-task'
+            })))
+        self.assertTrue(controller.is_running)
+        self.assertEqual('recovered-task', controller.current_task_id)
+
+    def test_shutdown_discards_robot_setup_started_before_snapshot(self):
+        class ProvisionedAvoidance:
+            max_linear_velocity = 0.22
+            max_angular_velocity = 2.84
+
+            def __init__(self, _robot_id):
+                self.closed = False
+
+            def shutdown(self):
+                self.closed = True
+
+        controller = make_controller()
+        controller.current_task_id = 'formation-roster-race'
+        controller.is_running = True
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        publisher_entered = threading.Event()
+        release_publisher = threading.Event()
+        created_publishers = []
+        created_subscribers = []
+        created_avoidance = []
+
+        def blocking_publisher(topic, *_args, **_kwargs):
+            if topic == '/tb3_1/cmd_vel':
+                publisher_entered.set()
+                release_publisher.wait(1.0)
+            publisher = FakePublisher()
+            created_publishers.append(publisher)
+            return publisher
+
+        def recording_subscriber(*_args, **_kwargs):
+            subscriber = FakeResource()
+            created_subscribers.append(subscriber)
+            return subscriber
+
+        def make_avoidance(robot_id):
+            avoidance = ProvisionedAvoidance(robot_id)
+            created_avoidance.append(avoidance)
+            return avoidance
+
+        with mock.patch.object(
+            formation.rospy,
+            'Publisher',
+            side_effect=blocking_publisher,
+            create=True,
+        ), mock.patch.object(
+            formation.rospy,
+            'Subscriber',
+            side_effect=recording_subscriber,
+            create=True,
+        ), mock.patch.object(
+            formation,
+            'ObstacleAvoidance',
+            side_effect=make_avoidance,
+        ):
+            roster = threading.Thread(
+                target=controller._fleet_list_cb,
+                args=(String(data='tb3_0,tb3_1'),),
+            )
+            roster.start()
+            self.assertTrue(publisher_entered.wait(0.5))
+            try:
+                controller._shutdown()
+            finally:
+                release_publisher.set()
+                roster.join(1.0)
+
+        self.assertFalse(roster.is_alive())
+        self.assertEqual(1, len(created_publishers))
+        self.assertTrue(created_publishers[0].unregistered)
+        self.assertEqual(1, len(created_subscribers))
+        self.assertTrue(created_subscribers[0].closed)
+        self.assertEqual(1, len(created_avoidance))
+        self.assertTrue(created_avoidance[0].closed)
+        self.assertNotIn('tb3_1', controller.robot_ids)
+        self.assertNotIn('tb3_1', controller.cmd_vel_pubs)
+        self.assertFalse(any(
+            robot_id == 'tb3_1'
+            for robot_id, _publisher, _generation, _debt
+            in controller._shutdown_publisher_snapshot
+        ))
+
+    def test_shutdown_deadline_includes_a_blocked_lifecycle_lock(self):
+        controller = make_controller()
+        controller.current_task_id = 'locked-shutdown-task'
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        planner_entered = threading.Event()
+        release_planner = threading.Event()
+
+        def planner_holding_both_state_locks():
+            with controller.command_lock:
+                with controller.lock:
+                    planner_entered.set()
+                    release_planner.wait(1.0)
+
+        planner = threading.Thread(target=planner_holding_both_state_locks)
+        controller._assignment_worker = planner
+        planner.start()
+        self.assertTrue(planner_entered.wait(0.5))
+        started_at = time.monotonic()
+        try:
+            controller._shutdown()
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(planner.is_alive())
+            self.assertTrue(controller._assignment_worker_stop.is_set())
+            self.assertFalse(controller.is_running)
+            self.assertTrue(controller.assignment_pending)
+            self.assertEqual(
+                formation.FormationState.FAILED,
+                controller.formation_state,
+            )
+            command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+            self.assertEqual(0.0, command.linear.x)
+            self.assertEqual(0.0, command.angular.z)
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual('locked-shutdown-task', status['task_id'])
+            self.assertEqual('failed', status['state'])
+            self.assertIn('could not acquire the lifecycle lock', status['error'])
+            self.assertIn('cleanup were not confirmed', status['error'])
+            self.assertTrue(
+                status['stop_publication']['publication_confirmed']
+            )
+        finally:
+            release_planner.set()
+            planner.join(1.0)
+
+        self.assertFalse(planner.is_alive())
+
+    def test_blocked_publisher_does_not_delay_other_shutdown_stops(self):
+        controller = make_controller()
+        controller.current_task_id = 'blocked-publisher-shutdown'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_blocked_publisher = threading.Event()
+        blocked = BlockingPublisher(release_blocked_publisher)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        started_at = time.monotonic()
+        try:
+            controller._shutdown()
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(blocked.entered.is_set())
+            self.assertEqual(1, len(healthy.messages))
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            self.assertEqual(
+                formation.FormationState.FAILED,
+                controller.formation_state,
+            )
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual('failed', status['state'])
+            self.assertEqual(
+                2, status['stop_publication']['requested_count']
+            )
+            self.assertEqual(
+                1, status['stop_publication']['accepted_count']
+            )
+            self.assertEqual(
+                ['tb3_0'], status['stop_publication']['failed_robots']
+            )
+            self.assertFalse(
+                status['stop_publication']['publication_confirmed']
+            )
+        finally:
+            release_blocked_publisher.set()
+
+        deadline = time.monotonic() + 0.5
+        while not blocked.messages and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(1, len(blocked.messages))
+
+    def test_shutdown_continues_when_the_first_zero_worker_cannot_start(self):
+        controller = make_controller()
+        controller.current_task_id = 'thread-start-shutdown'
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        first = FakePublisher()
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+        targets = controller._cached_command_publisher_snapshot()
+        original_start = threading.Thread.start
+        failed_once = []
+
+        def fail_first_shutdown_worker(worker):
+            if (
+                worker.name.startswith('formation-shutdown-stop-')
+                and not failed_once
+            ):
+                failed_once.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            formation.threading.Thread,
+            'start',
+            new=fail_first_shutdown_worker,
+        ):
+            publication = controller._stop_from_shutdown_snapshot(
+                targets,
+                'shutdown',
+                'thread-start-shutdown',
+                time.monotonic() + 0.2,
+            )
+
+        self.assertEqual(1, len(failed_once))
+        self.assertTrue(first.messages)
+        self.assertEqual(0.0, first.messages[-1].linear.x)
+        self.assertEqual(0.0, first.messages[-1].angular.z)
+        self.assertTrue(healthy.messages)
+        self.assertEqual(0.0, healthy.messages[-1].linear.x)
+        self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        self.assertEqual(2, publication['requested_count'])
+        self.assertEqual(2, publication['accepted_count'])
+        self.assertEqual([], publication['failed_robots'])
+        self.assertTrue(publication['publication_confirmed'])
+
+    def test_shutdown_reaches_later_publishers_after_two_start_failures(self):
+        controller = make_controller()
+        controller.current_task_id = 'persistent-thread-start-shutdown'
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        first = FakePublisher()
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': first,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+        targets = controller._cached_command_publisher_snapshot()
+        first_generation = targets[0]['publisher_generation']
+        fallback_lane = formation.SafetyPublishLane('test-formation-tb3-0')
+        self.assertTrue(fallback_lane.available)
+        controller._safety_fallback_lanes[id(first)] = fallback_lane
+        original_start = threading.Thread.start
+        failures = []
+
+        def fail_first_target_workers(worker):
+            if worker.name.startswith(
+                'formation-shutdown-stop-{}-'.format(first_generation)
+            ):
+                failures.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        try:
+            with mock.patch.object(
+                formation.threading.Thread,
+                'start',
+                new=fail_first_target_workers,
+            ):
+                publication = controller._stop_from_shutdown_snapshot(
+                    targets,
+                    'shutdown',
+                    'persistent-thread-start-shutdown',
+                    time.monotonic() + 0.2,
+                )
+        finally:
+            fallback_lane.close()
+
+        self.assertEqual(2, len(failures))
+        self.assertTrue(first.messages)
+        self.assertEqual(0.0, first.messages[-1].linear.x)
+        self.assertEqual(0.0, first.messages[-1].angular.z)
+        self.assertTrue(healthy.messages)
+        self.assertEqual(0.0, healthy.messages[-1].linear.x)
+        self.assertEqual(0.0, healthy.messages[-1].angular.z)
+        self.assertEqual(2, publication['accepted_count'])
+        self.assertEqual([], publication['failed_robots'])
+        self.assertTrue(publication['publication_confirmed'])
+
+    def test_shutdown_bypasses_a_regular_stop_blocked_on_one_publisher(self):
+        controller = make_controller()
+        controller.current_task_id = 'regular-stop-race'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_blocked_publisher = threading.Event()
+        blocked = BlockingPublisher(release_blocked_publisher)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        regular_stop = threading.Thread(
+            target=controller._stop_cb,
+            args=(String(data=json.dumps({
+                'task_id': 'regular-stop-race'
+            })),),
+        )
+        regular_stop.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+
+        started_at = time.monotonic()
+        try:
+            controller._shutdown()
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(regular_stop.is_alive())
+            self.assertGreaterEqual(len(healthy.messages), 2)
+            self.assertEqual(0.0, healthy.messages[-1].linear.x)
+            self.assertEqual(0.0, healthy.messages[-1].angular.z)
+            status = json.loads(controller.status_pub.messages[-1].data)
+            self.assertEqual('failed', status['state'])
+            self.assertEqual('regular-stop-race', status['task_id'])
+            self.assertEqual(
+                2, status['stop_publication']['requested_count']
+            )
+            self.assertEqual(
+                1, status['stop_publication']['accepted_count']
+            )
+            self.assertEqual(
+                ['tb3_0'], status['stop_publication']['failed_robots']
+            )
+            self.assertFalse(
+                status['stop_publication']['publication_confirmed']
+            )
+            shutdown_publication = controller._shutdown_publication
+            shutdown_status_count = len(controller.status_pub.messages)
+        finally:
+            release_blocked_publisher.set()
+            regular_stop.join(1.0)
+
+        self.assertFalse(regular_stop.is_alive())
+        self.assertIs(
+            shutdown_publication, controller._last_stop_publication
+        )
+        self.assertEqual({}, controller._stop_publication_debts)
+        self.assertEqual(
+            shutdown_status_count, len(controller.status_pub.messages)
+        )
+        self.assertTrue(controller._shutdown_started)
+        final_error = controller.placement_error
+
+        controller._stop_cb(String(data=json.dumps({
+            'task_id': 'regular-stop-race'
+        })))
+        controller._emergency_stop_cb(Bool(data=True))
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertEqual(final_error, controller.placement_error)
+
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 'task-after-shutdown'
+        })))
+        self.assertFalse(controller.is_running)
+        self.assertEqual('regular-stop-race', controller.current_task_id)
+
+    def test_late_motion_is_rezeroed_without_releasing_the_rest_of_batch(self):
+        controller = make_controller()
+        controller.current_task_id = 'motion-shutdown-race'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_blocked_publisher = threading.Event()
+        blocked = BlockingPublisher(release_blocked_publisher)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': blocked,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        commands = {'tb3_0': Twist(), 'tb3_1': Twist()}
+        commands['tb3_0'].linear.x = 0.22
+        commands['tb3_1'].linear.x = 0.22
+        batch_results = []
+
+        def publish_regular_batch():
+            with controller.command_lock:
+                with controller.lock:
+                    batch_results.append(
+                        controller._publish_motion_batch_locked(commands)
+                    )
+
+        regular_control = threading.Thread(target=publish_regular_batch)
+        regular_control.start()
+        self.assertTrue(blocked.entered.wait(0.5))
+
+        try:
+            controller._shutdown()
+            self.assertTrue(regular_control.is_alive())
+            self.assertEqual(1, len(healthy.messages))
+            self.assertEqual(0.0, healthy.messages[0].linear.x)
+            self.assertEqual(0.0, healthy.messages[0].angular.z)
+        finally:
+            release_blocked_publisher.set()
+            regular_control.join(1.0)
+
+        self.assertFalse(regular_control.is_alive())
+        self.assertEqual([False], batch_results)
+        self.assertTrue(any(
+            command.linear.x > 0.0 for command in blocked.messages
+        ))
+        self.assertEqual(0.0, blocked.messages[-1].linear.x)
+        self.assertEqual(0.0, blocked.messages[-1].angular.z)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.angular.z == 0.0
+            for command in healthy.messages
+        ))
+
+    def test_late_motion_uses_its_second_zero_when_first_thread_start_fails(self):
+        controller = make_controller()
+        publisher = FakePublisher()
+        original_start = threading.Thread.start
+        failed_once = []
+
+        def fail_first_late_zero(worker):
+            if (
+                worker.name.startswith('formation-late-zero-')
+                and not failed_once
+            ):
+                failed_once.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        with mock.patch.object(
+            formation.threading.Thread,
+            'start',
+            new=fail_first_late_zero,
+        ):
+            result = controller._compensate_late_motion(
+                'tb3_0', publisher, 7
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(1, len(failed_once))
+        deadline = time.monotonic() + 0.5
+        while not publisher.messages and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(publisher.messages)
+        self.assertEqual(0.0, publisher.messages[-1].linear.x)
+        self.assertEqual(0.0, publisher.messages[-1].angular.z)
+
+    def test_late_motion_uses_prestarted_lane_when_both_threads_fail(self):
+        controller = make_controller()
+        publisher = FakePublisher()
+        fallback_lane = formation.SafetyPublishLane(
+            'test-formation-late-motion'
+        )
+        self.assertTrue(fallback_lane.available)
+        controller._safety_fallback_lanes[id(publisher)] = fallback_lane
+        original_start = threading.Thread.start
+        failed_starts = []
+
+        def fail_late_zero_workers(worker):
+            if worker.name.startswith('formation-late-zero-'):
+                failed_starts.append(worker.name)
+                raise RuntimeError('thread capacity exhausted')
+            return original_start(worker)
+
+        try:
+            with mock.patch.object(
+                formation.threading.Thread,
+                'start',
+                new=fail_late_zero_workers,
+            ):
+                result = controller._compensate_late_motion(
+                    'tb3_0', publisher, 8
+                )
+            self.assertFalse(result)
+            self.assertEqual(2, len(failed_starts))
+            deadline = time.monotonic() + 0.5
+            while not publisher.messages and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(publisher.messages)
+            self.assertEqual(0.0, publisher.messages[-1].linear.x)
+            self.assertEqual(0.0, publisher.messages[-1].angular.z)
+        finally:
+            fallback_lane.close()
+
+    def test_late_motion_uses_lane_after_publish_and_thread_start_failures(self):
+        controller = make_controller()
+        publisher = FlakyPublisher(failures=1)
+        controller._register_safety_fallback_lane('tb3-0', publisher)
+        generation = 9
+        controller._motion_publish_inflight.add(generation)
+        original_start = threading.Thread.start
+        starts = []
+
+        def start_first_late_zero_only(worker):
+            if not worker.name.startswith('formation-late-zero-'):
+                return original_start(worker)
+            starts.append(worker.name)
+            if len(starts) == 2:
+                raise RuntimeError('thread capacity exhausted')
+            result = original_start(worker)
+            deadline = time.monotonic() + 0.5
+            while publisher.calls < 1 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            return result
+
+        with mock.patch.object(
+            formation.threading.Thread,
+            'start',
+            new=start_first_late_zero_only,
+        ):
+            result = controller._compensate_late_motion(
+                'tb3_0', publisher, generation
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(2, len(starts))
+        self.assertEqual(3, publisher.calls)
+        self.assertEqual(2, len(publisher.messages))
+        self.assertEqual(0.0, publisher.messages[-1].linear.x)
+        self.assertEqual(0.0, publisher.messages[-1].angular.z)
+        self.assertNotIn(generation, controller._motion_publish_inflight)
+
+    def test_inflight_motion_keeps_shutdown_unconfirmed_if_rezero_fails(self):
+        controller = make_controller()
+        controller.current_task_id = 'failed-rezero-race'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_motion = threading.Event()
+        late = LateCompensationFailingPublisher(release_motion)
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': late,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        commands = {'tb3_0': Twist(), 'tb3_1': Twist()}
+        commands['tb3_0'].linear.x = 0.22
+        commands['tb3_1'].linear.x = 0.22
+        batch_results = []
+
+        def publish_regular_batch():
+            with controller.command_lock:
+                with controller.lock:
+                    batch_results.append(
+                        controller._publish_motion_batch_locked(commands)
+                    )
+
+        regular_control = threading.Thread(target=publish_regular_batch)
+        regular_control.start()
+        self.assertTrue(late.entered.wait(0.5))
+
+        try:
+            controller._shutdown()
+            status = json.loads(controller.status_pub.messages[-1].data)
+            stop = status['stop_publication']
+            self.assertEqual('failed', status['state'])
+            self.assertEqual(2, stop['requested_count'])
+            self.assertEqual(1, stop['accepted_count'])
+            self.assertEqual(['tb3_0'], stop['failed_robots'])
+            self.assertFalse(stop['publication_confirmed'])
+            self.assertEqual(1, len(healthy.messages))
+            self.assertEqual(0.0, healthy.messages[0].linear.x)
+        finally:
+            release_motion.set()
+            regular_control.join(1.0)
+
+        self.assertFalse(regular_control.is_alive())
+        self.assertEqual([False], batch_results)
+        retry_deadline = time.monotonic() + 0.5
+        while late.calls < 4 and time.monotonic() < retry_deadline:
+            time.sleep(0.005)
+        self.assertEqual(4, late.calls)
+        self.assertEqual(0.0, late.messages[-1].linear.x)
+        self.assertEqual(0.0, late.messages[-1].angular.z)
+        self.assertFalse(
+            controller._shutdown_publication['publication_confirmed']
+        )
+
+    def test_blocked_rezero_does_not_suppress_the_redundant_attempt(self):
+        controller = make_controller()
+        controller.current_task_id = 'blocked-rezero-race'
+        controller.is_running = True
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.robot_count = 2
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_motion = threading.Event()
+        release_compensation = threading.Event()
+        late = LateCompensationBlockingPublisher(
+            release_motion, release_compensation
+        )
+        healthy = FakePublisher()
+        controller.cmd_vel_pubs = {
+            'tb3_0': late,
+            'tb3_1': healthy,
+        }
+        with controller.lock:
+            controller._refresh_shutdown_publisher_snapshot_locked()
+
+        commands = {'tb3_0': Twist(), 'tb3_1': Twist()}
+        commands['tb3_0'].linear.x = 0.22
+        commands['tb3_1'].linear.x = 0.22
+        batch_results = []
+
+        def publish_regular_batch():
+            with controller.command_lock:
+                with controller.lock:
+                    batch_results.append(
+                        controller._publish_motion_batch_locked(commands)
+                    )
+
+        regular_control = threading.Thread(target=publish_regular_batch)
+        regular_control.start()
+        self.assertTrue(late.motion_entered.wait(0.5))
+
+        try:
+            controller._shutdown()
+            stop = json.loads(
+                controller.status_pub.messages[-1].data
+            )['stop_publication']
+            self.assertEqual(1, stop['accepted_count'])
+            self.assertEqual(['tb3_0'], stop['failed_robots'])
+            self.assertFalse(stop['publication_confirmed'])
+
+            release_motion.set()
+            regular_control.join(0.5)
+            self.assertFalse(regular_control.is_alive())
+            self.assertTrue(late.compensation_entered.wait(0.5))
+            redundant_deadline = time.monotonic() + 0.5
+            while late.calls < 4 and time.monotonic() < redundant_deadline:
+                time.sleep(0.005)
+            self.assertEqual(4, late.calls)
+            self.assertEqual(0.0, late.messages[-1].linear.x)
+            self.assertEqual(0.0, late.messages[-1].angular.z)
+            self.assertEqual([False], batch_results)
+            self.assertTrue(all(
+                command.linear.x == 0.0 and command.angular.z == 0.0
+                for command in healthy.messages
+            ))
+        finally:
+            release_motion.set()
+            release_compensation.set()
+            regular_control.join(1.0)
+
+    def test_late_regular_status_is_followed_by_final_shutdown_status(self):
+        controller = make_controller()
+        controller.current_task_id = 'status-shutdown-race'
+        controller.is_running = True
+        controller.formation_state = formation.FormationState.FORMING
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_regular_status = threading.Event()
+        status_publisher = FirstPublishBlockingPublisher(
+            release_regular_status
+        )
+        controller.status_pub = status_publisher
+
+        def publish_regular_status():
+            with controller.command_lock:
+                controller._publish_status([], 0.4)
+
+        regular_status = threading.Thread(target=publish_regular_status)
+        regular_status.start()
+        self.assertTrue(status_publisher.entered.wait(0.5))
+
+        try:
+            controller._shutdown()
+            self.assertTrue(regular_status.is_alive())
+            states_at_shutdown = [
+                json.loads(message.data)['state']
+                for message in status_publisher.messages
+            ]
+            self.assertEqual(['failed'], states_at_shutdown)
+        finally:
+            release_regular_status.set()
+            regular_status.join(1.0)
+
+        self.assertFalse(regular_status.is_alive())
+        reassert_deadline = time.monotonic() + 0.5
+        while status_publisher.calls < 4 and time.monotonic() < reassert_deadline:
+            time.sleep(0.005)
+        states = [
+            json.loads(message.data)['state']
+            for message in status_publisher.messages
+        ]
+        self.assertEqual(['failed', 'forming'], states[:2])
+        self.assertEqual('failed', states[-1])
+        self.assertGreaterEqual(states.count('failed'), 2)
+        final_status = json.loads(status_publisher.messages[-1].data)
+        self.assertIn('could not acquire the lifecycle lock', final_status['error'])
+        self.assertEqual(
+            'shutdown', final_status['stop_publication']['reason']
+        )
+
+    def test_blocked_status_reassertion_does_not_hide_final_status(self):
+        controller = make_controller()
+        controller.current_task_id = 'blocked-status-reassertion'
+        controller.is_running = True
+        controller.formation_state = formation.FormationState.FORMING
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        release_regular = threading.Event()
+        release_reassertion = threading.Event()
+        status_publisher = StatusReassertionBlockingPublisher(
+            release_regular, release_reassertion
+        )
+        controller.status_pub = status_publisher
+
+        def publish_regular_status():
+            with controller.command_lock:
+                controller._publish_status([], 0.4)
+
+        regular_status = threading.Thread(target=publish_regular_status)
+        regular_status.start()
+        self.assertTrue(status_publisher.regular_entered.wait(0.5))
+
+        try:
+            controller._shutdown()
+            self.assertEqual(
+                ['failed'],
+                [
+                    json.loads(message.data)['state']
+                    for message in status_publisher.messages
+                ],
+            )
+
+            release_regular.set()
+            regular_status.join(0.5)
+            self.assertFalse(regular_status.is_alive())
+            self.assertTrue(status_publisher.reassertion_entered.wait(0.5))
+            redundant_deadline = time.monotonic() + 0.5
+            while (
+                status_publisher.calls < 4
+                and time.monotonic() < redundant_deadline
+            ):
+                time.sleep(0.005)
+            states = [
+                json.loads(message.data)['state']
+                for message in status_publisher.messages
+            ]
+            self.assertEqual(['failed', 'forming'], states[:2])
+            self.assertEqual('failed', states[-1])
+        finally:
+            release_regular.set()
+            release_reassertion.set()
+            regular_status.join(1.0)
+
+        final_status = json.loads(status_publisher.messages[-1].data)
+        self.assertEqual('failed', final_status['state'])
+        self.assertIn('could not acquire the lifecycle lock', final_status['error'])
+
+    def test_start_waiting_on_state_lock_cannot_survive_shutdown(self):
+        controller = make_controller()
+        controller.current_task_id = 'task-before-shutdown'
+        controller.is_running = False
+        controller.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 0.08
+        controller.lock.acquire()
+        start = threading.Thread(
+            target=controller._start_cb,
+            args=(String(data=json.dumps({
+                'task_id': 'late-start',
+                'formation_type': 'line',
+            })),),
+        )
+        start.start()
+
+        owns_command_lock = False
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if not controller.command_lock.acquire(blocking=False):
+                owns_command_lock = True
+                break
+            controller.command_lock.release()
+            time.sleep(0.005)
+        self.assertTrue(owns_command_lock)
+
+        try:
+            controller._shutdown()
+            self.assertTrue(start.is_alive())
+            self.assertFalse(controller.is_running)
+            self.assertEqual(
+                formation.FormationState.FAILED,
+                controller.formation_state,
+            )
+        finally:
+            controller.lock.release()
+            start.join(1.0)
+
+        self.assertFalse(start.is_alive())
+        self.assertFalse(controller.is_running)
+        self.assertEqual('task-before-shutdown', controller.current_task_id)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        final_status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('task-before-shutdown', final_status['task_id'])
+        self.assertEqual('failed', final_status['state'])
 
     def test_start_is_rejected_while_fleet_is_empty(self):
         controller = make_controller()

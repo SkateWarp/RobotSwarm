@@ -8,11 +8,12 @@ solo robot. No basta con observar movimiento en Gazebo: la aceptación relaciona
 la física de la carga, los estados del algoritmo GRF, el visor HLS abierto en un
 navegador normal y la limpieza posterior de la sesión.
 
-La caja verde del escenario habitual tiene una masa de 0,25 kg y `mu=0.05`.
+La caja verde del escenario habitual tiene una masa de 0,25 kg y
+`mu=mu2=0.05`.
 Sirve para las pruebas rápidas de búsqueda, aviso, encuentro y control, pero un
 Burger puede moverla por sí solo. Para estudiar reparto físico de carga se
 utiliza el perfil `transport_crate_loaded`, de 0,75 kg y con un coeficiente de
-fricción de contacto `mu=0.25`.
+fricción de contacto `mu=mu2=0.25`.
 
 La selección de esos valores parte de una estimación sencilla:
 
@@ -105,10 +106,13 @@ entrar en `PUSH`, resta la tolerancia de llegada y se limita por la configuraci�
 Puede aparecer como 0,4999 m por redondeo. El arnés valida ese eco con un epsilon
 de 0,001 m, pero en una comprobación separada continúa exigiendo 0,50 m de avance
 físico real. Ese medio metro es un mínimo de aceptación, no un límite de fuerza
-ni una orden para detener el ensayo exactamente allí. En el formulario nuevo,
-`arrival_tolerance` vale 0,25 m por defecto y puede ajustarse entre 0,15 y 0,75
-m; una meta más distante y un margen menor permiten observar un recorrido más
-largo sin alterar las propiedades físicas de la caja.
+ni una orden para detener el ensayo exactamente allí. Desde la liberación de
+la PR #106, el formulario público envía `arrival_tolerance=0.25` por defecto y
+permite ajustarlo entre 0,15 y 0,75 m. Una meta más distante y un margen menor
+permiten observar un recorrido más largo sin alterar las propiedades físicas
+de la caja. Es importante separar ambas decisiones: la tolerancia determina
+cuándo el controlador considera alcanzado el destino, mientras que la masa y
+la fricción determinan el esfuerzo necesario para mover el objeto.
 
 ## 4. Correcciones introducidas durante el diagnóstico
 
@@ -125,7 +129,7 @@ empujadores. Para poder comprobar el SHA productivo anterior sin modificarlo, el
 supervisor inspecciona la firma del probe desplegado: si esa versión aún no
 acepta `payload_xml`, aplica una envoltura de compatibilidad a `reset_fleet()`;
 si ya lo acepta, no la aplica. Esto evita tanto perder la carga como instalarla
-dos veces tras el futuro despliegue.
+dos veces al comparar versiones.
 
 El marcador `LOADED_PAYLOAD_READY_JSON` se emite únicamente después de comprobar
 en el XML una masa de 0,75 kg. Además, el supervisor exige una muestra posterior
@@ -257,14 +261,14 @@ se publicó, si la posición quedó sincronizada y cuál fue la coordenada
 observada. Un fallo del marcador se muestra como advertencia y no cambia el
 resultado físico de la tarea.
 
-Se decidió conservar 0,75 kg y `mu=0.25`. Reducir ambos valores haría que la
+Se decidió conservar 0,75 kg y `mu=mu2=0.25`. Reducir esos valores haría que la
 caja recorriera más distancia con menos esfuerzo, pero también eliminaría el
 contraste medido entre uno, dos y cuatro robots. El perfil de práctica de 0,25
-kg y `mu=0.05` permanece disponible para demostraciones rápidas. Para demostrar
-un movimiento más largo bajo carga se utiliza un destino suficientemente lejano
-y el margen de llegada de 0,25 m; el perfil cargado sigue respondiendo a la
-pregunta académica de si la flota aporta una capacidad que un Burger aislado no
-posee.
+kg y `mu=mu2=0.05` permanece disponible para demostraciones rápidas y es el que
+usa el transporte normal. Para mostrar un movimiento más largo se utiliza un
+destino suficientemente lejano y el margen de llegada de 0,25 m; el perfil
+cargado sigue respondiendo, por separado, a la pregunta académica de si la
+flota aporta una capacidad que un Burger aislado no posee.
 
 ### 4.10. Cierre de recuperación durante el apagado
 
@@ -331,7 +335,8 @@ La regresión adelanta el reloj entre el primer y el segundo robot y verifica qu
 no aparece un pulso parcial. El corte aislado de `4450c13` aprobó 172/172 pruebas
 de lifecycle y 487/487 globales, además de `py_compile` con Python 3.8 y
 `git diff --check`. Estos resultados cerraron I-127 en código. El freeze y la
-imagen posteriores se registran en la sección 5; la prueba física sigue pendiente.
+imagen posteriores se registran en la sección 5; en ese corte la prueba física
+aún no se había ejecutado.
 
 ### 4.14. Correlación de odometría durante la planificación de seguimiento
 
@@ -406,7 +411,12 @@ las propiedades cinemáticas del marcador. El mundo aprobó 8/8 pruebas y
 `git diff --check`. Después se reconstruyó la imagen y se comprobó en Gazebo
 visible que el marcador completo permaneciera dentro del encuadre en las cuatro
 esquinas del área: `(4; 4)`, `(-4; 4)`, `(4; -4)` y `(-4; -4)`. I-135 queda
-cerrada localmente; su cierre no equivale a CI, despliegue ni postdeploy.
+cerrada en el código integrado por la PR #106. Posteriormente, CI aprobó ese
+cambio, el merge `1448a31bbbbfd77588bada109947098cc95d9dda` se desplegó y la
+repetición visible postdeploy confirmó el marcador en el visor productivo. La
+evidencia concreta de esa comprobación se presenta en la sección 8; los datos
+que siguen en esta subsección conservan la trazabilidad de la prueba local que
+precedió al despliegue.
 
 La evidencia temporal de cuatro esquinas está en
 `/tmp/robotswarm-local-final-camera-20260722T0454Z/`:
@@ -507,7 +517,8 @@ dos corridas algorítmicas, pero está superada únicamente en el encuadre visua
 por la imagen `e17579ed…ae0d` descrita en 4.16. El nuevo build cerró la
 comprobación local de las cuatro esquinas. Después del ajuste, el rebuild y la
 imagen nueva, la suite ROS exacta se repitió y aprobó 497/497 en 109,592 s con
-RC=0. Esta última ejecución es el freeze final local vigente; los 109,460 s
+RC=0. Esa ejecución fue el freeze final local de I-128–I-135 y quedó
+supersedida por `6f1af927…4cb5` y 576/576 pruebas de I-136–I-140; los 109,460 s
 anteriores permanecen únicamente como trazabilidad del corte pre-cámara.
 
 Para comprobar que el cambio de cámara no alteró el comportamiento, se repitió
@@ -541,11 +552,14 @@ la limpieza o el reset alteraran la escena y, pese a sus nombres, no acreditan
 visualmente ni la fase `PUSH` ni la pose final. La conclusión física terminal
 procede del log correlacionado, no de esas dos imágenes.
 
-Ninguna de estas corridas incluye el gate completo de capacidad con la caja de
-0,75 kg ni constituye postdeploy; la repetición física cargada sobre el SHA
-desplegado todavía está pendiente. Las corridas públicas de esta sección
-continúan perteneciendo al release histórico
-`fbef23eaae2b1b1d5be51ad3fa03e0298239289a`.
+Ninguna de estas corridas locales incluye el gate completo de capacidad con la
+caja de 0,75 kg ni se reinterpreta como prueba postdeploy. El escenario N=4 con
+la física normal sí se repitió después de desplegar la PR #106, junto con N=2,
+N=3 y N=10, como se registra en la sección 8. En cambio, la repetición física
+del perfil cargado sobre `1448a31…d9dda` continúa pendiente. La última
+aceptación productiva completa de 0,75 kg sigue perteneciendo al release
+histórico `fbef23eaae2b1b1d5be51ad3fa03e0298239289a` y se documenta en las
+secciones 6 y 7.
 
 ## 6. Diagnóstico productivo del 21 de julio de 2026
 
@@ -636,81 +650,96 @@ correos, UUID, tokens y rutas internas antes de incorporarlos al manifiesto:
 - [Después del probe, con la regresión UTC visible](assets/commissioning-2026-07/final-fbef23e/contador-utc-antes.png), 58771 bytes, SHA-256 `fdfbef8f65b81178508f281130ea1ebf851aa9144bac9665a3024d77cf022206`.
 
 Este resultado aprueba el transporte cargado N=4 del release productivo
-`fbef23e…9289a`. No sustituye la repetición posterior al despliegue del candidato
-final: cuando los ajustes del arnés y de ROS se publiquen, el mismo procedimiento
-deberá ejecutarse otra vez sobre el nuevo SHA para comprobar que el artefacto
-final conserva el comportamiento aprobado aquí.
+`fbef23e…9289a`. El candidato posterior ya fue publicado, pero el procedimiento
+cargado de esta sección todavía debe repetirse sobre ese SHA nuevo. Por ello,
+esta aprobación histórica no se extiende de manera automática al despliegue
+actual.
 
-## 8. Preparación del candidato correctivo
+## 8. Liberación de la PR #106 y comprobación posterior
 
-El freeze provisional anterior a I-117–I-125, integrado hasta `e18926a`, reunió frontend 164/164 en 30
-suites, backend 253/253 con 8 pruebas PostgreSQL omitidas por diseño, ROS
-461/461 y aceptación 241/241. El cierre del apagado cargado aprobó por separado
-81/81 pruebas loaded, 170/170 ROS/mundo, 16/16 frontend focales y 53/53 backend
-focales. Worker aprobó 129/129, PostgreSQL 17 opt-in 8/8 y quedaron verdes el
-lint focal, el build de producción frontend, el publicador del visor y las
-pruebas de despliegue/rollback GPU. El primer build frontend se rechazó como
-fallo ambiental: encontró un `EACCES` en residuos ignorados de `build/` y aprobó
-al corregir únicamente su propiedad. Un build intermedio etiquetado
-`robotswarm-ros:local-final-candidate` terminó catkin al 100 %, con ID
-`sha256:db8ffda30d79e5e22e1bbfe66978faedb118bb9c43b3e25dedd161807833be14`,
-tamaño 4.231.139.487 bytes y fecha 2026-07-22T03:10:23Z. Una revisión posterior
-lo descartó como candidato final al encontrar fronteras P1 aún abiertas. Esa
-imagen sigue siendo anterior y fue sustituida localmente por
-`robotswarm-ros:local-final-safe`, creada el
-`2026-07-22T04:42:49.782807841Z`. Ese artefacto incorpora el código y mundo
-posteriores a I-134 y produjo las dos corridas visibles N4 de la sección 5, pero
-todavía usaba la cámara anterior. Tras cerrar I-135 se reconstruyó el mismo tag:
-la imagen vigente es `e17579ed…ae0d`, creada el
-`2026-07-22T04:53:51.679721236Z`. Este último artefacto incorpora también el
-encuadre corregido, superó el gate visible de cuatro esquinas y conservó el
-resultado N4 en la repetición física descrita en la sección 5. Ninguna de las
-dos imágenes es release ni despliegue; por ello no se cambió el estado
-productivo de la sección 7.
+### 8.1. Artefacto desplegado
 
-Los hallazgos de I-117–I-125 quedaron cerrados en código. `511e47c` aprobó 99/99
-pruebas focales de formación y 469/469 en su ejecución ROS aislada; `377a0e3`
-aprobó 206/206 de seguimiento+lifecycle y 473/473 en la ejecución global
-aislada. También aprobaron Python 3.8 y `git diff --check`. En ese corte todavía
-no existían el freeze ni el build seguro posteriores. La imagen intermedia
-permanece descartada y ningún artefacto local se presenta como ejecución física
-o postdeploy.
+La [PR #106](https://github.com/SkateWarp/RobotSwarm/pull/106) integró el
+control escalable del enjambre, la tolerancia de llegada de 0,25 m y el marcador
+fantasma. Los checks de CI finalizaron correctamente y el merge produjo el SHA
+`1448a31bbbbfd77588bada109947098cc95d9dda`. El despliegue GPU utilizó de forma
+exacta la imagen:
 
-La revisión posterior añadió I-126 e I-127. El primer caso se verificó aislado
-como `bd85755` y quedó integrado como `568979d`, con 40/40 pruebas follow y
-483/483 globales. I-127 afecta directamente a transporte y quedó integrada como
-`4450c13`, con 172/172 pruebas de lifecycle y 487/487 globales, como se explica
-en 4.13. Después aparecieron I-128–I-134, cerradas en `07da8f4` y descritas en
-4.14–4.15. I-135 se cerró después con el cambio de cámara y el gate de cuatro
-esquinas de 4.16. El freeze combinado y la imagen local vigente ya aprobaron;
-todavía no se acepta el artefacto como release antes de CI, despliegue y
-repetición física.
+```text
+robotswarm/ros-noetic:git-1448a31bbbbfd77588bada109947098cc95d9dda-29893535071-1
+```
 
-La captura «antes» de este nuevo intento se mantiene fuera del repositorio en
-`/tmp/robotswarm-acceptance/loaded-n4-evidence-20260722T011035Z-3918620/before-loaded-probe-browser.png`.
-Tiene 132.964 bytes y SHA-256
-`1905bea5683a3e75be4a06ef1838954389016b02004860c4c6e403125f489308`.
-Existe evidencia técnica local posterior bajo
-`/tmp/robotswarm-acceptance/corrective-local-20260722T023855Z`, donde la sonda
-dinámica comprobó el movimiento del marcador. El preflight visible correcto
-identificó `D3D12 (NVIDIA GeForce RTX 3080)`, 58,206 FPS de cámara, 62,512
-eventos de posrenderizado por segundo, RTF 2,996 y viewport 990×351. Su reporte
-`/tmp/robotswarm-corrected-ghost-gui-report.json` tiene permisos `0600` y
-SHA-256
-`98a4651069f1ea8199d26d278da0b7a4df273b54b93ffaa0a9b65bfd12e1f5d5`.
-Las capturas Windows/WSLg obtenidas con `CopyFromScreen` quedaron congeladas o
-recortadas y se rechazaron como evidencia. La evidencia visible limpia local se
-obtuvo después en las carpetas registradas en las secciones 4.16 y 5. El gate de
-cuatro esquinas demuestra el encuadre completo en Gazebo, pero no se presenta
-como evidencia postdeploy. La captura final de producción se obtendrá con
-Chrome y Gazebo visibles cuando el único PR correctivo apruebe CI y su SHA
-exacto quede desplegado. En esa corrida se verificará que el marcador fantasma
-aparezca completo en el destino, que la caja mantenga 0,75 kg y `mu=0.25`, que
-los cuatro robots aporten empuje útil y que no queden modelos, procesos,
-perfiles ni concesiones temporales.
+El ID observado de la imagen comienza por `d38cdd616eb1`. Esta relación entre
+merge, etiqueta e imagen evita atribuir a producción una prueba ejecutada sobre
+un build local diferente. La referencia de reversión anterior al cambio se
+conserva como `rollback/pre-formation-ghost-9f49e17`, que apunta a `9f49e17`.
 
-La referencia de reversión previa al candidato es
-`rollback/pre-formation-ghost-9f49e17`, que apunta exactamente a `9f49e17`. La
-política acordada es publicar todos los arreglos en un solo PR y no usar GitHub
-Actions para repetir diagnósticos locales; solo se ejecutará el ciclo remoto
-necesario para sellar y desplegar el artefacto final.
+El despliegue no unificó los dos perfiles físicos. El escenario normal conserva
+la caja de 0,25 kg con `mu=mu2=0.05` y el formulario usa una tolerancia inicial
+de 0,25 m. El gate cargado continúa usando, de manera explícita, 0,75 kg con
+`mu=mu2=0.25`. Así, el recorrido más largo de la demostración normal no se
+obtiene aligerando silenciosamente la carga académica.
+
+Como línea base previa al despliegue, la repetición local visible N=4 con el
+perfil normal avanzó 0,7523 m, terminó a 0,2477 m del destino y sostuvo RTF
+2,9962. Los cuatro robots aportaron movimiento útil y no se registraron
+colisiones. Ese resultado fue reproducible con el marcador completo dentro del
+encuadre, pero sigue identificado como evidencia local, no como aceptación
+cargada postdeploy.
+
+### 8.2. Evidencia visual antes y después
+
+La comparación versionada permite comprobar el cambio sin depender de las
+carpetas temporales de aceptación:
+
+- [Antes, sobre `9f49e17`: el destino no se representaba en Gazebo](assets/commissioning-2026-07/final-1448a31/marcador-antes-9f49e17.png).
+- [Después, sobre `1448a31`: el marcador magenta aparece en el visor productivo N=10](assets/commissioning-2026-07/final-1448a31/marcador-despues-1448a31.png).
+- [Búsqueda N=4 local con el objeto y el marcador dentro del encuadre](assets/commissioning-2026-07/final-1448a31/busqueda-n4-local.png).
+
+La captura «después» confirma que el modelo fantasma se publicó en producción:
+la huella magenta y la caja translúcida indican al espectador el destino sin
+añadir colisiones, gravedad ni fuerzas al mundo. La captura N=4 complementa la
+explicación del encuadre, pero no se presenta como imagen productiva. Los hashes,
+la procedencia y el uso válido de cada PNG están registrados en el
+[manifiesto del conjunto](assets/commissioning-2026-07/final-1448a31/README.md).
+
+### 8.3. Matriz de transporte con física normal
+
+La comprobación posterior al despliegue ejecutó el transporte normal con varios
+tamaños de flota. Su estado es el siguiente:
+
+| Robots | Resultado postdeploy | Observación |
+| ---: | --- | --- |
+| 1 | Aprobado con el arnés corregido | `DONE`, 0,5013 m, RTF 2,9962, utilidad 1/1, cero colisiones, sonda NVIDIA 58,711 FPS, HLS 30,164 FPS y limpieza completa sobre `1448a31`. |
+| 2 | Aprobado | El escenario de transporte completó sus criterios con la flota exacta. |
+| 3 | Aprobado | El escenario de transporte completó sus criterios con la flota exacta. |
+| 4 | Aprobado | El escenario de transporte completó sus criterios con la flota exacta. |
+| 10 | Aprobado | El objeto avanzó 0,5036 m, quedó a 0,4964 m del destino y mantuvo RTF 2,9672; participaron 10/10 robots y se observaron cero colisiones. |
+
+El rechazo N=1 inicial no demostró un fallo de ROS, del video ni del transporte.
+Fue una pérdida de evidencia causada por el orden temporal del instrumento: el
+informe se recogía demasiado tarde. La corrección copia y valida el
+`render-report` inmediatamente después de la sonda gráfica, antes de esperar el
+final de ROS. La repetición productiva utilizó esa versión del arnés contra la
+misma imagen `1448a31` y aprobó. Terminó antes de necesitar una renovación del
+lease; por ello prueba la preservación temprana y el cleanup, mientras las ramas
+de renovación permanecen acreditadas por contratos.
+
+Los cinco tamaños N=1, N=2, N=3, N=4 y N=10 tienen ahora un resultado aprobado
+del transporte normal sobre `1448a31`. Esto no cierra por sí solo la matriz ROS:
+las formaciones corregidas conservan su propio proceso de entrega y validación.
+
+### 8.4. Límites de la aceptación actual
+
+Después de `1448a31` aún no se ha ejecutado el gate completo de capacidad con
+la caja de 0,75 kg y `mu=mu2=0.25`. En consecuencia, no se afirma una nueva
+aceptación cargada para ese release. El último resultado cargado completo sigue
+siendo `loaded-n4-post-ttl-fix` sobre `fbef23e…9289a`, descrito en la sección 7.
+
+La evidencia actual permite afirmar tres hechos más acotados: el marcador es
+visible en producción, la tolerancia normal de 0,25 m permite observar un
+recorrido mayor sin cambiar la física y el transporte normal aprobó con 1, 2, 3,
+4 y 10 robots. Quedan fuera de este cierre el gate cargado post-`1448a31` y el
+cierre final de los escenarios de formación. Esta delimitación evita mezclar
+una mejora visual o de usabilidad con una aceptación física que todavía no se
+ha repetido.

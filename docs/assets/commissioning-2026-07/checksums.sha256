@@ -1,4 +1,9 @@
 7446344db0b74f373be2305903f79cc4bec90df19ee2883bf0023b7237105d82  ./account-preflight-readonly-20260720.txt
+1011fadae22fce986285b38765442748a0c0adce9187962d399e79b49a07d9c7  ./corrective-i136-i140/README.md
+9f5edd3a4b25050a11e9b7ee7ec5ebd148b109c77d85f96b76303f1b771645f7  ./corrective-i136-i140/predeploy-summary.json
+a465675aab6dc52f17fdecef6ff4cd8393a438526cf2f52daa88cb73b4256833  ./corrective-i141/README.md
+50aabc70834c4105e07e5e106b4b4ad98e6390826a72fee8f8892c61507bdf48  ./corrective-i142/README.md
+fdcff2beae20110007983bdfe687845f993522947024310f854fe63f01b215cb  ./corrective-i143/README.md
 435e26863c117b01c5ddc9f801d76ffe843832455eafd215fbdb555259dcb09f  ./datos-transporte-n10/README.md
 c16c775fe4f0ac714dbc2f4641a3431c2924dba63604bb993fcb3753ce94bfed  ./datos-transporte-n10/acceptance.result.json
 88d9ab6a5980904faf4729f88eed978e256f25255d8706204c51558865e8f274  ./datos-transporte-n10/acceptance.summary.json
@@ -21,6 +26,10 @@ da1137e8d7bc85408119d053358a8152c99fc57058fd01f7cf2c28faa79499ac  ./final-fbef23
 7d22238169fbf5303a1374de85fab15beed453742d746879135338394d75a429  ./final-fbef23e/responsive-768.png
 4e587e4d20d91602daf962f4f43e74b92017a4b3c537907517e06e5914739a74  ./final-fbef23e/responsive-reporte.json
 f8d9e24767c05af89a280f1ef255da789c2a2f33c17ff7cdeb442a5b9a956074  ./final-fbef23e/transporte-ui-carrera-rechazado.json
+a0ae03597c9eaa6b7191dcd4d94c9c47740a5f4436a699544fe7ca75a94e7a6e  ./final-1448a31/README.md
+d036d9814b893441f2c57be52a4ab58415339f85bfeba6055177820417211f11  ./final-1448a31/busqueda-n4-local.png
+4f27a3112d536da9a734a0b4d4d1a7b10117edded00c7451a723e1ff96018ed9  ./final-1448a31/marcador-antes-9f49e17.png
+916560190eb08d81e1608c61adbed756b6df299391d5b320b35a656343ea6a9b  ./final-1448a31/marcador-despues-1448a31.png
 3375d99ac1167c653a84d5ca1c286377ada812adf04296af7864fd4f0fd0053b  ./figura-01-frontend-antes.png
 bae24b015675aa3a6ab4b1f09ed93418ccfa004bff9e957f6054dab81fee0b9a  ./figura-02-visor-no-comisionado-antes.png
 a8cb63c867af431b40c8d4cd6d90279766303240a178fd5c8dd50bac33b272bd  ./figura-03-vnc-compartido-antes.png

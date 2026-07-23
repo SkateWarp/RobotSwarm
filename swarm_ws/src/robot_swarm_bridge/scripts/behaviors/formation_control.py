@@ -17,6 +17,7 @@ import json
 import math
 import threading
 import time
+import uuid
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
 
@@ -33,6 +34,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from core.obstacle_avoidance import ObstacleAvoidance
 from utils.robot_ids import sort_robot_ids
+from robot_swarm_bridge.utils.safety_publish import SafetyPublishLane
 from robot_swarm_bridge.algorithms.formation import (
     ensure_minimum_spacing,
     find_safe_formation_center,
@@ -43,6 +45,7 @@ from robot_swarm_bridge.algorithms.formation import (
     point_to_route_distance,
     routes_conflict,
     sample_letter_formation,
+    signed_distance_to_zone,
     straight_route_is_safe,
 )
 
@@ -295,7 +298,7 @@ class FormationController:
         ~path_radius        : float (default 2.5 m)
         ~centroid_path      : str   (default 'circular')
         ~odom_timeout_wall_s: float (default 0.75 s)
-        ~odom_initialization_timeout_wall_s: float (default 5.0 s)
+        ~odom_initialization_timeout_wall_s: float (default 10.0 s)
 
     Published topics:
         /{ns}/cmd_vel               geometry_msgs/Twist
@@ -310,6 +313,12 @@ class FormationController:
         /formation/stop             std_msgs/String  (JSON task_id)
     """
 
+    BURGER_MAX_LINEAR_VELOCITY = 0.22
+    BURGER_MAX_ANGULAR_VELOCITY = 2.84
+    BURGER_RADIUS = 0.11
+    ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT = 30.0
+    EMERGENCY_STOP_TIMEOUT = 0.25
+
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
@@ -321,8 +330,22 @@ class FormationController:
         formation_type_str = rospy.get_param('~formation_type', 'triangle')
         movement_mode_str = rospy.get_param('~movement_mode', 'moving')
         self.spacing = rospy.get_param('~spacing', 1.0)
-        self.max_linear_vel = rospy.get_param('~max_linear_vel', 0.22)
-        self.max_angular_vel = rospy.get_param('~max_angular_vel', 1.5)
+        configured_linear_limit = rospy.get_param('~max_linear_vel', 0.22)
+        configured_angular_limit = rospy.get_param('~max_angular_vel', 1.5)
+        self.max_linear_vel, linear_limit_valid = self._bounded_motion_limit(
+            configured_linear_limit,
+            self.BURGER_MAX_LINEAR_VELOCITY,
+        )
+        self.max_angular_vel, angular_limit_valid = self._bounded_motion_limit(
+            configured_angular_limit,
+            self.BURGER_MAX_ANGULAR_VELOCITY,
+        )
+        # Keep safe numeric limits in every downstream controller. The flag
+        # still remembers a malformed parameter so the publication gate can
+        # reject the task instead of silently accepting a fallback value.
+        self._motion_limits_valid = (
+            linear_limit_valid and angular_limit_valid
+        )
         self.centroid_speed = rospy.get_param('~centroid_speed', 0.1)
         self.path_radius = max(
             0.10, float(rospy.get_param('~path_radius', 2.5))
@@ -405,7 +428,14 @@ class FormationController:
         self.is_running = False
         self.is_paused = False
         self.emergency_stop_active = False
+        self._emergency_stop_generation = 0
+        self._latest_emergency_true_generation = 0
+        self._emergency_true_pending = set()
         self.current_task_id = None
+        # Start and stop travel on separate ROS topics. Remember a bounded set
+        # of stops which arrived first, so transport reordering cannot revive
+        # a task the orchestrator already cancelled.
+        self._cancelled_task_ids = {}
         self.formation_state = FormationState.IDLE
         self.lock = threading.RLock()
         self.command_lock = threading.RLock()
@@ -440,14 +470,19 @@ class FormationController:
         self.robot_yaws: Dict[str, float] = {}
         self.invalid_robot_poses: Tuple[str, ...] = ()
         self.odom_received_at: Dict[str, Optional[float]] = {}
+        # A pose received before a task starts is useful for planning, but it
+        # is not proof that the new task still has a live odometry stream.
+        # Each start waits for one new sample per robot before applying the
+        # normal, deliberately short stale-data timeout.
+        self.odom_confirmed_for_task: Dict[str, bool] = {}
         self.odom_timeout_wall_s = max(
             0.2, float(rospy.get_param('~odom_timeout_wall_s', 0.75))
         )
         initialization_timeout = float(rospy.get_param(
-            '~odom_initialization_timeout_wall_s', 5.0
+            '~odom_initialization_timeout_wall_s', 10.0
         ))
         if not math.isfinite(initialization_timeout):
-            initialization_timeout = 5.0
+            initialization_timeout = 10.0
         self.odom_initialization_timeout_wall_s = max(
             self.odom_timeout_wall_s, initialization_timeout
         )
@@ -456,6 +491,7 @@ class FormationController:
         self.waiting_for_odometry: List[str] = []
         self.model_poses: Dict[str, Tuple[float, float, float]] = {}
         self.invalid_model_poses: Tuple[str, ...] = ()
+        self.invalid_avoidance_limits: Tuple[str, ...] = ()
         self.placement_error: Optional[str] = None
 
         # Formation positions: list of (x, y) offsets from centroid (unscaled)
@@ -469,6 +505,71 @@ class FormationController:
         self.active_placement_plan: Optional[Dict] = None
         self.assignment_pending = False
         self._assignment_generation = 0
+        # A robot can settle after a long placement solve. Retry from the live
+        # poses a small, fixed number of times instead of releasing a stale
+        # route or failing immediately on harmless spawn jitter.
+        self.live_replan_limit = 2
+        self._live_replan_attempts = 0
+        self._stop_publication_attempt = 0
+        self._last_stop_publication = None
+        # A failed zero command belongs to one publisher instance, not merely
+        # to a robot name.  Keep that instance reachable until it accepts a
+        # zero; otherwise a fleet resize could hide the failed stop by
+        # removing the robot and successfully stopping only the reduced
+        # roster.  A returning robot reuses its retained publisher, which
+        # bounds the registry to the publishers that are active or still owe
+        # a stop acknowledgement at this local boundary.
+        self._stop_publication_lock = threading.RLock()
+        # This lock only protects the hand-off from regular stop accounting to
+        # the final shutdown result. It is never held while talking to ROS.
+        self._stop_result_lock = threading.RLock()
+        self._emergency_stop_condition = threading.Condition(
+            self._stop_result_lock
+        )
+        self._command_publisher_sequence = 0
+        self._command_publisher_generations = {}
+        self._stop_publication_debts = {}
+        self._safety_fallback_lanes = {}
+        self._safety_fallback_lane_factory = SafetyPublishLane
+        self._shutdown_publisher_snapshot = ()
+        self._shutdown_started = False
+        self._shutdown_publication = None
+        self._shutdown_status_delivery = None
+        self._shutdown_supervisor_delivery = None
+        self._safety_stop_ack_lock = threading.Lock()
+        self._safety_stop_ack_waiters = {}
+        self._motion_publish_inflight = set()
+        self._shutdown_motion_inflight = frozenset()
+        # Gazebo's differential-drive plugins can finish settling a freshly
+        # spawned Burger by a few centimetres while a ten-robot route is being
+        # solved. The complete live-geometry gate still validates every route
+        # before release; these tolerances only avoid throwing away a safe
+        # plan for normal spawn settling.
+        self.assignment_pose_drift_tolerance = min(
+            0.15,
+            max(0.02, float(rospy.get_param(
+                '~assignment_pose_drift_tolerance', 0.08
+            ))),
+        )
+        self.assignment_yaw_drift_tolerance = min(
+            0.20,
+            max(0.05, float(rospy.get_param(
+                '~assignment_yaw_drift_tolerance', 0.10
+            ))),
+        )
+        # Route and orbit planning can take several seconds for ten robots.
+        # Never perform that work on an odometry callback thread: blocking the
+        # callback would make the very sample which triggered planning appear
+        # stale. A single worker coalesces repeated requests, while generation
+        # checks reject any result made obsolete by a newer fleet or task.
+        self._assignment_worker_stop = threading.Event()
+        self._assignment_worker_wakeup = threading.Event()
+        self._assignment_worker = threading.Thread(
+            target=self._assignment_worker_loop,
+            name='formation-assignment-worker',
+            daemon=True,
+        )
+        self._assignment_worker.start()
         self._slot_reached: Dict[str, bool] = {}
         self._settled_duration = 0.0
 
@@ -488,6 +589,17 @@ class FormationController:
         self.status_pub = rospy.Publisher(
             '/formation/status', String, queue_size=1
         )
+        # Shutdown waits for a correlated ACK. Keep this one publisher
+        # synchronous so a return cannot mean only "placed in a local queue".
+        self.safety_stop_request_pub = rospy.Publisher(
+            '/swarm/safety_stop_request', String
+        )
+        if not self._register_safety_fallback_lane(
+            'supervisor-request', self.safety_stop_request_pub
+        ):
+            raise RuntimeError(
+                "Could not reserve the supervised-stop request lane"
+            )
         self.marker_pub = rospy.Publisher(
             '/formation/markers', MarkerArray, queue_size=1
         )
@@ -518,6 +630,10 @@ class FormationController:
         rospy.Subscriber(
             '/swarm/emergency_stop', Bool,
             self._emergency_stop_cb, queue_size=1
+        )
+        rospy.Subscriber(
+            '/swarm/safety_stop_ack', String,
+            self._safety_stop_ack_cb, queue_size=1,
         )
 
         # ---- Bootstrap robots from parameter if fleet topic not yet available ----
@@ -555,26 +671,53 @@ class FormationController:
             s.strip() for s in msg.data.split(',') if s.strip()
         )
         assignment_snapshot = None
+        fleet_stop_publication = None
         with self.command_lock:
+            if self._shutdown_started:
+                return
             if ids != self.robot_ids:
                 self._initial_formation_acquired = False
-                if not ids:
-                    self.is_running = False
-                    self.is_paused = False
-                    self.formation_state = FormationState.STOPPED
-                    self.current_task_id = None
-                    self._cancel_pending_assignment_locked(
-                        clear_assignments=True
+                if self.robot_ids:
+                    if not ids:
+                        self.is_running = False
+                        self.is_paused = False
+                        self.formation_state = FormationState.STOPPED
+                        self._cancel_pending_assignment_locked(
+                            clear_assignments=True
+                        )
+                    fleet_stop_publication = self._stop_all_robots(
+                        'fleet_empty' if not ids else 'fleet_change'
                     )
-                    self._stop_all_robots()
+                    if self._shutdown_started:
+                        return
+                    if (
+                        not ids
+                        and fleet_stop_publication[
+                            'publication_confirmed'
+                        ]
+                    ):
+                        self.current_task_id = None
 
                 self._update_robot_list(ids)
-                if ids:
+                if self._shutdown_started:
+                    return
+                if (
+                    ids
+                    and (
+                        fleet_stop_publication is None
+                        or fleet_stop_publication[
+                            'publication_confirmed'
+                        ]
+                    )
+                ):
                     assignment_snapshot = self._recompute_formation_locked()
                 else:
-                    self.formation_offsets = []
+                    if not ids:
+                        self.formation_offsets = []
                     self.assignments = {}
                     self.assignment_pending = False
+        if fleet_stop_publication is not None:
+            self._publish_stop_status_safely('fleet-change stop')
         self._compute_and_commit_assignment(assignment_snapshot)
 
     def _model_states_cb(self, msg: ModelStates):
@@ -664,6 +807,8 @@ class FormationController:
         new_type = msg.data.strip()
         assignment_snapshot = None
         with self.command_lock:
+            if self._shutdown_started:
+                return
             if new_type and new_type != self.formation_type:
                 rospy.loginfo(
                     "Formation shape changed: %s -> %s",
@@ -672,6 +817,11 @@ class FormationController:
                 self.formation_type = new_type
                 self._initial_formation_acquired = False
                 assignment_snapshot = self._recompute_formation_locked()
+                if self._shutdown_started:
+                    self._cancel_pending_assignment_locked(
+                        clear_assignments=True
+                    )
+                    return
         self._compute_and_commit_assignment(assignment_snapshot)
 
     def _start_cb(self, msg):
@@ -681,9 +831,35 @@ class FormationController:
             config = json.loads(msg.data) if msg.data else {}
         except (json.JSONDecodeError, AttributeError):
             config = {}
+        if not isinstance(config, dict):
+            config = {}
+        requested_task_id = config.get('task_id')
+        if (
+            not isinstance(requested_task_id, str)
+            or not requested_task_id.strip()
+        ):
+            rospy.logwarn(
+                "Formation start rejected because task_id is missing or "
+                "invalid"
+            )
+            return
 
         assignment_snapshot = None
         with self.command_lock:
+            if getattr(self, '_shutdown_started', False):
+                rospy.logwarn(
+                    "Formation start rejected because shutdown has begun"
+                )
+                return
+            if requested_task_id in getattr(
+                self, '_cancelled_task_ids', {}
+            ):
+                rospy.logwarn(
+                    "Formation start rejected because task %s was already "
+                    "cancelled",
+                    requested_task_id,
+                )
+                return
             if self.emergency_stop_active:
                 rospy.logwarn(
                     "Formation start rejected while emergency stop is active"
@@ -694,54 +870,121 @@ class FormationController:
                     "Formation start rejected because the fleet is empty"
                 )
                 return
+            last_stop = getattr(self, '_last_stop_publication', None)
+            with self.lock:
+                if self._shutdown_started:
+                    return
+                pending_stop_debt = bool(getattr(
+                    self, '_stop_publication_debts', {}
+                ))
+            if (
+                pending_stop_debt
+                or (
+                    last_stop is not None
+                    and not last_stop.get('publication_confirmed', False)
+                )
+            ):
+                rospy.logwarn(
+                    "Formation start rejected because the previous "
+                    "zero-velocity publication was not accepted by every "
+                    "robot publisher"
+                )
+                self._publish_stop_status_safely('start rejection')
+                return
 
+            requested_formation = self.formation_type
+            requested_mode = self.movement_mode
+            requested_spacing = self.spacing
+            requested_radius = self.path_radius
             recompute = False
             if 'formation_type' in config:
                 new_type = config['formation_type']
                 recompute = recompute or new_type != self.formation_type
-                self.formation_type = new_type
+                requested_formation = new_type
             if 'movement_mode' in config:
                 try:
-                    self.movement_mode = MovementMode(config['movement_mode'])
+                    requested_mode = MovementMode(config['movement_mode'])
                 except ValueError:
                     pass
             if 'spacing' in config:
                 try:
                     new_spacing = max(0.35, float(config['spacing']))
                     recompute = recompute or new_spacing != self.spacing
-                    self.spacing = new_spacing
+                    requested_spacing = new_spacing
                 except (TypeError, ValueError):
                     pass
             if 'path_radius' in config:
                 try:
                     new_radius = max(0.10, float(config['path_radius']))
                     recompute = recompute or new_radius != self.path_radius
-                    self.path_radius = new_radius
+                    requested_radius = new_radius
                 except (TypeError, ValueError):
                     pass
-            self.current_task_id = config.get('task_id')
-            self.task_started_at = time.monotonic()
-            self.stale_odometry = []
-            self.waiting_for_odometry = []
-            self.is_running = True
-            self.is_paused = False
-            self.formation_state = FormationState.FORMING
-            self.placement_error = None
-            self._slot_reached = {}
-            self._settled_duration = 0.0
-            self._initial_formation_acquired = False
-            self._reset_centroid_path_pose_locked()
+
+            task_started_at = time.monotonic()
+            with self.lock:
+                # Pair the final start commit with the shutdown epoch. If
+                # shutdown wins this short hand-off, no field can reactivate
+                # the controller after its final state has been published.
+                with self._stop_result_lock:
+                    if (
+                        self._shutdown_started
+                        or self.emergency_stop_active
+                    ):
+                        return
+                    self.formation_type = requested_formation
+                    self.movement_mode = requested_mode
+                    self.spacing = requested_spacing
+                    self.path_radius = requested_radius
+                    self.current_task_id = requested_task_id
+                    self._last_stop_publication = None
+                    self.task_started_at = task_started_at
+                    self.odom_confirmed_for_task = {
+                        robot_id: False for robot_id in self.robot_ids
+                    }
+                    self.stale_odometry = []
+                    self.waiting_for_odometry = []
+                    self.is_running = True
+                    self.is_paused = False
+                    self.formation_state = FormationState.FORMING
+                    self.placement_error = None
+                    self._slot_reached = {}
+                    self._settled_duration = 0.0
+                    self._initial_formation_acquired = False
+                    self._live_replan_attempts = 0
+                    self._reset_centroid_path_pose_locked()
+
+                    for pid in self.pid_linear.values():
+                        pid.reset()
+                    for pid in self.pid_angular.values():
+                        pid.reset()
 
             if recompute:
                 assignment_snapshot = self._recompute_formation_locked()
             else:
                 assignment_snapshot = self._prepare_assignment_locked()
 
-            for pid in self.pid_linear.values():
-                pid.reset()
-            for pid in self.pid_angular.values():
-                pid.reset()
+            if self._shutdown_started:
+                self.is_running = False
+                self.is_paused = False
+                self._cancel_pending_assignment_locked(
+                    clear_assignments=True
+                )
+                return
+        # Route planning for a large fleet can take longer than the normal
+        # behavior heartbeat window. Publish the correlated, stationary
+        # FORMING state before entering the solver so the orchestrator can
+        # distinguish bounded planning from a node that never accepted the
+        # task.
+        try:
+            self._publish_status([], 0.0)
+        except Exception as exc:
+            rospy.logwarn(
+                "Formation planning status could not be published: %s", exc
+            )
         self._compute_and_commit_assignment(assignment_snapshot)
+        if self._shutdown_started:
+            return
         if self.placement_error:
             rospy.logerr(
                 "Formation control could not start: %s",
@@ -755,73 +998,657 @@ class FormationController:
 
     def _stop_cb(self, msg: String):
         """Stop the formation behavior and halt all robots."""
+        requested_task_id = self._task_id_from_message(msg)
+        if requested_task_id is None:
+            return
         with self.command_lock:
-            if not self._task_command_matches(msg):
+            self._remember_cancelled_task_locked(requested_task_id)
+            if requested_task_id != self.current_task_id:
                 return
-            self.is_running = False
-            self.is_paused = False
-            self.formation_state = FormationState.STOPPED
-            self._initial_formation_acquired = False
+            with self._stop_result_lock:
+                if self._shutdown_started:
+                    return
+                self.is_running = False
+                self.is_paused = False
+                self.formation_state = FormationState.STOPPED
+                self.placement_error = None
+                self._initial_formation_acquired = False
             self._cancel_pending_assignment_locked(clear_assignments=True)
-            self._stop_all_robots()
-        rospy.loginfo("Formation control STOPPED")
+            publication = self._stop_all_robots('task_stop')
+            if self._shutdown_started:
+                return
+            self._publish_stop_status_safely('stop')
+        if publication['publication_confirmed']:
+            rospy.loginfo("Formation control STOPPED")
+        else:
+            rospy.logerr(
+                "Formation control stop remains unconfirmed at the local "
+                "publication boundary"
+            )
 
     def _pause_cb(self, msg: String):
         with self.command_lock:
             if not self._task_command_matches(msg):
                 return
-            if not self.is_running or self.is_paused:
+            with self._stop_result_lock:
+                if (
+                    self._shutdown_started
+                    or not self.is_running
+                    or self.is_paused
+                ):
+                    return
+                self.is_paused = True
+            publication = self._stop_all_robots('task_pause')
+            if self._shutdown_started:
                 return
-            self.is_paused = True
-            self._stop_all_robots()
-        rospy.loginfo("Formation control PAUSED")
+            self._publish_stop_status_safely('pause')
+        if publication['publication_confirmed']:
+            rospy.loginfo("Formation control PAUSED")
+        else:
+            rospy.logerr(
+                "Formation pause failed because zero velocity was not "
+                "accepted by every local publisher"
+            )
 
     def _resume_cb(self, msg: String):
         with self.command_lock:
             if not self._task_command_matches(msg):
                 return
-            if (
-                not self.is_running
-                or not self.is_paused
-                or self.emergency_stop_active
-            ):
-                return
-            self.is_paused = False
+            with self._stop_result_lock:
+                if (
+                    self._shutdown_started
+                    or not self.is_running
+                    or not self.is_paused
+                    or self.emergency_stop_active
+                ):
+                    return
+                self.is_paused = False
         rospy.loginfo("Formation control RESUMED")
 
-    def _task_command_matches(self, msg: String) -> bool:
+    @staticmethod
+    def _task_id_from_message(msg: String) -> Optional[str]:
         try:
             payload = json.loads(msg.data) if msg.data else {}
         except (json.JSONDecodeError, AttributeError):
             payload = {}
         requested_id = payload.get('task_id')
-        return (
-            isinstance(requested_id, str)
-            and bool(requested_id)
-            and requested_id == self.current_task_id
-        )
+        if not isinstance(requested_id, str) or not requested_id.strip():
+            return None
+        return requested_id
+
+    def _remember_cancelled_task_locked(self, task_id: str):
+        cancelled = getattr(self, '_cancelled_task_ids', None)
+        if cancelled is None:
+            self._cancelled_task_ids = {}
+            cancelled = self._cancelled_task_ids
+        if task_id in cancelled:
+            return
+        if len(cancelled) >= 64:
+            cancelled.pop(next(iter(cancelled)))
+        cancelled[task_id] = None
+
+    def _task_command_matches(self, msg: String) -> bool:
+        requested_id = self._task_id_from_message(msg)
+        return requested_id is not None and requested_id == self.current_task_id
 
     def _emergency_stop_cb(self, msg: Bool):
-        with self.command_lock:
-            self.emergency_stop_active = bool(msg.data)
-            if self.emergency_stop_active:
+        requested_stop = bool(msg.data)
+        with self._emergency_stop_condition:
+            if self._shutdown_started:
+                return
+            self._emergency_stop_generation = getattr(
+                self, '_emergency_stop_generation', 0
+            ) + 1
+            generation = self._emergency_stop_generation
+            if not requested_stop:
+                required_true_generation = getattr(
+                    self, '_latest_emergency_true_generation', 0
+                )
+            else:
+                self._latest_emergency_true_generation = generation
+                self._emergency_true_pending.add(generation)
+                # Close the motion gate before command_lock. A normal stop or
+                # motion publisher may be blocked while holding that lock.
+                self.emergency_stop_active = True
                 self.is_running = False
                 self.is_paused = False
                 self.formation_state = FormationState.STOPPED
+                self.placement_error = None
                 self._initial_formation_acquired = False
-                self._cancel_pending_assignment_locked(
-                    clear_assignments=True
-                )
-                self._stop_all_robots()
-                rospy.logwarn("Formation emergency stop latched")
+                task_id = self.current_task_id
+
+        if not requested_stop:
+            with self._emergency_stop_condition:
+                while any(
+                    pending_generation <= required_true_generation
+                    for pending_generation in self._emergency_true_pending
+                ):
+                    self._emergency_stop_condition.wait()
+            with self.command_lock:
+                with self._emergency_stop_condition:
+                    if (
+                        self._shutdown_started
+                        or generation != self._emergency_stop_generation
+                    ):
+                        return
+                    self.emergency_stop_active = False
+            return
+
+        # The latch above is visible before command_lock, so a blocked normal
+        # publication cannot delay the independent emergency fan-out.
+        publication = None
+        latest_true = False
+        try:
+            targets = self._cached_command_publisher_snapshot()
+            self._stop_from_shutdown_snapshot(
+                targets,
+                'emergency_stop',
+                task_id,
+                time.monotonic() + max(
+                    0.0, float(self.EMERGENCY_STOP_TIMEOUT)
+                ),
+            )
+            with self.command_lock:
+                with self._emergency_stop_condition:
+                    if self._shutdown_started:
+                        return
+                    current_edge = (
+                        generation == self._emergency_stop_generation
+                    )
+                    latest_true = (
+                        generation
+                        == self._latest_emergency_true_generation
+                    )
+                    if current_edge:
+                        self.emergency_stop_active = True
+                    if latest_true:
+                        # A start already waiting on the pose lock cannot
+                        # restore these fields after this True edge.
+                        self.is_running = False
+                        self.is_paused = False
+                        self.formation_state = FormationState.STOPPED
+                        self._initial_formation_acquired = False
+                if latest_true:
+                    self._cancel_pending_assignment_locked(
+                        clear_assignments=True
+                    )
+                    publication = self._stop_all_robots_bounded(
+                        'emergency_stop', self.EMERGENCY_STOP_TIMEOUT
+                    )
+                    if self._shutdown_started:
+                        return
+                    if not publication['publication_confirmed']:
+                        self._fail_for_unconfirmed_stop_locked(
+                            "Zero-velocity publication was not accepted for: "
+                            + ", ".join(publication['failed_robots'])
+                            + "."
+                        )
+                    self._publish_stop_status_safely('emergency stop')
+        finally:
+            with self._emergency_stop_condition:
+                self._emergency_true_pending.discard(generation)
+                self._emergency_stop_condition.notify_all()
+        if publication is None:
+            return
+        if publication['publication_confirmed']:
+            rospy.logwarn("Formation emergency stop latched")
+        else:
+            rospy.logerr(
+                "Formation emergency stop latched, but zero-velocity "
+                "publication was not accepted by every publisher"
+            )
 
     def _shutdown(self):
-        """Publish a final zero command before leaving the ROS graph."""
-        with self.command_lock:
+        """Stop planning and publish a final zero command before leaving."""
+        # This atomic flag also fences a lifecycle callback which began before
+        # shutdown but finishes after the bounded emergency publication.
+        with self._stop_result_lock:
+            self._shutdown_started = True
+            self._shutdown_motion_inflight = frozenset(
+                self._motion_publish_inflight
+            )
+        shutdown_timeout = max(
+            0.0, float(self.ASSIGNMENT_WORKER_SHUTDOWN_TIMEOUT)
+        )
+        shutdown_deadline = time.monotonic() + shutdown_timeout
+        status_reserve = min(0.02, shutdown_timeout / 4.0)
+        work_deadline = shutdown_deadline - status_reserve
+        request_budget = min(0.05, shutdown_timeout / 4.0)
+        request_deadline = min(
+            work_deadline,
+            time.monotonic() + request_budget,
+        )
+        supervisor_delivery = self._request_supervised_shutdown_stop(
+            request_deadline
+        )
+        supervisor_error = None
+        if not supervisor_delivery['publication_confirmed']:
+            supervisor_error = (
+                "The independent safety-stop request was not confirmed "
+                "before the bounded shutdown deadline."
+            )
+        worker_stop = getattr(self, '_assignment_worker_stop', None)
+        worker_wakeup = getattr(self, '_assignment_worker_wakeup', None)
+        worker = getattr(self, '_assignment_worker', None)
+        # Close the worker's input first. A plan which is already being solved
+        # is invalidated after acquiring the lifecycle lock. Keep one deadline
+        # for lock acquisition, zero publication, and the worker join: a
+        # planner which accidentally retains command_lock must not deadlock ROS
+        # shutdown before the old join timeout even starts.
+        if worker_stop is not None:
+            worker_stop.set()
+        if worker_wakeup is not None:
+            worker_wakeup.set()
+
+        publisher_snapshot = self._cached_command_publisher_snapshot()
+        status_context = self._shutdown_status_context()
+        status_context['supervisor_stop_request'] = supervisor_delivery
+        remaining = max(0.0, work_deadline - time.monotonic())
+        publication_reserve = min(0.10, remaining / 2.0)
+        lifecycle_wait = max(0.0, remaining - publication_reserve)
+        lifecycle_lock_acquired = self.command_lock.acquire(
+            timeout=lifecycle_wait
+        )
+        if not lifecycle_lock_acquired:
+            publication = self._stop_from_shutdown_snapshot(
+                publisher_snapshot,
+                'shutdown',
+                status_context['task_id'],
+                work_deadline,
+                self._shutdown_motion_inflight,
+            )
+            self._seal_shutdown_publication(publication)
+            self._publish_bounded_shutdown_failure(
+                "Formation shutdown could not acquire the lifecycle lock "
+                "before its bounded deadline. The assignment worker exit "
+                "and lifecycle cleanup were not confirmed."
+                + (
+                    " " + supervisor_error
+                    if supervisor_error is not None else ""
+                ),
+                publication,
+                status_context,
+                shutdown_deadline,
+            )
+            return
+
+        try:
             self.is_running = False
             self.is_paused = False
+            self.formation_state = FormationState.STOPPED
             self._initial_formation_acquired = False
-            self._stop_all_robots()
+            self._cancel_pending_assignment_locked(clear_assignments=True)
+            publication = self._stop_from_shutdown_snapshot(
+                publisher_snapshot,
+                'shutdown',
+                status_context['task_id'],
+                work_deadline,
+                self._shutdown_motion_inflight,
+            )
+            self._stop_publication_attempt = publication['attempt']
+            self._seal_shutdown_publication(publication)
+            if not publication['publication_confirmed']:
+                self._fail_for_unconfirmed_stop_locked(
+                    "Zero-velocity publication was not accepted for: "
+                    + ", ".join(publication['failed_robots'])
+                    + "."
+                )
+            if supervisor_error is not None:
+                self._fail_for_unconfirmed_stop_locked(supervisor_error)
+        finally:
+            self.command_lock.release()
+
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(
+                0.0, work_deadline - time.monotonic()
+            ))
+            if worker.is_alive():
+                self._publish_bounded_shutdown_failure(
+                    "Formation assignment worker did not stop before the "
+                    "bounded shutdown deadline. Its exit and lifecycle "
+                    "cleanup were not confirmed.",
+                    publication,
+                    status_context,
+                    shutdown_deadline,
+                )
+                return
+
+        self._publish_shutdown_status(
+            status_context,
+            publication,
+            self.formation_state,
+            self.placement_error,
+            shutdown_deadline,
+        )
+
+    def _seal_shutdown_publication(self, publication):
+        """Make the bounded shutdown result final for late callbacks."""
+        with self._stop_result_lock:
+            self._shutdown_publication = publication
+            self._last_stop_publication = publication
+
+    def _safety_stop_ack_cb(self, msg):
+        """Release only the waiter named by a positive supervisor ACK."""
+        try:
+            payload = json.loads(msg.data)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        request_id = payload.get('request_id')
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or payload.get('accepted') is not True
+            or payload.get('supervisor_latched') is not True
+            or payload.get('supervisor_will_remain_active') is not True
+            or payload.get('valid_request') is not True
+            or payload.get('zero_publications_confirmed') is not True
+        ):
+            return
+        with self._safety_stop_ack_lock:
+            waiter = self._safety_stop_ack_waiters.get(request_id)
+            if waiter is None:
+                return
+            waiter['ack'] = dict(payload)
+            waiter['event'].set()
+
+    def _request_supervised_shutdown_stop(self, deadline):
+        """Request and observe an ACK from the independent orchestrator."""
+        publisher = getattr(self, 'safety_stop_request_pub', None)
+        if publisher is None:
+            delivery = {
+                'attempted': False,
+                'subscriber_connected': False,
+                'publication_returned': False,
+                'acknowledgement_received': False,
+                'publication_confirmed': False,
+                'error': 'safety-stop request publisher is unavailable',
+            }
+            with self._stop_result_lock:
+                self._shutdown_supervisor_delivery = delivery
+            return delivery
+        request_id = uuid.uuid4().hex
+        waiter = {'event': threading.Event(), 'ack': None}
+        with self._safety_stop_ack_lock:
+            self._safety_stop_ack_waiters[request_id] = waiter
+
+        request = String(data=json.dumps({
+            'source': 'formation',
+            'reason': 'shutdown',
+            'request_id': request_id,
+            'task_id': (
+                self.current_task_id
+                if isinstance(self.current_task_id, str)
+                else None
+            ),
+        }))
+
+        connection_count = getattr(publisher, 'get_num_connections', None)
+        subscriber_connected = None
+        if callable(connection_count):
+            try:
+                subscriber_connected = connection_count() > 0
+            except Exception:
+                subscriber_connected = None
+
+        result = {'error': None}
+        publication_finished = threading.Event()
+
+        def publish_request():
+            try:
+                publisher.publish(request)
+            except Exception as exc:
+                result['error'] = str(exc)[:256]
+                try:
+                    rospy.logerr(
+                        "Formation could not request the supervised stop: %s",
+                        exc,
+                    )
+                except Exception:
+                    pass
+            finally:
+                publication_finished.set()
+
+        request_started = False
+        last_start_error = None
+        for attempt in (1, 2):
+            request_thread = threading.Thread(
+                target=publish_request,
+                name='formation-supervised-stop-request-{}'.format(attempt),
+                daemon=True,
+            )
+            try:
+                request_thread.start()
+                request_started = True
+                break
+            except Exception as exc:
+                last_start_error = exc
+                try:
+                    rospy.logerr(
+                        "Supervised-stop request worker could not start "
+                        "(attempt %d): %s",
+                        attempt,
+                        exc,
+                    )
+                except Exception:
+                    pass
+        if not request_started and self._submit_safety_fallback(
+            publisher, publish_request
+        ):
+            request_started = True
+        if not request_started:
+            with self._safety_stop_ack_lock:
+                self._safety_stop_ack_waiters.pop(request_id, None)
+            delivery = {
+                'attempted': False,
+                'subscriber_connected': subscriber_connected,
+                'publication_returned': False,
+                'acknowledgement_received': False,
+                'publication_confirmed': False,
+                'error': (
+                    'safety-stop request worker could not start: '
+                    + str(last_start_error)[:192]
+                ),
+            }
+            with self._stop_result_lock:
+                self._shutdown_supervisor_delivery = delivery
+            return delivery
+        publication_finished.wait(max(
+            0.0, deadline - time.monotonic()
+        ))
+        publication_returned = publication_finished.is_set()
+        if publication_returned and result['error'] is None:
+            waiter['event'].wait(max(
+                0.0, deadline - time.monotonic()
+            ))
+        with self._safety_stop_ack_lock:
+            self._safety_stop_ack_waiters.pop(request_id, None)
+            acknowledgement_received = waiter['ack'] is not None
+        confirmed = (
+            publication_returned
+            and result['error'] is None
+            and subscriber_connected is not False
+            and acknowledgement_received
+        )
+        error = result['error']
+        if error is None and not publication_returned:
+            error = 'safety-stop request exceeded shutdown deadline'
+        elif error is None and subscriber_connected is False:
+            error = 'safety-stop supervisor had no ROS subscriber'
+        elif error is None and not acknowledgement_received:
+            error = 'safety-stop acknowledgement exceeded shutdown deadline'
+        delivery = {
+            'attempted': True,
+            'subscriber_connected': subscriber_connected,
+            'publication_returned': publication_returned,
+            'acknowledgement_received': acknowledgement_received,
+            'publication_confirmed': confirmed,
+            'error': None if confirmed else error,
+        }
+        with self._stop_result_lock:
+            self._shutdown_supervisor_delivery = delivery
+        return delivery
+
+    def _shutdown_status_context(self):
+        """Capture only atomic shutdown fields; never traverse live mappings."""
+        movement_mode = getattr(self, 'movement_mode', MovementMode.STATIC)
+        return {
+            'task_id': (
+                self.current_task_id
+                if isinstance(self.current_task_id, str)
+                else None
+            ),
+            'formation_type': getattr(self, 'formation_type', 'unknown'),
+            'movement_mode': movement_mode.value,
+            'centroid_x': float(getattr(self, 'centroid_x', 0.0)),
+            'centroid_y': float(getattr(self, 'centroid_y', 0.0)),
+            'centroid_heading': float(getattr(
+                self, 'centroid_heading', 0.0
+            )),
+            'formation_heading': float(getattr(
+                self, 'formation_heading', 0.0
+            )),
+            'robot_count': int(getattr(self, 'robot_count', 0)),
+            'settled_for': float(getattr(self, '_settled_duration', 0.0)),
+            'status_publisher': self.status_pub,
+        }
+
+    def _publish_shutdown_status(
+        self, context, publication, state, error, deadline
+    ):
+        """Publish shutdown state from immutable scalar and stop snapshots."""
+        status = {
+            'task_id': context['task_id'] or publication.get('task_id'),
+            'paused': False,
+            'formation_type': context['formation_type'],
+            'movement_mode': context['movement_mode'],
+            'state': state.value,
+            'centroid': {
+                'x': round(context['centroid_x'], 4),
+                'y': round(context['centroid_y'], 4),
+            },
+            'centroid_heading': round(context['centroid_heading'], 4),
+            'formation_heading': round(context['formation_heading'], 4),
+            'robot_count': context['robot_count'],
+            'maximum_position_error': 0.0,
+            'settled_for': round(context['settled_for'], 3),
+            'robot_assignments': {},
+            'stale_odometry': [],
+            'waiting_for_odometry': [],
+            'stop_publication': self._stop_publication_status_payload(
+                publication
+            ),
+            'supervisor_stop_request': dict(
+                context['supervisor_stop_request']
+            ),
+        }
+        if error:
+            status['error'] = error
+        status_message = String(data=json.dumps(status))
+        with self._stop_result_lock:
+            self._shutdown_status_delivery = (
+                context['status_publisher'], status_message
+            )
+
+        def publish_status():
+            try:
+                context['status_publisher'].publish(status_message)
+            except Exception as exc:
+                try:
+                    rospy.logerr(
+                        "Formation shutdown status could not be published: "
+                        "%s",
+                        exc,
+                    )
+                except Exception:
+                    pass
+
+        status_thread = threading.Thread(
+            target=publish_status,
+            name='formation-shutdown-status',
+            daemon=True,
+        )
+        try:
+            status_thread.start()
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Formation shutdown status worker could not start: %s",
+                    exc,
+                )
+            except Exception:
+                pass
+            return
+        status_thread.join(timeout=max(
+            0.0, deadline - time.monotonic()
+        ))
+
+    def _reassert_shutdown_status(self):
+        """Put the final snapshot after a status publish that returned late."""
+        with self._stop_result_lock:
+            delivery = self._shutdown_status_delivery
+        if delivery is None:
+            return
+        publisher, message = delivery
+        for attempt in (1, 2):
+            worker = threading.Thread(
+                target=self._shutdown_status_reassertion_attempt,
+                args=(publisher, message, attempt),
+                name='formation-shutdown-status-reassert-{}'.format(attempt),
+                daemon=True,
+            )
+            try:
+                worker.start()
+            except Exception as exc:
+                try:
+                    rospy.logerr(
+                        "Formation shutdown status reassertion worker %d "
+                        "could not start: %s",
+                        attempt,
+                        exc,
+                    )
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _shutdown_status_reassertion_attempt(publisher, message, attempt):
+        """Run one detached attempt to restore the terminal status order."""
+        try:
+            publisher.publish(message)
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Formation shutdown status reassertion %d failed: %s",
+                    attempt,
+                    exc,
+                )
+            except Exception:
+                pass
+
+    def _publish_bounded_shutdown_failure(
+        self, error, publication, status_context, deadline
+    ):
+        """Publish a minimal immutable failure status without command_lock."""
+        self.is_running = False
+        self.is_paused = False
+        self._initial_formation_acquired = False
+        self.formation_state = FormationState.FAILED
+        self.orbit_path_validated = False
+        if self.placement_error:
+            if error not in self.placement_error:
+                self.placement_error = (
+                    self.placement_error.rstrip() + " " + error
+                )
+        else:
+            self.placement_error = error
+        self._publish_shutdown_status(
+            status_context,
+            publication,
+            FormationState.FAILED,
+            self.placement_error,
+            deadline,
+        )
 
     def _odom_cb(self, msg: Odometry, robot_id: str):
         """Per-robot odometry callback."""
@@ -857,9 +1684,15 @@ class FormationController:
             first_update = self.robot_poses.get(robot_id) is None
             invalid_robots.discard(robot_id)
             self.invalid_robot_poses = tuple(sorted(invalid_robots))
+            observed_at = time.monotonic()
             self.robot_poses[robot_id] = pose
             self.robot_yaws[robot_id] = yaw
-            self.odom_received_at[robot_id] = time.monotonic()
+            self.odom_received_at[robot_id] = observed_at
+            if (
+                self.task_started_at is not None
+                and observed_at >= self.task_started_at
+            ):
+                self.odom_confirmed_for_task[robot_id] = True
             should_assign = (
                 first_update
                 and self.assignment_pending
@@ -874,16 +1707,267 @@ class FormationController:
         if av is not None:
             av.set_position(pose.position.x, pose.position.y, yaw)
         if should_assign:
+            self._request_pending_assignment()
+
+    def _request_pending_assignment(self):
+        """Wake the planner without holding up a sensor callback."""
+        wakeup = getattr(self, '_assignment_worker_wakeup', None)
+        if wakeup is not None:
+            wakeup.set()
+
+    def _assignment_worker_loop(self):
+        """Coalesce pending plans and solve them away from ROS callbacks."""
+        while not self._assignment_worker_stop.is_set():
+            self._assignment_worker_wakeup.wait(0.25)
+            if self._assignment_worker_stop.is_set():
+                break
+            if not self._assignment_worker_wakeup.is_set():
+                continue
+            self._assignment_worker_wakeup.clear()
+            prepared_generation = None
             with self.command_lock:
-                if self.assignment_pending:
+                if not self.assignment_pending:
+                    continue
+                try:
                     assignment_snapshot = self._prepare_assignment_locked()
-                else:
-                    assignment_snapshot = None
-            self._compute_and_commit_assignment(assignment_snapshot)
+                    prepared_generation = self._assignment_generation
+                except Exception as exc:
+                    failed_generation = self._assignment_generation
+                    self._fail_assignment_worker(
+                        exc,
+                        'snapshot preparation',
+                        failed_generation,
+                    )
+                    continue
+            try:
+                self._compute_and_commit_assignment(assignment_snapshot)
+            except Exception as exc:
+                self._fail_assignment_worker(
+                    exc,
+                    'plan computation',
+                    prepared_generation,
+                )
+
+    def _fail_assignment_worker(
+        self,
+        exc: Exception,
+        stage: str,
+        expected_generation: Optional[int],
+    ) -> bool:
+        """Fail the current task closed without terminating the worker."""
+        if self._shutdown_started:
+            return False
+        error = (
+            "Formation assignment planning failed unexpectedly during "
+            f"{stage}; a zero-velocity stop was requested for the fleet."
+        )
+        status_error = None
+        handler_error = None
+        applied = False
+        try:
+            with self.command_lock:
+                if self._shutdown_started:
+                    return False
+                if (
+                    expected_generation is not None
+                    and expected_generation != self._assignment_generation
+                ):
+                    return False
+                self.is_running = False
+                self.is_paused = False
+                self._initial_formation_acquired = False
+                self._cancel_pending_assignment_locked(
+                    clear_assignments=True
+                )
+                self.orbit_path_validated = False
+                self.placement_error = error
+                self.formation_state = FormationState.FAILED
+                # Each command publisher is attempted independently. Keep the
+                # status channel independent too: neither a broken socket nor
+                # a test double is allowed to terminate this worker.
+                self._stop_all_robots('assignment_worker_failure')
+                try:
+                    self._publish_status([], 0.0)
+                except Exception as status_exc:
+                    status_error = status_exc
+                applied = True
+        except Exception as failure_exc:
+            handler_error = failure_exc
+
+        for message, detail in (
+            (
+                "Formation assignment worker failed closed during %s: %s",
+                (stage, exc),
+            ),
+            (
+                "Formation assignment failure status could not be "
+                "published: %s",
+                (status_error,),
+            ),
+            (
+                "Formation assignment failure handler encountered an "
+                "additional error: %s",
+                (handler_error,),
+            ),
+        ):
+            if detail[0] is None:
+                continue
+            try:
+                rospy.logerr(message, *detail)
+            except Exception:
+                pass
+        return applied
 
     # ------------------------------------------------------------------
     # Robot list management
     # ------------------------------------------------------------------
+    @staticmethod
+    def _report_safety_lane_error(label, action, error):
+        try:
+            rospy.logerr(
+                "Safety publication lane %s %s: %s", label, action, error
+            )
+        except Exception:
+            pass
+
+    def _register_safety_fallback_lane(self, label, publisher):
+        """Reserve a worker while the process still has normal resources."""
+        lanes = getattr(self, '_safety_fallback_lanes', None)
+        if lanes is None:
+            self._safety_fallback_lanes = {}
+            lanes = self._safety_fallback_lanes
+        key = id(publisher)
+        current = lanes.get(key)
+        if current is not None and current.available:
+            return True
+        factory = getattr(
+            self, '_safety_fallback_lane_factory', SafetyPublishLane
+        )
+        lane = factory(label, self._report_safety_lane_error)
+        if not lane.available:
+            lane.close()
+            return False
+        lanes[key] = lane
+        return True
+
+    def _discard_safety_fallback_lane(self, publisher):
+        lane = getattr(self, '_safety_fallback_lanes', {}).pop(
+            id(publisher), None
+        )
+        if lane is not None:
+            lane.close()
+
+    def _submit_safety_fallback(self, publisher, callback):
+        lane = getattr(self, '_safety_fallback_lanes', {}).get(id(publisher))
+        return lane is not None and lane.submit(callback)
+
+    def _ensure_command_publisher_registry_locked(self):
+        """Create the small publisher registry for old test configurations."""
+        if not hasattr(self, '_command_publisher_sequence'):
+            self._command_publisher_sequence = 0
+        if not hasattr(self, '_command_publisher_generations'):
+            self._command_publisher_generations = {}
+        if not hasattr(self, '_stop_publication_debts'):
+            self._stop_publication_debts = {}
+
+    def _command_publisher_generation_locked(self, robot_id, publisher):
+        """Return a stable, non-address identity for one publisher object."""
+        self._ensure_command_publisher_registry_locked()
+        object_key = id(publisher)
+        generation = self._command_publisher_generations.get(object_key)
+        if generation is None:
+            self._command_publisher_sequence += 1
+            generation = self._command_publisher_sequence
+            self._command_publisher_generations[object_key] = generation
+        return generation
+
+    def _refresh_shutdown_publisher_snapshot_locked(self):
+        """Replace the lock-free shutdown snapshot with immutable entries."""
+        self._ensure_command_publisher_registry_locked()
+        retained_object_keys = {
+            id(publisher) for publisher in self.cmd_vel_pubs.values()
+        }
+        retained_object_keys.update(
+            id(debt['publisher'])
+            for debt in self._stop_publication_debts.values()
+        )
+        for object_key in tuple(self._command_publisher_generations):
+            if object_key not in retained_object_keys:
+                self._command_publisher_generations.pop(object_key, None)
+        publishers = {}
+        for robot_id, publisher in self.cmd_vel_pubs.items():
+            generation = self._command_publisher_generation_locked(
+                robot_id, publisher
+            )
+            debt = self._stop_publication_debts.get(generation)
+            publishers[generation] = (
+                robot_id,
+                publisher,
+                generation,
+                self._public_stop_debt(debt) if debt is not None else None,
+            )
+        for generation, debt in self._stop_publication_debts.items():
+            if generation in publishers:
+                continue
+            publishers[generation] = (
+                debt['robot_id'],
+                debt['publisher'],
+                generation,
+                self._public_stop_debt(debt),
+            )
+        self._shutdown_publisher_snapshot = tuple(sorted(
+            publishers.values(),
+            key=lambda item: (item[0], item[2]),
+        ))
+
+    def _cached_command_publisher_snapshot(self):
+        """Read the immutable emergency snapshot without acquiring a lock."""
+        return tuple(
+            {
+                'robot_id': robot_id,
+                'publisher': publisher,
+                'publisher_generation': generation,
+                'debt': dict(debt) if debt is not None else None,
+            }
+            for robot_id, publisher, generation, debt
+            in getattr(self, '_shutdown_publisher_snapshot', ())
+        )
+
+    def _publisher_is_active_locked(self, publisher):
+        return any(
+            active_publisher is publisher
+            for active_publisher in self.cmd_vel_pubs.values()
+        )
+
+    def _forget_publisher_generation_locked(self, publisher, generation):
+        """Drop registry metadata once no command or debt retains the object."""
+        if self._publisher_is_active_locked(publisher):
+            return
+        if generation in self._stop_publication_debts:
+            return
+        object_key = id(publisher)
+        if self._command_publisher_generations.get(object_key) == generation:
+            self._command_publisher_generations.pop(object_key, None)
+
+    def _close_retired_command_publisher_locked(
+        self, publisher, generation
+    ):
+        """Unregister a stopped publisher which no longer belongs to a robot."""
+        try:
+            publisher.unregister()
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Command publisher unregister failed for generation %d: "
+                    "%s",
+                    generation,
+                    exc,
+                )
+            except Exception:
+                pass
+        self._discard_safety_fallback_lane(publisher)
+        self._forget_publisher_generation_locked(publisher, generation)
+
     def _update_robot_list(self, new_ids: List[str]):
         """Add/remove robots to match the given list."""
         with self.lock:
@@ -900,43 +1984,216 @@ class FormationController:
 
             # Maintain ordered list
             self.robot_ids = sort_robot_ids(
-                rid for rid in new_ids if rid in new_set
+                rid for rid in new_ids if rid in self.cmd_vel_pubs
             )
             self.robot_count = len(self.robot_ids)
 
     def _add_robot(self, robot_id: str):
-        """Register publishers, subscribers, PID, and avoidance for a robot."""
-        if not hasattr(self, 'odom_received_at'):
-            self.odom_received_at = {}
-        self.robot_poses[robot_id] = None
-        self.robot_yaws[robot_id] = 0.0
-        self.odom_received_at[robot_id] = None
+        """Build one robot provisionally, then commit it behind shutdown."""
+        with self._stop_result_lock:
+            if self._shutdown_started:
+                return False
 
-        self.cmd_vel_pubs[robot_id] = rospy.Publisher(
-            f'/{robot_id}/cmd_vel', Twist, queue_size=1
-        )
-        self._odom_subs[robot_id] = rospy.Subscriber(
-            f'/{robot_id}/odom', Odometry,
-            callback=self._odom_cb,
-            callback_args=robot_id,
-            queue_size=1,
-        )
-        self.pid_linear[robot_id] = PIDController(
-            kp=0.6, ki=0.01, kd=0.15, max_output=self.max_linear_vel
-        )
-        self.pid_angular[robot_id] = PIDController(
-            kp=1.2, ki=0.0, kd=0.1, max_output=self.max_angular_vel
-        )
-        self.avoidance[robot_id] = ObstacleAvoidance(robot_id)
+        retained_publishers = [
+            debt['publisher']
+            for debt in getattr(self, '_stop_publication_debts', {}).values()
+            if debt['robot_id'] == robot_id
+        ]
+        owns_command_publisher = not retained_publishers
+        command_publisher = None
+        odom_subscriber = None
+        avoidance = None
+        lane_registered = False
 
+        def discard_provisional_resources():
+            if odom_subscriber is not None:
+                try:
+                    odom_subscriber.unregister()
+                except Exception:
+                    pass
+            if avoidance is not None:
+                try:
+                    avoidance.shutdown()
+                except Exception:
+                    pass
+            if command_publisher is not None and owns_command_publisher:
+                if lane_registered:
+                    self._discard_safety_fallback_lane(command_publisher)
+                try:
+                    command_publisher.unregister()
+                except Exception:
+                    pass
+
+        try:
+            if retained_publishers:
+                # Do not let a fresh publisher with the same robot ID make an
+                # old failed socket look healthy. The exact instance which
+                # owes the zero remains the boundary when the robot returns.
+                command_publisher = retained_publishers[0]
+            else:
+                command_publisher = rospy.Publisher(
+                    f'/{robot_id}/cmd_vel', Twist, queue_size=1
+                )
+            lane_registered = self._register_safety_fallback_lane(
+                robot_id, command_publisher
+            )
+            if not lane_registered:
+                raise RuntimeError(
+                    "the safety publication lane could not be reserved"
+                )
+            odom_subscriber = rospy.Subscriber(
+                f'/{robot_id}/odom', Odometry,
+                callback=self._odom_cb,
+                callback_args=robot_id,
+                queue_size=1,
+            )
+            linear_pid = PIDController(
+                kp=0.6,
+                ki=0.01,
+                kd=0.15,
+                max_output=self.max_linear_vel,
+            )
+            angular_pid = PIDController(
+                kp=1.2,
+                ki=0.0,
+                kd=0.1,
+                max_output=self.max_angular_vel,
+            )
+            avoidance = ObstacleAvoidance(robot_id)
+            avoidance_limits_valid = self._align_avoidance_motion_limits(
+                avoidance
+            )
+        except Exception:
+            discard_provisional_resources()
+            raise
+
+        with self._stop_result_lock:
+            if self._shutdown_started:
+                installed = False
+            else:
+                if not hasattr(self, 'odom_received_at'):
+                    self.odom_received_at = {}
+                self.robot_poses[robot_id] = None
+                self.robot_yaws[robot_id] = 0.0
+                self.odom_received_at[robot_id] = None
+                self.odom_confirmed_for_task[robot_id] = False
+                self.cmd_vel_pubs[robot_id] = command_publisher
+                self._command_publisher_generation_locked(
+                    robot_id, command_publisher
+                )
+                self._odom_subs[robot_id] = odom_subscriber
+                self.pid_linear[robot_id] = linear_pid
+                self.pid_angular[robot_id] = angular_pid
+                self.avoidance[robot_id] = avoidance
+                invalid_limits = set(getattr(
+                    self, 'invalid_avoidance_limits', ()
+                ))
+                if avoidance_limits_valid:
+                    invalid_limits.discard(robot_id)
+                else:
+                    invalid_limits.add(robot_id)
+                self.invalid_avoidance_limits = tuple(sorted(invalid_limits))
+                self._refresh_shutdown_publisher_snapshot_locked()
+                installed = True
+
+        if not installed:
+            discard_provisional_resources()
+            rospy.logwarn(
+                "Discarded robot %s because formation shutdown began "
+                "during setup",
+                robot_id,
+            )
+            return False
+
+        if not avoidance_limits_valid:
+            rospy.logerr(
+                "Robot %s has invalid velocity limits; obstacle avoidance "
+                "was locked to zero velocity.",
+                robot_id,
+            )
         rospy.loginfo("Added robot: %s", robot_id)
+        return True
+
+    @staticmethod
+    def _bounded_motion_limit(value, hardware_limit) -> Tuple[float, bool]:
+        """Return one finite, non-negative limit inside the hardware cap."""
+        try:
+            configured = float(value)
+            hardware = float(hardware_limit)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0, False
+        if (
+            not math.isfinite(configured)
+            or not math.isfinite(hardware)
+            or configured < 0.0
+            or hardware < 0.0
+        ):
+            return 0.0, False
+        return min(configured, hardware), True
+
+    def _align_avoidance_motion_limits(self, avoidance) -> bool:
+        """Intersect obstacle steering limits with the owner's safe envelope."""
+        owner_linear, owner_linear_valid = self._bounded_motion_limit(
+            getattr(self, 'max_linear_vel', None),
+            self.BURGER_MAX_LINEAR_VELOCITY,
+        )
+        owner_angular, owner_angular_valid = self._bounded_motion_limit(
+            getattr(self, 'max_angular_vel', None),
+            self.BURGER_MAX_ANGULAR_VELOCITY,
+        )
+        avoidance_linear, avoidance_linear_valid = self._bounded_motion_limit(
+            getattr(avoidance, 'max_linear_velocity', None),
+            self.BURGER_MAX_LINEAR_VELOCITY,
+        )
+        avoidance_angular, avoidance_angular_valid = self._bounded_motion_limit(
+            getattr(avoidance, 'max_angular_velocity', None),
+            self.BURGER_MAX_ANGULAR_VELOCITY,
+        )
+        limits_valid = (
+            getattr(self, '_motion_limits_valid', True)
+            and owner_linear_valid
+            and owner_angular_valid
+            and avoidance_linear_valid
+            and avoidance_angular_valid
+        )
+        if not limits_valid:
+            # A bad value on either axis makes the whole differential-drive
+            # command unsafe. Lock both axes instead of guessing a fallback.
+            avoidance.max_linear_velocity = 0.0
+            avoidance.max_angular_velocity = 0.0
+            return False
+
+        avoidance.max_linear_velocity = min(
+            owner_linear, avoidance_linear
+        )
+        avoidance.max_angular_velocity = min(
+            owner_angular, avoidance_angular
+        )
+        return True
 
     def _remove_robot(self, robot_id: str):
         """Unregister a robot."""
         pub = self.cmd_vel_pubs.pop(robot_id, None)
         if pub is not None:
-            pub.publish(Twist())
-            pub.unregister()
+            generation = self._command_publisher_generation_locked(
+                robot_id, pub
+            )
+            debt_is_pending = generation in getattr(
+                self, '_stop_publication_debts', {}
+            )
+            if not debt_is_pending:
+                self._close_retired_command_publisher_locked(pub, generation)
+            else:
+                # The fleet-wide stop immediately preceding a resize already
+                # attempted this publisher.  Retain a failed instance for the
+                # next retry instead of unregistering it and losing the only
+                # object that can settle its debt.
+                rospy.logwarn(
+                    "Retaining command publisher generation %d for %s until "
+                    "its zero-velocity publication is accepted.",
+                    generation,
+                    robot_id,
+                )
 
         sub = self._odom_subs.pop(robot_id, None)
         if sub is not None:
@@ -949,6 +2206,7 @@ class FormationController:
         for store in (
             self.robot_poses, self.robot_yaws,
             getattr(self, 'odom_received_at', {}),
+            getattr(self, 'odom_confirmed_for_task', {}),
             self.pid_linear, self.pid_angular,
             self.assignments, self._slot_reached,
             self.route_waypoints, self.route_waypoint_indices,
@@ -957,6 +2215,12 @@ class FormationController:
         invalid_robots = set(getattr(self, 'invalid_robot_poses', ()))
         invalid_robots.discard(robot_id)
         self.invalid_robot_poses = tuple(sorted(invalid_robots))
+        invalid_limits = set(getattr(
+            self, 'invalid_avoidance_limits', ()
+        ))
+        invalid_limits.discard(robot_id)
+        self.invalid_avoidance_limits = tuple(sorted(invalid_limits))
+        self._refresh_shutdown_publisher_snapshot_locked()
 
         rospy.loginfo("Removed robot: %s", robot_id)
 
@@ -966,11 +2230,15 @@ class FormationController:
     def _recompute_formation(self):
         """Recompute formation offsets and reassign robots."""
         with self.command_lock:
+            if self._shutdown_started:
+                return False
             assignment_snapshot = self._recompute_formation_locked()
         self._compute_and_commit_assignment(assignment_snapshot)
 
     def _recompute_formation_locked(self) -> Optional[Dict]:
         """Recompute offsets and snapshot an assignment under command_lock."""
+        if self._shutdown_started:
+            return None
         n = len(self.robot_ids)
         if n == 0:
             self.formation_offsets = []
@@ -1199,6 +2467,8 @@ class FormationController:
     def _assign_robots_to_positions(self):
         """Snapshot state briefly, then solve without holding command_lock."""
         with self.command_lock:
+            if self._shutdown_started:
+                return False
             assignment_snapshot = self._prepare_assignment_locked()
         return self._compute_and_commit_assignment(assignment_snapshot)
 
@@ -1210,6 +2480,8 @@ class FormationController:
         has been released, so emergency-stop and lifecycle callbacks are never
         queued behind its O(n^3) computation.
         """
+        if self._shutdown_started:
+            return None
         self._assignment_generation += 1
         generation = self._assignment_generation
 
@@ -1228,6 +2500,7 @@ class FormationController:
 
         robot_ids = tuple(self.robot_ids[:n])
         robot_positions: List[Tuple[float, float]] = []
+        robot_yaws: List[float] = []
         previous_slots: List[Optional[int]] = []
 
         with self.lock:
@@ -1246,6 +2519,7 @@ class FormationController:
 
             for robot_id, pose in zip(robot_ids, poses):
                 robot_positions.append((pose.position.x, pose.position.y))
+                robot_yaws.append(float(self.robot_yaws.get(robot_id, 0.0)))
                 previous_slots.append(self.assignments.get(robot_id))
             model_poses = dict(self.model_poses)
             invalid_model_poses = tuple(getattr(
@@ -1364,6 +2638,7 @@ class FormationController:
             'generation': generation,
             'robot_ids': robot_ids,
             'robot_positions': tuple(robot_positions),
+            'robot_yaws': tuple(robot_yaws),
             'target_world': target_world,
             'previous_slots': tuple(previous_slots),
             'switch_penalty': (self.spacing * 0.35) ** 2,
@@ -1825,7 +3100,7 @@ class FormationController:
         A newer shape/fleet/start request, stop, or emergency stop advances the
         generation and makes this result stale before it can affect control.
         """
-        if assignment_snapshot is None:
+        if self._shutdown_started or assignment_snapshot is None:
             return False
 
         placement_plan = assignment_snapshot.get('placement_plan')
@@ -1914,6 +3189,13 @@ class FormationController:
             }
 
         with self.command_lock:
+            if self._shutdown_started:
+                return False
+            if (
+                getattr(self, '_assignment_worker_stop', None) is not None
+                and self._assignment_worker_stop.is_set()
+            ):
+                return False
             if (
                 assignment_snapshot['generation']
                 != self._assignment_generation
@@ -1933,14 +3215,26 @@ class FormationController:
                         for robot_id in assignment_snapshot['robot_ids']
                         if self.robot_poses.get(robot_id) is not None
                     }
+                    live_robot_yaws = {
+                        robot_id: self.robot_yaws.get(robot_id)
+                        for robot_id in assignment_snapshot['robot_ids']
+                    }
+                if self._shutdown_started:
+                    return False
                 path_center = None
                 path_radius = None
                 if planned_orbit is not None:
                     path_center = planned_orbit['path_center']
                     path_radius = planned_orbit['radius']
-                if (
-                    invalid_live_model_poses
-                    or not self._placement_plan_is_live_safe(
+                pose_drift = self._assignment_pose_drift(
+                    assignment_snapshot,
+                    live_robot_positions,
+                    live_robot_yaws,
+                )
+                live_plan_is_safe = (
+                    pose_drift is None
+                    and not invalid_live_model_poses
+                    and self._placement_plan_is_live_safe(
                         placement_plan,
                         assignment_snapshot['robot_ids'],
                         live_robot_positions,
@@ -1955,7 +3249,23 @@ class FormationController:
                             for robot_id in assignment_snapshot['robot_ids']
                         },
                     )
-                ):
+                )
+                if not live_plan_is_safe:
+                    detail = pose_drift or {
+                        'gate': 'assignment_live_revalidation'
+                    }
+                    detail['stage'] = 'assignment_commit'
+                    self._record_live_safety_failure(detail)
+                    if (
+                        not invalid_live_model_poses
+                        and self._schedule_live_replan_locked(
+                            placement_plan,
+                            live_robot_positions,
+                            live_model_poses,
+                            detail,
+                        )
+                    ):
+                        return False
                     return self._reject_assignment_plan(
                         assignment_snapshot,
                         "The live arena changed while the formation plan "
@@ -2014,6 +3324,8 @@ class FormationController:
         """Discard one current unsafe plan without reviving stale work."""
 
         with self.command_lock:
+            if self._shutdown_started:
+                return False
             if (
                 assignment_snapshot['generation']
                 != self._assignment_generation
@@ -2057,6 +3369,146 @@ class FormationController:
             self._live_orbit_validation_safe = False
             self._slot_reached = {}
         self._settled_duration = 0.0
+
+    def _model_geometry_matches_plan(self, plan, live_model_poses) -> bool:
+        """Distinguish robot settling from a genuinely moving obstacle."""
+        planned_model_poses = plan.get('model_poses', {})
+        if set(planned_model_poses) != set(live_model_poses):
+            return False
+        try:
+            for model_name, planned_pose in planned_model_poses.items():
+                live_pose = live_model_poses[model_name]
+                if (
+                    abs(float(live_pose[0]) - float(planned_pose[0])) > 0.005
+                    or abs(float(live_pose[1]) - float(planned_pose[1])) > 0.005
+                    or abs(normalize_angle(
+                        float(live_pose[2]) - float(planned_pose[2])
+                    )) > 0.005
+                ):
+                    return False
+        except (IndexError, TypeError, ValueError, OverflowError):
+            return False
+        return True
+
+    def _assignment_pose_drift(
+        self, assignment_snapshot, live_robot_positions, live_robot_yaws
+    ):
+        """Describe material odometry movement since a solve was started."""
+        robot_ids = assignment_snapshot.get('robot_ids', ())
+        positions = assignment_snapshot.get('robot_positions', ())
+        yaws = assignment_snapshot.get('robot_yaws', ())
+        if (
+            len(robot_ids) != len(positions)
+            or len(robot_ids) != len(yaws)
+            or set(live_robot_positions) != set(robot_ids)
+            or set(live_robot_yaws) != set(robot_ids)
+        ):
+            return {'gate': 'assignment_pose_snapshot', 'kind': 'incomplete'}
+        try:
+            for robot_id, old_position, old_yaw in zip(
+                robot_ids, positions, yaws
+            ):
+                live_position = live_robot_positions[robot_id]
+                position_drift = math.hypot(
+                    float(live_position[0]) - float(old_position[0]),
+                    float(live_position[1]) - float(old_position[1]),
+                )
+                yaw_drift = abs(normalize_angle(
+                    float(live_robot_yaws[robot_id]) - float(old_yaw)
+                ))
+                if not math.isfinite(position_drift + yaw_drift):
+                    raise ValueError('non-finite pose drift')
+                if (
+                    position_drift > self.assignment_pose_drift_tolerance
+                    or yaw_drift > self.assignment_yaw_drift_tolerance
+                ):
+                    return {
+                        'gate': 'assignment_pose_snapshot',
+                        'kind': 'drift',
+                        'robot': robot_id,
+                        'position_drift': round(position_drift, 6),
+                        'yaw_drift': round(yaw_drift, 6),
+                    }
+        except (IndexError, TypeError, ValueError, OverflowError):
+            return {'gate': 'assignment_pose_snapshot', 'kind': 'invalid'}
+        return None
+
+    def _live_poses_can_be_replanned(
+        self, plan, robot_positions, live_model_poses
+    ) -> bool:
+        """Require finite, contact-free starts in unchanged live geometry."""
+        if (
+            not self.is_running
+            or self._live_replan_attempts >= self.live_replan_limit
+            or not self._model_geometry_matches_plan(plan, live_model_poses)
+            or set(robot_positions) != set(self.robot_ids)
+        ):
+            return False
+        usable_half = plan['arena_size'] / 2.0 - self.BURGER_RADIUS
+        for robot_id in self.robot_ids:
+            try:
+                position = tuple(float(value) for value in robot_positions[
+                    robot_id
+                ])
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if (
+                len(position) != 2
+                or not all(math.isfinite(value) for value in position)
+                or abs(position[0]) > usable_half
+                or abs(position[1]) > usable_half
+            ):
+                return False
+            for zone in plan['exclusion_zones']:
+                if not self._zone_is_active_for_plan(
+                    zone, plan['arena_profile']
+                ):
+                    continue
+                try:
+                    clearance = signed_distance_to_zone(
+                        position, zone, live_model_poses
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    return False
+                if (
+                    not math.isfinite(clearance)
+                    or clearance <= self.BURGER_RADIUS + 1e-6
+                ):
+                    return False
+        return True
+
+    def _schedule_live_replan_locked(
+        self, plan, robot_positions, live_model_poses, detail
+    ) -> bool:
+        """Queue a bounded replacement plan from settled live robot poses."""
+        if not self._live_poses_can_be_replanned(
+            plan, robot_positions, live_model_poses
+        ):
+            return False
+        publication = self._stop_all_robots('live_replan')
+        if not publication['publication_confirmed']:
+            self._publish_stop_status_safely('live replan')
+            return False
+        self._live_replan_attempts += 1
+        self._cancel_pending_assignment_locked(clear_assignments=True)
+        self.assignment_pending = True
+        self.orbit_path_validated = False
+        self.placement_error = None
+        self.formation_state = FormationState.FORMING
+        self._initial_formation_acquired = False
+        self._request_pending_assignment()
+        try:
+            rospy.logwarn(
+                "Formation route changed while planning; retrying from live "
+                "poses (%d/%d, gate=%s, robot=%s).",
+                self._live_replan_attempts,
+                self.live_replan_limit,
+                detail.get('gate', 'unknown'),
+                detail.get('robot', 'unknown'),
+            )
+        except Exception:
+            pass
+        return True
 
     @staticmethod
     def _model_poses_are_finite(
@@ -2120,6 +3572,7 @@ class FormationController:
         robot_ids = tuple(self.robot_ids)
         robot_positions = self._live_robot_positions_locked()
         if robot_positions is None:
+            self._record_live_safety_failure({'gate': 'robot_pose'})
             return False
 
         model_poses = dict(self.model_poses)
@@ -2127,6 +3580,12 @@ class FormationController:
             getattr(self, 'invalid_model_poses', ())
             or not self._model_poses_are_finite(model_poses)
         ):
+            self._record_live_safety_failure({
+                'gate': 'model_pose',
+                'invalid_models': list(getattr(
+                    self, 'invalid_model_poses', ()
+                )),
+            })
             return False
 
         plan = getattr(self, 'active_placement_plan', None)
@@ -2134,7 +3593,12 @@ class FormationController:
             # The brief assignment-planning window has neither assignments nor
             # routes and may safely emit its all-zero hold batch. Any assigned
             # fleet without a plan has lost its geometric safety contract.
-            return not self.assignments and not self.route_batches
+            safe_without_plan = (
+                not self.assignments and not self.route_batches
+            )
+            if not safe_without_plan:
+                self._record_live_safety_failure({'gate': 'missing_plan'})
+            return safe_without_plan
 
         if (
             plan['kind'] == 'circular'
@@ -2142,6 +3606,7 @@ class FormationController:
                 plan, model_poses
             )
         ):
+            self._record_live_safety_failure({'gate': 'orbit'})
             return False
         if not formation_targets_are_safe(
             world_targets,
@@ -2152,14 +3617,22 @@ class FormationController:
             plan['arena_profile'],
             model_poses,
         ):
+            self._record_live_safety_failure({'gate': 'targets'})
             return False
         if not assembling_on_routes:
             return True
 
         slots = [self.assignments.get(robot_id) for robot_id in robot_ids]
         if any(slot is None for slot in slots):
+            self._record_live_safety_failure({
+                'gate': 'assignments',
+                'missing': [
+                    robot_id for robot_id, slot in zip(robot_ids, slots)
+                    if slot is None
+                ],
+            })
             return False
-        return self._routes_are_safe(
+        routes_safe = self._routes_are_safe(
             robot_ids,
             robot_positions,
             world_targets,
@@ -2169,10 +3642,38 @@ class FormationController:
             model_poses,
             self.route_waypoint_indices,
         )
+        if not routes_safe:
+            self._record_live_safety_failure({'gate': 'route'})
+        return routes_safe
+
+    def _record_live_safety_failure(self, detail: Dict):
+        """Keep one structured explanation for a fail-closed geometry gate."""
+        self._last_live_safety_failure = dict(detail)
+        try:
+            rospy.logerr(
+                "Formation live safety gate rejected: %s",
+                json.dumps(detail, sort_keys=True),
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _zone_is_active_for_plan(zone: Dict, arena_profile: str) -> bool:
+        if not isinstance(zone, dict):
+            return False
+        worlds = zone.get('worlds')
+        if isinstance(worlds, str):
+            worlds = [worlds]
+        return (
+            (not worlds or arena_profile in worlds)
+            and zone.get('shape') in ('box', 'circle')
+        )
 
     def _validated_motion_command(self, command: Twist) -> Optional[Twist]:
         """Return a detached safe copy, or None for an invalid Twist."""
 
+        if not getattr(self, '_motion_limits_valid', True):
+            return None
         try:
             configured_linear_limit = float(self.max_linear_vel)
             configured_angular_limit = float(self.max_angular_vel)
@@ -2199,8 +3700,12 @@ class FormationController:
             return None
 
         # A bad ROS parameter must not enlarge the TurtleBot3 Burger envelope.
-        linear_limit = min(configured_linear_limit, 0.22)
-        angular_limit = min(configured_angular_limit, 2.84)
+        linear_limit = min(
+            configured_linear_limit, self.BURGER_MAX_LINEAR_VELOCITY
+        )
+        angular_limit = min(
+            configured_angular_limit, self.BURGER_MAX_ANGULAR_VELOCITY
+        )
         epsilon = 1e-9
         if (
             any(abs(value) > epsilon for value in linear[1:] + angular[:2])
@@ -2221,6 +3726,121 @@ class FormationController:
             validated.angular.z,
         ) = angular
         return validated
+
+    def _publish_motion_batch_locked(self, commands) -> bool:
+        """Publish one safe batch and compensate a late safety-stop edge."""
+        for robot_id, command in commands.items():
+            publisher = self.cmd_vel_pubs.get(robot_id)
+            if publisher is None:
+                continue
+            requests_motion = (
+                float(command.linear.x) != 0.0
+                or float(command.angular.z) != 0.0
+            )
+            generation = None
+            with self._stop_result_lock:
+                if self._shutdown_started or self.emergency_stop_active:
+                    return False
+                if requests_motion:
+                    generation = self._command_publisher_generation_locked(
+                        robot_id, publisher
+                    )
+                    self._motion_publish_inflight.add(generation)
+
+            try:
+                publisher.publish(command)
+            except Exception:
+                if generation is not None:
+                    with self._stop_result_lock:
+                        safety_stop_started = (
+                            self._shutdown_started
+                            or self.emergency_stop_active
+                        )
+                        if not safety_stop_started:
+                            self._motion_publish_inflight.discard(generation)
+                    if safety_stop_started:
+                        self._compensate_late_motion(
+                            robot_id, publisher, generation
+                        )
+                raise
+
+            with self._stop_result_lock:
+                safety_stop_started = (
+                    self._shutdown_started or self.emergency_stop_active
+                )
+                if generation is not None and not safety_stop_started:
+                    self._motion_publish_inflight.discard(generation)
+            if safety_stop_started:
+                if generation is not None:
+                    self._compensate_late_motion(
+                        robot_id, publisher, generation
+                    )
+                return False
+        return True
+
+    def _compensate_late_motion(
+        self, robot_id, publisher, generation
+    ) -> bool:
+        """Start redundant re-zero attempts without delaying shutdown."""
+        for attempt in (1, 2):
+            worker = threading.Thread(
+                target=self._late_motion_zero_attempt,
+                args=(robot_id, publisher, generation, attempt),
+                name='formation-late-zero-{}-{}'.format(
+                    generation, attempt
+                ),
+                daemon=True,
+            )
+            try:
+                worker.start()
+            except Exception as exc:
+                try:
+                    rospy.logerr(
+                        "Late-motion zero worker %d could not start for %s: "
+                        "%s",
+                        attempt,
+                        robot_id,
+                        exc,
+                    )
+                except Exception:
+                    pass
+
+        # A worker can start successfully and still fail inside publish().
+        # Always queue independent attempts on the lane reserved when this
+        # publisher was created; thread-start success alone is not a receipt.
+        for attempt in (3, 4):
+            self._submit_safety_fallback(
+                publisher,
+                lambda current_attempt=attempt: (
+                    self._late_motion_zero_attempt(
+                        robot_id,
+                        publisher,
+                        generation,
+                        current_attempt,
+                    )
+                ),
+            )
+        return False
+
+    def _late_motion_zero_attempt(
+        self, robot_id, publisher, generation, attempt
+    ):
+        """Run one detached zero attempt for a late motion publication."""
+        try:
+            publisher.publish(Twist())
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Detached late-motion zero attempt %d failed for %s: %s",
+                    attempt,
+                    robot_id,
+                    exc,
+                )
+            except Exception:
+                pass
+            return
+        with self._stop_result_lock:
+            self._motion_publish_inflight.discard(generation)
 
     def _cached_live_orbit_is_safe_locked(
         self,
@@ -2482,9 +4102,35 @@ class FormationController:
     # ------------------------------------------------------------------
     # 20 Hz control loop
     # ------------------------------------------------------------------
+    def _route_batch_member_is_clear(self, robot_id, world_targets):
+        """Return whether a staged robot is close enough to clear its route.
+
+        Slot convergence still uses ``position_tolerance`` below.  Batch
+        release is a different question: once a robot is inside the wider
+        hysteresis band, keeping every later route stopped can deadlock a
+        healthy formation when avoidance settles a Burger a few centimetres
+        outside the strict target radius.
+        """
+        if self._slot_reached.get(robot_id, False):
+            return True
+        slot_index = self.assignments.get(robot_id)
+        if slot_index is None or slot_index >= len(world_targets):
+            return False
+        with self.lock:
+            pose = self.robot_poses.get(robot_id)
+        if pose is None:
+            return False
+        target_x, target_y = world_targets[slot_index]
+        return math.hypot(
+            target_x - pose.position.x,
+            target_y - pose.position.y,
+        ) <= self.position_release_tolerance
+
     def _control_loop(self, event):
         with self.command_lock:
             if (
+                self._shutdown_started
+                or
                 not self.is_running
                 or self.is_paused
                 or self.emergency_stop_active
@@ -2496,8 +4142,8 @@ class FormationController:
                 # A malformed scan or another unexpected live-data value must
                 # not kill rospy's timer thread while its last Twist is active.
                 self.placement_error = (
-                    "Formation control failed on invalid live data; all "
-                    "robots were stopped."
+                    "Formation control failed on invalid live data; motion "
+                    "was disabled and a fleet stop was requested."
                 )
                 self.formation_state = FormationState.FAILED
                 self._initial_formation_acquired = False
@@ -2505,7 +4151,7 @@ class FormationController:
                 self._cancel_pending_assignment_locked(
                     clear_assignments=True
                 )
-                self._stop_all_robots()
+                self._stop_all_robots('control_exception')
                 try:
                     self._publish_status([], 0.0)
                 except Exception as status_exc:
@@ -2519,7 +4165,7 @@ class FormationController:
 
     def _control_step(self, event):
         """Main 20 Hz timer callback."""
-        if not self.is_running:
+        if self._shutdown_started or not self.is_running:
             return
 
         waiting, stale = self._odometry_readiness(self.robot_ids)
@@ -2536,15 +4182,24 @@ class FormationController:
                 live_robot_positions = self._live_robot_positions_locked()
             if live_robot_positions is None:
                 self.placement_error = (
-                    "Robot odometry contained a non-finite planar pose; all "
-                    "robots were stopped."
+                    "Robot odometry contained a non-finite planar pose; a "
+                    "fleet stop was requested."
                 )
+
+        invalid_avoidance_limits = sorted(set(getattr(
+            self, 'invalid_avoidance_limits', ()
+        )) & set(self.robot_ids))
+        if invalid_avoidance_limits:
+            self.placement_error = (
+                "Obstacle-avoidance velocity limits were invalid for: "
+                + ", ".join(invalid_avoidance_limits)
+            )
 
         if self.placement_error:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False
             self._cancel_pending_assignment_locked(clear_assignments=True)
-            self._stop_all_robots()
+            self._stop_all_robots('control_failure')
             self._publish_status([], 0.0)
             self.is_running = False
             return
@@ -2555,7 +4210,7 @@ class FormationController:
             # complete fleet is observable, so assignment and avoidance never
             # operate on a partial swarm.
             self.formation_state = FormationState.FORMING
-            self._stop_all_robots()
+            self._stop_all_robots('odometry_wait')
             self._publish_status([], 0.0)
             return
 
@@ -2571,7 +4226,7 @@ class FormationController:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False
             self._cancel_pending_assignment_locked(clear_assignments=True)
-            self._stop_all_robots()
+            self._stop_all_robots('centroid_failure')
             self._publish_status([], 0.0)
             self.is_running = False
             return
@@ -2654,7 +4309,9 @@ class FormationController:
             while (
                 self.route_batch_index < len(self.route_batches)
                 and all(
-                    self._slot_reached.get(robot_id, False)
+                    self._route_batch_member_is_clear(
+                        robot_id, world_targets
+                    )
                     for robot_id in self.route_batches[
                         self.route_batch_index
                     ]
@@ -2793,6 +4450,8 @@ class FormationController:
         invalid_command_ids = []
         late_waiting = []
         late_stale = []
+        live_replan_detail = None
+        motion_batch_complete = True
         with self.lock:
             validated_commands = {}
             requests_motion = False
@@ -2841,7 +4500,7 @@ class FormationController:
                 elif not adaptive_targets_valid:
                     self.placement_error = (
                         "Adaptive formation produced invalid target geometry; "
-                        "all robots were stopped."
+                        "a fleet stop was requested."
                     )
                 elif late_waiting or late_stale:
                     self.placement_error = (
@@ -2849,20 +4508,59 @@ class FormationController:
                         + ", ".join(self.stale_odometry)
                     )
                 elif live_safety_exception is None:
-                    self.placement_error = (
-                        "A live obstacle or invalid robot odometry invalidated "
-                        "the formation orbit, slots, or remaining entry route."
-                    )
+                    detail = dict(getattr(
+                        self, '_last_live_safety_failure', {}
+                    ))
+                    if (
+                        assembling_on_routes
+                        and detail.get('gate') == 'route'
+                    ):
+                        live_replan_detail = detail
+                    else:
+                        self.placement_error = (
+                            "A live obstacle or invalid robot odometry "
+                            "invalidated the formation orbit, slots, or "
+                            "remaining entry route."
+                        )
                 else:
                     self.placement_error = (
                         "Formation live safety validation failed "
-                        "unexpectedly; all robots were stopped."
+                        "unexpectedly; a fleet stop was requested."
                     )
             else:
-                for rid, command in validated_commands.items():
-                    pub = self.cmd_vel_pubs.get(rid)
-                    if pub is not None:
-                        pub.publish(command)
+                motion_batch_complete = self._publish_motion_batch_locked(
+                    validated_commands
+                )
+
+        if not motion_batch_complete or self._shutdown_started:
+            return
+
+        if live_replan_detail is not None:
+            with self.lock:
+                live_robot_positions = self._live_robot_positions_locked()
+                live_model_poses = dict(self.model_poses)
+                invalid_live_models = tuple(getattr(
+                    self, 'invalid_model_poses', ()
+                ))
+            plan = getattr(self, 'active_placement_plan', None)
+            if (
+                plan is not None
+                and live_robot_positions is not None
+                and not invalid_live_models
+                and self._schedule_live_replan_locked(
+                    plan,
+                    live_robot_positions,
+                    live_model_poses,
+                    live_replan_detail,
+                )
+            ):
+                self._publish_status([], 0.0)
+                return
+            if not self.placement_error:
+                self.placement_error = (
+                    "A live obstacle or invalid robot odometry invalidated "
+                    "the formation orbit, slots, or remaining entry route."
+                )
 
         if live_safety_exception is not None:
             rospy.logerr(
@@ -2873,7 +4571,7 @@ class FormationController:
             self.formation_state = FormationState.FAILED
             self._initial_formation_acquired = False
             self._cancel_pending_assignment_locked(clear_assignments=True)
-            self._stop_all_robots()
+            self._stop_all_robots('live_safety_failure')
             self._publish_status([], 0.0)
             self.is_running = False
             return
@@ -2891,6 +4589,7 @@ class FormationController:
         if deforming:
             self.formation_state = FormationState.DEFORMING
         elif formation_is_settled:
+            self._live_replan_attempts = 0
             if self.movement_mode == MovementMode.STATIC:
                 self.formation_state = FormationState.FORMED
             else:
@@ -2916,9 +4615,10 @@ class FormationController:
             now = time.monotonic()
         timeout = getattr(self, 'odom_timeout_wall_s', 0.75)
         initialization_timeout = getattr(
-            self, 'odom_initialization_timeout_wall_s', 5.0
+            self, 'odom_initialization_timeout_wall_s', 10.0
         )
         received = getattr(self, 'odom_received_at', {})
+        confirmed = getattr(self, 'odom_confirmed_for_task', {})
         waiting = []
         stale = []
         for robot_id in robot_ids:
@@ -2926,7 +4626,7 @@ class FormationController:
                 stale.append(robot_id)
                 continue
             stamp = received.get(robot_id)
-            if stamp is None:
+            if not confirmed.get(robot_id, False):
                 within_initialization_window = (
                     now >= started_at
                     and now - started_at <= initialization_timeout
@@ -2935,6 +4635,8 @@ class FormationController:
                     waiting.append(robot_id)
                 else:
                     stale.append(robot_id)
+            elif stamp is None:
+                stale.append(robot_id)
             elif now < stamp or now - stamp > timeout:
                 stale.append(robot_id)
         return waiting, stale
@@ -2947,13 +4649,482 @@ class FormationController:
     # ------------------------------------------------------------------
     # Stop helpers
     # ------------------------------------------------------------------
-    def _stop_all_robots(self):
-        """Publish zero velocity to every robot."""
-        stop = Twist()
+    def _command_publisher_snapshot(self):
+        """Copy active publishers and unresolved stop debts exactly once."""
         with self.lock:
-            pubs = list(self.cmd_vel_pubs.values())
-        for pub in pubs:
-            pub.publish(stop)
+            self._refresh_shutdown_publisher_snapshot_locked()
+            return self._cached_command_publisher_snapshot()
+
+    @staticmethod
+    def _public_stop_debt(debt):
+        """Remove the retained ROS object from one status-safe debt copy."""
+        return {
+            'robot_id': debt['robot_id'],
+            'publisher_generation': int(debt['publisher_generation']),
+            'task_id': debt.get('task_id'),
+            'reason': str(debt.get('reason', ''))[:64],
+            'first_attempt': int(debt.get('first_attempt', 0)),
+            'last_attempt': int(debt.get('last_attempt', 0)),
+        }
+
+    def _record_stop_attempt(self, targets, accepted_generations, reason):
+        """Merge one attempt into the per-publisher stop ledger."""
+        retired_publishers = []
+        with self.lock:
+            # The short result lock is nested only under the state lock. The
+            # shutdown path takes it on its own, so there is no lock cycle and
+            # no late attempt can reopen or clear the final ledger state.
+            with self._stop_result_lock:
+                if self._shutdown_started:
+                    publication = self._shutdown_publication
+                    if publication is None:
+                        publication = self._unrecorded_stop_attempt(
+                            targets, accepted_generations, reason
+                        )
+                    return publication
+
+                self._ensure_command_publisher_registry_locked()
+                self._stop_publication_attempt = (
+                    getattr(self, '_stop_publication_attempt', 0) + 1
+                )
+                attempt = self._stop_publication_attempt
+                current_task_id = (
+                    self.current_task_id
+                    if isinstance(self.current_task_id, str)
+                    else None
+                )
+                for target in targets:
+                    generation = target['publisher_generation']
+                    publisher = target['publisher']
+                    if generation in accepted_generations:
+                        self._stop_publication_debts.pop(generation, None)
+                        if not self._publisher_is_active_locked(publisher):
+                            retired_publishers.append((publisher, generation))
+                        continue
+
+                    previous = self._stop_publication_debts.get(generation)
+                    self._stop_publication_debts[generation] = {
+                        'robot_id': target['robot_id'],
+                        'publisher': publisher,
+                        'publisher_generation': generation,
+                        'task_id': (
+                            previous.get('task_id')
+                            if previous is not None
+                            else current_task_id
+                        ),
+                        'reason': (
+                            previous.get('reason')
+                            if previous is not None
+                            else str(reason)[:64]
+                        ),
+                        'first_attempt': (
+                            previous.get('first_attempt', attempt)
+                            if previous is not None
+                            else attempt
+                        ),
+                        'last_attempt': attempt,
+                    }
+
+                pending_debts = sorted(
+                    self._stop_publication_debts.values(),
+                    key=lambda debt: (
+                        debt['robot_id'], debt['publisher_generation']
+                    ),
+                )
+                correlated_task_id = current_task_id
+                if correlated_task_id is None and pending_debts:
+                    correlated_task_id = pending_debts[0].get('task_id')
+                pending_robots = sort_robot_ids(set(
+                    debt['robot_id'] for debt in pending_debts
+                ))
+                publication = {
+                    'task_id': correlated_task_id,
+                    'attempt': attempt,
+                    'reason': str(reason)[:64],
+                    'requested_count': len(targets),
+                    'accepted_count': len(accepted_generations),
+                    'failed_robots': pending_robots,
+                    'unconfirmed_publishers': [
+                        self._public_stop_debt(debt)
+                        for debt in pending_debts
+                    ],
+                    # rospy accepted publish() for every active or retained
+                    # local publisher. This is not a physical acknowledgement
+                    # from Gazebo or a TurtleBot.
+                    'publication_confirmed': not pending_debts,
+                }
+                self._last_stop_publication = publication
+                self._refresh_shutdown_publisher_snapshot_locked()
+
+            # unregister() belongs to ROS and can block. Leave the result lock
+            # first so it can never delay the bounded shutdown fan-out.
+            for publisher, generation in retired_publishers:
+                self._close_retired_command_publisher_locked(
+                    publisher, generation
+                )
+        return publication
+
+    def _unrecorded_stop_attempt(
+        self, targets, accepted_generations, reason
+    ):
+        """Describe a regular stop superseded by an in-flight shutdown."""
+        attempt = getattr(self, '_stop_publication_attempt', 0) + 1
+        current_task_id = (
+            self.current_task_id
+            if isinstance(self.current_task_id, str)
+            else None
+        )
+        pending = []
+        for target in targets:
+            generation = target['publisher_generation']
+            if generation in accepted_generations:
+                continue
+            previous = target.get('debt')
+            pending.append({
+                'robot_id': target['robot_id'],
+                'publisher_generation': generation,
+                'task_id': (
+                    previous.get('task_id')
+                    if previous is not None
+                    else current_task_id
+                ),
+                'reason': (
+                    previous.get('reason')
+                    if previous is not None
+                    else str(reason)[:64]
+                ),
+                'first_attempt': (
+                    previous.get('first_attempt', attempt)
+                    if previous is not None
+                    else attempt
+                ),
+                'last_attempt': attempt,
+            })
+        pending.sort(key=lambda debt: (
+            debt['robot_id'], debt['publisher_generation']
+        ))
+        return {
+            'task_id': current_task_id,
+            'attempt': attempt,
+            'reason': str(reason)[:64],
+            'requested_count': len(targets),
+            'accepted_count': len(accepted_generations),
+            'failed_robots': sort_robot_ids(set(
+                debt['robot_id'] for debt in pending
+            )),
+            'unconfirmed_publishers': pending,
+            'publication_confirmed': not pending,
+        }
+
+    def _stop_all_robots(
+        self,
+        reason='unspecified',
+        publisher_snapshot=None,
+        publication_lock_timeout=None,
+        lifecycle_locked=True,
+    ):
+        """Request zero velocity from active and previously failed sockets."""
+        targets = (
+            tuple(publisher_snapshot)
+            if publisher_snapshot is not None
+            else self._command_publisher_snapshot()
+        )
+        if not hasattr(self, '_stop_publication_lock'):
+            self._stop_publication_lock = threading.RLock()
+        if publication_lock_timeout is None:
+            publication_lock_acquired = self._stop_publication_lock.acquire()
+        else:
+            publication_lock_acquired = self._stop_publication_lock.acquire(
+                timeout=max(0.0, publication_lock_timeout)
+            )
+
+        if not publication_lock_acquired:
+            publication = self._record_stop_attempt(targets, set(), reason)
+            stop_error = (
+                "Zero-velocity publication could not begin before the "
+                "bounded shutdown deadline."
+            )
+            if lifecycle_locked:
+                self._fail_for_unconfirmed_stop_locked(stop_error)
+            return publication
+
+        try:
+            report = self._stop_from_shutdown_snapshot(
+                targets,
+                reason,
+                self.current_task_id,
+                time.monotonic() + max(
+                    0.0, float(self.EMERGENCY_STOP_TIMEOUT)
+                ),
+            )
+            failed_generations = {
+                item['publisher_generation']
+                for item in report['unconfirmed_publishers']
+            }
+            accepted_generations = {
+                target['publisher_generation']
+                for target in targets
+                if target['publisher_generation'] not in failed_generations
+            }
+            publication = self._record_stop_attempt(
+                targets, accepted_generations, reason
+            )
+        finally:
+            self._stop_publication_lock.release()
+
+        if not publication['publication_confirmed'] and lifecycle_locked:
+            publication_error = (
+                "Zero-velocity publication was not accepted for: "
+                + ", ".join(publication['failed_robots'])
+                + "."
+            )
+            self._fail_for_unconfirmed_stop_locked(publication_error)
+        return publication
+
+    def _stop_all_robots_bounded(self, reason, timeout):
+        """Fan out a stop so one blocked socket cannot hide healthy robots."""
+        targets = self._command_publisher_snapshot()
+        report = self._stop_from_shutdown_snapshot(
+            targets,
+            reason,
+            self.current_task_id,
+            time.monotonic() + max(0.0, float(timeout)),
+        )
+        failed_generations = {
+            item['publisher_generation']
+            for item in report['unconfirmed_publishers']
+        }
+        accepted_generations = {
+            target['publisher_generation']
+            for target in targets
+            if target['publisher_generation'] not in failed_generations
+        }
+        publication = self._record_stop_attempt(
+            targets, accepted_generations, reason
+        )
+        if not publication['publication_confirmed']:
+            self._fail_for_unconfirmed_stop_locked(
+                "Zero-velocity publication was not accepted for: "
+                + ", ".join(publication['failed_robots'])
+                + "."
+            )
+        return publication
+
+    def _stop_from_shutdown_snapshot(
+        self, targets, reason, task_id, deadline,
+        motion_inflight=frozenset(),
+    ):
+        """Attempt the cached publisher set without taking a state lock."""
+        accepted_generations = set()
+        failed_targets = []
+        stop = Twist()
+        results = {}
+        results_lock = threading.Lock()
+        completed = {}
+
+        def publish_zero(target):
+            error = None
+            try:
+                target['publisher'].publish(stop)
+            except Exception as exc:
+                error = exc
+            with results_lock:
+                results[target['publisher_generation']] = error
+            completed[target['publisher_generation']].set()
+
+        for target in targets:
+            generation = target['publisher_generation']
+            completed[generation] = threading.Event()
+            started = False
+            last_error = None
+            for attempt in (1, 2):
+                worker = threading.Thread(
+                    target=publish_zero,
+                    args=(target,),
+                    name='formation-shutdown-stop-{}-{}'.format(
+                        generation, attempt
+                    ),
+                    daemon=True,
+                )
+                try:
+                    worker.start()
+                    started = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    try:
+                        rospy.logerr(
+                            "Zero-velocity worker could not start for %s "
+                            "(attempt %d): %s",
+                            target['robot_id'],
+                            attempt,
+                            exc,
+                        )
+                    except Exception:
+                        pass
+            if not started and self._submit_safety_fallback(
+                target['publisher'],
+                lambda current=target: publish_zero(current),
+            ):
+                started = True
+            if not started:
+                with results_lock:
+                    results[generation] = last_error
+                completed[generation].set()
+
+        # Shutdown deliberately bypasses the regular stop serialization.
+        # Every publisher gets an independent attempt before this wait, so a
+        # blocked callback or ROS socket cannot suppress a healthy zero.
+        for target in targets:
+            generation = target['publisher_generation']
+            completed[generation].wait(max(
+                0.0, deadline - time.monotonic()
+            ))
+
+        with results_lock:
+            final_results = dict(results)
+        for target in targets:
+            generation = target['publisher_generation']
+            if generation not in final_results:
+                failed_targets.append((
+                    target,
+                    RuntimeError(
+                        'zero publication exceeded shutdown deadline'
+                    ),
+                ))
+            elif final_results[generation] is None:
+                if generation in motion_inflight:
+                    failed_targets.append((
+                        target,
+                        RuntimeError(
+                            'motion publication was still in flight at '
+                            'shutdown'
+                        ),
+                    ))
+                else:
+                    accepted_generations.add(generation)
+            else:
+                failed_targets.append((target, final_results[generation]))
+
+        attempt = getattr(self, '_stop_publication_attempt', 0) + 1
+        pending = []
+        for target, exc in failed_targets:
+            previous = target.get('debt')
+            debt = {
+                'robot_id': target['robot_id'],
+                'publisher_generation': target['publisher_generation'],
+                'task_id': (
+                    previous.get('task_id')
+                    if previous is not None
+                    else task_id
+                ),
+                'reason': (
+                    previous.get('reason')
+                    if previous is not None
+                    else str(reason)[:64]
+                ),
+                'first_attempt': (
+                    previous.get('first_attempt', attempt)
+                    if previous is not None
+                    else attempt
+                ),
+                'last_attempt': attempt,
+            }
+            pending.append(debt)
+            try:
+                rospy.logerr(
+                    "Zero-velocity publication was not accepted for %s: %s",
+                    target['robot_id'],
+                    exc,
+                )
+            except Exception:
+                pass
+        pending.sort(key=lambda debt: (
+            debt['robot_id'], debt['publisher_generation']
+        ))
+        return {
+            'task_id': task_id,
+            'attempt': attempt,
+            'reason': str(reason)[:64],
+            'requested_count': len(targets),
+            'accepted_count': len(accepted_generations),
+            'failed_robots': sort_robot_ids(set(
+                debt['robot_id'] for debt in pending
+            )),
+            'unconfirmed_publishers': pending,
+            'publication_confirmed': not pending,
+        }
+
+    def _fail_for_unconfirmed_stop_locked(self, publication_error):
+        """Apply the normal fail-closed lifecycle while command_lock is held."""
+        self.is_running = False
+        self.is_paused = False
+        self._initial_formation_acquired = False
+        self.formation_state = FormationState.FAILED
+        self.orbit_path_validated = False
+        self._cancel_pending_assignment_locked(clear_assignments=True)
+        if self.placement_error:
+            if publication_error not in self.placement_error:
+                self.placement_error = (
+                    self.placement_error.rstrip() + " "
+                    + publication_error
+                )
+        else:
+            self.placement_error = publication_error
+
+    @staticmethod
+    def _stop_publication_status_payload(stop_publication):
+        """Return the stable public part of one local stop record."""
+        return {
+            'task_id': stop_publication.get('task_id'),
+            'attempt': int(stop_publication.get('attempt', 0)),
+            'reason': str(stop_publication.get('reason', ''))[:64],
+            'requested_count': int(stop_publication.get(
+                'requested_count', 0
+            )),
+            'accepted_count': int(stop_publication.get(
+                'accepted_count', 0
+            )),
+            'failed_robots': list(stop_publication.get(
+                'failed_robots', ()
+            )),
+            'unconfirmed_publishers': [
+                {
+                    'robot_id': debt.get('robot_id'),
+                    'publisher_generation': int(debt.get(
+                        'publisher_generation', 0
+                    )),
+                    'task_id': debt.get('task_id'),
+                    'reason': str(debt.get('reason', ''))[:64],
+                    'first_attempt': int(debt.get('first_attempt', 0)),
+                    'last_attempt': int(debt.get('last_attempt', 0)),
+                }
+                for debt in stop_publication.get(
+                    'unconfirmed_publishers', ()
+                )
+            ],
+            'publication_confirmed': bool(stop_publication.get(
+                'publication_confirmed', False
+            )),
+        }
+
+    def _publish_stop_status_safely(self, context):
+        """Keep a failed command socket from hiding the stop result."""
+        if getattr(self, '_shutdown_started', False):
+            return False
+        try:
+            self._publish_status([], 0.0)
+            return True
+        except Exception as exc:
+            try:
+                rospy.logerr(
+                    "Formation %s status could not be published: %s",
+                    context,
+                    exc,
+                )
+            except Exception:
+                pass
+            return False
 
     # ------------------------------------------------------------------
     # Status publishing
@@ -2964,6 +5135,10 @@ class FormationController:
         maximum_position_error: float = 0.0,
     ):
         """Publish JSON status to /formation/status."""
+        # Shutdown publishes its own bounded snapshot. A lifecycle callback
+        # that was already in progress must not overwrite that final record.
+        if getattr(self, '_shutdown_started', False):
+            return
         assignments_dict: Dict[str, Dict] = {}
         for rid, slot_idx in self.assignments.items():
             if slot_idx < len(world_targets):
@@ -3025,7 +5200,22 @@ class FormationController:
             }
         if self.placement_error:
             status['error'] = self.placement_error
-        self.status_pub.publish(String(data=json.dumps(status)))
+        stop_publication = getattr(self, '_last_stop_publication', None)
+        if stop_publication is not None:
+            status['stop_publication'] = (
+                self._stop_publication_status_payload(stop_publication)
+            )
+        status_message = String(data=json.dumps(status))
+        if self._shutdown_started:
+            return
+        try:
+            self.status_pub.publish(status_message)
+        finally:
+            # A regular publish can have entered rospy before the epoch changed
+            # and return after the bounded final status. Reassert the immutable
+            # shutdown snapshot after that stale delivery completes.
+            if self._shutdown_started:
+                self._reassert_shutdown_status()
 
     # ------------------------------------------------------------------
     # RViz marker publishing

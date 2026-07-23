@@ -3,39 +3,53 @@
 ## Estado del documento
 
 Este documento conserva la arquitectura objetivo y la evolución del plan de
-liberación. Las afirmaciones intermedias sobre I-064–I-105 son cortes
-históricos, no el estado vigente. Los PR #102–#105 integraron ese trabajo y
-dejaron `9f49e17435a1ddd6b93b7834b2896d57059616fe` alineado en frontend,
-backend y worker durante la aceptación del 21 de julio.
+liberación. Las afirmaciones intermedias sobre I-064–I-135 son cortes
+históricos, no el estado vigente. La PR #106 integró ese conjunto como
+`1448a31bbbbfd77588bada109947098cc95d9dda`; CI, Cloudflare, backend y el
+despliegue GPU exacto aprobaron.
 
-La base `9f49e17` aprobó API multiusuario, dos visores privados visibles y el
-recorrido administrativo. Los cuatro anchos responsive y la carga N=4 aceptada
-permanecen ligados a `fbef23e`; el reintento nuevo falló antes de la física y
-permitió localizar la carrera de colocación. Sobre `9f49e17` se preparó un
-delta correctivo que resuelve los fallos de formación móvil, una carrera de
-colocación en Gazebo, diagnóstico acotado de carga, visualización del destino y
-dos rutas de tareas antiguas. La revisión añadió el rechazo fail-closed de
-datos numéricos inválidos, el cese de toda recuperación de carga durante el
-apagado y el ajuste que convirtió el marcador en cinemático. Los commits
-`511e47c` y `377a0e3` cerraron después las fronteras de formación adaptativa,
-planes no circulares, publicación por lotes y datos vivos de seguimiento y
-transporte. Finalmente, `568979d` revalidó los planes de seguimiento ante
-cambios de escena y `4450c13` hizo atómica la última comprobación de frescura de
-transporte;
-debe pasar por un único PR, un solo ciclo normal de CI y un despliegue con SHA
-único antes de repetir los gates finales. Por tanto, este archivo describe el
-plan; no declara por sí solo una aceptación final.
+Sobre `1448a31` aprobaron API multiusuario N=3/N=7, dos visores privados en
+Chrome visible, interacción, pantalla completa, responsive a 360/768/1366/1920
+px, seguimiento N=3/N=6/N=10 y transporte N=2/N=3/N=4/N=10. El marcador
+fantasma magenta apareció en producción y la interfaz envía una tolerancia de
+llegada de 0,25 m sin cambiar la física normal de 0,25 kg y fricción 0,05. La
+carga de 0,75 kg y fricción 0,25 continúa como perfil de aceptación separado.
 
-I-126 e I-127 ya están cerradas en código. La revisión de liberación encontró
-después I-128–I-134: correlación incompleta de la cadena del planificador,
-ventanas de frescura al publicar y validaciones incompletas de instantáneas,
-cuaterniones, ejes no holonómicos y nombres duplicados. `07da8f4` cierra esas
-fronteras. El árbol principal exacto aprobó después el freeze local combinado.
-La imagen local segura también se reconstruyó. Una primera comprobación visible
-encontró I-135, un recorte del marcador en el borde sur; el encuadre se corrigió
-y la imagen reconstruida aprobó las cuatro esquinas del área de trabajo. La
-liberación sigue abierta porque todavía faltan PR, CI y la repetición visible
-sobre el SHA desplegado.
+La prueba postdeploy también encontró trabajo real pendiente. Las seis
+formaciones terminaron antes del gate activo y transporte N=1 perdió su informe
+gráfico después del TTL, aunque ROS, movimiento y HLS habían aprobado. I-136–
+I-138 sacan el solver del callback de odometría, alinean la envolvente de
+evasión, correlacionan posición/yaw al commit y permiten hasta dos replans en
+cero solo cuando la escena permanece estable y sin contacto. I-139 preserva el
+informe antes de esperar ROS, sondea la transición de cierre y renueva un visor
+únicamente después de demostrar que el lease anterior fue desmontado. Conserva
+la propiedad del lease nuevo aunque falle una comprobación intermedia y no puede
+declarar limpieza con un binding desconocido. I-140 obliga a cada ruta de
+parada, pausa, emergencia, replan y shutdown a comprobar si todos los publishers
+locales aceptaron `Twist=0`; un fallo queda correlacionado en `FAILED` y no se
+presenta como parada física confirmada. I-141 publica el estado estacionario
+`forming` antes de una planificación grande, concede una gracia acotada y
+proporcional únicamente mientras no existen asignaciones, y tolera el
+asentamiento normal de Gazebo sin retirar la revalidación geométrica. El primer corte local aprobó 524/524
+pruebas ROS, 77/77 de formación en Python actual y 3.8, 253/253 contratos y una
+formación S N=10 con 10/10 asignaciones, RTF 2,9929 y cero colisiones. El freeze
+posterior sustituyó esas cifras provisionales: 576/576 ROS, 253/253 contratos y
+revisión independiente sin P0/P1. La imagen exacta `6f1af927…4cb5`, sin montar
+fuentes, aprobó triángulo N=3 y S N=10 durante 75 s activos, con errores finales
+0,0921/0,0974 m, RTF 2,9965/2,9875, 58,493/57,507 FPS NVIDIA y cero colisiones.
+N=1 también volvió a aprobar contra `1448a31` usando I-139 en el arnés. El plan
+suma ahora un freeze local de 624/624 pruebas y una S N=10 visible de I-141:
+75,0004 s activos, error máximo 0,0952 m, RTF 2,9851 y cero colisiones. El plan
+suma además I-142: el gate API y dos Chrome visibles aprobaron aislamiento,
+entrada, fullscreen, concurrencia, cierre/reapertura y video cercano a 30 FPS.
+Los cambios de I-142 pertenecen al instrumento y corrigen únicamente una
+formación de prueba ya satisfecha, un seek hacia el borde vivo HLS y la
+transición de repintado al salir de fullscreen. I-143 separa la liberación
+segura de cada corredor de la convergencia estricta del slot: el freeze final
+aprobó 625/625 pruebas ROS y S/N=10 con error 0,0936 m, RTF 2,9912 y cero
+colisiones. El plan
+sigue abierto hasta publicar esta única corrección, desplegar su SHA exacto y
+repetir las filas afectadas y la carga.
 
 El [estado de implementación](../IMPLEMENTATION_STATUS.md) mantiene la frontera
 vigente y el [informe de comisionamiento](informe-comisionamiento-final.md)
@@ -257,10 +271,11 @@ sur; ese ID quedó supersedido solamente por el ajuste de encuadre. La imagen
 reconstruida con la misma etiqueta completó catkin al 100 %, con ID
 `sha256:e17579ed83e0c37a9ff9b03817652aeb935573b307801ddc5863d29f2a92ae0d`,
 tamaño 4.231.381.706 bytes y fecha
-`2026-07-22T04:53:51.679721236Z`. Sigue siendo un artefacto local, no un
-release. Después de ese ajuste y rebuild, la suite completa volvió a aprobar
-497/497 pruebas en 109,592 s, con `OK` y RC=0. Este último resultado sustituye
-al de 109,460 s como freeze local exacto vigente.
+`2026-07-22T04:53:51.679721236Z`. Fue el artefacto local exacto de la etapa
+I-128–I-135 y hoy es histórico. Después de ese ajuste y rebuild, la suite
+completa volvió a aprobar 497/497 pruebas en 109,592 s, con `OK` y RC=0. Ese
+resultado sustituyó al de 109,460 s en su etapa; el freeze vigente es
+`6f1af927…4cb5` con 576/576 pruebas.
 
 I-088 impide que una fase `SEARCH` declarada sustituya el movimiento observado:
 el smoke web integra la trayectoria de cada robot y exige al menos 0,015 m por
@@ -411,6 +426,32 @@ modelos vivos. Un plan ausente solo permite la espera inicial sin asignaciones
 ni rutas. La flota completa de `Twist` se valida por finitud, ejes permitidos y
 límites físicos del Burger antes del primer publish. Si un elemento falla, la
 tarea pasa a `FAILED`, cancela el solver y envía parada a toda la flota.
+
+La ejecución productiva de `1448a31` mostró que esas guardas eran correctas,
+pero que el cálculo todavía podía bloquear la última callback de odometría. El
+solver de diez robots tardaba varios segundos y el timeout estricto era 0,75 s.
+I-136 lo mueve a un worker único y coalescente; una generación impide que un
+resultado de otra tarea, forma o flota llegue al control. Cada inicio exige una
+muestra nueva por robot. I-137 intersecta los límites propios de evasión con la
+envolvente de formación y los máximos del Burger, de modo que `apply_avoidance`
+no puede devolver 2,84 rad/s a un controlador configurado para 1,5 rad/s.
+
+I-138 cubre la segunda ventana observada: durante el solve, los robots recién
+creados podían asentarse hasta 0,139 m. El snapshot incluye posición y yaw y se
+correlaciona en el commit. Si la escena no cambió, las poses son finitas y no
+existe contacto, se mantiene `Twist=0` y se recalcula desde la foto viva hasta
+dos veces. Una escena móvil, contacto, dato corrupto o churn persistente falla
+cerrado sin reducir el margen de 0,30 m. La reproducción S N=10 utilizó un
+replan y aprobó con error 0,0985 m, RTF 2,9929 y cero colisiones.
+
+El freeze posterior se ejecutó desde una imagen nueva y sin bind del checkout.
+La repetición N=3 conservó una ventana `moving` de 75,0346 s, error máximo
+0,0921 m y RTF 2,9965. N=10 conservó 75,0411 s, diez asignaciones y error máximo
+independiente de 0,0974 m; el estado del comportamiento informó 0,0981 m. Su RTF
+fue 2,9875. Ambas registraron cero colisiones. Las sondas visibles concurrentes
+identificaron D3D12 en la RTX 3080 y midieron 58,493/57,507 FPS con RTF
+2,996/2,984; el intento previo con `llvmpipe` se rechazó y no se mezcló con
+estos resultados.
 
 Los presupuestos de formación se expresan en tiempo de pared, pero se dimensionan
 con un piso conservador RTF 2,7. Los tiempos simulados de adquisición medidos
@@ -592,7 +633,7 @@ La primera validación exterior de v11 supuso erróneamente que cada flota
 reiniciaría sus ordinales en cero. El contrato corregido admite el offset fresco
 del gestor, pero exige namespaces canónicos, bloques contiguos y distintos,
 mapas iguales y asignación monotónica. Aquel arnés aprobó 38/38; el arnés vigente
-aprobó 47/47 e incluye
+aprobó 49/49 e incluye
 una regresión donde la captura durante `PUSH` se rechaza si cualquiera de sus
 dos lecturas HLS queda por debajo de `MATRIX.MINIMUM_BROWSER_VIDEO_FPS`,
 actualmente 27,0.
@@ -796,34 +837,36 @@ deployment rather than silently enabling a path.
 
 ## Secuencia de liberación pendiente
 
-1. Conservar la imagen local segura reconstruida (`e17579ed…ae0d`) y la etiqueta
-   `rollback/pre-formation-ghost-9f49e17`, publicar un único PR y consumir un
-   solo ciclo normal de CI; no repetir jobs aprobados solo para duplicar
+La validación local final añadió I-143: el secuenciador de rutas ya no retiene
+los lotes posteriores cuando un robot está dentro de la banda segura de
+histéresis, aunque todavía no cumpla la tolerancia estricta de convergencia.
+El candidato exacto aprobó S/N=10 con error máximo 0,0936 m, RTF 2,9912 y cero
+colisiones. Los umbrales finales de precisión y seguridad no cambiaron.
+
+1. Publicar código, contratos y documentación en un único PR correctivo. Usar
+   un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar
    evidencia.
-2. Después del merge, comprobar que Cloudflare y el backend anuncien el SHA
-   exacto. Despachar el workflow del worker GPU una sola vez y verificar la
-   revisión instalada, la unidad versionada, AF_NETLINK y el preflight NVIDIA.
-3. Usar los [arneses de aceptación productiva](../scripts/acceptance/README.md)
-   con dos perfiles Chrome visibles y cuentas distintas. Exigir rosters N=3/N=7,
-   streams diferentes, aislamiento HLS, tareas solapadas, interacción, fullscreen,
-   cierre independiente del visor, supervivencia del par y limpieza completa.
-4. Repetir User/Admin, visitar Historial, Plantillas, Robots, Grupos y Usuarios,
-   ejercer autorización real, eliminar únicamente el grupo efímero propio y
-   restaurar el rol con revocación de tokens.
-5. Ejecutar primero las seis formaciones corregidas y, si aprueban, continuar
-   en sesiones frescas con seguimiento y transporte N=1/2/3/4/10. `SEARCH`
-   debe mostrar movimiento sostenido de toda la flota, seguido por aviso del
-   hallazgo, rendezvous y contribución útil de todos los robots al empuje.
-6. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA visible
-   sobre el mismo master Gazebo. Exigir al menos 45 FPS de render y RTF 2,90;
-   luego comprobar que no queden tareas, robots, procesos ni recursos activos.
-7. Repetir el smoke React N=4 y confirmar la secuencia persistida exacta
-   `Accepted → Running → Completed`, el marcador de destino sincronizado y
-   visible, el margen 0,25 m, el contador UTC cercano a cinco minutos, los
-   cuatro viewports y la interacción/fullscreen privada.
-8. Retirar roles, tokens, cuentas, sesiones, perfiles y artefactos temporales.
-   Incorporar al informe únicamente capturas saneadas, separadas por SHA y con
-   checksums; conservar la etiqueta de rollback hasta completar la observación.
+2. Después del merge, comprobar los servicios públicos y despachar el workflow
+   GPU una sola vez para el SHA exacto. Verificar imagen instalada, NVIDIA, RTF,
+   unidad versionada y ausencia de un release parcial.
+3. Ejecutar las seis formaciones corregidas en sesiones frescas. Exigir roster
+   completo, ventana activa, precisión, movimiento natural, cero colisiones,
+   RTF ≥2,90, video visible y limpieza por caso.
+4. Repetir transporte N=1 sobre el SHA nuevo. La comprobación previa contra
+   `1448a31` ya aprobó la preservación del informe, ROS, HLS y cleanup. Después,
+   desde React, ejecutar N=4 con
+   tolerancia 0,25 m y confirmar búsqueda de toda la flota, aviso, encuentro,
+   contribución útil, marcador sincronizado, interacción y fullscreen.
+5. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA sobre el
+   mismo master Gazebo. Exigir render ≥45 FPS, HLS ≥27 FPS y RTF ≥2,90, sin
+   reducir masa o fricción para obtener el aprobado.
+6. No elevar cuentas por SQL ni crear usuarios para completar el recorrido
+   Admin. Solo se repetirá esa superficie si el operador proporciona una
+   credencial administrativa existente y acepta la revocación de sus tokens;
+   el recorrido User de `1448a31` permanece válido.
+7. Comprobar al final cero tareas, robots, sesiones, leases, contenedores,
+   perfiles y procesos temporales. Incorporar únicamente evidencia saneada y
+   separada por SHA; conservar el rollback hasta completar la observación.
 
 ## Deferred work
 

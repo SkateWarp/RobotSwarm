@@ -1748,6 +1748,26 @@ class RobotSwarmUi:
                 "Escape leaving fullscreen",
             )
             left_with_escape = True
+            # Chrome clears fullscreenElement before React has necessarily
+            # rendered the ordinary toolbar again. Wait for the public UI
+            # contract instead of sampling that short transition as a failure.
+            self.wait_js(
+                """
+                    (() => {
+                        const status = document.querySelector(
+                            '[data-testid="viewer-status"]'
+                        )?.textContent.trim();
+                        const button = document.querySelector(
+                            '[aria-label="Abrir visor en pantalla completa"]'
+                        );
+                        return status === 'En vivo'
+                            && (button?.textContent || '').trim()
+                                === 'Pantalla completa';
+                    })()
+                """,
+                5,
+                "live controls after leaving fullscreen",
+            )
             restored = self.viewer_state()
             if restored.get("status") != "En vivo" or restored.get("fullscreenText") != "Pantalla completa":
                 raise DriverError("The viewer did not restore its live non-fullscreen controls")
@@ -2056,7 +2076,16 @@ class RobotSwarmUi:
                         decodedFps: decoded / elapsedSeconds,
                         droppedFrames: dropped,
                         droppedRatio: dropped === null ? null : dropped / Math.max(1, decoded),
-                        mediaTimeAdvancedSeconds: video.currentTime - mediaStarted,
+                        // A live HLS player can seek backwards to a new live
+                        // edge while it keeps decoding at full rate. Treat
+                        // that correction as a regression diagnostic, not as
+                        // negative presented time that cancels earlier chunks.
+                        mediaTimeAdvancedSeconds: Math.max(
+                            0, video.currentTime - mediaStarted
+                        ),
+                        mediaTimeRegressedSeconds: Math.max(
+                            0, mediaStarted - video.currentTime
+                        ),
                         readyState: video.readyState,
                         paused: video.paused,
                         playbackRate: video.playbackRate,
@@ -2124,6 +2153,9 @@ class RobotSwarmUi:
             ),
             "mediaTimeAdvancedSeconds": sum(
                 float(item.get("mediaTimeAdvancedSeconds") or 0) for item in chunks
+            ),
+            "mediaTimeRegressedSeconds": sum(
+                float(item.get("mediaTimeRegressedSeconds") or 0) for item in chunks
             ),
             "readyState": last.get("readyState"),
             "paused": last.get("paused"),

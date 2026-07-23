@@ -39,6 +39,7 @@ from robot_swarm_bridge.algorithms.formation import (
     signed_distance_to_zone,
 )
 from robot_swarm_bridge.algorithms.path_trace import ArcLengthTrace
+from robot_swarm_bridge.utils.safety_publish import SafetyPublishLane
 
 
 PARAMETRIC_MODES = ('circular', 'square', 'figure8')
@@ -290,10 +291,37 @@ class FollowTheLeader:
         self.is_paused = False
         self.emergency_stop_active = False
         self.current_task_id = None
+        self._cancelled_task_ids = {}
         self.manual_twist = Twist()
         self.leader_trace = ArcLengthTrace(minimum_step=0.015)
         self.lock = threading.RLock()  # guards robot_names / per-robot dicts
         self.command_lock = threading.RLock()
+        # Emergency stops do not wait for the normal lifecycle lock.  Each
+        # command publisher owns one worker created here, while resources are
+        # healthy, so a blocked ROS socket cannot hide the rest of the fleet.
+        self._safety_lock = threading.RLock()
+        self._emergency_stop_condition = threading.Condition(
+            self._safety_lock
+        )
+        self._safety_lane_factory = SafetyPublishLane
+        self._safety_lanes = {}
+        self._safety_zero_state = {}
+        self._safety_publisher_snapshot = ()
+        self._safety_zero_attempts = 3
+        self.normal_stop_timeout_wall_s = max(0.05, float(rospy.get_param(
+            '~normal_stop_timeout_wall_s', 0.5,
+        )))
+        self.removal_stop_timeout_wall_s = max(0.05, float(rospy.get_param(
+            '~removal_stop_timeout_wall_s', 0.2,
+        )))
+        self.shutdown_stop_timeout_wall_s = max(0.05, float(rospy.get_param(
+            '~shutdown_stop_timeout_wall_s', 0.5,
+        )))
+        self._emergency_stop_generation = 0
+        self._latest_emergency_true_generation = 0
+        self._emergency_true_committed_generation = 0
+        self._emergency_true_pending = set()
+        self._shutdown_started = False
 
         # ---- Global publishers / subscribers --------------------------------
         self.status_pub = rospy.Publisher(
@@ -365,6 +393,220 @@ class FollowTheLeader:
         names = [n.strip() for n in msg.data.split(',') if n.strip()]
         self._sync_fleet(names)
 
+    @staticmethod
+    def _report_safety_lane_error(label, action, error):
+        try:
+            rospy.logerr(
+                "[follow_leader] Safety lane %s %s: %s",
+                label, action, error,
+            )
+        except Exception:
+            pass
+
+    def _ensure_safety_state(self):
+        """Create the small safety registry for legacy test instances."""
+        if not hasattr(self, '_safety_lock'):
+            self._safety_lock = threading.RLock()
+        if not hasattr(self, '_safety_lane_factory'):
+            self._safety_lane_factory = SafetyPublishLane
+        if not hasattr(self, '_emergency_stop_condition'):
+            self._emergency_stop_condition = threading.Condition(
+                self._safety_lock
+            )
+        if not hasattr(self, '_safety_lanes'):
+            self._safety_lanes = {}
+        if not hasattr(self, '_safety_zero_state'):
+            self._safety_zero_state = {}
+        if not hasattr(self, '_safety_publisher_snapshot'):
+            self._safety_publisher_snapshot = ()
+        if not hasattr(self, '_safety_zero_attempts'):
+            self._safety_zero_attempts = 3
+        if not hasattr(self, 'normal_stop_timeout_wall_s'):
+            self.normal_stop_timeout_wall_s = 0.5
+        if not hasattr(self, 'removal_stop_timeout_wall_s'):
+            self.removal_stop_timeout_wall_s = 0.2
+        if not hasattr(self, 'shutdown_stop_timeout_wall_s'):
+            self.shutdown_stop_timeout_wall_s = 0.5
+        if not hasattr(self, '_emergency_stop_generation'):
+            self._emergency_stop_generation = 0
+        if not hasattr(self, '_latest_emergency_true_generation'):
+            self._latest_emergency_true_generation = 0
+        if not hasattr(self, '_emergency_true_committed_generation'):
+            self._emergency_true_committed_generation = 0
+        if not hasattr(self, '_emergency_true_pending'):
+            self._emergency_true_pending = set()
+        if not hasattr(self, '_shutdown_started'):
+            self._shutdown_started = False
+
+    def _refresh_safety_snapshot_locked(self):
+        """Store an immutable roster for callbacks that bypass command_lock."""
+        self._safety_publisher_snapshot = tuple(
+            (name, publisher)
+            for name, publisher in sorted(
+                self.cmd_pubs.items(), key=lambda item: robot_id_sort_key(
+                    item[0]
+                )
+            )
+        )
+
+    def _register_safety_lane(self, name, publisher):
+        """Reserve one independent publication worker for a robot."""
+        self._ensure_safety_state()
+        with self._safety_lock:
+            current = self._safety_lanes.get(id(publisher))
+            if current is not None and current.available:
+                self._refresh_safety_snapshot_locked()
+                return True
+            lane = self._safety_lane_factory(
+                name, self._report_safety_lane_error
+            )
+            if not lane.available:
+                lane.close()
+                return False
+            self._safety_lanes[id(publisher)] = lane
+            self._safety_zero_state[id(publisher)] = {
+                'pending': False,
+                'reassert': False,
+                'receipts': 0,
+            }
+            self._refresh_safety_snapshot_locked()
+            return True
+
+    def _discard_safety_lane(self, publisher):
+        self._ensure_safety_state()
+        with self._safety_lock:
+            lane = self._safety_lanes.pop(id(publisher), None)
+            self._safety_zero_state.pop(id(publisher), None)
+            self._refresh_safety_snapshot_locked()
+        if lane is not None:
+            lane.close()
+
+    def _queue_safety_zero_locked(self, name, publisher, reassert=False):
+        """Coalesce a zero request onto one publisher's prestarted lane."""
+        key = id(publisher)
+        lane = self._safety_lanes.get(key)
+        state = self._safety_zero_state.setdefault(key, {
+            'pending': False,
+            'reassert': False,
+            'receipts': 0,
+        })
+        if lane is None or not lane.available:
+            rospy.logerr(
+                "[follow_leader] No safety lane is available for %s", name
+            )
+            return False
+        if state['pending']:
+            if reassert:
+                state['reassert'] = True
+            return True
+
+        state['pending'] = True
+        state['reassert'] = False
+        submitted = lane.submit(
+            lambda: self._run_safety_zero(name, publisher)
+        )
+        if not submitted:
+            state['pending'] = False
+            rospy.logerr(
+                "[follow_leader] Safety lane rejected the stop for %s", name
+            )
+        return submitted
+
+    def _queue_safety_zero(self, name, publisher, reassert=False):
+        self._ensure_safety_state()
+        with self._safety_lock:
+            return self._queue_safety_zero_locked(
+                name, publisher, reassert=reassert
+            )
+
+    def _run_safety_zero(self, name, publisher):
+        """Retry one zero without spawning workers from an emergency callback."""
+        key = id(publisher)
+        while True:
+            accepted = False
+            for attempt in range(1, self._safety_zero_attempts + 1):
+                try:
+                    publisher.publish(Twist())
+                    accepted = True
+                    break
+                except Exception as exc:
+                    rospy.logerr(
+                        "[follow_leader] Zero publish %d failed for %s: %s",
+                        attempt, name, exc,
+                    )
+
+            with self._safety_lock:
+                state = self._safety_zero_state.get(key)
+                if state is None:
+                    return
+                if accepted:
+                    state['receipts'] = state.get('receipts', 0) + 1
+                if state['reassert']:
+                    # A motion publish returned after the first zero, or a
+                    # second stop edge arrived while this job was in flight.
+                    state['reassert'] = False
+                    continue
+                state['pending'] = False
+                return
+
+    def _fan_out_safety_zero_locked(self, reassert=False):
+        """Queue every publisher before waiting on any lifecycle activity."""
+        accepted = True
+        for name, publisher in self._safety_publisher_snapshot:
+            accepted = self._queue_safety_zero_locked(
+                name, publisher, reassert=reassert
+            ) and accepted
+        return accepted
+
+    def _stop_publishers_bounded(self, publishers, timeout):
+        """Wait a bounded time for one fresh zero receipt per publisher."""
+        self._ensure_safety_state()
+        publishers = tuple(publishers)
+        with self._safety_lock:
+            required_receipts = {}
+            for name, publisher in publishers:
+                key = id(publisher)
+                state = self._safety_zero_state.get(key)
+                if state is None:
+                    required_receipts[(name, key)] = 1
+                    continue
+
+                baseline = state.get('receipts', 0)
+                if state.get('pending'):
+                    # The pending zero may already have returned and be waiting
+                    # to record its receipt behind another lock holder.  Require
+                    # a second zero so it cannot be mistaken for this stop edge.
+                    state['reassert'] = True
+                    required_receipts[(name, key)] = baseline + 2
+                else:
+                    required_receipts[(name, key)] = baseline + 1
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._safety_lock:
+                missing = []
+                for name, publisher in publishers:
+                    key = id(publisher)
+                    state = self._safety_zero_state.get(key)
+                    required = required_receipts[(name, key)]
+                    if state is None or state.get('receipts', 0) < required:
+                        missing.append((name, publisher))
+                if not missing:
+                    return {
+                        'confirmed': True,
+                        'failed_robots': [],
+                    }
+                if time.monotonic() >= deadline:
+                    return {
+                        'confirmed': False,
+                        'failed_robots': [name for name, _ in missing],
+                    }
+                for name, publisher in missing:
+                    lane = self._safety_lanes.get(id(publisher))
+                    if lane is not None and lane.available:
+                        self._queue_safety_zero_locked(name, publisher)
+            time.sleep(0.005)
+
     def _sync_fleet(self, new_names):
         """
         Synchronise internal data structures with *new_names*.
@@ -376,6 +618,11 @@ class FollowTheLeader:
         new_names_sorted = sort_robot_ids(new_names)
 
         with self.command_lock:
+            self._ensure_safety_state()
+            with self._safety_lock:
+                if self._shutdown_started:
+                    return
+
             with self.lock:
                 old_set = set(self.robot_names)
                 new_set = set(new_names_sorted)
@@ -384,49 +631,70 @@ class FollowTheLeader:
                 # not quietly replace it and restart path planning.
                 if new_set == old_set:
                     return
-
                 old_leader = self.robot_names[0] if self.robot_names else None
+                was_active = self.is_active or self.is_paused
+                departing_publishers = tuple(
+                    (name, self.cmd_pubs[name])
+                    for name in sort_robot_ids(old_set - new_set)
+                    if name in self.cmd_pubs
+                )
 
-                if not new_set and (self.is_active or self.is_paused):
+                if not new_set and was_active:
+                    # Clear lifecycle state before any ROS operation.  A broken
+                    # connection must not leave an empty fleet looking active.
                     self._cancel_path_plan_locked(clear_staging=True)
-                    self._stop_all()
                     self.is_active = False
                     self.is_paused = False
                     self.leader_trace.clear()
 
-                # Add new robots
-                for name in new_set - old_set:
-                    self._add_robot(name)
+            publication = self._stop_publishers_bounded(
+                departing_publishers,
+                max(0.05, float(self.removal_stop_timeout_wall_s)),
+            )
+            if was_active and not publication['confirmed']:
+                self._record_stop_failure_locked(
+                    'Fleet change', publication
+                )
 
-                # Remove departed robots
-                for name in old_set - new_set:
-                    self._remove_robot(name)
+            # Holding the safety lock makes this the fleet-change commit point.
+            # A shutdown that won first is terminal; a shutdown that arrives
+            # afterwards receives the complete new publisher snapshot.
+            with self._safety_lock:
+                if self._shutdown_started:
+                    return
+                with self.lock:
+                    for name in new_set - old_set:
+                        self._add_robot(name)
+                    for name in old_set - new_set:
+                        self._remove_robot(name, stop_first=False)
 
-                self.robot_names = new_names_sorted
-                new_leader = self.robot_names[0] if self.robot_names else None
-                if old_leader != new_leader:
-                    self.leader_trace.clear()
+                    self.robot_names = new_names_sorted
+                    new_leader = (
+                        self.robot_names[0] if self.robot_names else None
+                    )
+                    if old_leader != new_leader:
+                        self.leader_trace.clear()
 
-                # A changed chain can require a larger closed path. Re-anchor
-                # at the leader's current pose on the next control tick so the
-                # desired position does not jump across the arena.
-                if (
-                    new_names_sorted
-                    and self.is_active
-                    and self.leader_mode in PARAMETRIC_MODES
-                ):
-                    self._cancel_path_plan_locked(clear_staging=True)
-                    self.path_t = 0.0
-                    self.path_anchor_ready = False
-                    self.path_error = None
-                    self.chain_assembled = False
-                    self.chain_settle_ticks = 0
-                    self.leader_speed_scale = 0.0
-                    self.leader_trace.clear()
-                    for pid in self.linear_pids.values():
-                        pid.reset()
-                    for pid in self.angular_pids.values():
-                        pid.reset()
+                    # A changed chain can require a larger closed path. Re-anchor
+                    # at the leader's current pose on the next control tick so the
+                    # desired position does not jump across the arena.
+                    if (
+                        new_names_sorted
+                        and self.is_active
+                        and self.leader_mode in PARAMETRIC_MODES
+                    ):
+                        self._cancel_path_plan_locked(clear_staging=True)
+                        self.path_t = 0.0
+                        self.path_anchor_ready = False
+                        self.path_error = None
+                        self.chain_assembled = False
+                        self.chain_settle_ticks = 0
+                        self.leader_speed_scale = 0.0
+                        self.leader_trace.clear()
+                        for pid in self.linear_pids.values():
+                            pid.reset()
+                        for pid in self.angular_pids.values():
+                            pid.reset()
 
         rospy.loginfo(
             "[follow_leader] Fleet synced: %s", ', '.join(new_names_sorted)
@@ -456,9 +724,17 @@ class FollowTheLeader:
             max_output=self.max_angular_vel,
         )
 
-        self.cmd_pubs[name] = rospy.Publisher(
+        publisher = rospy.Publisher(
             '/{}/cmd_vel'.format(name), Twist, queue_size=1
         )
+        self.cmd_pubs[name] = publisher
+        if not self._register_safety_lane(name, publisher):
+            self.cmd_pubs.pop(name, None)
+            publisher.unregister()
+            raise RuntimeError(
+                "could not reserve the emergency publication lane for {}"
+                .format(name)
+            )
         self.odom_subs[name] = rospy.Subscriber(
             '/{}/odom'.format(name), Odometry,
             callback=self._odom_cb, callback_args=name,
@@ -468,20 +744,23 @@ class FollowTheLeader:
 
         rospy.loginfo("[follow_leader] Added robot: %s", name)
 
-    def _remove_robot(self, name):
-        """Unregister a robot and clean up resources."""
+    def _remove_robot(self, name, stop_first=True):
+        """Detach a robot without trusting its ROS connection callbacks."""
+        pub = self.cmd_pubs.get(name)
+        if stop_first and pub is not None:
+            self._stop_publishers_bounded(
+                ((name, pub),),
+                max(0.05, float(self.removal_stop_timeout_wall_s)),
+            )
+
+        # Internal cleanup is authoritative and happens before unregistering
+        # anything.  The ROS methods below are allowed to fail or block without
+        # leaving a ghost robot in the active roster.
         pub = self.cmd_pubs.pop(name, None)
-        if pub is not None:
-            pub.publish(Twist())
-            pub.unregister()
-
         odom_sub = self.odom_subs.pop(name, None)
-        if odom_sub is not None:
-            odom_sub.unregister()
-
         avoidance = self.avoidance.pop(name, None)
-        if avoidance is not None:
-            avoidance.shutdown()
+        if pub is not None:
+            self._discard_safety_lane(pub)
 
         for d in (
             self.poses, self.yaws,
@@ -492,8 +771,52 @@ class FollowTheLeader:
         invalid_odometry = set(getattr(self, 'invalid_odometry', set()))
         invalid_odometry.discard(name)
         self.invalid_odometry = invalid_odometry
+        if name in self.robot_names:
+            self.robot_names.remove(name)
+
+        for label, resource, method_name in (
+            ('command publisher', pub, 'unregister'),
+            ('odometry subscriber', odom_sub, 'unregister'),
+            ('avoidance module', avoidance, 'shutdown'),
+        ):
+            if resource is not None:
+                self._dispose_robot_resource(
+                    name, label, resource, method_name
+                )
 
         rospy.loginfo("[follow_leader] Removed robot: %s", name)
+
+    @staticmethod
+    def _dispose_robot_resource(name, label, resource, method_name):
+        """Dispose one external resource away from fleet-management locks."""
+        def dispose():
+            try:
+                getattr(resource, method_name)()
+            except Exception as exc:
+                try:
+                    rospy.logwarn(
+                        "[follow_leader] %s for %s could not be disposed: %s",
+                        label, name, exc,
+                    )
+                except Exception:
+                    pass
+
+        worker = threading.Thread(
+            target=dispose,
+            name='follow-dispose-{}-{}'.format(name, method_name),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception as exc:
+            try:
+                rospy.logwarn(
+                    "[follow_leader] disposal worker for %s (%s) could not "
+                    "start: %s",
+                    name, label, exc,
+                )
+            except Exception:
+                pass
 
     # -- callbacks ----------------------------------------------------------
 
@@ -664,11 +987,36 @@ class FollowTheLeader:
             config = json.loads(msg.data) if msg.data else {}
         except (json.JSONDecodeError, AttributeError):
             config = {}
+        if not isinstance(config, dict):
+            config = {}
+        requested_task_id = config.get('task_id')
+        if (
+            not isinstance(requested_task_id, str)
+            or not requested_task_id.strip()
+        ):
+            rospy.logwarn(
+                "[follow_leader] Start rejected because task_id is invalid"
+            )
+            return
 
         with self.command_lock:
-            if self.emergency_stop_active:
+            self._ensure_safety_state()
+            with self._safety_lock:
+                stop_is_latched = (
+                    self.emergency_stop_active or self._shutdown_started
+                )
+            if stop_is_latched:
                 rospy.logwarn(
-                    "[follow_leader] Start rejected while emergency stop is active"
+                    "[follow_leader] Start rejected after a terminal stop"
+                )
+                return
+            if requested_task_id in getattr(
+                self, '_cancelled_task_ids', {}
+            ):
+                rospy.logwarn(
+                    "[follow_leader] Start rejected because task %s was "
+                    "already cancelled",
+                    requested_task_id,
                 )
                 return
             with self.lock:
@@ -722,11 +1070,17 @@ class FollowTheLeader:
                 ]
                 self.leader_mode = 'waypoint'
 
-            self.current_task_id = config.get('task_id')
-            self.task_started_at = time.monotonic()
-            self.stale_odometry = []
-            self.is_active = True
-            self.is_paused = False
+            with self._safety_lock:
+                if self.emergency_stop_active or self._shutdown_started:
+                    rospy.logwarn(
+                        "[follow_leader] Start cancelled by a terminal stop"
+                    )
+                    return
+                self.current_task_id = requested_task_id
+                self.task_started_at = time.monotonic()
+                self.stale_odometry = []
+                self.is_active = True
+                self.is_paused = False
             self._cancel_path_plan_locked(clear_staging=True)
             self.path_t = 0.0
             self.current_waypoint_idx = 0
@@ -822,14 +1176,19 @@ class FollowTheLeader:
         return result
 
     def _stop_cb(self, msg):
+        requested_task_id = self._task_id_from_message(msg)
+        if requested_task_id is None:
+            return
         with self.command_lock:
-            if not self._task_command_matches(msg):
+            self._remember_cancelled_task_locked(requested_task_id)
+            if requested_task_id != self.current_task_id:
                 return
             self._cancel_path_plan_locked(clear_staging=True)
             self.is_active = False
             self.is_paused = False
-            self._stop_all()
-        rospy.loginfo("[follow_leader] Behaviour STOPPED")
+            publication = self._stop_all('Task stop')
+        if publication['confirmed']:
+            rospy.loginfo("[follow_leader] Behaviour STOPPED")
 
     def _pause_cb(self, msg):
         with self.command_lock:
@@ -838,49 +1197,168 @@ class FollowTheLeader:
             if not self.is_active or self.is_paused:
                 return
             self.is_paused = True
-            self._stop_all()
-        rospy.loginfo("[follow_leader] Behaviour PAUSED")
+            publication = self._stop_all('Task pause')
+        if publication['confirmed']:
+            rospy.loginfo("[follow_leader] Behaviour PAUSED")
 
     def _resume_cb(self, msg):
         with self.command_lock:
             if not self._task_command_matches(msg):
                 return
-            if (
-                not self.is_active
-                or not self.is_paused
-                or self.emergency_stop_active
-            ):
-                return
-            self.is_paused = False
+            self._ensure_safety_state()
+            with self._safety_lock:
+                if (
+                    not self.is_active
+                    or not self.is_paused
+                    or self.emergency_stop_active
+                    or self._shutdown_started
+                ):
+                    return
+                self.is_paused = False
         rospy.loginfo("[follow_leader] Behaviour RESUMED")
 
-    def _task_command_matches(self, msg):
+    @staticmethod
+    def _task_id_from_message(msg):
         try:
             payload = json.loads(msg.data) if msg.data else {}
         except (json.JSONDecodeError, AttributeError):
             payload = {}
         requested_id = payload.get('task_id')
-        return bool(requested_id) and requested_id == self.current_task_id
+        if not isinstance(requested_id, str) or not requested_id.strip():
+            return None
+        return requested_id
+
+    def _remember_cancelled_task_locked(self, task_id):
+        cancelled = getattr(self, '_cancelled_task_ids', None)
+        if cancelled is None:
+            self._cancelled_task_ids = {}
+            cancelled = self._cancelled_task_ids
+        if task_id in cancelled:
+            return
+        if len(cancelled) >= 64:
+            cancelled.pop(next(iter(cancelled)))
+        cancelled[task_id] = None
+
+    def _task_command_matches(self, msg):
+        requested_id = self._task_id_from_message(msg)
+        return requested_id is not None and requested_id == self.current_task_id
 
     def _manual_cmd_cb(self, msg):
         self.manual_twist = msg
 
     def _emergency_stop_cb(self, msg):
-        with self.command_lock:
-            self.emergency_stop_active = bool(msg.data)
-            if self.emergency_stop_active:
+        requested_stop = bool(msg.data)
+        self._ensure_safety_state()
+        with self._emergency_stop_condition:
+            self._emergency_stop_generation += 1
+            generation = self._emergency_stop_generation
+            if requested_stop:
+                self._latest_emergency_true_generation = generation
+                self._emergency_true_pending.add(generation)
+                self.emergency_stop_active = True
+                self.is_active = False
+                self.is_paused = False
+            else:
+                required_true_generation = (
+                    self._latest_emergency_true_generation
+                )
+        if not requested_stop:
+            with self._emergency_stop_condition:
+                while (
+                    any(
+                        pending_generation <= required_true_generation
+                        for pending_generation
+                        in self._emergency_true_pending
+                    )
+                ):
+                    self._emergency_stop_condition.wait()
+            with self.command_lock:
+                with self._emergency_stop_condition:
+                    if generation == self._emergency_stop_generation:
+                        self.emergency_stop_active = False
+            return
+
+        # The complete snapshot was queued before command_lock above. A late
+        # cmd_vel or blocked normal stop cannot delay healthy publishers.
+        initial_fanout = True
+        final_fanout = True
+        try:
+            with self._emergency_stop_condition:
+                initial_fanout = self._fan_out_safety_zero_locked(
+                    reassert=True
+                )
+            with self.command_lock:
+                with self._emergency_stop_condition:
+                    current_edge = (
+                        generation == self._emergency_stop_generation
+                    )
+                    latest_true = (
+                        generation
+                        == self._latest_emergency_true_generation
+                    )
+                if latest_true:
+                    self._cancel_path_plan_locked(clear_staging=True)
+                    with self._emergency_stop_condition:
+                        if current_edge:
+                            self.emergency_stop_active = True
+                        self.is_active = False
+                        self.is_paused = False
+                        final_fanout = self._fan_out_safety_zero_locked(
+                            reassert=True
+                        )
+        finally:
+            with self._emergency_stop_condition:
+                self._emergency_true_committed_generation = max(
+                    self._emergency_true_committed_generation,
+                    generation,
+                )
+                self._emergency_true_pending.discard(generation)
+                self._emergency_stop_condition.notify_all()
+
+        if initial_fanout and final_fanout:
+            rospy.logwarn("[follow_leader] Emergency stop latched")
+        else:
+            rospy.logerr(
+                "[follow_leader] Emergency stop latched with an unavailable "
+                "local safety lane"
+            )
+
+    def _shutdown(self):
+        """Latch terminal state and confirm final zeros within a wall timeout."""
+        self._ensure_safety_state()
+        with self._safety_lock:
+            self._shutdown_started = True
+            self.is_active = False
+            self.is_paused = False
+            publishers = self._safety_publisher_snapshot
+            self._fan_out_safety_zero_locked(reassert=True)
+
+        # A control callback may be stuck inside rospy.publish while holding the
+        # lifecycle lock.  The safety lanes are independent, so waiting for that
+        # lock here would discard the configured shutdown wall-time guarantee.
+        publication = self._stop_publishers_bounded(
+            publishers,
+            max(0.05, float(self.shutdown_stop_timeout_wall_s)),
+        )
+        command_lock_acquired = self.command_lock.acquire(blocking=False)
+        if command_lock_acquired:
+            try:
                 self._cancel_path_plan_locked(clear_staging=True)
                 self.is_active = False
                 self.is_paused = False
-                self._stop_all()
-                rospy.logwarn("[follow_leader] Emergency stop latched")
-
-    def _shutdown(self):
-        """Publish a final zero command before leaving the ROS graph."""
-        with self.command_lock:
-            self.is_active = False
-            self.is_paused = False
-            self._stop_all()
+            finally:
+                self.command_lock.release()
+        else:
+            rospy.logwarn(
+                "[follow_leader] Shutdown left path cleanup to the in-flight "
+                "control callback"
+            )
+        if not publication['confirmed']:
+            rospy.logerr(
+                "[follow_leader] Shutdown could not confirm zero velocity "
+                "for: %s",
+                ', '.join(publication['failed_robots']),
+            )
 
     # -- leader path generation ---------------------------------------------
 
@@ -2249,12 +2727,15 @@ class FollowTheLeader:
     def _publish_motion_commands(self, commands):
         """Validate a complete fleet batch immediately before publishing it."""
         with self.command_lock:
-            if (
-                not self.is_active
-                or self.is_paused
-                or self.emergency_stop_active
-            ):
-                return False
+            self._ensure_safety_state()
+            with self._safety_lock:
+                if (
+                    not self.is_active
+                    or self.is_paused
+                    or self.emergency_stop_active
+                    or self._shutdown_started
+                ):
+                    return False
 
             requests_motion = False
             for robot_name, command in commands.items():
@@ -2295,8 +2776,44 @@ class FollowTheLeader:
             # command transaction. Lifecycle callbacks cannot split the batch.
             for robot_name, command in commands.items():
                 publisher = self.cmd_pubs.get(robot_name)
-                if publisher is not None:
+                if publisher is None:
+                    continue
+
+                with self._safety_lock:
+                    if (
+                        self.emergency_stop_active
+                        or self._shutdown_started
+                        or not self.is_active
+                    ):
+                        return False
+                try:
                     publisher.publish(command)
+                except Exception:
+                    with self._safety_lock:
+                        stop_was_latched = (
+                            self.emergency_stop_active
+                            or self._shutdown_started
+                        )
+                        if stop_was_latched:
+                            self._queue_safety_zero_locked(
+                                robot_name, publisher, reassert=True
+                            )
+                    raise
+
+                # The emergency callback deliberately does not wait for this
+                # publish. If its latch won the race, put another zero behind
+                # this late positive command before leaving the transaction.
+                with self._safety_lock:
+                    stop_was_latched = (
+                        self.emergency_stop_active
+                        or self._shutdown_started
+                    )
+                    if stop_was_latched:
+                        self._queue_safety_zero_locked(
+                            robot_name, publisher, reassert=True
+                        )
+                if stop_was_latched:
+                    return False
             return True
 
     def _fail_active_task_locked(self, reason, invalid_names=None):
@@ -2330,6 +2847,7 @@ class FollowTheLeader:
                 not self.is_active
                 or self.is_paused
                 or self.emergency_stop_active
+                or getattr(self, '_shutdown_started', False)
             ):
                 return
             invalid = self._invalid_live_odometry(self.robot_names)
@@ -2683,13 +3201,62 @@ class FollowTheLeader:
 
     # -- utilities ----------------------------------------------------------
 
-    def _stop_all(self):
-        """Send zero-velocity to every robot."""
-        stop = Twist()
+    def _record_stop_failure_locked(self, context, publication):
+        """Turn an unconfirmed ordinary stop into an observable task failure."""
+        failed = publication.get('failed_robots', [])
+        detail = "{} could not confirm zero velocity for: {}".format(
+            context, ', '.join(failed),
+        )
+        previous_error = getattr(self, 'path_error', None)
+        if previous_error:
+            if detail not in previous_error:
+                self.path_error = "{} {}".format(previous_error, detail)
+        else:
+            self.path_error = detail
+        self.is_active = False
+        self.is_paused = False
+        try:
+            self._publish_status([])
+        except Exception as exc:
+            rospy.logerr(
+                "[follow_leader] stop failure status could not be published: %s",
+                exc,
+            )
+        rospy.logerr("[follow_leader] %s", detail)
+        return detail
+
+    def _stop_all(self, failure_context='Follow task'):
+        """Confirm fleet-wide zeros without serialising on a bad publisher."""
+        self._ensure_safety_state()
         with self.lock:
-            pubs = list(self.cmd_pubs.values())
-        for pub in pubs:
-            pub.publish(stop)
+            publishers = tuple(
+                (name, self.cmd_pubs[name])
+                for name in sort_robot_ids(self.cmd_pubs)
+            )
+        # Old in-process users may have constructed the controller before the
+        # lane registry was introduced.  Ordinary lifecycle work may repair
+        # that state; emergency and shutdown paths never create workers late.
+        for name, publisher in publishers:
+            with self._safety_lock:
+                lane = self._safety_lanes.get(id(publisher))
+                lane_is_ready = lane is not None and lane.available
+            if not lane_is_ready:
+                self._register_safety_lane(name, publisher)
+        publication = self._stop_publishers_bounded(
+            publishers,
+            max(0.05, float(self.normal_stop_timeout_wall_s)),
+        )
+        for avoidance in tuple(self.avoidance.values()):
+            try:
+                avoidance.reset_motion()
+            except Exception as exc:
+                rospy.logwarn(
+                    "[follow_leader] avoidance reset failed during stop: %s",
+                    exc,
+                )
+        if failure_context and not publication['confirmed']:
+            self._record_stop_failure_locked(failure_context, publication)
+        return publication
 
 
 # ---------------------------------------------------------------------------

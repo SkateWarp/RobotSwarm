@@ -1705,7 +1705,10 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
             "config": {
                 "formation_type": "triangle",
                 "movement_mode": "static",
-                "spacing": 0.7,
+                # Keep the task active long enough for the independent
+                # FollowLeader command to cross the worker queue. At 0.7 m
+                # the grid spawn can already satisfy the triangle.
+                "spacing": 1.3,
             },
         }
         follow_parameters = {
