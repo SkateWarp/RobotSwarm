@@ -63,6 +63,7 @@ READ_CHUNK = 64 * 1024
 MAXIMUM_OBSERVER_LINE = 16 * 1024
 MAXIMUM_OBSERVER_EVIDENCE = 8 * 1024 * 1024
 MAXIMUM_OBSERVER_DOCUMENTS = 6000
+OBSERVER_SAMPLE_INTERVAL_SECONDS = 0.25
 OBSERVER_MARKER_GRACE_SECONDS = 2.0
 OBSERVER_SIGNAL_GRACE_SECONDS = 2.0
 OBSERVER_KILL_GRACE_SECONDS = 3.0
@@ -592,6 +593,7 @@ from std_msgs.msg import String
 roster = tuple(item for item in sys.argv[1].split(',') if item)
 stop_path = sys.argv[2]
 maximum_seconds = float(sys.argv[3])
+sample_interval_seconds = float(sys.argv[4])
 if (
     not roster
     or len(set(roster)) != len(roster)
@@ -599,6 +601,8 @@ if (
     or not re.fullmatch(r'/tmp/robotswarm-transport-ui-[0-9a-f]{32}[.]stop', stop_path)
     or not math.isfinite(maximum_seconds)
     or maximum_seconds <= 0
+    or not math.isfinite(sample_interval_seconds)
+    or sample_interval_seconds <= 0
 ):
     raise SystemExit(4)
 
@@ -609,6 +613,8 @@ last_positions = {}
 search_origins = {}
 search_last = {}
 search_paths = {item: 0.0 for item in roster}
+last_emitted_at = 0.0
+last_emitted_phase = None
 
 def decode(message):
     try:
@@ -639,7 +645,7 @@ def model_callback(message):
             search_last[name] = point
 
 def status_callback(message):
-    global active_task, active_phase
+    global active_task, active_phase, last_emitted_at, last_emitted_phase
     value = decode(message)
     if value is None:
         return
@@ -657,24 +663,29 @@ def status_callback(message):
             'finder': discovery.get('finder'),
             'notified_robots': discovery.get('notified_robots'),
         }
+    observed_at = time.monotonic()
     with lock:
         active_task = task_id
         active_phase = phase
+        if (
+            phase not in {'DONE', 'FAILED'}
+            and phase == last_emitted_phase
+            and observed_at - last_emitted_at < sample_interval_seconds
+        ):
+            return
+        last_emitted_at = observed_at
+        last_emitted_phase = phase
         paths = dict(search_paths)
     document = {
-        'observed_at': time.monotonic(),
+        'observed_at': observed_at,
         'task_id': task_id,
         'phase': phase,
         'paused': value.get('paused'),
         'progress': value.get('progress'),
-        'distance_to_target': value.get('distance_to_target'),
         'searching_robot_count': value.get('searching_robot_count'),
         'search_path_length_m': paths,
         'current_useful_pusher_count': value.get('current_useful_pusher_count'),
         'current_useful_pusher_ids': value.get('current_useful_pusher_ids'),
-        'useful_contributor_count': value.get('useful_contributor_count'),
-        'useful_contributor_ids': value.get('useful_contributor_ids'),
-        'all_pushers_confirmed': value.get('all_pushers_confirmed'),
         'discovery': selected_discovery,
     }
     print(
@@ -833,7 +844,7 @@ class TransportStatusObserver:
         bootstrap = (
             "set -u; source /opt/ros/noetic/setup.bash; "
             "source /catkin_ws/devel/setup.bash; "
-            "test ! -e \"$3\"; exec python3 -u -c \"$1\" \"$2\" \"$3\" \"$4\""
+            "test ! -e \"$3\"; exec python3 -u -c \"$1\" \"$2\" \"$3\" \"$4\" \"$5\""
         )
         command = [
             self.docker.executable,
@@ -847,6 +858,7 @@ class TransportStatusObserver:
             ",".join(sorted(self.roster)),
             self.stop_path,
             f"{self.maximum_seconds:.3f}",
+            f"{OBSERVER_SAMPLE_INTERVAL_SECONDS:.3f}",
         ]
         self.process = subprocess.Popen(
             command,

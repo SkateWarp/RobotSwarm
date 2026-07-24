@@ -10,6 +10,7 @@ import datetime as dt
 import importlib.util
 import inspect
 import json
+import math
 import os
 import re
 import signal
@@ -729,6 +730,38 @@ class TransportUiAcceptanceContractTests(unittest.TestCase):
             8 * 1024 * 1024,
         )
         self.assertIn("os.read", inspect.getsource(HARNESS.TransportStatusObserver._bounded_lines))
+
+    def test_private_ros_observer_samples_status_within_its_complete_task_bound(self):
+        maximum_task_seconds = 600
+        maximum_sampled_documents = (
+            math.ceil(
+                maximum_task_seconds / HARNESS.OBSERVER_SAMPLE_INTERVAL_SECONDS
+            )
+            + 5
+        )
+        representative_size = HARNESS.TransportStatusObserver._retained_size(
+            ros_documents()[3]
+        )
+
+        self.assertLess(
+            maximum_sampled_documents,
+            HARNESS.MAXIMUM_OBSERVER_DOCUMENTS,
+        )
+        self.assertLess(
+            maximum_sampled_documents * representative_size,
+            HARNESS.MAXIMUM_OBSERVER_EVIDENCE,
+        )
+        self.assertIn(
+            "phase == last_emitted_phase",
+            HARNESS.TRANSPORT_OBSERVER_SOURCE,
+        )
+        self.assertIn(
+            "phase not in {'DONE', 'FAILED'}",
+            HARNESS.TRANSPORT_OBSERVER_SOURCE,
+        )
+        launch_source = inspect.getsource(HARNESS.TransportStatusObserver.launch)
+        self.assertIn("$5", launch_source)
+        self.assertIn("OBSERVER_SAMPLE_INTERVAL_SECONDS", launch_source)
 
     def test_private_ros_observer_kills_local_group_but_fails_closed_without_remote_proof(self):
         docker = types.SimpleNamespace(

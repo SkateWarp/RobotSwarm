@@ -1,0 +1,406 @@
+{
+  "account": "A",
+  "artifacts": {
+    "after-loaded-probe-browser.png": {
+      "bytes": 146826,
+      "file": "after-loaded-probe-browser.png",
+      "sanitized": true,
+      "sha256": "20080eaa3f7ea2d6311313db3e4dbf6ca6fda30af2dd0bd8b94a354081ac7d57"
+    },
+    "before-loaded-probe-browser.png": {
+      "bytes": 128481,
+      "file": "before-loaded-probe-browser.png",
+      "sanitized": true,
+      "sha256": "2419cd851d23826ff75c19ace39169f7dfd1e0491a4bb760b341c214bc493eaa"
+    },
+    "during-loaded-grf-push-browser.png": {
+      "bytes": 147491,
+      "file": "during-loaded-grf-push-browser.png",
+      "sanitized": true,
+      "sha256": "bcf8442f62a827c23f1cab10612d93676ac1d26336a180d1bde852a50a8debdb"
+    },
+    "gazebo-gui-preflight.json": {
+      "bytes": 909,
+      "file": "gazebo-gui-preflight.json",
+      "sanitized": true,
+      "sha256": "b58aad17dc02e7a2a808160ee68dd99664616dcd7f4bd2abaa84acf008294ea0"
+    },
+    "grf-result.json": {
+      "bytes": 29839,
+      "file": "grf-result.json",
+      "sanitized": true,
+      "sha256": "bc218802ef33bf82809ec8c44e982c4ea375328296f312d428dde9b543a803a4"
+    },
+    "grf-summary.json": {
+      "bytes": 167,
+      "file": "grf-summary.json",
+      "sanitized": true,
+      "sha256": "6cf07517daf70661e3878588b1efee2d435ddc58f0c209cc263308173122fd76"
+    },
+    "load-result.json": {
+      "bytes": 3176,
+      "file": "load-result.json",
+      "sanitized": true,
+      "sha256": "060ce9910fb1d1c5dac9b2c62bb8516ab313939cd988252f0f1a5a9ad512ad5b"
+    },
+    "loaded-preflight-hls.json": {
+      "bytes": 789,
+      "file": "loaded-preflight-hls.json",
+      "sanitized": true,
+      "sha256": "38623a7be693205a9f4138cad56a89e876e908a485b472277c3f1dceb570920d"
+    },
+    "loaded-preflight-overlap.json": {
+      "bytes": 1375,
+      "file": "loaded-preflight-overlap.json",
+      "sanitized": true,
+      "sha256": "43edc7219aff4ae2abc4ec42fc2db30413e03db331bc0285930af6340ec8dcb8"
+    },
+    "loaded-push-browser-correlation.json": {
+      "bytes": 788,
+      "file": "loaded-push-browser-correlation.json",
+      "sanitized": true,
+      "sha256": "73a0c1a2c93bb74f40067811bbbc87367e531ea59527d513cb3bf165d25fd3c7"
+    },
+    "post-load-cleanup.json": {
+      "bytes": 172,
+      "file": "post-load-cleanup.json",
+      "sanitized": true,
+      "sha256": "1354668ca53790255c43b675441d44f0114f495af70833277614b940c94768ce"
+    }
+  },
+  "browser": {
+    "clickAudit": [
+      {
+        "contextReplaced": false,
+        "description": "login",
+        "fallbackUsed": false,
+        "received": true,
+        "trusted": true
+      },
+      {
+        "contextReplaced": false,
+        "description": "button Crear simulación",
+        "fallbackUsed": false,
+        "received": true,
+        "trusted": true
+      },
+      {
+        "contextReplaced": false,
+        "description": "button Abrir visor",
+        "fallbackUsed": false,
+        "received": true,
+        "trusted": true
+      },
+      {
+        "contextReplaced": false,
+        "description": "button Cerrar visor",
+        "fallbackUsed": false,
+        "received": true,
+        "trusted": true
+      },
+      {
+        "contextReplaced": false,
+        "description": "button Detener sesión",
+        "fallbackUsed": false,
+        "received": true,
+        "trusted": true
+      },
+      {
+        "contextReplaced": false,
+        "description": "button Detener y liberar",
+        "fallbackUsed": false,
+        "received": true,
+        "trusted": true
+      }
+    ],
+    "mediaCapabilities": {
+      "baselineAudio": true,
+      "baselineAvc": true,
+      "hlsJsEquivalent": true,
+      "mediaSource": true,
+      "sourceBufferReady": true
+    },
+    "product": "Chrome/150.0.7871.129",
+    "visible": true
+  },
+  "capacity": {
+    "companionCount": 2,
+    "connectedRobotCount": 4,
+    "fleetProgressM": 1.0604,
+    "payloadProgressGain": 147.27777777777777,
+    "payloadRootCount": 2,
+    "profileFriction": 0.25,
+    "profileMassKg": 0.75,
+    "singleRobotProgressM": 0.0072,
+    "trialRealTimeFactors": [
+      2.9963441020667014,
+      2.9960302599056248,
+      2.9977606369743715
+    ],
+    "trialTiming": [
+      {
+        "commandSpeedMps": 0.16,
+        "recalculatedRealTimeFactor": 2.9963441020667014,
+        "robotCount": 1,
+        "simulatedSeconds": 12.048,
+        "wallSeconds": 4.0209
+      },
+      {
+        "commandSpeedMps": 0.16,
+        "recalculatedRealTimeFactor": 2.9960302599056248,
+        "robotCount": 2,
+        "simulatedSeconds": 12.0,
+        "wallSeconds": 4.0053
+      },
+      {
+        "commandSpeedMps": 0.16,
+        "recalculatedRealTimeFactor": 2.9977606369743715,
+        "robotCount": 4,
+        "simulatedSeconds": 12.048,
+        "wallSeconds": 4.019
+      }
+    ],
+    "twoRootProgressM": 0.0332
+  },
+  "cleanup": {
+    "boundedChildProcessesStopped": true,
+    "browserClosed": true,
+    "cdpPortReleased": true,
+    "complete": true,
+    "containerAbsent": true,
+    "leaseRuntimeAbsent": true,
+    "networkAbsent": true,
+    "officialProbeTaskRosterClean": true,
+    "payloadProcessAbsent": true,
+    "preflightFileCount": 3,
+    "preflightFilesRemoved": true,
+    "preflightProcessAbsent": true,
+    "preflightWorkspaceReleased": true,
+    "profileRemoved": true,
+    "sessionResourcesComplete": true,
+    "sessionStopped": true,
+    "taskRosterClean": true,
+    "viewerClosed": true,
+    "viewerPublisherAbsent": true,
+    "workspaceReleased": true
+  },
+  "completedAt": "2026-07-24T08:37:46Z",
+  "container": {
+    "exclusiveNetworkAttachmentVerified": true,
+    "imagePinned": true,
+    "imageRevision": "c3866d553015463e561b636f27860a2b8472b7fe",
+    "imageVersion": "c3866d553015463e561b636f27860a2b8472b7fe+a2859ad62dcc",
+    "managed": true,
+    "privateMasterBindingReady": true,
+    "privateNetworkVerified": true,
+    "running": true
+  },
+  "deploymentCommit": "c3866d553015463e561b636f27860a2b8472b7fe",
+  "evidenceDirectory": "loaded-n4-evidence-20260724T083157Z-2686390",
+  "gate": "loaded-transport-grf-n4",
+  "grf": {
+    "allFleetUsefulSamples": 1701,
+    "companionPusherCount": 2,
+    "contractGoalProgressM": 0.4998,
+    "finderNoticeObserved": true,
+    "goalProgressEfficiency": 0.9902,
+    "goalProgressM": 0.4999,
+    "grfSamples": 1701,
+    "noticeRecipientCount": 4,
+    "observedRealTimeFactor": 2.9959954516240668,
+    "payloadRootCount": 2,
+    "physicalMinimumGoalProgressM": 0.5,
+    "rendezvousRobotCount": 4,
+    "robotCount": 4,
+    "simultaneousSearchMoverCount": 4,
+    "usefulPusherCount": 4
+  },
+  "hashes": {
+    "GrfResultSha256": "bc218802ef33bf82809ec8c44e982c4ea375328296f312d428dde9b543a803a4",
+    "GrfSummarySha256": "6cf07517daf70661e3878588b1efee2d435ddc58f0c209cc263308173122fd76",
+    "LoadResultSha256": "060ce9910fb1d1c5dac9b2c62bb8516ab313939cd988252f0f1a5a9ad512ad5b",
+    "LoadedPreflightHlsSha256": "38623a7be693205a9f4138cad56a89e876e908a485b472277c3f1dceb570920d",
+    "LoadedPreflightOverlapSha256": "43edc7219aff4ae2abc4ec42fc2db30413e03db331bc0285930af6340ec8dcb8",
+    "LoadedPushBrowserCorrelationSha256": "73a0c1a2c93bb74f40067811bbbc87367e531ea59527d513cb3bf165d25fd3c7",
+    "PostLoadCleanupSha256": "1354668ca53790255c43b675441d44f0114f495af70833277614b940c94768ce",
+    "afterBrowserPngSha256": "20080eaa3f7ea2d6311313db3e4dbf6ca6fda30af2dd0bd8b94a354081ac7d57",
+    "beforeBrowserPngSha256": "2419cd851d23826ff75c19ace39169f7dfd1e0491a4bb760b341c214bc493eaa",
+    "duringLoadedPushBrowserPngSha256": "bcf8442f62a827c23f1cab10612d93676ac1d26336a180d1bde852a50a8debdb",
+    "evidenceBundleSha256": "a0115349e48c526ced30d511aab3f2b3aac817add0a4d4cef6b2b741eadbd62b",
+    "gazeboGuiPreflightSha256": "b58aad17dc02e7a2a808160ee68dd99664616dcd7f4bd2abaa84acf008294ea0",
+    "grfResultSourceProtocolSha256": "166a00fad72307a717d334808ef5e8a43e6eb7eadb15977cd2bec468e38ed223",
+    "grfSummarySourceProtocolSha256": "ea91fa682527cf21cc3ff85737ef00e0d5cde7aae81e1f8434161322e414b3cd",
+    "loadSourceProtocolSha256": "d50b40ac5889a44ef4417ef037f41971c84729474339130a1884093ea696c504",
+    "postCleanupSourceProtocolSha256": "fef8fd0a8230a3256934b22d436a3153072e09befe752d24c70e8aabd1521b84"
+  },
+  "interrupted": false,
+  "loadedPreflightOverlap": {
+    "clock": "time.monotonic",
+    "exactN4RosterAndModelsThroughout": true,
+    "firstGrfStatusMarkerSha256": "2775a01499db8be3b882293573f7877f349e284d808924d0da574a97d9f040f3",
+    "firstLoadedMassMarkerSha256": "507763e488c1882d3b20e1a9267fc572f2257aa20397fed21da23e824d17b036",
+    "grfPhasesObserved": [
+      "SEARCH"
+    ],
+    "guaranteedLoadedSampleOverlapSeconds": 5.007,
+    "hlsEndOffsetSeconds": 50.056289,
+    "hlsMeasuredDuringLoadedPreflight": true,
+    "hlsOverlapSeconds": 5.102676,
+    "hlsStartOffsetSeconds": 44.953613,
+    "lastGrfStatusMarkerSha256": "9dcdeea580d701f53baee8687a91c4c7cee7582f18848ec10c8f42fa4cee73db",
+    "lastLoadedMassMarkerSha256": "87d13df4e1eb102eba66290939355a99900ad03640fdfa4a35d3f043ef0ead83",
+    "loadedGrfActiveThroughoutPreflight": true,
+    "loadedGrfStatusSampleCount": 714,
+    "loadedMassContinuousThroughoutPreflight": true,
+    "loadedMassSampleCount": 118,
+    "loadedProcessSpansCompletePreflight": true,
+    "maximumGrfStatusGapSeconds": 0.061238,
+    "maximumMassSampleGapSeconds": 0.238496,
+    "officialSampleSeconds": 5.007,
+    "officialWarmupSeconds": 2.0,
+    "payloadEndOffsetSeconds": 287.830547,
+    "payloadReadyOffsetSeconds": 4.565335,
+    "preflightEndOffsetSeconds": 68.701523,
+    "preflightProcessDurationSeconds": 23.7489,
+    "preflightStartOffsetSeconds": 44.952623,
+    "processOverlapSeconds": 23.7489,
+    "sameGrfTaskThroughoutPreflight": true
+  },
+  "loadedPushBrowserCapture": {
+    "afterPushMarkerSha256": "58c9f6dbd7ec3f5be0a0183297ad66f936e6732299858d4107519ff4276bd6bf",
+    "allFourPushersConfirmedBeforeAndAfter": true,
+    "beforePushMarkerSha256": "6ecbfd82d967a7987b6e5b76684cb7411dbdb7f637fd86ee078d1a809c47ea2d",
+    "captureDurationSeconds": 0.079476,
+    "captureEndOffsetSeconds": 140.109853,
+    "captureStartOffsetSeconds": 140.030377,
+    "clock": "time.monotonic",
+    "correlatedWithFinalGrfTask": true,
+    "decodedHlsFpsAfter": 29.8,
+    "decodedHlsFpsBefore": 30.2,
+    "freshMassSamplesBeforeAndAfter": true,
+    "loadedProcessActiveThroughout": true,
+    "massSequenceAdvanced": true,
+    "minimumAcceptedHlsFps": 27.0,
+    "payloadMassKg": 0.75,
+    "robotCount": 4,
+    "runningPushStateBeforeAndAfter": true,
+    "taskProgressAfter": 0.004,
+    "taskProgressBefore": 0.002
+  },
+  "preflight": {
+    "adapter": "D3D12 (NVIDIA GeForce RTX 3080)",
+    "averageFps": 58.419,
+    "measuredDuringLoadedGrfN4": true,
+    "measuredDuringLoadedProcess": true,
+    "minimumFps": 45.0,
+    "minimumRealTimeFactor": 2.9,
+    "nvidiaD3d12": true,
+    "officialDeployedScript": true,
+    "postRenderFps": 62.508,
+    "privateSessionRuntime": true,
+    "realTimeFactor": 2.996,
+    "temporaryGzclientStopped": true
+  },
+  "probeCleanup": {
+    "payloadMassKg": 0.25,
+    "practicePayloadRestored": true,
+    "robotModelsAbsent": true,
+    "rosterEmpty": true,
+    "taskTerminal": true
+  },
+  "publicControlPlane": true,
+  "rendering": {
+    "gpuDisabled": false,
+    "headless": false,
+    "minimumGazeboFps": 45.0,
+    "minimumRealTimeFactor": 2.9,
+    "visibleChrome": true
+  },
+  "robotCount": 4,
+  "runId": "20260724T083157Z-2686390",
+  "runtimeBinding": {
+    "privateDisplayBound": true,
+    "privateNetworkEndpoint": true,
+    "sameGazeboMaster": true,
+    "sameRosMaster": true,
+    "sameSessionContainer": true,
+    "viewerLeaseBound": true
+  },
+  "schemaVersion": 1,
+  "session": {
+    "activeRobots": 4,
+    "state": "Ready"
+  },
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-24T08:31:57Z",
+  "status": "passed",
+  "success": true,
+  "viewer": {
+    "decodedFpsAfter": 29.8,
+    "decodedFpsAfterLoadedPushCapture": 29.8,
+    "decodedFpsBefore": 31.2,
+    "decodedFpsDuringLoadedPush": {
+      "afterCapture": 29.8,
+      "beforeCapture": 30.2
+    },
+    "interactive": true,
+    "loadedPreflightVideo": {
+      "activePreflightThroughout": true,
+      "algorithmMotionProvenByRos": true,
+      "decodedFps": 30.018835347598912,
+      "decodedFrames": 153,
+      "droppedFrames": 0,
+      "droppedRatio": 0.0,
+      "elapsedSeconds": 5.096800000011921,
+      "exactN4RosterAndModelsThroughout": true,
+      "getVideoPlaybackQuality": true,
+      "loadedGrfTaskActiveThroughout": true,
+      "loadedProcessActiveThroughout": true,
+      "maximumDroppedRatio": 0.1,
+      "measurementSeconds": 5.0,
+      "mediaProgressing": true,
+      "mediaTimeAdvancedSeconds": 5.096987999999996,
+      "minimumAcceptedFps": 27.0,
+      "phase": "duringLoadedGrfN4AndGuiPreflight",
+      "presentedFps": 30.215036885818513,
+      "presentedFrames": 154,
+      "requestVideoFrameCallback": true,
+      "scope": "liveHlsUnderLoadedGrfN4",
+      "targetFps": 30.0,
+      "visualMotionMeasured": false
+    },
+    "postTaskLeaseState": {
+      "alerts": [],
+      "controlDisabled": false,
+      "controlText": "Interactuar",
+      "fps": "Video 30.0 FPS",
+      "fullscreenText": "Pantalla completa",
+      "hlsInteractive": true,
+      "isFullscreen": false,
+      "leaseCountdown": "Vence en 9:47",
+      "status": "En vivo",
+      "video": {
+        "height": 720,
+        "paused": false,
+        "readyState": 4,
+        "width": 1280
+      },
+      "viewerRect": {
+        "height": 465.4375,
+        "width": 829,
+        "x": 50,
+        "y": 219.359375
+      },
+      "viewport": {
+        "height": 905,
+        "width": 944
+      }
+    },
+    "publisherStartupGazebo": {
+      "averageFps": 49.594,
+      "postRenderFps": 49.985,
+      "realTimeFactor": 2.992
+    },
+    "transport": "HLS"
+  }
+}

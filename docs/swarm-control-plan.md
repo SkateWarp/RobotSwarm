@@ -909,24 +909,31 @@ completa. La primera prueba N=4 desde React descubrió I-151: `TaskRun` y
 `StartTask` se persistieron, pero sus fechas PostgreSQL se serializaron sin
 zona UTC. No se repitió la simulación a ciegas.
 
-1. Integrar I-151 en un único PR correctivo: normalización UTC en Minimal API,
-   controladores y SignalR, con regresión para `DateTimeKind.Unspecified`.
-2. Repetir una vez el transporte N=4 desde React y exigir clic físico,
-   `Accepted → Running → Completed`, SEARCH con todos los robots, aviso del
-   descubridor, PUSH conjunto, HLS ≥27 FPS, RTF ≥2,90 y limpieza completa.
-3. Recorrer login, Control, Historial, Plantillas, Robots, Grupos y Usuarios
-   con la cuenta disponible; comprobar responsive, interacción, fullscreen y
-   aislamiento sin crear usuarios innecesarios ni elevar roles por SQL.
-4. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA sobre el
-   mismo master Gazebo. Exigir render ≥45 FPS, HLS ≥27 FPS y RTF ≥2,90, sin
-   reducir masa o fricción para obtener el aprobado.
-5. No elevar cuentas por SQL ni crear usuarios para completar el recorrido
-   Admin. Solo se repetirá esa superficie si el operador proporciona una
-   credencial administrativa existente y acepta la revocación de sus tokens;
-   el recorrido User de `1448a31` permanece válido.
-6. Comprobar al final cero tareas, robots, sesiones, leases, contenedores,
-   perfiles y procesos temporales. Incorporar únicamente evidencia saneada y
-   separada por SHA; conservar el rollback hasta completar la observación.
+La PR #116 integró I-151 como `c3866d5`. PR, `main`, backend, Cloudflare y el
+único workflow GPU aprobaron al primer intento. La API productiva devolvió
+184/184 fechas con zona UTC. React N=4 aprobó clic único,
+`Queued → Accepted → Running → Completed`, movimiento de cuatro robots en
+SEARCH, aviso a los tres compañeros, PUSH con cuatro contribuidores y HLS
+30,094 FPS.
+
+La repetición abrió I-152 en el instrumento privado: conservar cada mensaje
+`/transport/status` agotaba 8 MiB. El muestreo correctivo a 4 Hz conserva
+cambios de fase y terminales sin demora. Después de fijar también el quinto
+argumento del wrapper, 45/45 focales, 255/255 contratos y la repetición
+productiva completa aprobaron.
+
+El gate cargado final aprobó masa 0,75 kg, fricción 0,25, GRF 0,4999 m, RTF
+2,9960, Gazebo 58,419 FPS, posrender 62,508 FPS y HLS ≈30 FPS. El recorrido
+User e Historial y los cuatro anchos responsive también aprobaron. Plantillas,
+Robots, Grupos y Usuarios permanecen restringidos al rol Admin; no se creó ni
+elevó una cuenta para aparentar ese recorrido.
+
+1. Integrar I-152 y la evidencia final en un único PR documental/instrumental.
+   No volver a desplegar GPU: el runtime productivo no cambia.
+2. Confirmar que CI aprueba el arnés y que el árbol local queda limpio.
+3. Conservar el rollback y los reportes privados hasta la entrega académica.
+4. Si el operador facilita una credencial Admin existente, ejecutar el
+   recorrido administrativo sin modificar roles por SQL.
 
 ## Deferred work
 

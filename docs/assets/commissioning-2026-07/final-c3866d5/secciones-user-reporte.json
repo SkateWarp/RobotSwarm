@@ -1,0 +1,129 @@
+{
+  "authorization": {
+    "backendAdminEndpoints": {
+      "robotGroups": 403,
+      "taskTemplates": 403
+    },
+    "groups": {
+      "destinationPath": "/apps/GTS/realtime",
+      "redirected": true,
+      "requestedPath": "/apps/GTS/robot-groups",
+      "restrictedMarkerAbsent": true
+    },
+    "robots": {
+      "destinationPath": "/apps/GTS/realtime",
+      "redirected": true,
+      "requestedPath": "/apps/GTS/leafSorting",
+      "restrictedMarkerAbsent": true
+    },
+    "templates": {
+      "destinationPath": "/apps/GTS/realtime",
+      "redirected": true,
+      "requestedPath": "/apps/GTS/task-templates",
+      "restrictedMarkerAbsent": true
+    },
+    "users": {
+      "destinationPath": "/apps/GTS/realtime",
+      "redirected": true,
+      "requestedPath": "/apps/accounts/all",
+      "restrictedMarkerAbsent": true
+    }
+  },
+  "browser": {
+    "cdpPort": 9340,
+    "gpuDisabled": false,
+    "headless": false,
+    "ownedPid": 2714688,
+    "product": "Chrome/150.0.7871.129",
+    "profile": "robotswarm-sections-e2e-20260724T083831Z-2714684-user",
+    "profileOwned": true,
+    "visible": true
+  },
+  "cleanup": {
+    "browser": {
+      "method": "Browser.close",
+      "portFree": true,
+      "processExited": true,
+      "profileRemoved": true,
+      "requested": true
+    },
+    "passed": true,
+    "temporaryGroup": {
+      "reason": "not-created",
+      "requested": false
+    }
+  },
+  "completedAt": "2026-07-24T08:38:42Z",
+  "deploymentCommit": "c3866d553015463e561b636f27860a2b8472b7fe",
+  "expectedRole": "User",
+  "navigation": {
+    "observed": {
+      "Control": true,
+      "Grupos": false,
+      "Historial": true,
+      "Plantillas": false,
+      "Robots": false,
+      "Usuarios": false
+    },
+    "reducedForRole": true
+  },
+  "observedRole": "User",
+  "productionExecution": true,
+  "runId": "20260724T083831Z-2714684",
+  "schemaVersion": 1,
+  "sections": {
+    "history": {
+      "cards": 0,
+      "dialog": {
+        "available": true,
+        "cancelled": true,
+        "opened": true,
+        "screenshot": {
+          "bytes": 43839,
+          "file": "20260724T083831Z-2714684-user-history-dialog.png",
+          "page": {
+            "origin": "https://rs.zerav.la",
+            "path": "/apps/GTS/taskLogs",
+            "title": "RobotSwarm"
+          },
+          "redaction": {
+            "emails": true,
+            "ipAddresses": true,
+            "personalCells": true,
+            "uuids": true,
+            "workerNames": true
+          },
+          "sha256": "dbe3acbe257e9fde18974e9c595371af5dd2f6fcceb92ef75d113be7647e0cb6"
+        }
+      },
+      "emptyState": false,
+      "heading": true,
+      "marker": "[data-testid=\"task-history-page\"]",
+      "path": "/apps/GTS/taskLogs",
+      "screenshot": {
+        "bytes": 29468,
+        "file": "20260724T083831Z-2714684-user-history.png",
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/taskLogs",
+          "title": "RobotSwarm"
+        },
+        "redaction": {
+          "emails": true,
+          "ipAddresses": true,
+          "personalCells": true,
+          "uuids": true,
+          "workerNames": true
+        },
+        "sha256": "a7fe956c858a6e750b855ecd86734573a346a8209cf63a3969ace1a3d2f05991"
+      },
+      "tableRows": 10
+    }
+  },
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-24T08:38:31Z",
+  "success": true,
+  "temporaryGroup": {
+    "cleanupRequired": false
+  }
+}

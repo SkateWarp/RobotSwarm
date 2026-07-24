@@ -2500,17 +2500,19 @@ de cinco minutos venció antes de una comprobación redundante posterior. La
 repetición exacta sobre `dc4745e` cerró I-149 con el lease de quince minutos.
 La primera prueba N=4 desde React abrió I-151 al encontrar las fechas de tarea
 y comando sin zona UTC; se detuvo antes de ROS y limpió todos sus recursos.
+La PR #116 desplegó la normalización como `c3866d5`; 184/184 fechas
+productivas salieron con `Z` y la repetición React N=4 aprobó completa.
 
 | Grupo de aceptación | Criterio pendiente | Estado actual |
 | --- | --- | --- |
 | API multiusuario | Crear simultáneamente rosters 3/7, ejecutar tareas paralelas, negar acceso cruzado, detener A sin afectar B y limpiar | **Aprobado en `1448a31`**; dos cuentas, rosters exactos, aislamiento y limpieza completa |
-| Interfaz visible | Operar dos Chrome no headless, interacción, pantalla completa, cierre aislado y tareas concurrentes | **Aprobado en `1448a31`**; dos HLS privados ≈30 FPS, cero drops y ROS B sobrevivió al cierre/reapertura de su visor |
-| Administración web | Probar Historial, Plantillas, Robots, Grupos y Usuarios según rol | Recorrido User y denegaciones 403 aprobados en `1448a31`. Admin no se repitió: no existe credencial bootstrap autorizada y no se creó ni elevó ninguna cuenta |
+| Interfaz visible | Operar dos Chrome no headless, interacción, pantalla completa, cierre aislado y tareas concurrentes | **Aprobado en `1448a31`**; el bundle final `c3866d5` repitió Chrome visible, tarea React y HLS ≈30 FPS |
+| Administración web | Probar Historial, Plantillas, Robots, Grupos y Usuarios según rol | Recorrido User y denegaciones 403 repetidos en `c3866d5`. Admin no se repitió: no existe credencial bootstrap autorizada y no se creó ni elevó ninguna cuenta |
 | Video privado | Comprobar flujos separados, FPS y renovación sin compartir display | Dos usuarios aprobaron en `1448a31`; N=1 sobre `dc4745e` conservó HLS a 30,076 FPS hasta terminar sin renovar el lease de 15 min |
 | Formaciones | Triángulo N=3, cuadrado N=5, A N=7, V N=8, rombo N=9 y S N=10 | **6/6 aprobadas en `b34c9a5`**, RTF 2,9802–2,9959, ≈31 FPS HLS, cero colisiones y cleanup completo |
 | Seguimiento de líder | Trayectorias circular N=3, cuadrada N=6 y figura de ocho N=10 | **3/3 aprobadas en `b34c9a5`**, RTF 2,9668–2,9962, ≈31 FPS HLS, cero colisiones y cleanup completo |
-| Transporte | GRF N=1, N=2, N=3, N=4 y N=10; para N>1, búsqueda, aviso y contribución completa | **5/5 aprobaron físicamente en `b34c9a5`**. N=1 volvió a aprobar completo sobre `dc4745e`; el flujo React N=4 queda pendiente de repetir tras I-151 |
-| Carga física y rendimiento | Mantener 0,75 kg, `mu=0.25`, RTF ≥2,90, Gazebo visible ≥45 FPS y HLS ≥27 FPS durante la carga | Aprobado sobre `fbef23e`: capacidad 0,0070/0,0354/1,0836 m, GRF 0,5001 m a RTF 2,9942, NVIDIA 58,469/62,489 FPS y HLS ≈30 FPS. El intento posterior encontró la carrera de colocación; el gate corregido debe repetirse sobre el próximo SHA |
+| Transporte | GRF N=1, N=2, N=3, N=4 y N=10; para N>1, búsqueda, aviso y contribución completa | **5/5 aprobaron físicamente en `b34c9a5`**. N=1 aprobó completo sobre `dc4745e`; React N=4 aprobó sobre `c3866d5` con 4 buscadores, aviso a 3 y 4 empujadores |
+| Carga física y rendimiento | Mantener 0,75 kg, `mu=0.25`, RTF ≥2,90, Gazebo visible ≥45 FPS y HLS ≥27 FPS durante la carga | **Aprobado en `c3866d5`**: capacidad 0,0072/0,0332/1,0604 m, GRF 0,4999 m a RTF 2,9960, NVIDIA 58,419/62,508 FPS y HLS ≈30 FPS |
 | Limpieza | Eliminar sesiones, leases, contenedores, redes, perfiles y procesos creados por aceptación | Las catorce filas de `b34c9a5`, incluida N=1 rechazada por TTL, informaron cleanup completo; la entrega final debe conservarlo |
 
 Los valores se incorporarán con el SHA del componente, hora de ejecución, criterios de aceptación, capturas y hashes de los artefactos sanitizados. Una fila solo cambiará a «Aprobada» cuando el resultado observado y el estado estructurado coincidan.
@@ -2526,6 +2528,11 @@ en el [manifiesto general](assets/commissioning-2026-07/checksums.sha256). El
 separa la imagen local exacta de la repetición N=1 contra `1448a31` y conserva
 los hashes de sus reportes crudos. No se crean archivos vacíos ni montajes para
 aparentar la evidencia todavía pendiente.
+
+El [cierre `c3866d5`](assets/commissioning-2026-07/final-c3866d5/README.md)
+versiona por separado React N=4, la carga de 0,75 kg, el recorrido User,
+responsive y las capturas de búsqueda/empuje. También conserva los hashes de
+los dos intentos rechazados por I-152, sin presentarlos como aprobados.
 
 Antes de reservar las imágenes conviene separar la evidencia técnica que sí existe de la evidencia visual que todavía falta:
 
@@ -2593,7 +2600,8 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-148 | El presupuesto S/N=10 cubría 229,5 s simulados, menos que una colocación productiva todavía sana a 252,816 s | Envolvente exclusiva S/N=10 de 120 s; todos los gates físicos permanecen iguales | Cerrada en `b34c9a5`: 75,0199 s activos, error 0,0952 m, RTF 2,9645 y cero colisiones |
 | I-149 | N=1 terminó ROS y física, pero el lease HLS de 5 min venció antes del muestreo posterior | TTL productivo predeterminado de 15 min, todavía acotado, privado y revocable | Cerrada en `dc4745e`: N=1 `DONE`, 0,5003 m, RTF 2,9963 y HLS 30,076 FPS sin renovación |
 | I-150 | El roster decía «rol sin asignar» aunque ROS ya controlaba al robot | Rol explícito prioritario y función derivada de la tarea; login visual histórico restaurado | `dc4745e` desplegado; login productivo y rótulo «función disponible» comprobados en Chrome visible |
-| I-151 | React creó una tarea y comando válidos, pero `createdAt` persistido llegó sin zona | Convertidor UTC común para Minimal API, controladores y SignalR; regresión con el `Unspecified` real de PostgreSQL | 256/256 backend ordinarias aprobadas; falta PR único y repetir N=4 desde React |
+| I-151 | React creó una tarea y comando válidos, pero `createdAt` persistido llegó sin zona | Convertidor UTC común para Minimal API, controladores y SignalR; regresión con el `Unspecified` real de PostgreSQL | Cerrada en `c3866d5`: 184/184 fechas públicas con `Z` y React N=4 completo |
+| I-152 | El observador privado conservaba cada `/transport/status` y agotaba 8 MiB antes de leer `DONE` | Muestreo 4 Hz; cambios de fase y terminales inmediatos; campos redundantes retirados; quinto argumento cubierto | 45/45 focales, 255/255 contratos y React N=4 productivo completo |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
@@ -2605,15 +2613,15 @@ El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre l
 | Figura 13 | Lista de cuentas sin estado ni acciones claras | Filtros, cuentas activas/inactivas y diálogo de creación/edición | Frontend desplegado; captura pendiente |
 | Figura 14 | Espacio de simulación sin jerarquía operacional | Etapas sesión→visor→tarea y resultado terminal visible | Flujo integral observado sobre `fbef23e`; falta seleccionar y versionar la captura |
 | Figura 15 | Una sola vista o un escritorio compartido | Dos ventanas Chrome reales con sesiones y flujos privados diferentes | Aceptación concurrente aprobada; PNG temporal pendiente de saneamiento y versionado |
-| Figuras 16–18 | Escena previa a cada tarea | Formación, seguimiento y transporte final ejecutados desde el frontend | Matriz física aprobada en `b34c9a5`; falta seleccionar capturas saneadas |
-| Figura 19 | Historial heredado vacío o basado en `TaskLog`, sin exponer datos privados | Historial `TaskRun` del propietario, con filtros, resultado y diálogo de detalle | Capturado durante los recorridos User/Admin; falta versión permanente |
+| Figuras 16–18 | Escena previa a cada tarea | Formación, seguimiento y transporte final ejecutados desde el frontend | Matriz física aprobada; búsqueda, PUSH y DONE de React N=4 versionados bajo `final-c3866d5/` |
+| Figura 19 | Historial heredado vacío o basado en `TaskLog`, sin exponer datos privados | Historial `TaskRun` del propietario, con filtros, resultado y diálogo de detalle | Recorrido User y captura saneada versionados bajo `final-c3866d5/`; Admin no autorizado |
 | Figura 20 | «Tareas» con crear/eliminar o campos que no corresponden al backend | «Plantillas de tareas» con catálogo real y edición `GET`/`PUT` de administrador | Captura Admin temporal sobre `fbef23e`; falta versionarla |
 | Figura 21 | Lista heredada de robots sin estados de carga/error ni separación de runtime | Registro persistente con búsqueda, estados, alta, edición y desactivación | Captura Admin temporal sobre `fbef23e`; falta versionarla |
 | Figura 22 | Ausencia de una gestión clara de grupos o acción que aparentaba iniciar ROS | Grupos administrativos con membresía, transferencia confirmada y aviso de alcance | Capturas Admin y grupo efímero temporales; falta versionarlas |
-| Figura 23 | Monitor con varias filas «rol sin asignar» | Función contextual y rol específico solo cuando el worker lo publica | Candidato I-150; captura antes/después pendiente |
+| Figura 23 | Monitor con varias filas «rol sin asignar» | Función contextual y rol específico solo cuando el worker lo publica | Cerrada: captura N=4 muestra las cuatro filas como «función búsqueda y transporte» |
 | Figura 24 | Visor sin cierre independiente y parada de sesión inmediata | Botón «Cerrar visor», estado posterior sin stream y evidencia de que ROS continúa | Operación aprobada en la corrida concurrente; PNG temporal pendiente |
 | Figura 25 | Menú con nombres heredados «Tareas»/«Cuentas» y sin Grupos | Navegación completa y adaptación a 360/768/1366/1920 px | Las cuatro capturas responsive de `fbef23e` ya están versionadas; falta la repetición del bundle final |
-| Figura 26 | Contador productivo de ≈244 min para un lease de 5 min | Contador UTC correcto y lease de 15 min suficiente para la tarea larga | Parser ya desplegado; TTL I-149 y captura final pendientes |
+| Figura 26 | Contador productivo de ≈244 min para un lease de 5 min | Contador UTC correcto y lease de 15 min suficiente para la tarea larga | Cerrada: carga final conservó HLS y reportó 9:47 restantes al terminar |
 | Figura 27 | Transporte sin indicación gráfica del destino | Huella y caja fantasma magenta visibles, con estado sincronizado en el panel | Comparación saneada y permanente bajo `assets/commissioning-2026-07/final-1448a31/`; la imagen «después» pertenece al postdeploy `1448a31`. Las capturas `CopyFromScreen` y las PNG ambiguas de push/done permanecen rechazadas |
 
 La base cargada histórica se conserva en
