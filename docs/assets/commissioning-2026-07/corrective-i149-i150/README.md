@@ -59,13 +59,12 @@ No se inventa una asignación física concreta: por ejemplo, «empuje directo» 
 unitarias cubren la prioridad del rol real, las tres familias de tarea y el
 estado disponible.
 
-El login también recupera la composición visual histórica solicitada:
+El login también recuperó la composición visual histórica solicitada:
 gradiente azul, tarjeta compacta animada, PNG original, rótulo
 «BIENVENIDO» y acceso a recuperación de contraseña. Se conserva el formulario
 JWT actual y no se reabre el registro público. La captura posterior y el
-resultado productivo de I-149 se incorporarán después de desplegar y observar
-el mismo SHA; hasta entonces, esta evidencia describe el diagnóstico y el
-candidato, no el cierre.
+resultado productivo de I-149 se obtuvieron después de desplegar
+`dc4745e8739d8dcd9ff964bb5772596e4622027b`.
 
 ### Comparación visual previa al despliegue
 
@@ -83,6 +82,49 @@ composición antes del único ciclo de CI.
 
 ![Login histórico restaurado en el candidato local](login-candidato-local-i150.png)
 
-Después del despliegue se añadirá una tercera captura con el SHA servido por
-Cloudflare. La comparación final no reutilizará la imagen local como si fuera
-producción.
+La tercera captura se tomó desde `rs.zerav.la` después de que Cloudflare
+publicara el merge `dc4745e`. El formulario estaba vacío, no contiene datos de
+cuenta y su SHA-256 es
+`9510fa1d84c5df54a7fb54a312d9784f64c244985146e925d7c934404c995d0b`.
+
+![Login histórico observado después del despliegue](login-despues-dc4745e.png)
+
+### Repetición productiva de I-149
+
+La repetición N=1 se ejecutó en Chrome visible y Gazebo no headless contra la
+imagen inmutable de revisión `dc4745e`. Terminó `DONE`, desplazó la carga
+0,5003 m y obtuvo RTF 2,9963. Durante el escenario, la sonda oficial midió
+58,808 FPS de cámara y 62,490 eventos de posrenderizado por segundo sobre
+`D3D12 (NVIDIA GeForce RTX 3080)`. El video HLS produjo 30,076 FPS, 152
+fotogramas presentados y cero descartados.
+
+La segunda lectura HLS siguió activa al finalizar la tarea, sin renovar el
+lease. Con ello se demuestra que los quince minutos corrigen el defecto
+observado sin cambiar el protocolo de privacidad. El contador de colisiones no
+aumentó; las distancias mínimas a obstáculo y borde fueron 0,3755 m y 0,5196 m.
+La sesión, el contenedor, la red, el publicador, el visor, el perfil Chrome y el
+workspace quedaron retirados. El reporte privado saneado por el propio arnés
+tiene SHA-256
+`3b736aa56d4ee173632337e26fec698e9d25ec4e9d8754b77e31828e89f4f171`.
+
+## I-151: fechas de tareas sin zona UTC
+
+La primera repetición N=4 iniciada desde React sí produjo un clic físico
+confiable, exactamente un `TaskRun`, un comando `StartTask`, roster 4/4 y HLS
+interactivo a 30,9 FPS. El arnés se detuvo antes de observar ROS porque
+`createdAt` persistido no incluía `Z`. La limpieza posterior fue completa. El
+reporte rechazado tiene SHA-256
+`d52383d968c9ab98c8f654dda85f164f0fbb75d34c64e42c30d6b0e698075e7a`.
+
+La causa es el contrato de las columnas PostgreSQL `timestamp without time
+zone`: aunque el servidor escribe UTC, Npgsql recupera esas fechas con
+`DateTimeKind.Unspecified` y `System.Text.Json` las emitía sin zona. El defecto
+afecta tanto la fecha de la tarea como la del comando, por lo que aceptar una
+fecha local en el arnés habría ocultado una ambigüedad real de la API.
+
+La corrección añade un convertidor único en las tres fronteras JSON del
+backend: Minimal API, controladores y SignalR. Las fechas `Utc` se conservan,
+las `Local` se convierten y las `Unspecified` conocidas por contrato se marcan
+UTC antes de serializar. La regresión reproduce explícitamente el valor
+`Unspecified` de PostgreSQL y exige el sufijo `Z`; la suite ordinaria quedó en
+256 aprobadas y 8 pruebas PostgreSQL opt-in omitidas.

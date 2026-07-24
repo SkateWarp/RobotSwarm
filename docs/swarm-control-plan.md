@@ -901,26 +901,30 @@ a los demás y todos contribuyeron. N=1 terminó `DONE` y avanzó 0,5003 m, pero
 el lease de cinco minutos venció antes de la segunda medición HLS. Este
 hallazgo es I-149, no un fallo ROS.
 
-1. Integrar en un solo PR I-149 e I-150: lease de visor de 15 min, funciones
-   contextuales del roster y restauración visual del login. Usar un solo ciclo
-   normal de CI y no repetir jobs ya aprobados.
-2. Después del merge, comprobar Cloudflare y el backend. Despachar el workflow
-   GPU una sola vez para alinear el SHA, aunque la imagen ROS conserve el mismo
-   contenido algorítmico.
-3. Repetir N=1 y exigir dos mediciones HLS, `DONE`, 0,50 m, RTF ≥2,90, cero
-   colisiones y cleanup. Verificar en navegador que el monitor muestre
-   «búsqueda y transporte» o el rol explícito, nunca «sin asignar».
-4. Recorrer login, Control, Historial, Plantillas, Robots, Grupos y Usuarios
+La PR #115 integró I-149 e I-150 como `dc4745e`. Todos los checks de PR y
+`main` aprobaron al primer intento; el backend, Cloudflare y el único workflow
+GPU quedaron alineados con ese SHA. N=1 repitió correctamente las dos
+mediciones HLS, `DONE`, 0,5003 m, RTF 2,9963, cero colisiones y limpieza
+completa. La primera prueba N=4 desde React descubrió I-151: `TaskRun` y
+`StartTask` se persistieron, pero sus fechas PostgreSQL se serializaron sin
+zona UTC. No se repitió la simulación a ciegas.
+
+1. Integrar I-151 en un único PR correctivo: normalización UTC en Minimal API,
+   controladores y SignalR, con regresión para `DateTimeKind.Unspecified`.
+2. Repetir una vez el transporte N=4 desde React y exigir clic físico,
+   `Accepted → Running → Completed`, SEARCH con todos los robots, aviso del
+   descubridor, PUSH conjunto, HLS ≥27 FPS, RTF ≥2,90 y limpieza completa.
+3. Recorrer login, Control, Historial, Plantillas, Robots, Grupos y Usuarios
    con la cuenta disponible; comprobar responsive, interacción, fullscreen y
    aislamiento sin crear usuarios innecesarios ni elevar roles por SQL.
-5. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA sobre el
+4. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA sobre el
    mismo master Gazebo. Exigir render ≥45 FPS, HLS ≥27 FPS y RTF ≥2,90, sin
    reducir masa o fricción para obtener el aprobado.
-6. No elevar cuentas por SQL ni crear usuarios para completar el recorrido
+5. No elevar cuentas por SQL ni crear usuarios para completar el recorrido
    Admin. Solo se repetirá esa superficie si el operador proporciona una
    credencial administrativa existente y acepta la revocación de sus tokens;
    el recorrido User de `1448a31` permanece válido.
-7. Comprobar al final cero tareas, robots, sesiones, leases, contenedores,
+6. Comprobar al final cero tareas, robots, sesiones, leases, contenedores,
    perfiles y procesos temporales. Incorporar únicamente evidencia saneada y
    separada por SHA; conservar el rollback hasta completar la observación.
 
