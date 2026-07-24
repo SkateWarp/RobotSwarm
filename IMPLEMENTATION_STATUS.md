@@ -3,10 +3,10 @@
 **Fecha del corte:** 2026-07-24
 
 **Alcance:** producción observada en
-`917b06b6c78d450e01943f54a08854eec08bc6a8`, integrada mediante la PR #111,
-y segundo candidato local de I-147 todavía sin publicar. Frontend, backend y
+`2193c3d506e7e04eee79cc5245ae47d5db1227ce`, integrada mediante la PR #112,
+y tercer candidato local de I-147 todavía sin publicar. Frontend, backend y
 worker GPU ejecutan ese corte; CI, backend y GPU aprobaron en los runs
-`30064564159`, `30064779456` y `30064823558`. La revisión anterior al trabajo,
+`30066740098`, `30066968177` y `30067030369`. La revisión anterior al trabajo,
 `1448a31`, y el archivo
 `/home/anyelo/Documents/Codex/backups/2026-07-15-github-robotswarm_backup-20260721.tar.gz`
 se conservan para reversión. Este documento no constituye todavía el acta de
@@ -26,10 +26,10 @@ fallidos y la evidencia visual, está disponible en
 
 | Capa | Responsabilidad actual | Estado del repositorio |
 | --- | --- | --- |
-| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `917b06b` publicado por Cloudflare; dos Chrome visibles aprobaron interacción, fullscreen y video ≈30 FPS |
-| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `917b06b` desplegado y `Healthy`; aislamiento y solapamiento API de 6,902 s comprobados |
-| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `917b06b-30064823558-1` activo; NVIDIA y reinicios cero comprobados |
-| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | `917b06b` mantiene seguimiento/transporte; S/N=10 refutó el primer umbral de I-147 y requiere el segundo candidato |
+| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `2193c3d` publicado por Cloudflare; la aceptación visible anterior continúa vigente y se repetirá sobre el próximo SHA |
+| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `2193c3d` desplegado y `Healthy`; aislamiento y solapamiento API de 6,902 s comprobados en el corte anterior |
+| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `2193c3d…-30067030369-1` activo; NVIDIA y reinicios cero comprobados |
+| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | Dos S/N=10 refutaron la recuperación de `2193c3d`; el tercer candidato solapa lotes solo al quedar libres sus corredores vivos |
 | MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | Seis inicios HLS postdeploy llegaron a video; los casos aceptados midieron aproximadamente 30 FPS |
 
 I-146 quedó publicada y comprobada sobre `e3dc7ad`: las seis filas abrieron
@@ -38,8 +38,12 @@ Chrome, 57,5–58,5 FPS en Gazebo y RTF ≥2,9908. La fila S/N=10 fue rechazada
 después por ROS, no por el visor. I-147 conserva ese rechazo: ocho robots
 avanzaron, dos lotes posteriores permanecieron detenidos y no hubo colisiones.
 El primer detector publicado en `917b06b` también fue refutado: 0,01 m por
-20 s permitía progreso demasiado lento. El segundo candidato exige 0,10 m por
-20 s, añade telemetría de lote/replan y conserva todos los umbrales físicos.
+20 s permitía progreso demasiado lento. El segundo candidato, publicado en
+`2193c3d`, exigió 0,10 m/20 s y añadió telemetría, pero dos corridas demostraron
+que seguía esperando lotes casi completos. El tercer candidato conserva el
+fallback a 0,20 m/20 s y libera de forma concurrente únicamente los corredores
+vivos que ya no se cruzan. Tres repeticiones visibles aprobaron con error
+≤0,0963 m, RTF ≥2,9887 y cero colisiones.
 
 Las capas utilizan un único ciclo de vida correlacionado en vez de controles
 puntuales separados: el frontend invoca al backend autenticado, el backend
@@ -570,15 +574,17 @@ próximo SHA antes de desplegarlo:
   focales; el arnés aprobó 74/74. La
   [evidencia I-146](docs/assets/commissioning-2026-07/corrective-i146/README.md)
   distingue el diagnóstico previo de la comprobación postdeploy.
-- I-147 conserva dos resultados que no deben mezclarse: la primera S/N=10 de
+- I-147 conserva resultados que no deben mezclarse: la primera S/N=10 de
   `e3dc7ad` quedó en `forming`, sin colisiones, con dos robots todavía
   retenidos; una repetición fresca sí aprobó 75,0317 s activos, error 0,0951 m
   y RTF 2,9846. El primer candidato `917b06b` volvió a fallar porque 0,01 m
   cada 20 s admitía una deriva microscópica; su reporte conserva RTF 2,9855 y
-  cero colisiones. El segundo candidato exige 0,10 m, publica cero, usa el
-  replan vivo ya limitado a dos intentos e informa el lote. Su repetición
-  local S/N=10 aprobó 75,026 s activos con error máximo 0,0943 m,
-  RTF 2,9882 y cero colisiones. El gate API con
+  cero colisiones. El segundo candidato `2193c3d` volvió a fallar dos veces
+  con seis lotes, un replan, RTF ≥2,9908 y cero colisiones. El tercer candidato
+  reconstruye los corredores restantes y solapa lotes cuando dejan de
+  cruzarse; tres S/N=10 locales aprobaron 75 s activos con error ≤0,0963 m,
+  RTF ≥2,9887 y cero colisiones. ROS aprobó 631/631 y los contratos 254/254.
+  El gate API con
   letra A aprobó 6,902 s de solapamiento y dos Chrome visibles aprobaron a
   30,089/30,069 FPS con cero drops. La
   [evidencia I-147](docs/assets/commissioning-2026-07/corrective-i147/README.md)

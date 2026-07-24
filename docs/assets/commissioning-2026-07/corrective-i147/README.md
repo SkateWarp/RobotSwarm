@@ -145,3 +145,86 @@ API y navegación visible ya quedaron aceptadas sobre `917b06b`; S/N=10 refutó
 el primer umbral y mantiene abierto el cierre algorítmico. El segundo candidato
 aprobó localmente y se someterá ahora a un único CI, despliegue y prueba
 productiva.
+
+## Refutación productiva del segundo candidato
+
+La PR #112 integró el segundo candidato como
+`2193c3d506e7e04eee79cc5245ae47d5db1227ce`. El gate normal, el despliegue del
+backend y el despliegue GPU aprobaron en una sola ejecución cada uno
+(`30066740098`, `30066968177` y `30067030369`). El worker activó la unidad
+versionada `2193c3d…-30067030369-1`, reconoció la RTX 3080 y permaneció con
+cero reinicios.
+
+Dos S/N=10 frescas del SHA exacto fueron rechazadas. La primera duró 85,3905 s
+de pared, alcanzó RTF 2,9908 y terminó con error máximo 2,3958 m. La segunda
+duró 85,3781 s, alcanzó RTF 2,9922 y terminó con error máximo 3,6117 m. En
+ambas hubo seis lotes, un replan vivo, video visible y cero episodios de
+colisión; el cleanup fue completo. Los reportes `0600` tienen SHA-256
+`90d5c52b853e3d1d00c5fdc80b91f7fff157651d122110b871e766056c8365f2` y
+`60b3b03939b7f125a58639d8d4544300e3ec07eeb310d3783ec07eb78f56d6c5`.
+
+Esta repetición refutó la hipótesis de que bastaba detectar una tasa baja. El
+replan seguía produciendo corredores seguros, pero el secuenciador esperaba
+que todo el lote activo llegase prácticamente a su destino antes de liberar el
+siguiente. Un robot podía haber dejado de interceptar el corredor mucho antes
+y, aun así, el resto de la flota permanecía inmóvil. El comportamiento era
+seguro, pero innecesariamente serial.
+
+## Experimento descartado y corrección de concurrencia segura
+
+Primero se probó ordenar también las dependencias por los slots futuros y
+elevar el progreso útil a 0,20 m por 20 s. Esta variante aislada volvió a
+agotar el presupuesto con seis lotes y un replan. Se descartó antes de publicar
+porque cambiaba el orden, pero no la condición que retenía los lotes.
+
+La corrección final conserva el grafo de dependencias y añade una segunda
+condición de liberación:
+
+1. para cada robot ya liberado se reconstruye el corredor que todavía le queda,
+   desde su pose viva, por los waypoints restantes y hasta su slot;
+2. se reconstruyen del mismo modo las rutas del lote siguiente;
+3. el lote siguiente se libera solamente cuando esos corredores vivos ya no
+   se cruzan con el despeje geométrico del plan; y
+4. todos los lotes liberados continúan recibiendo control hasta converger, en
+   lugar de detener el anterior al adelantar el índice.
+
+Si falta una pose, un slot, un waypoint finito o el plan de despeje, la
+comprobación devuelve `false` y conserva el lote detenido. El umbral de
+0,20 m/20 s queda como recuperación secundaria; no sustituye la prueba
+geométrica. También se ordena antes al robot cuya ruta atraviesa el slot futuro
+de otro, de modo que el segundo no se estacione sobre un corredor todavía
+necesario.
+
+Se añadieron regresiones para el bloqueo por slot futuro, la transición
+«corredor cruzado → corredor libre» y la continuidad simultánea de los dos
+lotes. La suite completa aprobó 631/631 en 105,452 s y los siete arneses
+contractuales aprobaron 254/254. Sus registros locales `0600` tienen SHA-256
+`51001192a1927cb4904993293b9b4432db159d4b509840b1d9015db90d80bafb` y
+`3f6656298074e22854aa92ab10d4a50d4d8f4ccaa1979e8c0ebf9e9329c3fbf4`.
+
+## Tres repeticiones visibles del tercer candidato
+
+La imagen local inmutable `robotswarm/ros-noetic:i147-overlap-local`
+(`sha256:e8788919466c…`) se ejecutó tres veces con un único `gzserver` y un
+`gzclient` visible mediante WSLg. Cada corrida exigió diez robots, 75 s
+continuos en estado `moving`, RTF ≥2,90, precisión ≤0,12 m, aceleración
+filtrada ≤1 m/s², distancias de seguridad y cero colisiones.
+
+| Repetición | Pared / activa | Error máximo | RTF | Separación / obstáculo | Aceleración | Resultado |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 138,0731 / 75,0307 s | 0,0938 m | 2,9887 | 0,4063 / 0,2544 m | 0,7801 m/s² | Aprobada |
+| 2 | 139,5628 / 75,0178 s | 0,0953 m | 2,9895 | 0,4025 / 0,2537 m | 0,6706 m/s² | Aprobada |
+| 3 | 137,8556 / 75,0178 s | 0,0963 m | 2,9892 | 0,4031 / 0,2547 m | 0,7064 m/s² | Aprobada |
+
+Las tres usaron dos lotes solapados, no necesitaron replan y registraron cero
+episodios de colisión. Los hashes de sus resultados saneados son,
+respectivamente,
+`86de6c8c08754626bf4c6a26840da6abeed8d2d6aa9083215af73a01f98bd4fa`,
+`893648d0853efe72b681e8efb56d79b684766235e2edd320b2d5e74349b516b7` y
+`5b0964ff7f34a842daabd1eb63025622e7986d774b5ec2d3738b33f36d25f787`.
+Después de la tercera repetición se cerraron contenedor, servidor y cliente;
+no quedaron procesos Gazebo huérfanos.
+
+El tercer candidato aún no se presenta como cierre productivo: primero debe
+aprobar un único CI, desplegarse con el SHA exacto y repetir la aceptación
+visible sobre ese mismo release.

@@ -402,7 +402,7 @@ def make_controller():
     controller.route_batches = []
     controller.route_batch_index = 0
     controller.route_stall_timeout = 20.0
-    controller.route_progress_epsilon = 0.10
+    controller.route_progress_epsilon = 0.20
     controller._route_progress_token = None
     controller._route_progress_best = {}
     controller._route_stall_duration = {}
@@ -1370,7 +1370,10 @@ class FormationAssignmentTests(unittest.TestCase):
             'arena_profile': controller.arena_profile,
         }
 
-        controller._control_step(None)
+        with mock.patch.object(
+            controller, '_next_route_batch_is_clear', return_value=False
+        ):
+            controller._control_step(None)
 
         first_command = controller.cmd_vel_pubs[first].messages[-1]
         second_command = controller.cmd_vel_pubs[second].messages[-1]
@@ -1386,14 +1389,89 @@ class FormationAssignmentTests(unittest.TestCase):
         first_target = targets[controller.assignments[first]]
         controller.robot_poses[first].position.x = first_target[0]
         controller.robot_poses[first].position.y = first_target[1]
-        controller._control_step(None)
-        controller._control_step(None)
+        with mock.patch.object(
+            controller, '_next_route_batch_is_clear', return_value=False
+        ):
+            controller._control_step(None)
+            controller._control_step(None)
 
         second_command = controller.cmd_vel_pubs[second].messages[-1]
         self.assertNotEqual(
             (0.0, 0.0),
             (second_command.linear.x, second_command.angular.z),
         )
+
+    def test_route_batches_move_a_future_slot_blocker_last(self):
+        controller = make_controller()
+        robot_ids = ('tb3_0', 'tb3_1')
+        routes = {
+            'tb3_0': [(-1.0, 0.0), (0.0, 0.0)],
+            'tb3_1': [(0.0, -1.0), (0.0, 1.0)],
+        }
+
+        batches = controller._build_route_batches(
+            robot_ids,
+            ((-1.0, 0.0), (0.0, -1.0)),
+            routes,
+            0.30,
+        )
+
+        self.assertEqual([['tb3_1'], ['tb3_0']], batches)
+
+    def test_next_route_batch_releases_after_the_live_crossing_clears(self):
+        controller = make_controller()
+        controller.robot_ids = ['tb3_0', 'tb3_1']
+        controller.assignments = {'tb3_0': 0, 'tb3_1': 1}
+        controller.route_batches = [['tb3_0'], ['tb3_1']]
+        controller.route_waypoints = {
+            'tb3_0': [(1.0, 0.0)],
+            'tb3_1': [(0.0, 1.0)],
+        }
+        controller.route_waypoint_indices = {'tb3_0': 0, 'tb3_1': 0}
+        controller.active_placement_plan = {'slot_clearance': 0.30}
+        targets = [(1.0, 0.0), (0.0, 1.0)]
+        controller.robot_poses = {
+            'tb3_0': Pose(x=-0.5, y=0.0),
+            'tb3_1': Pose(x=0.0, y=-1.0),
+        }
+
+        self.assertFalse(controller._next_route_batch_is_clear(1, targets))
+
+        controller.robot_poses['tb3_0'] = Pose(x=0.5, y=0.0)
+
+        self.assertTrue(controller._next_route_batch_is_clear(1, targets))
+
+    def test_early_route_release_keeps_both_batches_moving(self):
+        controller, targets = make_closed_loop_controller(2, 'line', 1.0)
+        first, second = controller.robot_ids
+        controller.route_waypoints = {
+            first: [targets[controller.assignments[first]]],
+            second: [targets[controller.assignments[second]]],
+        }
+        controller.route_waypoint_indices = {first: 0, second: 0}
+        controller.route_batches = [[first], [second]]
+        controller.route_batch_index = 0
+        controller.active_placement_plan = {
+            'kind': 'static',
+            'arena_size': controller.arena_size,
+            'arena_margin': controller.arena_margin,
+            'obstacle_clearance': controller.formation_obstacle_clearance,
+            'exclusion_zones': controller.spawn_exclusion_zones,
+            'arena_profile': controller.arena_profile,
+            'slot_clearance': 0.30,
+        }
+        with mock.patch.object(
+            controller, '_next_route_batch_is_clear', return_value=True
+        ):
+            controller._control_step(None)
+
+        self.assertEqual(1, controller.route_batch_index)
+        for robot_id in (first, second):
+            command = controller.cmd_vel_pubs[robot_id].messages[-1]
+            self.assertNotEqual(
+                (0.0, 0.0),
+                (command.linear.x, command.angular.z),
+            )
 
     def test_route_batch_releases_inside_safe_hysteresis_band(self):
         controller, targets = make_closed_loop_controller(2, 'line', 1.0)
@@ -1461,7 +1539,11 @@ class FormationAssignmentTests(unittest.TestCase):
             controller,
             '_schedule_live_replan_locked',
             return_value=True,
-        ) as schedule:
+        ) as schedule, mock.patch.object(
+            controller,
+            '_next_route_batch_is_clear',
+            return_value=False,
+        ):
             controller._control_step(None)
             controller._control_step(None)
             positive_batches = len(
@@ -1488,7 +1570,7 @@ class FormationAssignmentTests(unittest.TestCase):
         self.assertEqual([first], routing['active_batch'])
         self.assertEqual(1, routing['live_replan_attempts'])
         self.assertEqual(first, routing['last_stall']['robot'])
-        self.assertEqual(0.1, routing['progress_threshold'])
+        self.assertEqual(0.2, routing['progress_threshold'])
 
     def test_small_route_steps_accumulate_into_useful_progress(self):
         controller = make_controller()
@@ -1500,13 +1582,13 @@ class FormationAssignmentTests(unittest.TestCase):
             controller._route_stall_detail(
                 {'tb3_0'}, {'tb3_0': distance}, 0.05
             )
-            for distance in (1.0, 0.96, 0.92, 0.88)
+            for distance in (1.0, 0.92, 0.84, 0.76)
         ]
 
         self.assertEqual([None, None, None, None], details)
         self.assertEqual(0.0, controller._route_stall_duration['tb3_0'])
         self.assertAlmostEqual(
-            0.88, controller._route_progress_best['tb3_0']
+            0.76, controller._route_progress_best['tb3_0']
         )
 
     def test_impossible_spacing_reports_a_correlated_failure(self):

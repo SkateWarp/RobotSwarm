@@ -868,15 +868,24 @@ liberado dejó de progresar fuera de la histéresis y retuvo dos robots de lotes
 posteriores. La PR #111 publicó un detector de 0,01 m por 20 s como `917b06b`;
 API y dos Chrome visibles aprobaron, pero S/N=10 volvió a quedar retenida
 porque una deriva microscópica reiniciaba el reloj. El segundo delta local
-exige 0,10 m por ventana, omite el siguiente lote positivo, publica cero,
-reutiliza el replan vivo limitado a dos intentos y expone telemetría del lote.
-La repetición local S/N=10 aprobó 75,026 s activos, error máximo 0,0943 m,
-RTF 2,9882 y cero colisiones; 628/628 pruebas ROS y 254/254 contratos
-aprobaron antes de publicar.
+exigió 0,10 m por ventana, omitió el siguiente lote positivo, publicó cero,
+reutilizó el replan vivo limitado a dos intentos y expuso telemetría del lote.
+Se integró mediante la PR #112 como `2193c3d`; CI, backend y GPU aprobaron,
+pero dos S/N=10 productivas volvieron a agotar el presupuesto con seis lotes y
+un replan, aunque conservaron RTF ≥2,9908 y cero colisiones.
+
+El diagnóstico mostró que el problema restante no era el detector, sino la
+serialización: el lote siguiente esperaba la llegada casi completa del
+anterior aun después de quedar libre el cruce. El tercer candidato reconstruye
+los corredores restantes desde las poses vivas y adelanta el lote siguiente
+solo cuando ya no hay intersección con el despeje del plan; todos los lotes
+liberados continúan moviéndose. Tres S/N=10 visibles aprobaron 75 s activos con
+error ≤0,0963 m, RTF ≥2,9887 y cero colisiones. La suite local aprobó 631/631
+pruebas ROS y 254/254 contratos.
 El gate API usa letra A/N=3 para acreditar solapamiento real sin pausas
 artificiales.
 
-1. Publicar código, contratos y documentación en un único PR correctivo. Usar
+1. Publicar el tercer candidato y su documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar
    evidencia.
 2. Después del merge, comprobar los servicios públicos y despachar el workflow
