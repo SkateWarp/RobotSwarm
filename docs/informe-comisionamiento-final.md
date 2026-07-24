@@ -1912,22 +1912,30 @@ diferencia de recorrido separó a los robots liberados de los dos lotes todavía
 retenidos. Aumentar el presupuesto habría permitido esperar más, pero no
 ofrecía una transición que liberase el corredor bloqueado.
 
-**Corrección candidata.** Cada miembro del lote activo acumula progreso contra
-su waypoint actual. Si permanece fuera de la banda segura y no reduce 0,01 m
-en 20 s simulados, el controlador omite el siguiente lote positivo, publica
-cero, y usa el replan vivo ya limitado a dos intentos. Cambiar de waypoint,
-lote o generación reinicia el reloj. La primera implementación comparaba con
-el slot final y fue rechazada localmente porque confundía desvíos válidos con
-estancamiento; la versión corregida mide el tramo activo.
+**Primer candidato refutado.** Cada miembro del lote activo acumulaba progreso
+contra su waypoint. La PR #111 se integró como `917b06b`; CI, backend y GPU
+aprobaron. Sin embargo, S/N=10 volvió a terminar en `forming` a los 85,3957 s:
+dos robots recorrieron 0,14 m, el error fue 3,7228 m, RTF 2,9855 y hubo cero
+colisiones. El umbral de 0,01 m cada 20 s aceptaba avances microscópicos que no
+podían liberar el corredor dentro del presupuesto. El resultado se conservó y
+el candidato no se declaró correcto.
+
+**Segundo candidato.** La tasa mínima pasa a 0,10 m por 20 s, o 0,005 m/s.
+El controlador omite el siguiente lote positivo, publica cero y usa el replan
+vivo ya limitado a dos intentos. Cambiar de waypoint, lote o generación
+reinicia el reloj. El status expone lote activo, conteo de lotes, replans y
+último estancamiento. La precisión, las distancias y la física no cambian.
 
 **Instrumento API.** El gate paralelo de `e3dc7ad` aprobó aislamiento y dos
 visores privados, pero el triángulo estático terminó antes del `startedAt` de
 FollowLeader y los intervalos persistidos no se solaparon. El gate se mantiene
 estricto y ahora usa la letra A/N=3 del recorrido visible, sin esperas
-artificiales. La
+artificiales. Sobre `917b06b` aprobó con 6,902 s de solapamiento; el recorrido
+en dos Chrome visibles midió 30,089/30,069 FPS, cero drops, entrada,
+fullscreen, reapertura del visor B y continuidad de ROS. La
 [evidencia saneada](assets/commissioning-2026-07/corrective-i147/README.md)
-registra ambos rechazos, la repetición S aprobada, hashes y verificación local.
-El cierre requiere todavía el SHA integrado y una repetición visible.
+registra los tres rechazos, la repetición S aprobada, hashes y resultados web.
+El cierre algorítmico requiere todavía integrar y probar el segundo candidato.
 
 ## 5. Registro cronológico de cambios y pruebas
 
@@ -2110,6 +2118,8 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-24 | Despliegue PR #110 y cierre I-146 | CI, backend, GPU y bundle Cloudflare quedaron en `e3dc7ad`; seis visores HLS arrancaron y las cinco primeras formaciones aprobaron | Runs `30059408258`, `30059673420`, `30059924664` y `30060062277`; HLS ≈30 FPS |
 | 2026-07-24 | Diagnóstico I-147 | S/N=10 retenida en lotes: 8 robots liberados, 2 esperando, RTF 2,988 y cero colisiones; repetición fresca aprobada | Reportes `7e41dd3…75419` y `8b79c44…7a4e0`, ambos `0600` |
 | 2026-07-24 | Corrección local I-147 | Replan acotado después de 20 s simulados sin progreso al waypoint; gate API alineado con letra A | ROS 628/628 en 112,130 s, contratos 254/254 y focal final 3/3; postdeploy pendiente |
+| 2026-07-24 | PR #111 y prueba productiva I-147 | CI/backend/GPU aprobaron `917b06b`; API y dos Chrome visibles aprobaron, pero S/N=10 repitió el bloqueo porque 0,01 m/20 s era demasiado permisivo | Runs `30064290013`, `30064564159`, `30064779456`, `30064823558`; reporte S `15bb0ae…f48b96` |
+| 2026-07-24 | Segundo candidato I-147 | Tasa útil mínima 0,10 m/20 s y telemetría explícita de lote/replan | S/N=10 local aprobó 75,026 s activos, error 0,0943 m, RTF 2,9882 y cero colisiones; ROS 628/628 en 111,465 s y contratos 254/254; CI/postdeploy pendientes |
 
 ## 6. Resultados previos y cortes históricos
 
@@ -2477,7 +2487,7 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-144 | Tres presupuestos históricos terminaban rutas sanas antes de su ventana activa | Presupuesto de ensamblaje 90 s para cuadrado, V y diamante; yaw de asentamiento 0,15 rad para la huella circular | PR #108; las seis filas postdeploy de `e3dc7ad` superaron el gate de arranque y cinco aprobaron ROS |
 | I-145 | Una intermitencia DNS agotaba el POST inicial de adquisición del lease | Tres intentos solo ante error de transporte, sin reintentar respuestas HTTP ni mutar antes del lease | PR #109 y despliegue GPU `30055847809` aprobados |
 | I-146 | El frontend esperaba 30 s frente a un arranque HLS real cercano a 28 s | Ventana acotada de 60 s y preservación del protocolo ROS al fallar antes del muestreo | PR #110; seis inicios HLS postdeploy y cinco filas aceptadas a ≈30 FPS |
-| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos sin transición de recuperación | Progreso acumulado por waypoint, parada y replan vivo después de 20 s simulados, máximo dos intentos | Rechazo postdeploy preservado y repetición fresca aprobada; regresiones locales verdes; falta SHA integrado |
+| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos sin transición de recuperación | Progreso mínimo 0,10 m/20 s por waypoint, parada, replan vivo máximo dos veces y telemetría de lote | Rechazos `e3dc7ad` y `917b06b` preservados; API/Chrome de `917b06b` aprobados; segundo candidato aprobado localmente con S/N=10, pendiente de integración y postdeploy |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.

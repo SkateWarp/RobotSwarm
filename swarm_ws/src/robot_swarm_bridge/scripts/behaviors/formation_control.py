@@ -380,9 +380,9 @@ class FormationController:
             ),
         )
         self.route_progress_epsilon = min(
-            0.05,
-            max(0.005, float(rospy.get_param(
-                '~formation_route_progress_epsilon', 0.01
+            0.25,
+            max(0.02, float(rospy.get_param(
+                '~formation_route_progress_epsilon', 0.10
             ))),
         )
         centroid_path_str = rospy.get_param('~centroid_path', 'circular')
@@ -528,6 +528,8 @@ class FormationController:
         self._route_progress_token = None
         self._route_progress_best: Dict[str, float] = {}
         self._route_stall_duration: Dict[str, float] = {}
+        self._active_route_batch_ids: Tuple[str, ...] = ()
+        self._last_route_stall_detail: Optional[Dict] = None
         self._stop_publication_attempt = 0
         self._last_stop_publication = None
         # A failed zero command belongs to one publisher instance, not merely
@@ -970,6 +972,8 @@ class FormationController:
                     self._settled_duration = 0.0
                     self._initial_formation_acquired = False
                     self._live_replan_attempts = 0
+                    self._active_route_batch_ids = ()
+                    self._last_route_stall_detail = None
                     self._reset_centroid_path_pose_locked()
 
                     for pid in self.pid_linear.values():
@@ -4161,9 +4165,11 @@ class FormationController:
             self._route_progress_token = None
             self._route_progress_best = {}
             self._route_stall_duration = {}
+            self._active_route_batch_ids = ()
             return None
 
         ordered_ids = tuple(sort_robot_ids(active_route_ids))
+        self._active_route_batch_ids = ordered_ids
         token = (
             self._assignment_generation,
             self.route_batch_index,
@@ -4207,7 +4213,7 @@ class FormationController:
             stalled_for = self._route_stall_duration.get(robot_id, 0.0) + dt
             self._route_stall_duration[robot_id] = stalled_for
             if stalled_for >= self.route_stall_timeout:
-                return {
+                detail = {
                     'gate': 'route_stall',
                     'robot': robot_id,
                     'batch': self.route_batch_index,
@@ -4217,6 +4223,8 @@ class FormationController:
                     ),
                     'stalled_for': round(stalled_for, 3),
                 }
+                self._last_route_stall_detail = detail
+                return detail
         return None
 
     def _control_loop(self, event):
@@ -5269,6 +5277,28 @@ class FormationController:
                 self, 'waiting_for_odometry', []
             )),
         }
+        if (
+            self.route_batches
+            or self._live_replan_attempts
+            or self._last_route_stall_detail is not None
+        ):
+            status['routing'] = {
+                'batch_index': min(
+                    self.route_batch_index, len(self.route_batches)
+                ),
+                'batch_count': len(self.route_batches),
+                'active_batch': list(self._active_route_batch_ids),
+                'live_replan_attempts': self._live_replan_attempts,
+                'stall_timeout': round(self.route_stall_timeout, 3),
+                'progress_threshold': round(
+                    self.route_progress_epsilon, 4
+                ),
+                'last_stall': (
+                    None
+                    if self._last_route_stall_detail is None
+                    else dict(self._last_route_stall_detail)
+                ),
+            }
         if (
             self.movement_mode != MovementMode.STATIC
             and self.centroid_path == CentroidPath.CIRCULAR

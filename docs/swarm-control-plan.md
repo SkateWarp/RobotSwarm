@@ -865,11 +865,16 @@ a video HLS.
 
 La misma matriz abrió I-147: S/N=10 mantuvo seguridad y RTF, pero un miembro
 liberado dejó de progresar fuera de la histéresis y retuvo dos robots de lotes
-posteriores. El delta local mide progreso acumulado contra el waypoint activo;
-después de 20 s simulados sin mejora, omite el siguiente lote positivo, publica
-cero y reutiliza el replan vivo limitado a dos intentos. El gate API cambia el
-triángulo ya casi satisfecho por letra A/N=3 para acreditar solapamiento real,
-sin pausas artificiales.
+posteriores. La PR #111 publicó un detector de 0,01 m por 20 s como `917b06b`;
+API y dos Chrome visibles aprobaron, pero S/N=10 volvió a quedar retenida
+porque una deriva microscópica reiniciaba el reloj. El segundo delta local
+exige 0,10 m por ventana, omite el siguiente lote positivo, publica cero,
+reutiliza el replan vivo limitado a dos intentos y expone telemetría del lote.
+La repetición local S/N=10 aprobó 75,026 s activos, error máximo 0,0943 m,
+RTF 2,9882 y cero colisiones; 628/628 pruebas ROS y 254/254 contratos
+aprobaron antes de publicar.
+El gate API usa letra A/N=3 para acreditar solapamiento real sin pausas
+artificiales.
 
 1. Publicar código, contratos y documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar

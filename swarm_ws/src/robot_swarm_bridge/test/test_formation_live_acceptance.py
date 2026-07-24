@@ -62,7 +62,7 @@ class FormationLiveAcceptanceTest(unittest.TestCase):
         valid = self.valid_status(case, task_id)
 
         self.assertTrue({
-            "stale_odometry", "waiting_for_odometry",
+            "stale_odometry", "waiting_for_odometry", "routing",
         }.issubset(LIVE.RESULT_BEHAVIOR_STATUS_KEYS))
 
         self.assertEqual(
