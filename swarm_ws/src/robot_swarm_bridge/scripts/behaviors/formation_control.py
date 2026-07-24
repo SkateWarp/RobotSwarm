@@ -370,6 +370,21 @@ class FormationController:
                 '~formation_route_waypoint_tolerance', 0.08
             ))),
         )
+        self.route_stall_timeout = min(
+            60.0,
+            max(
+                5.0,
+                float(rospy.get_param(
+                    '~formation_route_stall_timeout', 20.0
+                )),
+            ),
+        )
+        self.route_progress_epsilon = min(
+            0.05,
+            max(0.005, float(rospy.get_param(
+                '~formation_route_progress_epsilon', 0.01
+            ))),
+        )
         centroid_path_str = rospy.get_param('~centroid_path', 'circular')
         self.position_tolerance = max(
             0.03, float(rospy.get_param('~position_tolerance', 0.09))
@@ -510,6 +525,9 @@ class FormationController:
         # route or failing immediately on harmless spawn jitter.
         self.live_replan_limit = 2
         self._live_replan_attempts = 0
+        self._route_progress_token = None
+        self._route_progress_best: Dict[str, float] = {}
+        self._route_stall_duration: Dict[str, float] = {}
         self._stop_publication_attempt = 0
         self._last_stop_publication = None
         # A failed zero command belongs to one publisher instance, not merely
@@ -4126,6 +4144,81 @@ class FormationController:
             target_y - pose.position.y,
         ) <= self.position_release_tolerance
 
+    def _route_stall_detail(
+        self,
+        active_route_ids,
+        route_distances: Dict[str, float],
+        dt: float,
+    ) -> Optional[Dict]:
+        """Detect a staged robot that stopped making useful route progress.
+
+        A later batch cannot be released while an earlier corridor remains
+        occupied.  If avoidance leaves one member stationary well outside the
+        safe release band, stop the fleet and let the bounded live replanner
+        build a fresh assignment from the poses that Gazebo actually reached.
+        """
+        if not active_route_ids:
+            self._route_progress_token = None
+            self._route_progress_best = {}
+            self._route_stall_duration = {}
+            return None
+
+        ordered_ids = tuple(sort_robot_ids(active_route_ids))
+        token = (
+            self._assignment_generation,
+            self.route_batch_index,
+            tuple(
+                (
+                    robot_id,
+                    self.route_waypoint_indices.get(robot_id, 0),
+                )
+                for robot_id in ordered_ids
+            ),
+        )
+        tracked = {
+            robot_id: route_distances[robot_id]
+            for robot_id in ordered_ids
+            if (
+                robot_id in route_distances
+                and route_distances[robot_id]
+                > self.position_release_tolerance
+            )
+        }
+        if token != self._route_progress_token:
+            self._route_progress_token = token
+            self._route_progress_best = dict(tracked)
+            self._route_stall_duration = {
+                robot_id: 0.0 for robot_id in tracked
+            }
+            return None
+
+        for robot_id in list(self._route_progress_best):
+            if robot_id not in tracked:
+                self._route_progress_best.pop(robot_id, None)
+                self._route_stall_duration.pop(robot_id, None)
+
+        for robot_id, distance in tracked.items():
+            best = self._route_progress_best.get(robot_id)
+            if best is None or distance <= best - self.route_progress_epsilon:
+                self._route_progress_best[robot_id] = distance
+                self._route_stall_duration[robot_id] = 0.0
+                continue
+
+            stalled_for = self._route_stall_duration.get(robot_id, 0.0) + dt
+            self._route_stall_duration[robot_id] = stalled_for
+            if stalled_for >= self.route_stall_timeout:
+                return {
+                    'gate': 'route_stall',
+                    'robot': robot_id,
+                    'batch': self.route_batch_index,
+                    'distance': round(distance, 4),
+                    'best_distance': round(
+                        self._route_progress_best[robot_id], 4
+                    ),
+                    'stalled_for': round(stalled_for, 3),
+                }
+        return None
+
     def _control_loop(self, event):
         with self.command_lock:
             if (
@@ -4305,6 +4398,7 @@ class FormationController:
         maximum_position_error = 0.0
         active_route_ids = None
         commands_to_publish: Dict[str, Twist] = {}
+        route_distances: Dict[str, float] = {}
         if assembling_on_routes and self.route_batches:
             while (
                 self.route_batch_index < len(self.route_batches)
@@ -4380,6 +4474,7 @@ class FormationController:
             dx = target_x - robot_x
             dy = target_y - robot_y
             distance = math.hypot(dx, dy)
+            route_distances[rid] = distance
             angle_to_target = math.atan2(dy, dx)
             angle_error = normalize_angle(angle_to_target - yaw)
 
@@ -4441,6 +4536,10 @@ class FormationController:
                 safe_cmd = desired_cmd
 
             commands_to_publish[rid] = safe_cmd
+
+        route_stall_detail = self._route_stall_detail(
+            active_route_ids, route_distances, dt
+        )
 
         # ModelStates can change while PID commands are being calculated. Hold
         # the same lock used by its callback for one final geometric check and
@@ -4527,6 +4626,11 @@ class FormationController:
                         "Formation live safety validation failed "
                         "unexpectedly; a fleet stop was requested."
                     )
+            elif route_stall_detail is not None:
+                # Do not publish another positive batch after liveness has
+                # selected a replan. _schedule_live_replan_locked performs the
+                # correlated zero-velocity fan-out before replacing routes.
+                live_replan_detail = route_stall_detail
             else:
                 motion_batch_complete = self._publish_motion_batch_locked(
                     validated_commands

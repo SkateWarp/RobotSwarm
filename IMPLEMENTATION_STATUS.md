@@ -1,14 +1,16 @@
 # Estado de implementación de RobotSwarm
 
-**Fecha del corte:** 2026-07-23
+**Fecha del corte:** 2026-07-24
 
 **Alcance:** producción observada en
-`2445a3735ca42bd574c1cfbb1fcb2bbc7b2dce18`, integrada mediante la PR #109,
-y corrección local I-146 todavía sin publicar. Frontend, backend y worker GPU
-ejecutan ese corte; el despliegue GPU `30055847809` aprobó y activó el release
-exacto después de incorporar el reintento DNS acotado de I-145. La etiqueta
-`rollback/pre-formation-ghost-9f49e17` conserva la revisión anterior. Este
-documento no constituye todavía el acta de cierre.
+`e3dc7ad37c7525c53f24f9601102b32152103a5d`, integrada mediante la PR #110,
+y corrección local I-147 todavía sin publicar. Frontend, backend y worker GPU
+ejecutan ese corte; CI, backend y GPU aprobaron en los runs `30059408258`,
+`30059924664` y `30060062277`. La revisión anterior al trabajo,
+`1448a31`, y el archivo
+`/home/anyelo/Documents/Codex/backups/2026-07-15-github-robotswarm_backup-20260721.tar.gz`
+se conservan para reversión. Este documento no constituye todavía el acta de
+cierre.
 
 La versión anterior de este archivo describía como trabajo futuro pendiente el
 orquestador de tareas, los tres comportamientos, los archivos de lanzamiento,
@@ -24,19 +26,19 @@ fallidos y la evidencia visual, está disponible en
 
 | Capa | Responsabilidad actual | Estado del repositorio |
 | --- | --- | --- |
-| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `1448a31` publicado por Cloudflare, con tolerancia de llegada, estado del marcador y redirecciones heredadas comprobados |
-| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `1448a31` desplegado y sano; `arrival_tolerance` forma parte del contrato productivo |
-| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | `1448a31` activo; unidad versionada con AF_NETLINK y GPU NVIDIA comprobada |
-| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | Imagen inmutable de `1448a31` activa; las correcciones de formación I-136–I-138 permanecen locales hasta el PR correctivo |
-| MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | HLS privado operativo; dos visores independientes, interacción y pantalla completa aprobados en Chrome visible; I-139 endurece localmente la renovación al vencer el TTL |
+| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `e3dc7ad` publicado por Cloudflare; arranque y recuperación HLS con presupuesto de 60 s comprobados |
+| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `e3dc7ad` desplegado y `Healthy`; aislamiento 401/404 y dos leases privados comprobados |
+| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `e3dc7ad-30060062277-1` activo; NVIDIA y reinicios cero comprobados |
+| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | `e3dc7ad` aprobó seguimiento 3/3, transporte 5/5 y carga N=4; I-147 corrige localmente un estancamiento intermitente de lotes en S/N=10 |
+| MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | Seis inicios HLS postdeploy llegaron a video; los casos aceptados midieron aproximadamente 30 FPS |
 
-La repetición visible de I-146 aprobó cuadrado N=5 en producción con
-58,203 FPS de Gazebo, 29,960 FPS decodificados en Chrome, RTF 2,9959 y cero
-colisiones. También hizo visible una carrera de disponibilidad: el frontend
-agotaba a los 30 s una preparación gráfica que normalmente consumía alrededor
-de 28 s. La corrección local amplía únicamente el presupuesto inicial HLS a
-60 s, conserva el TTL y la limpieza, y añade estado diagnóstico saneado al
-arnés. La matriz completa sobre el futuro SHA continúa pendiente.
+I-146 quedó publicada y comprobada sobre `e3dc7ad`: las seis filas abrieron
+video HLS y las cinco formaciones aceptadas midieron aproximadamente 30 FPS en
+Chrome, 57,5–58,5 FPS en Gazebo y RTF ≥2,9908. La fila S/N=10 fue rechazada
+después por ROS, no por el visor. I-147 conserva ese rechazo: ocho robots
+avanzaron, dos lotes posteriores permanecieron detenidos y no hubo colisiones.
+La corrección local añade parada y replan vivo acotado después de 20 s
+simulados sin progreso al waypoint, sin cambiar los umbrales físicos.
 
 Las capas utilizan un único ciclo de vida correlacionado en vez de controles
 puntuales separados: el frontend invoca al backend autenticado, el backend
@@ -561,12 +563,21 @@ próximo SHA antes de desplegarlo:
   [evidencia I-145](docs/assets/commissioning-2026-07/corrective-i145/README.md)
   conserva diagnóstico y contención.
 - La PR #109 publicó I-145 y el run `30055847809` dejó activo el release
-  exacto `2445a37`. I-146 conserva un cuadrado N=5 productivo aprobado y
-  corrige localmente la carrera del primer HLS: 60 s de presupuesto en vez de
-  30 s, sin cambiar el TTL. Frontend aprobó 164/164, build y 37/37 focales; el
-  arnés aprobó 74/74. La
+  exacto `2445a37`. La PR #110 publicó I-146 como `e3dc7ad`; CI, backend y GPU
+  aprobaron. Seis filas postdeploy alcanzaron video HLS y los casos aceptados
+  midieron aproximadamente 30 FPS. Frontend aprobó 164/164, build y 37/37
+  focales; el arnés aprobó 74/74. La
   [evidencia I-146](docs/assets/commissioning-2026-07/corrective-i146/README.md)
-  distingue el caso aprobado de la matriz todavía pendiente.
+  distingue el diagnóstico previo de la comprobación postdeploy.
+- I-147 conserva dos resultados que no deben mezclarse: la primera S/N=10 de
+  `e3dc7ad` quedó en `forming`, sin colisiones, con dos robots todavía
+  retenidos; una repetición fresca sí aprobó 75,0317 s activos, error 0,0951 m
+  y RTF 2,9846. El candidato local detecta 20 s simulados sin progreso al
+  waypoint, publica cero y usa el replan vivo ya limitado a dos intentos. El
+  gate API usa ahora letra A/N=3 para probar solapamiento persistido sin una
+  espera artificial. La
+  [evidencia I-147](docs/assets/commissioning-2026-07/corrective-i147/README.md)
+  conserva hashes, diagnóstico y el primer intento local descartado.
 - La imagen exacta del delta, sin montajes de fuentes, tiene ID
   `sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5`.
   En ventanas Gazebo no headless, el triángulo N=3 y la S N=10 conservaron el

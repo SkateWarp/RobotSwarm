@@ -81,7 +81,16 @@ dos sesiones concurrentes mantienen clientes distintos de forma intencional.
 - contratos del arnés de matriz: 74/74;
 - `git diff --check`: aprobado.
 
-El cierre de I-146 requiere todavía publicar el candidato, repetir el arranque
-HLS contra el bundle de Cloudflare resultante y completar las filas ROS
-pendientes. Hasta entonces, la ampliación a 60 s se clasifica como corrección
-local verificada y no como aceptación postdeploy.
+## Resultado posterior al despliegue
+
+La PR #110 se integró como
+`e3dc7ad37c7525c53f24f9601102b32152103a5d`. CI de PR y `main`, backend y
+worker GPU aprobaron; Cloudflare sirvió el bundle cuyo chunk de visor coincidió
+con el build local y contenía el presupuesto de 60 s.
+
+Las seis filas de formación abrieron un visor HLS. Triángulo, cuadrado, A, V y
+diamante midieron 29,981–30,124 FPS decodificados, 57,542–58,478 FPS en
+Gazebo y RTF 2,9908–2,9965. S/N=10 también arrancó video, pero fue rechazada
+después por un estancamiento ROS independiente, registrado como I-147. Por
+ello I-146 queda cerrada en su alcance —disponibilidad inicial del visor— sin
+atribuirse la aprobación del algoritmo completo.
