@@ -382,7 +382,7 @@ class FormationController:
         self.route_progress_epsilon = min(
             0.25,
             max(0.02, float(rospy.get_param(
-                '~formation_route_progress_epsilon', 0.10
+                '~formation_route_progress_epsilon', 0.20
             ))),
         )
         centroid_path_str = rospy.get_param('~centroid_path', 'circular')
@@ -3087,6 +3087,12 @@ class FormationController:
                     continue
                 if point_to_route_distance(starts[other_id], route) < clearance:
                     dependencies[robot_id].add(other_id)
+                # A robot parked at its slot can block a route just as surely
+                # as one waiting at its spawn. Move the crossing robot first,
+                # then let the future blocker settle at the route endpoint.
+                other_target = routes[other_id][-1]
+                if point_to_route_distance(other_target, route) < clearance:
+                    dependencies[other_id].add(robot_id)
 
         remaining = set(robot_ids)
         batches = []
@@ -4148,6 +4154,74 @@ class FormationController:
             target_y - pose.position.y,
         ) <= self.position_release_tolerance
 
+    def _remaining_robot_route(self, robot_id, world_targets):
+        """Build the live, untravelled part of one staged route."""
+        slot_index = self.assignments.get(robot_id)
+        if slot_index is None or slot_index >= len(world_targets):
+            return None
+        with self.lock:
+            pose = self.robot_poses.get(robot_id)
+        if pose is None:
+            return None
+
+        points = [(float(pose.position.x), float(pose.position.y))]
+        waypoints = self.route_waypoints.get(robot_id, [])
+        waypoint_index = self.route_waypoint_indices.get(robot_id, 0)
+        points.extend(waypoints[waypoint_index:])
+        points.append(world_targets[slot_index])
+
+        compact = []
+        for point in points:
+            if (
+                len(point) != 2
+                or not all(math.isfinite(float(value)) for value in point)
+            ):
+                return None
+            clean = (float(point[0]), float(point[1]))
+            if not compact or math.hypot(
+                clean[0] - compact[-1][0],
+                clean[1] - compact[-1][1],
+            ) > 1e-6:
+                compact.append(clean)
+        return compact
+
+    def _next_route_batch_is_clear(self, next_index, world_targets):
+        """Release a later batch once all live remaining corridors separate."""
+        if next_index <= 0 or next_index >= len(self.route_batches):
+            return False
+
+        released = [
+            robot_id
+            for batch in self.route_batches[:next_index]
+            for robot_id in batch
+            if not self._route_batch_member_is_clear(
+                robot_id, world_targets
+            )
+        ]
+        if not released:
+            return True
+
+        incoming = self.route_batches[next_index]
+        routes = {}
+        for robot_id in released + incoming:
+            route = self._remaining_robot_route(robot_id, world_targets)
+            if route is None:
+                return False
+            routes[robot_id] = route
+
+        plan = getattr(self, 'active_placement_plan', None) or {}
+        clearance = float(plan.get(
+            'slot_clearance',
+            min(0.34, self.spacing - 0.01),
+        ))
+        return not any(
+            routes_conflict(
+                routes[released_id], routes[incoming_id], clearance
+            )
+            for released_id in released
+            for incoming_id in incoming
+        )
+
     def _route_stall_detail(
         self,
         active_route_ids,
@@ -4421,9 +4495,20 @@ class FormationController:
             ):
                 self.route_batch_index += 1
             if self.route_batch_index < len(self.route_batches):
-                active_route_ids = set(
-                    self.route_batches[self.route_batch_index]
-                )
+                while (
+                    self.route_batch_index + 1 < len(self.route_batches)
+                    and self._next_route_batch_is_clear(
+                        self.route_batch_index + 1, world_targets
+                    )
+                ):
+                    self.route_batch_index += 1
+                active_route_ids = {
+                    robot_id
+                    for batch in self.route_batches[
+                        :self.route_batch_index + 1
+                    ]
+                    for robot_id in batch
+                }
 
         for rid in self.robot_ids:
             slot_idx = self.assignments.get(rid)

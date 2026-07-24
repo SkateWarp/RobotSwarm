@@ -1920,11 +1920,36 @@ colisiones. El umbral de 0,01 m cada 20 s aceptaba avances microscópicos que no
 podían liberar el corredor dentro del presupuesto. El resultado se conservó y
 el candidato no se declaró correcto.
 
-**Segundo candidato.** La tasa mínima pasa a 0,10 m por 20 s, o 0,005 m/s.
-El controlador omite el siguiente lote positivo, publica cero y usa el replan
-vivo ya limitado a dos intentos. Cambiar de waypoint, lote o generación
-reinicia el reloj. El status expone lote activo, conteo de lotes, replans y
-último estancamiento. La precisión, las distancias y la física no cambian.
+**Segundo candidato refutado.** La tasa mínima pasó a 0,10 m por 20 s, o
+0,005 m/s. El controlador omitía el siguiente lote positivo, publicaba cero y
+usaba el replan vivo ya limitado a dos intentos. La PR #112 se integró como
+`2193c3d`; CI, backend y GPU aprobaron. Sin embargo, dos S/N=10 productivas
+agotaron 85,3905 y 85,3781 s con errores 2,3958 y 3,6117 m. Ambas conservaron
+RTF ≥2,9908, seis lotes, un replan, video visible, cero colisiones y cleanup
+completo. Por tanto, el resultado no se atribuyó al entorno ni se ocultó con
+otro aumento del presupuesto.
+
+**Causa restante.** Los corredores calculados eran seguros, pero el índice
+solo adelantaba cuando todos los miembros del lote llegaban a la banda del
+slot. El robot que cruzaba primero podía haber despejado físicamente la ruta
+del siguiente lote y, aun así, este permanecía detenido. Ordenar también por
+slots futuros y elevar de forma aislada la tasa a 0,20 m/20 s volvió a fallar
+en local; ese experimento se descartó porque no corregía la condición de
+liberación.
+
+**Tercer candidato.** El controlador reconstruye el tramo restante desde cada
+pose viva, por los waypoints pendientes y hasta el slot. Adelanta el lote
+siguiente únicamente si ninguna de esas rutas cruza los corredores todavía
+activos con el despeje del plan. Los lotes ya liberados siguen recibiendo
+control al adelantar el índice. Una pose ausente, un valor no finito o un plan
+incompleto conserva el lote detenido. El umbral de 0,20 m/20 s permanece como
+recuperación secundaria, no como sustituto de la prueba geométrica.
+
+Tres S/N=10 visibles locales aprobaron 75 s activos con error máximo
+0,0938–0,0963 m, RTF 2,9887–2,9895, separación mínima 0,4025 m, despeje mínimo
+0,2537 m, aceleración filtrada máxima 0,7801 m/s² y cero colisiones. Las tres
+usaron dos lotes solapados sin replan. La suite aprobó 631/631 y los siete
+arneses contractuales 254/254.
 
 **Instrumento API.** El gate paralelo de `e3dc7ad` aprobó aislamiento y dos
 visores privados, pero el triángulo estático terminó antes del `startedAt` de
@@ -1935,7 +1960,8 @@ en dos Chrome visibles midió 30,089/30,069 FPS, cero drops, entrada,
 fullscreen, reapertura del visor B y continuidad de ROS. La
 [evidencia saneada](assets/commissioning-2026-07/corrective-i147/README.md)
 registra los tres rechazos, la repetición S aprobada, hashes y resultados web.
-El cierre algorítmico requiere todavía integrar y probar el segundo candidato.
+El cierre algorítmico requiere todavía integrar y probar el tercer candidato
+sobre su SHA productivo exacto.
 
 ## 5. Registro cronológico de cambios y pruebas
 
@@ -2120,6 +2146,8 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-24 | Corrección local I-147 | Replan acotado después de 20 s simulados sin progreso al waypoint; gate API alineado con letra A | ROS 628/628 en 112,130 s, contratos 254/254 y focal final 3/3; postdeploy pendiente |
 | 2026-07-24 | PR #111 y prueba productiva I-147 | CI/backend/GPU aprobaron `917b06b`; API y dos Chrome visibles aprobaron, pero S/N=10 repitió el bloqueo porque 0,01 m/20 s era demasiado permisivo | Runs `30064290013`, `30064564159`, `30064779456`, `30064823558`; reporte S `15bb0ae…f48b96` |
 | 2026-07-24 | Segundo candidato I-147 | Tasa útil mínima 0,10 m/20 s y telemetría explícita de lote/replan | S/N=10 local aprobó 75,026 s activos, error 0,0943 m, RTF 2,9882 y cero colisiones; ROS 628/628 en 111,465 s y contratos 254/254; CI/postdeploy pendientes |
+| 2026-07-24 | PR #112 y refutación productiva I-147 | El detector se desplegó correctamente, pero la llegada casi completa de cada lote continuó serializando la flota | SHA `2193c3d`; dos S/N=10 rechazadas con RTF ≥2,9908, un replan y cero colisiones |
+| 2026-07-24 | Tercer candidato I-147 | Liberación por corredores vivos sin cruce y continuidad de todos los lotes ya liberados | Tres S/N=10 visibles aprobadas; error ≤0,0963 m, RTF ≥2,9887, cero colisiones; ROS 631/631 y contratos 254/254 |
 
 ## 6. Resultados previos y cortes históricos
 
@@ -2487,7 +2515,7 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-144 | Tres presupuestos históricos terminaban rutas sanas antes de su ventana activa | Presupuesto de ensamblaje 90 s para cuadrado, V y diamante; yaw de asentamiento 0,15 rad para la huella circular | PR #108; las seis filas postdeploy de `e3dc7ad` superaron el gate de arranque y cinco aprobaron ROS |
 | I-145 | Una intermitencia DNS agotaba el POST inicial de adquisición del lease | Tres intentos solo ante error de transporte, sin reintentar respuestas HTTP ni mutar antes del lease | PR #109 y despliegue GPU `30055847809` aprobados |
 | I-146 | El frontend esperaba 30 s frente a un arranque HLS real cercano a 28 s | Ventana acotada de 60 s y preservación del protocolo ROS al fallar antes del muestreo | PR #110; seis inicios HLS postdeploy y cinco filas aceptadas a ≈30 FPS |
-| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos sin transición de recuperación | Progreso mínimo 0,10 m/20 s por waypoint, parada, replan vivo máximo dos veces y telemetría de lote | Rechazos `e3dc7ad` y `917b06b` preservados; API/Chrome de `917b06b` aprobados; segundo candidato aprobado localmente con S/N=10, pendiente de integración y postdeploy |
+| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos aun después de despejar el corredor | Grafo por spawns/slots, corredores restantes desde poses vivas, liberación concurrente sin cruces y fallback 0,20 m/20 s | Rechazos `e3dc7ad`, `917b06b` y `2193c3d` preservados; tercer candidato 3/3 visible y 631/631 local, pendiente de integración y postdeploy |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
