@@ -228,3 +228,38 @@ no quedaron procesos Gazebo huérfanos.
 El tercer candidato aún no se presenta como cierre productivo: primero debe
 aprobar un único CI, desplegarse con el SHA exacto y repetir la aceptación
 visible sobre ese mismo release.
+
+## I-148: presupuesto de una colocación productiva más larga
+
+La PR #113 integró el tercer candidato como
+`ec4980b502dd99f7d8598387d6ff1da4a1229e61`. El PR y `main` aprobaron sus
+jobs en el primer intento; el backend se desplegó mediante `30069263190` y el
+único dispatch GPU `30069309217` activó la imagen inmutable
+`sha256:b46895cf96ed…`. La unidad quedó activa con RTX 3080 y cero reinicios.
+
+La primera S/N=10 productiva de ese release se rechazó a los 85,3957 s de
+pared. El resultado no reprodujo el bloqueo anterior: el controlador había
+liberado nueve robots, avanzó hasta el quinto de seis lotes, no informó
+estancamiento ni ejecutó replans. `tb3_6` continuaba a 1,3223 m de su slot y
+el último robot permanecía retenido detrás de ese corredor. La simulación
+alcanzó 252,816 s, RTF 2,9605, HLS 31,2 FPS, separación mínima 0,3897 m,
+despeje mínimo 0,2288 m, aceleración filtrada 0,7427 m/s² y cero colisiones.
+La limpieza retiró sesión, lease, contenedor, red, publicador y workspace. El
+reporte `0600` tiene SHA-256
+`e821ecbe05a421d21e052f1ea96b36b01ebc8756a753f275306ef890c53f46f9`.
+
+El timeout histórico se había dimensionado con una convergencia de 208,75 s
+simulados y cubría 229,5 s al RTF conservador 2,7. La nueva colocación ya
+demostró progreso sano a 252,816 s, por fuera de ese supuesto. I-148 eleva
+solo la envolvente S/N=10 a 120 s de pared: a RTF 2,7 cubre 324 s simulados y
+deja 71,184 s más que el último borde observado. No cambia el algoritmo, el
+error máximo de 0,12 m, la ventana activa de 75 s, las velocidades, la
+aceleración, el RTF mínimo ni las distancias de seguridad. Una corrida
+posterior deberá demostrar que ese margen termina la tarea; el hecho de ampliar
+el presupuesto no se presenta por sí solo como aprobado.
+
+Antes de publicar I-148, la regresión focal aprobó 5/5, la suite ROS completa
+631/631 en 106,956 s y los siete arneses contractuales 254/254. Los registros
+locales `0600` tienen SHA-256
+`9fc21ae6387095f527662716bc7781a9d011ae4a25a7a0f99d6c1f1aad73c587` y
+`44863656a2db458d52f30a64d9f0cd4596fd210ac8516c72e774dc4b715e23a5`.

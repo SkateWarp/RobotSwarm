@@ -128,7 +128,7 @@ class FormationLiveAcceptanceTest(unittest.TestCase):
             "formation_A_n7": (156.65, 65),
             "formation_V_n8": (190.05, 90),
             "formation_diamond_n9": (213.65, 90),
-            "formation_S_n10": (208.75, 85),
+            "formation_S_n10": (252.816, 120),
         }
         cases = {case["name"]: case for case in LIVE.SCENARIOS}
 

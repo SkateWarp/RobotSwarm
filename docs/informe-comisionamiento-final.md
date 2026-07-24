@@ -1963,6 +1963,29 @@ registra los tres rechazos, la repetición S aprobada, hashes y resultados web.
 El cierre algorítmico requiere todavía integrar y probar el tercer candidato
 sobre su SHA productivo exacto.
 
+### I-148. El presupuesto S/N=10 no cubría una colocación segura más larga
+
+**Hallazgo.** La PR #113 integró el solapamiento como `ec4980b`; CI, backend y
+GPU aprobaron en el primer intento. La primera aceptación productiva liberó
+nueve robots, llegó al quinto de seis lotes y no informó estancamiento ni
+replan. A los 85,3957 s todavía quedaban un robot avanzando y el último
+retenido por su corredor. La física acumuló 252,816 s con RTF 2,9605, HLS
+31,2 FPS, aceleración 0,7427 m/s², separación 0,3897 m, despeje 0,2288 m y
+cero colisiones; el cleanup fue completo.
+
+**Diagnóstico.** El límite de 85 s procedía de una convergencia medida en
+208,75 s simulados y solo cubría 229,5 s al RTF de dimensionamiento 2,7. La
+nueva colocación había superado ese borde mientras continuaba progresando.
+No se clasificó como el estancamiento de I-147 y no se ejecutó un rerun para
+buscar una colocación más favorable.
+
+**Corrección acotada.** S/N=10 dispone de 120 s de pared, equivalentes a
+324 s simulados al piso 2,7 y 71,184 s por encima del último progreso
+observado. No cambian el controlador, la precisión de 0,12 m, los 75 s activos,
+el RTF mínimo, la aceleración ni las distancias de seguridad. La ampliación se
+considerará válida solo si la corrida exacta posterior alcanza `moving` y
+aprueba todos esos gates.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -2148,6 +2171,7 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-24 | Segundo candidato I-147 | Tasa útil mínima 0,10 m/20 s y telemetría explícita de lote/replan | S/N=10 local aprobó 75,026 s activos, error 0,0943 m, RTF 2,9882 y cero colisiones; ROS 628/628 en 111,465 s y contratos 254/254; CI/postdeploy pendientes |
 | 2026-07-24 | PR #112 y refutación productiva I-147 | El detector se desplegó correctamente, pero la llegada casi completa de cada lote continuó serializando la flota | SHA `2193c3d`; dos S/N=10 rechazadas con RTF ≥2,9908, un replan y cero colisiones |
 | 2026-07-24 | Tercer candidato I-147 | Liberación por corredores vivos sin cruce y continuidad de todos los lotes ya liberados | Tres S/N=10 visibles aprobadas; error ≤0,0963 m, RTF ≥2,9887, cero colisiones; ROS 631/631 y contratos 254/254 |
+| 2026-07-24 | PR #113 e I-148 | `ec4980b` liberó 9/10 sin estancamiento, pero el límite histórico terminó a 252,816 s simulados | RTF 2,9605, HLS 31,2 FPS, cero colisiones y cleanup completo; presupuesto S/N=10 calibrado a 120 s |
 
 ## 6. Resultados previos y cortes históricos
 
@@ -2516,6 +2540,7 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-145 | Una intermitencia DNS agotaba el POST inicial de adquisición del lease | Tres intentos solo ante error de transporte, sin reintentar respuestas HTTP ni mutar antes del lease | PR #109 y despliegue GPU `30055847809` aprobados |
 | I-146 | El frontend esperaba 30 s frente a un arranque HLS real cercano a 28 s | Ventana acotada de 60 s y preservación del protocolo ROS al fallar antes del muestreo | PR #110; seis inicios HLS postdeploy y cinco filas aceptadas a ≈30 FPS |
 | I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos aun después de despejar el corredor | Grafo por spawns/slots, corredores restantes desde poses vivas, liberación concurrente sin cruces y fallback 0,20 m/20 s | Rechazos `e3dc7ad`, `917b06b` y `2193c3d` preservados; tercer candidato 3/3 visible y 631/631 local, pendiente de integración y postdeploy |
+| I-148 | El presupuesto S/N=10 cubría 229,5 s simulados, menos que una colocación productiva todavía sana a 252,816 s | Envolvente exclusiva S/N=10 de 120 s; todos los gates físicos permanecen iguales | Rechazo `ec4980b` preservado; repetición exacta pendiente |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.

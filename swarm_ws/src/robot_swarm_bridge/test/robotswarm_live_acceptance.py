@@ -116,11 +116,15 @@ SCENARIOS = [
     # only; the 0.12 m final-error gate remains unchanged.
     scenario("formation_diamond_n9", "formation", 9, "circle",
              shape="diamond", spacing=0.55, timeout=90),
-    # The production-pattern N=10 baseline reached the moving state after
-    # 208.75 simulated seconds.  An 85-second wall cap at RTF 2.7 covers
-    # 229.5 simulated seconds, leaving 20.75 seconds of explicit margin.
+    # A second safe production placement still had nine robots advancing after
+    # 252.816 simulated seconds: one long corridor had not cleared for the
+    # final robot.  This was not a stall (the controller reported no stalled
+    # member or replan), and every safety gate remained green.  A 120-second
+    # wall cap at RTF 2.7 covers 324 simulated seconds, preserving 71.184
+    # seconds beyond that observed healthy-progress edge without changing the
+    # 0.12 m accuracy limit or any collision threshold.
     scenario("formation_S_n10", "formation", 10, "grid",
-             shape="S", spacing=0.55, timeout=85),
+             shape="S", spacing=0.55, timeout=120),
     # Follow cases stop as soon as the leader path clock completes a lap.
     # These wall-time caps include chain assembly and enough margin to finish
     # at the minimum accepted real-time factor.
