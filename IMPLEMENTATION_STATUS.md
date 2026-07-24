@@ -3,10 +3,10 @@
 **Fecha del corte:** 2026-07-24
 
 **Alcance:** producción observada en
-`2193c3d506e7e04eee79cc5245ae47d5db1227ce`, integrada mediante la PR #112,
-y tercer candidato local de I-147 todavía sin publicar. Frontend, backend y
-worker GPU ejecutan ese corte; CI, backend y GPU aprobaron en los runs
-`30066740098`, `30066968177` y `30067030369`. La revisión anterior al trabajo,
+`ec4980b502dd99f7d8598387d6ff1da4a1229e61`, integrada mediante la PR #113,
+y calibración local I-148 todavía sin publicar. Frontend, backend y worker GPU
+ejecutan ese corte; CI, backend y GPU aprobaron en los runs `30068986450`,
+`30069263190` y `30069309217`. La revisión anterior al trabajo,
 `1448a31`, y el archivo
 `/home/anyelo/Documents/Codex/backups/2026-07-15-github-robotswarm_backup-20260721.tar.gz`
 se conservan para reversión. Este documento no constituye todavía el acta de
@@ -26,10 +26,10 @@ fallidos y la evidencia visual, está disponible en
 
 | Capa | Responsabilidad actual | Estado del repositorio |
 | --- | --- | --- |
-| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `2193c3d` publicado por Cloudflare; la aceptación visible anterior continúa vigente y se repetirá sobre el próximo SHA |
-| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `2193c3d` desplegado y `Healthy`; aislamiento y solapamiento API de 6,902 s comprobados en el corte anterior |
-| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `2193c3d…-30067030369-1` activo; NVIDIA y reinicios cero comprobados |
-| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | Dos S/N=10 refutaron la recuperación de `2193c3d`; el tercer candidato solapa lotes solo al quedar libres sus corredores vivos |
+| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `ec4980b` publicado por Cloudflare; HLS productivo observado a 31,2 FPS |
+| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `ec4980b` desplegado y `Healthy`; aislamiento y solapamiento API de 6,902 s comprobados en el corte anterior |
+| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `ec4980b…-30069309217-1` activo; RTX 3080 y reinicios cero comprobados |
+| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | `ec4980b` solapa corredores; S/N=10 liberó 9/10, pero reveló que el presupuesto histórico era menor que una ruta sana |
 | MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | Seis inicios HLS postdeploy llegaron a video; los casos aceptados midieron aproximadamente 30 FPS |
 
 I-146 quedó publicada y comprobada sobre `e3dc7ad`: las seis filas abrieron
@@ -589,6 +589,12 @@ próximo SHA antes de desplegarlo:
   30,089/30,069 FPS con cero drops. La
   [evidencia I-147](docs/assets/commissioning-2026-07/corrective-i147/README.md)
   conserva hashes, diagnóstico y el primer intento local descartado.
+- La PR #113 publicó el tercer candidato como `ec4980b`. Su primera S/N=10
+  productiva llegó al quinto de seis lotes con nueve robots liberados, progreso
+  sano, RTF 2,9605, HLS 31,2 FPS y cero colisiones. Terminó a 252,816 s
+  simulados porque el arnés todavía suponía el borde histórico de 229,5 s.
+  I-148 eleva solo la envolvente S/N=10 a 120 s de pared (324 s al piso 2,7);
+  precisión, ventana activa, aceleración y seguridad no cambian.
 - La imagen exacta del delta, sin montajes de fuentes, tiene ID
   `sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5`.
   En ventanas Gazebo no headless, el triángulo N=3 y la S N=10 conservaron el

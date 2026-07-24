@@ -885,7 +885,14 @@ pruebas ROS y 254/254 contratos.
 El gate API usa letra A/N=3 para acreditar solapamiento real sin pausas
 artificiales.
 
-1. Publicar el tercer candidato y su documentación en un único PR correctivo. Usar
+La PR #113 integró esa corrección como `ec4980b`; CI, backend y GPU aprobaron
+en un intento. Su primera S/N=10 productiva liberó nueve robots y mantuvo
+progreso sin replans ni colisiones, pero el presupuesto histórico terminó a
+252,816 s simulados, antes de despejar el último corredor. I-148 corrige solo
+el supuesto del arnés: 120 s de pared cubren 324 s al RTF conservador 2,7.
+Precisión, ventana activa, RTF, aceleración y seguridad permanecen iguales.
+
+1. Publicar la calibración I-148 y su documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar
    evidencia.
 2. Después del merge, comprobar los servicios públicos y despachar el workflow
