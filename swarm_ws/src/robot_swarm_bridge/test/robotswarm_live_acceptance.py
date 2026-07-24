@@ -72,7 +72,7 @@ RESULT_BEHAVIOR_STATUS_KEYS = (
     "queue_settling", "approach_stage", "rendezvous_ready_count",
     "compression_progress", "searching_robot_count", "route_target",
     "assembly_routes", "discovery",
-    "robot_assignments", "useful_contributor_count",
+    "robot_assignments", "routing", "useful_contributor_count",
     "useful_contributor_ids", "current_useful_pusher_count",
     "current_useful_pusher_ids", "all_pusher_proof_minimum_speed",
     "all_pushers_confirmed", "arrival_latched",

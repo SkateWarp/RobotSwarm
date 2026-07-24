@@ -402,10 +402,12 @@ def make_controller():
     controller.route_batches = []
     controller.route_batch_index = 0
     controller.route_stall_timeout = 20.0
-    controller.route_progress_epsilon = 0.01
+    controller.route_progress_epsilon = 0.10
     controller._route_progress_token = None
     controller._route_progress_best = {}
     controller._route_stall_duration = {}
+    controller._active_route_batch_ids = ()
+    controller._last_route_stall_detail = None
     controller.active_placement_plan = None
     controller.assignment_pending = False
     controller._assignment_generation = 0
@@ -1476,24 +1478,35 @@ class FormationAssignmentTests(unittest.TestCase):
             len(controller.cmd_vel_pubs[first].messages),
             'the stall edge published another positive command batch',
         )
+        controller._live_replan_attempts = 1
+        formation.FormationController._publish_status(
+            controller, targets, 0.4
+        )
+        routing = json.loads(
+            controller.status_pub.messages[-1].data
+        )['routing']
+        self.assertEqual([first], routing['active_batch'])
+        self.assertEqual(1, routing['live_replan_attempts'])
+        self.assertEqual(first, routing['last_stall']['robot'])
+        self.assertEqual(0.1, routing['progress_threshold'])
 
     def test_small_route_steps_accumulate_into_useful_progress(self):
         controller = make_controller()
         controller.route_batches = [['tb3_0']]
         controller.route_waypoint_indices = {'tb3_0': 0}
-        controller.route_stall_timeout = 0.15
+        controller.route_stall_timeout = 0.25
 
         details = [
             controller._route_stall_detail(
                 {'tb3_0'}, {'tb3_0': distance}, 0.05
             )
-            for distance in (1.0, 0.996, 0.992, 0.988)
+            for distance in (1.0, 0.96, 0.92, 0.88)
         ]
 
         self.assertEqual([None, None, None, None], details)
         self.assertEqual(0.0, controller._route_stall_duration['tb3_0'])
         self.assertAlmostEqual(
-            0.988, controller._route_progress_best['tb3_0']
+            0.88, controller._route_progress_best['tb3_0']
         )
 
     def test_impossible_spacing_reports_a_correlated_failure(self):

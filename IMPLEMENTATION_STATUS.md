@@ -3,10 +3,10 @@
 **Fecha del corte:** 2026-07-24
 
 **Alcance:** producción observada en
-`e3dc7ad37c7525c53f24f9601102b32152103a5d`, integrada mediante la PR #110,
-y corrección local I-147 todavía sin publicar. Frontend, backend y worker GPU
-ejecutan ese corte; CI, backend y GPU aprobaron en los runs `30059408258`,
-`30059924664` y `30060062277`. La revisión anterior al trabajo,
+`917b06b6c78d450e01943f54a08854eec08bc6a8`, integrada mediante la PR #111,
+y segundo candidato local de I-147 todavía sin publicar. Frontend, backend y
+worker GPU ejecutan ese corte; CI, backend y GPU aprobaron en los runs
+`30064564159`, `30064779456` y `30064823558`. La revisión anterior al trabajo,
 `1448a31`, y el archivo
 `/home/anyelo/Documents/Codex/backups/2026-07-15-github-robotswarm_backup-20260721.tar.gz`
 se conservan para reversión. Este documento no constituye todavía el acta de
@@ -26,10 +26,10 @@ fallidos y la evidencia visual, está disponible en
 
 | Capa | Responsabilidad actual | Estado del repositorio |
 | --- | --- | --- |
-| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `e3dc7ad` publicado por Cloudflare; arranque y recuperación HLS con presupuesto de 60 s comprobados |
-| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `e3dc7ad` desplegado y `Healthy`; aislamiento 401/404 y dos leases privados comprobados |
-| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `e3dc7ad-30060062277-1` activo; NVIDIA y reinicios cero comprobados |
-| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | `e3dc7ad` aprobó seguimiento 3/3, transporte 5/5 y carga N=4; I-147 corrige localmente un estancamiento intermitente de lotes en S/N=10 |
+| Frontend React | Controles de sesión, flota y tareas pertenecientes al usuario; estado en vivo; reproductor privado de escena HLS | `917b06b` publicado por Cloudflare; dos Chrome visibles aprobaron interacción, fullscreen y video ≈30 FPS |
+| Backend .NET | Autenticación, comprobaciones de propiedad, cola de sesiones, comandos del worker, resultados de tareas, concesiones del visor y concesiones de drenaje de despliegue | `917b06b` desplegado y `Healthy`; aislamiento y solapamiento API de 6,902 s comprobados |
+| Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | Release exacto `917b06b-30064823558-1` activo; NVIDIA y reinicios cero comprobados |
+| ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | `917b06b` mantiene seguimiento/transporte; S/N=10 refutó el primer umbral de I-147 y requiere el segundo candidato |
 | MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | Seis inicios HLS postdeploy llegaron a video; los casos aceptados midieron aproximadamente 30 FPS |
 
 I-146 quedó publicada y comprobada sobre `e3dc7ad`: las seis filas abrieron
@@ -37,8 +37,9 @@ video HLS y las cinco formaciones aceptadas midieron aproximadamente 30 FPS en
 Chrome, 57,5–58,5 FPS en Gazebo y RTF ≥2,9908. La fila S/N=10 fue rechazada
 después por ROS, no por el visor. I-147 conserva ese rechazo: ocho robots
 avanzaron, dos lotes posteriores permanecieron detenidos y no hubo colisiones.
-La corrección local añade parada y replan vivo acotado después de 20 s
-simulados sin progreso al waypoint, sin cambiar los umbrales físicos.
+El primer detector publicado en `917b06b` también fue refutado: 0,01 m por
+20 s permitía progreso demasiado lento. El segundo candidato exige 0,10 m por
+20 s, añade telemetría de lote/replan y conserva todos los umbrales físicos.
 
 Las capas utilizan un único ciclo de vida correlacionado en vez de controles
 puntuales separados: el frontend invoca al backend autenticado, el backend
@@ -572,10 +573,14 @@ próximo SHA antes de desplegarlo:
 - I-147 conserva dos resultados que no deben mezclarse: la primera S/N=10 de
   `e3dc7ad` quedó en `forming`, sin colisiones, con dos robots todavía
   retenidos; una repetición fresca sí aprobó 75,0317 s activos, error 0,0951 m
-  y RTF 2,9846. El candidato local detecta 20 s simulados sin progreso al
-  waypoint, publica cero y usa el replan vivo ya limitado a dos intentos. El
-  gate API usa ahora letra A/N=3 para probar solapamiento persistido sin una
-  espera artificial. La
+  y RTF 2,9846. El primer candidato `917b06b` volvió a fallar porque 0,01 m
+  cada 20 s admitía una deriva microscópica; su reporte conserva RTF 2,9855 y
+  cero colisiones. El segundo candidato exige 0,10 m, publica cero, usa el
+  replan vivo ya limitado a dos intentos e informa el lote. Su repetición
+  local S/N=10 aprobó 75,026 s activos con error máximo 0,0943 m,
+  RTF 2,9882 y cero colisiones. El gate API con
+  letra A aprobó 6,902 s de solapamiento y dos Chrome visibles aprobaron a
+  30,089/30,069 FPS con cero drops. La
   [evidencia I-147](docs/assets/commissioning-2026-07/corrective-i147/README.md)
   conserva hashes, diagnóstico y el primer intento local descartado.
 - La imagen exacta del delta, sin montajes de fuentes, tiene ID
