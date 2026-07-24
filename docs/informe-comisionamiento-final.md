@@ -2490,25 +2490,26 @@ La sonda cinemática inicial produjo evidencia técnica local en `/tmp/robotswar
 
 ## 7. Aceptación final en producción
 
-La cadena correctiva I-136–I-148 ya fue integrada y desplegada hasta
-`b34c9a53f66f1803ea6b101cd58dd69298c95527`. Los ensayos rechazados se
+La cadena correctiva I-136–I-150 ya fue integrada y desplegada hasta
+`dc4745e8739d8dcd9ff964bb5772596e4622027b`. Los ensayos rechazados se
 conservan como diagnóstico y no se reutilizan como resultados aprobados. La
 matriz productiva posterior aprobó las seis formaciones, los tres seguimientos
 y los cinco tamaños físicos de transporte. N=1 conserva un rechazo
-instrumental separado: ROS, Gazebo y la dinámica aprobaron, pero el lease HLS
-de cinco minutos venció antes de una comprobación redundante posterior. I-149
-e I-150 forman el último candidato web/configuración; todavía requieren una
-única integración, despliegue y observación en navegador.
+instrumental histórico: ROS, Gazebo y la dinámica aprobaron, pero el lease HLS
+de cinco minutos venció antes de una comprobación redundante posterior. La
+repetición exacta sobre `dc4745e` cerró I-149 con el lease de quince minutos.
+La primera prueba N=4 desde React abrió I-151 al encontrar las fechas de tarea
+y comando sin zona UTC; se detuvo antes de ROS y limpió todos sus recursos.
 
 | Grupo de aceptación | Criterio pendiente | Estado actual |
 | --- | --- | --- |
 | API multiusuario | Crear simultáneamente rosters 3/7, ejecutar tareas paralelas, negar acceso cruzado, detener A sin afectar B y limpiar | **Aprobado en `1448a31`**; dos cuentas, rosters exactos, aislamiento y limpieza completa |
 | Interfaz visible | Operar dos Chrome no headless, interacción, pantalla completa, cierre aislado y tareas concurrentes | **Aprobado en `1448a31`**; dos HLS privados ≈30 FPS, cero drops y ROS B sobrevivió al cierre/reapertura de su visor |
 | Administración web | Probar Historial, Plantillas, Robots, Grupos y Usuarios según rol | Recorrido User y denegaciones 403 aprobados en `1448a31`. Admin no se repitió: no existe credencial bootstrap autorizada y no se creó ni elevó ninguna cuenta |
-| Video privado | Comprobar flujos separados, FPS y renovación sin compartir display | Dos usuarios aprobaron en `1448a31`. La matriz `b34c9a5` abrió cada HLS a ≈31 FPS; I-149 amplía el lease a 15 min para conservarlo durante tareas largas y requiere repetición final |
+| Video privado | Comprobar flujos separados, FPS y renovación sin compartir display | Dos usuarios aprobaron en `1448a31`; N=1 sobre `dc4745e` conservó HLS a 30,076 FPS hasta terminar sin renovar el lease de 15 min |
 | Formaciones | Triángulo N=3, cuadrado N=5, A N=7, V N=8, rombo N=9 y S N=10 | **6/6 aprobadas en `b34c9a5`**, RTF 2,9802–2,9959, ≈31 FPS HLS, cero colisiones y cleanup completo |
 | Seguimiento de líder | Trayectorias circular N=3, cuadrada N=6 y figura de ocho N=10 | **3/3 aprobadas en `b34c9a5`**, RTF 2,9668–2,9962, ≈31 FPS HLS, cero colisiones y cleanup completo |
-| Transporte | GRF N=1, N=2, N=3, N=4 y N=10; para N>1, búsqueda, aviso y contribución completa | **5/5 aprobaron físicamente en `b34c9a5`**. N=2/3/4/10 aprobaron el reporte completo; N=1 requiere repetir solo el gate HLS posterior con el lease de I-149 |
+| Transporte | GRF N=1, N=2, N=3, N=4 y N=10; para N>1, búsqueda, aviso y contribución completa | **5/5 aprobaron físicamente en `b34c9a5`**. N=1 volvió a aprobar completo sobre `dc4745e`; el flujo React N=4 queda pendiente de repetir tras I-151 |
 | Carga física y rendimiento | Mantener 0,75 kg, `mu=0.25`, RTF ≥2,90, Gazebo visible ≥45 FPS y HLS ≥27 FPS durante la carga | Aprobado sobre `fbef23e`: capacidad 0,0070/0,0354/1,0836 m, GRF 0,5001 m a RTF 2,9942, NVIDIA 58,469/62,489 FPS y HLS ≈30 FPS. El intento posterior encontró la carrera de colocación; el gate corregido debe repetirse sobre el próximo SHA |
 | Limpieza | Eliminar sesiones, leases, contenedores, redes, perfiles y procesos creados por aceptación | Las catorce filas de `b34c9a5`, incluida N=1 rechazada por TTL, informaron cleanup completo; la entrega final debe conservarlo |
 
@@ -2590,8 +2591,9 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-146 | El frontend esperaba 30 s frente a un arranque HLS real cercano a 28 s | Ventana acotada de 60 s y preservación del protocolo ROS al fallar antes del muestreo | PR #110; seis inicios HLS postdeploy y cinco filas aceptadas a ≈30 FPS |
 | I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos aun después de despejar el corredor | Grafo por spawns/slots, corredores restantes desde poses vivas, liberación concurrente sin cruces y fallback 0,20 m/20 s | Cerrada en `b34c9a5`: seis formaciones aprobadas, incluida S/N=10 con dos lotes solapados y cero replans |
 | I-148 | El presupuesto S/N=10 cubría 229,5 s simulados, menos que una colocación productiva todavía sana a 252,816 s | Envolvente exclusiva S/N=10 de 120 s; todos los gates físicos permanecen iguales | Cerrada en `b34c9a5`: 75,0199 s activos, error 0,0952 m, RTF 2,9645 y cero colisiones |
-| I-149 | N=1 terminó ROS y física, pero el lease HLS de 5 min venció antes del muestreo posterior | TTL productivo predeterminado de 15 min, todavía acotado, privado y revocable | Candidato local; backend 253/253, frontend y repetición postdeploy pendientes de cierre |
-| I-150 | El roster decía «rol sin asignar» aunque ROS ya controlaba al robot | Rol explícito prioritario y función derivada de la tarea; login visual histórico restaurado | Pruebas focales aprobadas; falta captura del bundle productivo |
+| I-149 | N=1 terminó ROS y física, pero el lease HLS de 5 min venció antes del muestreo posterior | TTL productivo predeterminado de 15 min, todavía acotado, privado y revocable | Cerrada en `dc4745e`: N=1 `DONE`, 0,5003 m, RTF 2,9963 y HLS 30,076 FPS sin renovación |
+| I-150 | El roster decía «rol sin asignar» aunque ROS ya controlaba al robot | Rol explícito prioritario y función derivada de la tarea; login visual histórico restaurado | `dc4745e` desplegado; login productivo y rótulo «función disponible» comprobados en Chrome visible |
+| I-151 | React creó una tarea y comando válidos, pero `createdAt` persistido llegó sin zona | Convertidor UTC común para Minimal API, controladores y SignalR; regresión con el `Unspecified` real de PostgreSQL | 256/256 backend ordinarias aprobadas; falta PR único y repetir N=4 desde React |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
@@ -2599,7 +2601,7 @@ El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre l
 | Figura reservada | Estado «antes» que debe mostrar | Estado «después» que debe mostrar | Situación |
 | --- | --- | --- | --- |
 | Figura 11 | Error del visor observado por el usuario, con datos privados recortados | La misma vista con estado «En vivo» y FPS | La escena visible de carga ya está versionada; falta la comparación final del visor posterior al despliegue |
-| Figura 12 | Login anterior a la restauración, con composición plana | Diseño histórico restaurado con gradiente, tarjeta compacta, PNG y «BIENVENIDO» | Candidato local I-150; comparación postdeploy pendiente |
+| Figura 12 | Login anterior a la restauración, con composición plana | Diseño histórico restaurado con gradiente, tarjeta compacta, PNG y «BIENVENIDO» | Comparación local/productiva versionada; despliegue `dc4745e` comprobado |
 | Figura 13 | Lista de cuentas sin estado ni acciones claras | Filtros, cuentas activas/inactivas y diálogo de creación/edición | Frontend desplegado; captura pendiente |
 | Figura 14 | Espacio de simulación sin jerarquía operacional | Etapas sesión→visor→tarea y resultado terminal visible | Flujo integral observado sobre `fbef23e`; falta seleccionar y versionar la captura |
 | Figura 15 | Una sola vista o un escritorio compartido | Dos ventanas Chrome reales con sesiones y flujos privados diferentes | Aceptación concurrente aprobada; PNG temporal pendiente de saneamiento y versionado |
