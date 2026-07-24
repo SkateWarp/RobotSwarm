@@ -401,6 +401,11 @@ def make_controller():
     controller.route_waypoint_indices = {}
     controller.route_batches = []
     controller.route_batch_index = 0
+    controller.route_stall_timeout = 20.0
+    controller.route_progress_epsilon = 0.01
+    controller._route_progress_token = None
+    controller._route_progress_best = {}
+    controller._route_stall_duration = {}
     controller.active_placement_plan = None
     controller.assignment_pending = False
     controller._assignment_generation = 0
@@ -1426,6 +1431,69 @@ class FormationAssignmentTests(unittest.TestCase):
         self.assertNotEqual(
             (0.0, 0.0),
             (second_command.linear.x, second_command.angular.z),
+        )
+
+    def test_stalled_route_batch_replans_without_another_positive_batch(self):
+        controller, targets = make_closed_loop_controller(2, 'line', 1.0)
+        first, second = controller.robot_ids
+        controller.movement_mode = formation.MovementMode.STATIC
+        controller.route_stall_timeout = 0.1
+        controller.route_waypoints = {
+            first: [targets[controller.assignments[first]]],
+            second: [targets[controller.assignments[second]]],
+        }
+        controller.route_waypoint_indices = {first: 0, second: 0}
+        controller.route_batches = [[first], [second]]
+        controller.route_batch_index = 0
+        controller.active_placement_plan = {
+            'kind': 'static',
+            'arena_size': controller.arena_size,
+            'arena_margin': controller.arena_margin,
+            'obstacle_clearance': controller.formation_obstacle_clearance,
+            'exclusion_zones': controller.spawn_exclusion_zones,
+            'arena_profile': controller.arena_profile,
+            'model_poses': {},
+        }
+
+        with mock.patch.object(
+            controller,
+            '_schedule_live_replan_locked',
+            return_value=True,
+        ) as schedule:
+            controller._control_step(None)
+            controller._control_step(None)
+            positive_batches = len(
+                controller.cmd_vel_pubs[first].messages
+            )
+            controller._control_step(None)
+
+        schedule.assert_called_once()
+        detail = schedule.call_args.args[-1]
+        self.assertEqual('route_stall', detail['gate'])
+        self.assertEqual(first, detail['robot'])
+        self.assertEqual(
+            positive_batches,
+            len(controller.cmd_vel_pubs[first].messages),
+            'the stall edge published another positive command batch',
+        )
+
+    def test_small_route_steps_accumulate_into_useful_progress(self):
+        controller = make_controller()
+        controller.route_batches = [['tb3_0']]
+        controller.route_waypoint_indices = {'tb3_0': 0}
+        controller.route_stall_timeout = 0.15
+
+        details = [
+            controller._route_stall_detail(
+                {'tb3_0'}, {'tb3_0': distance}, 0.05
+            )
+            for distance in (1.0, 0.996, 0.992, 0.988)
+        ]
+
+        self.assertEqual([None, None, None, None], details)
+        self.assertEqual(0.0, controller._route_stall_duration['tb3_0'])
+        self.assertAlmostEqual(
+            0.988, controller._route_progress_best['tb3_0']
         )
 
     def test_impossible_spacing_reports_a_correlated_failure(self):

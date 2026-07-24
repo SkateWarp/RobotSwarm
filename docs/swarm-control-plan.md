@@ -859,9 +859,17 @@ matriz sobre su SHA.
 I-144 se integró como `ea25434`. Dos dispatches GPU se detuvieron antes del
 lease por timeout DNS. I-145 añadió tres intentos acotados solamente para
 errores de transporte; se integró mediante la PR #109 y el despliegue
-`30055847809` activó `2445a37`. I-146 es ahora el único delta local: amplía el
-arranque HLS de 30 a 60 s, preserva el estado saneado del fallo y no modifica
-backend, ROS, el TTL ni la limpieza.
+`30055847809` activó `2445a37`. I-146 se integró mediante la PR #110 y el
+despliegue `30060062277` activó `e3dc7ad`. Las seis filas posteriores llegaron
+a video HLS.
+
+La misma matriz abrió I-147: S/N=10 mantuvo seguridad y RTF, pero un miembro
+liberado dejó de progresar fuera de la histéresis y retuvo dos robots de lotes
+posteriores. El delta local mide progreso acumulado contra el waypoint activo;
+después de 20 s simulados sin mejora, omite el siguiente lote positivo, publica
+cero y reutiliza el replan vivo limitado a dos intentos. El gate API cambia el
+triángulo ya casi satisfecho por letra A/N=3 para acreditar solapamiento real,
+sin pausas artificiales.
 
 1. Publicar código, contratos y documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar

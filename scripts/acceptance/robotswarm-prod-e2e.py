@@ -106,7 +106,7 @@ class Report:
                 "robot_counts": {"user_a": 3, "user_b": 7},
                 "task": {
                     "parallel": True,
-                    "user_a": {"type": "Figure", "formation": "triangle"},
+                    "user_a": {"type": "Figure", "formation": "A"},
                     "user_b": {"type": "FollowLeader", "mode": "figure8"},
                 },
                 "production_execution": True,
@@ -1700,15 +1700,16 @@ def run_acceptance(args: argparse.Namespace, report: Report) -> int:
 
         safe_progress("iniciando Figure y FollowLeader en paralelo")
         figure_parameters = {
-            "formation_type": "triangle",
+            "formation_type": "A",
             "movement_mode": "static",
             "config": {
-                "formation_type": "triangle",
+                "formation_type": "A",
                 "movement_mode": "static",
-                # Keep the task active long enough for the independent
-                # FollowLeader command to cross the worker queue. At 0.7 m
-                # the grid spawn can already satisfy the triangle.
-                "spacing": 1.3,
+                # Use the same non-trivial letter exercised by the visible
+                # two-browser flow. Three sampled A slots require real
+                # repositioning, so both persisted task intervals can overlap
+                # even when the simulation runs at RTF 3.
+                "spacing": 0.7,
             },
         }
         follow_parameters = {

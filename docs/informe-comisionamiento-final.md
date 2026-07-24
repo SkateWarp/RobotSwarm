@@ -1882,11 +1882,52 @@ temporal de la sonda oficial; ambos compartían masters, no existía un segundo
 `gzserver`. Después del cierre se comprobaron cero procesos o contenedores ROS
 residuales.
 
-**Verificación y límite.** Frontend aprobó 164/164 y su build; el visor focal
-37/37 y la matriz contractual 74/74. La
+**Verificación postdeploy.** La corrección se integró mediante la PR #110 como
+`e3dc7ad`. CI, despliegue de backend y despliegue GPU aprobaron. Las seis filas
+alcanzaron un visor HLS decodificable: 29,981–30,124 FPS en las cinco
+formaciones aceptadas y 31 FPS de arranque en la S rechazada posteriormente
+por ROS. Gazebo mantuvo 57,542–58,478 FPS y RTF 2,9908–2,9965 en esas cinco
+filas. Esto cierra el defecto de arranque HLS sin usar una captura aislada como
+prueba del algoritmo.
+
+Frontend aprobó 164/164 y su build; el visor focal 37/37 y la matriz contractual
+74/74. La
 [evidencia saneada](assets/commissioning-2026-07/corrective-i146/README.md)
-conserva métricas y hashes. El cambio de 60 s y las filas restantes continúan
-pendientes de postdeploy; no se declara cierre global.
+conserva métricas y hashes. El cierre de I-146 no implica el cierre global: la
+misma matriz reveló después el estancamiento independiente I-147.
+
+### I-147. Un lote de rutas podía permanecer detenido sin recuperación
+
+**Síntoma postdeploy.** Sobre `e3dc7ad`, las primeras cinco formaciones de la
+matriz aprobaron. S/N=10 agotó 85,4005 s todavía en `forming`: ocho robots se
+desplazaron, `tb3_3` quedó a 0,4616 m de su slot y dos robots de lotes
+posteriores recorrieron apenas 0,14 m. RTF fue 2,988, la separación mínima
+0,3944 m, el despeje 0,2274 m y no hubo colisiones. Una repetición fresca sí
+aprobó 75,0317 s activos con error 0,0951 m y RTF 2,9846. Por ello se clasificó
+como liveness intermitente y no como geometría imposible.
+
+**Cómo se encontró.** El reporte ROS preservado mostró tarea y controlador
+vivos, odometría completa, asignaciones 10/10 y cero fallos geométricos. La
+diferencia de recorrido separó a los robots liberados de los dos lotes todavía
+retenidos. Aumentar el presupuesto habría permitido esperar más, pero no
+ofrecía una transición que liberase el corredor bloqueado.
+
+**Corrección candidata.** Cada miembro del lote activo acumula progreso contra
+su waypoint actual. Si permanece fuera de la banda segura y no reduce 0,01 m
+en 20 s simulados, el controlador omite el siguiente lote positivo, publica
+cero, y usa el replan vivo ya limitado a dos intentos. Cambiar de waypoint,
+lote o generación reinicia el reloj. La primera implementación comparaba con
+el slot final y fue rechazada localmente porque confundía desvíos válidos con
+estancamiento; la versión corregida mide el tramo activo.
+
+**Instrumento API.** El gate paralelo de `e3dc7ad` aprobó aislamiento y dos
+visores privados, pero el triángulo estático terminó antes del `startedAt` de
+FollowLeader y los intervalos persistidos no se solaparon. El gate se mantiene
+estricto y ahora usa la letra A/N=3 del recorrido visible, sin esperas
+artificiales. La
+[evidencia saneada](assets/commissioning-2026-07/corrective-i147/README.md)
+registra ambos rechazos, la repetición S aprobada, hashes y verificación local.
+El cierre requiere todavía el SHA integrado y una repetición visible.
 
 ## 5. Registro cronológico de cambios y pruebas
 
@@ -2066,6 +2107,9 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-23 | Despliegue PR #108 e I-145 | Gate y backend verdes; dos dispatches GPU fallaron por timeout DNS antes del lease, sin mutación parcial | SHA `ea25434`; runs `30054706834` y `30054818947`; release anterior activo |
 | 2026-07-23 | Despliegue PR #109 | CI, backend y GPU aprobaron; release exacto activo con NVIDIA disponible | SHA `2445a37`; run GPU `30055847809` |
 | 2026-07-23 | Diagnóstico visible I-146 | Cuadrado N=5 aprobó a 58,203 FPS, HLS 29,960 FPS, RTF 2,9959 y cero colisiones; el margen HLS de 30 s quedó identificado como intermitente | Reporte `f739be7…ce60d`; frontend 164/164, matriz contractual 74/74 |
+| 2026-07-24 | Despliegue PR #110 y cierre I-146 | CI, backend, GPU y bundle Cloudflare quedaron en `e3dc7ad`; seis visores HLS arrancaron y las cinco primeras formaciones aprobaron | Runs `30059408258`, `30059673420`, `30059924664` y `30060062277`; HLS ≈30 FPS |
+| 2026-07-24 | Diagnóstico I-147 | S/N=10 retenida en lotes: 8 robots liberados, 2 esperando, RTF 2,988 y cero colisiones; repetición fresca aprobada | Reportes `7e41dd3…75419` y `8b79c44…7a4e0`, ambos `0600` |
+| 2026-07-24 | Corrección local I-147 | Replan acotado después de 20 s simulados sin progreso al waypoint; gate API alineado con letra A | ROS 628/628 en 112,130 s, contratos 254/254 y focal final 3/3; postdeploy pendiente |
 
 ## 6. Resultados previos y cortes históricos
 
@@ -2430,6 +2474,10 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-141 | La planificación N=10 se confundía con un heartbeat perdido y el asentamiento normal agotaba replans | Status `forming` previo, gracia proporcional solo sin asignaciones y tolerancia acotada 0,08 m/0,10 rad con revalidación completa | Formación 103/103, lifecycle 235/235, global 624/624; S N=10 visible 75,0004 s, error 0,0952 m, RTF 2,9851 y cero colisiones; falta postdeploy |
 | I-142 | El arnés confundía una figura ya satisfecha, un seek HLS y el repintado post-fullscreen con fallos | Separación de aceptación 1,3 m, regresión HLS informada sin restar avance y espera de toolbar acotada a 5 s | API y responsive aprobados; dos Chrome visibles ~30 FPS, entrada, fullscreen, concurrencia, reapertura y aislamiento de parada; cleanup completo |
 | I-143 | Un robot podía quedar dentro de la histéresis segura pero fuera del umbral estricto y retener indefinidamente los lotes siguientes | Liberación de corredor separada de la convergencia final; la primera usa 0,14 m y la aceptación conserva 0,12 m | Antes rechazado: 4 robots esperando y error 3,7458 m; después aprobado: S/N=10, 0,0936 m, RTF 2,9912, cero colisiones |
+| I-144 | Tres presupuestos históricos terminaban rutas sanas antes de su ventana activa | Presupuesto de ensamblaje 90 s para cuadrado, V y diamante; yaw de asentamiento 0,15 rad para la huella circular | PR #108; las seis filas postdeploy de `e3dc7ad` superaron el gate de arranque y cinco aprobaron ROS |
+| I-145 | Una intermitencia DNS agotaba el POST inicial de adquisición del lease | Tres intentos solo ante error de transporte, sin reintentar respuestas HTTP ni mutar antes del lease | PR #109 y despliegue GPU `30055847809` aprobados |
+| I-146 | El frontend esperaba 30 s frente a un arranque HLS real cercano a 28 s | Ventana acotada de 60 s y preservación del protocolo ROS al fallar antes del muestreo | PR #110; seis inicios HLS postdeploy y cinco filas aceptadas a ≈30 FPS |
+| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos sin transición de recuperación | Progreso acumulado por waypoint, parada y replan vivo después de 20 s simulados, máximo dos intentos | Rechazo postdeploy preservado y repetición fresca aprobada; regresiones locales verdes; falta SHA integrado |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
