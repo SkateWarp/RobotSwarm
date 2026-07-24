@@ -3587,9 +3587,12 @@ def run_active_scenario_gate(
             and exc.reason == "task_terminal_before_activity"
         ):
             # A correlated terminal status means the runner is already winding
-            # down. Give it a short chance to print RESULT_JSON/SUMMARY_JSON
-            # before cancellation closes the child process.
-            scenario_thread.join(timeout=10)
+            # down.  Gazebo teardown and the supervisor finalize step can take
+            # longer than ten seconds on the production WSL worker.  Preserve
+            # the child's RESULT_JSON/SUMMARY_JSON before cancellation so the
+            # report explains the terminal task instead of hiding it behind
+            # the activity gate.
+            scenario_thread.join(timeout=min(60.0, scenario_timeout))
         cancel_event.set()
         if probe_thread.ident is not None:
             probe_thread.join(timeout=50)
@@ -4266,15 +4269,20 @@ def run_one_case(
         case_report["container"] = container_evidence
 
         viewer_lease.begin_viewer_request()
-        ui.open_viewer(args.viewer_timeout)
-        lease_directory = active_viewer_lease_directory(
-            args.viewer_runtime_dir,
-            session_id,
-            timeout=args.viewer_timeout,
-            stop_event=stop_event,
-        )
-        viewer_lease.bind(lease_directory)
-        initial_viewer = ui.require_interactive_hls()
+        try:
+            ui.open_viewer(args.viewer_timeout)
+            lease_directory = active_viewer_lease_directory(
+                args.viewer_runtime_dir,
+                session_id,
+                timeout=args.viewer_timeout,
+                stop_event=stop_event,
+            )
+            viewer_lease.bind(lease_directory)
+            initial_viewer = ui.require_interactive_hls()
+        except Exception:
+            with contextlib.suppress(Exception):
+                case_report["viewerStartupFailure"] = ui.viewer_startup_state()
+            raise
         case_report["viewer"] = {
             "transport": "HLS",
             "interactive": True,

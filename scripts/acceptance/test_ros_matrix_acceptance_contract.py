@@ -3278,6 +3278,84 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertTrue(report["cleanup"]["complete"])
         cleanup_call.assert_called_once()
 
+    def test_viewer_startup_failure_keeps_the_last_sanitized_ui_state(self):
+        scenario = DRIVER.SCENARIOS[0]
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        ui = mock.Mock()
+        ui._occupying_sessions.side_effect = [[], [{"id": str(session_id)}]]
+        ui.wait_ready.return_value = {
+            "state": "Ready",
+            "activeRobots": scenario.robot_count,
+        }
+        ui.require_interactive_hls.side_effect = DRIVER.MatrixError(
+            "synthetic HLS startup failure"
+        )
+        ui.viewer_startup_state.return_value = {
+            "openButton": False,
+            "privateViewerMounted": True,
+            "viewerStatus": "Preparando publicación",
+            "hlsInteractive": False,
+        }
+        docker = mock.Mock()
+        docker.verify_session.return_value = (
+            DRIVER.ContainerHandle(
+                "c" * 64, "version", "172.20.0.4", "172.20.0.1"
+            ),
+            {"managed": True},
+        )
+        args = argparse.Namespace(
+            ready_timeout=1,
+            viewer_timeout=1,
+            scenario_timeout=1,
+            cleanup_timeout=1,
+            viewer_runtime_dir=Path("/tmp/not-used"),
+            deployment_commit="a" * 40,
+        )
+        cleanup = {
+            "viewerClosed": True,
+            "sessionStopped": True,
+            "workspaceReleased": True,
+            "resourceIdentityKnown": True,
+            "leaseBindingKnown": True,
+            "containerAbsent": True,
+            "networkAbsent": True,
+            "leaseRuntimeAbsent": True,
+            "viewerPublisherAbsent": True,
+            "complete": True,
+        }
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            return_value=Path(temporary) / "viewer-lease",
+        ), mock.patch.object(
+            DRIVER, "cleanup_case", return_value=cleanup
+        ):
+            report, passed = DRIVER.run_one_case(
+                index=1,
+                scenario=scenario,
+                args=args,
+                ui=ui,
+                docker=docker,
+                evidence_dir=Path(temporary),
+                credentials={"email": "owner@example.test", "password": "secret"},
+                stop_event=threading.Event(),
+            )
+
+        self.assertFalse(passed)
+        self.assertEqual("failed", report["status"])
+        self.assertIn("synthetic HLS startup failure", report["failure"])
+        self.assertEqual(
+            {
+                "openButton": False,
+                "privateViewerMounted": True,
+                "viewerStatus": "Preparando publicación",
+                "hlsInteractive": False,
+            },
+            report["viewerStartupFailure"],
+        )
+        self.assertTrue(report["cleanup"]["complete"])
+
     def test_failed_probe_capture_retains_sanitized_parsed_protocol_and_hashes(self):
         scenario = DRIVER.SCENARIOS[0]
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
