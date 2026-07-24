@@ -47,9 +47,14 @@ formación de prueba ya satisfecha, un seek hacia el borde vivo HLS y la
 transición de repintado al salir de fullscreen. I-143 separa la liberación
 segura de cada corredor de la convergencia estricta del slot: el freeze final
 aprobó 625/625 pruebas ROS y S/N=10 con error 0,0936 m, RTF 2,9912 y cero
-colisiones. El plan
-sigue abierto hasta publicar esta única corrección, desplegar su SHA exacto y
-repetir las filas afectadas y la carga.
+colisiones. I-144 fue publicada mediante la PR #108 e I-145 mediante la PR
+#109. El worker GPU exacto de `2445a37` quedó activo después de que el reintento
+DNS acotado aprobara el despliegue `30055847809`. La aceptación posterior
+aprobó cuadrado N=5, pero encontró que el frontend abandonaba HLS a los 30 s
+mientras la ruta gráfica completa consumía cerca de 28 s sin margen para
+variación. I-146 eleva solo esa ventana inicial a 60 s y conserva el estado
+saneado del fallo en el arnés. El plan sigue abierto hasta publicar esta última
+corrección, desplegar su SHA exacto y repetir las filas afectadas y la carga.
 
 El [estado de implementación](../IMPLEMENTATION_STATUS.md) mantiene la frontera
 vigente y el [informe de comisionamiento](informe-comisionamiento-final.md)
@@ -851,11 +856,12 @@ locales aprobaron en 62,64–86,34 s con error ≤0,0960 m, RTF ≥2,90 y cero
 colisiones. El plan sigue abierto hasta integrar el parche mínimo y repetir la
 matriz sobre su SHA.
 
-I-144 se integró como `ea25434`. El gate de `main` y el backend aprobaron, pero
-dos dispatches GPU se detuvieron antes del lease por timeout DNS. I-145 añade
-tres intentos acotados solamente para errores de transporte en la adquisición;
-el release anterior permaneció activo y no se repite el despliegue hasta que
-este guard pase CI.
+I-144 se integró como `ea25434`. Dos dispatches GPU se detuvieron antes del
+lease por timeout DNS. I-145 añadió tres intentos acotados solamente para
+errores de transporte; se integró mediante la PR #109 y el despliegue
+`30055847809` activó `2445a37`. I-146 es ahora el único delta local: amplía el
+arranque HLS de 30 a 60 s, preserva el estado saneado del fallo y no modifica
+backend, ROS, el TTL ni la limpieza.
 
 1. Publicar código, contratos y documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar

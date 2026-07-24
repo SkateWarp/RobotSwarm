@@ -3,10 +3,10 @@
 **Fecha del corte:** 2026-07-23
 
 **Alcance:** producción observada en
-`ea25434c17a45c9032857a5cc86c40ea42b46c21`, integrada mediante la PR #108,
-y corrección local I-145 todavía sin publicar. Frontend y backend ejecutan el
-corte de la PR #108; el worker GPU conserva `1d497d4` porque dos intentos de
-despliegue fallaron antes de adquirir el lease por timeout DNS. La etiqueta
+`2445a3735ca42bd574c1cfbb1fcb2bbc7b2dce18`, integrada mediante la PR #109,
+y corrección local I-146 todavía sin publicar. Frontend, backend y worker GPU
+ejecutan ese corte; el despliegue GPU `30055847809` aprobó y activó el release
+exacto después de incorporar el reintento DNS acotado de I-145. La etiqueta
 `rollback/pre-formation-ghost-9f49e17` conserva la revisión anterior. Este
 documento no constituye todavía el acta de cierre.
 
@@ -29,6 +29,14 @@ fallidos y la evidencia visual, está disponible en
 | Worker GPU .NET | Ciclo de vida aislado de sesiones Docker, puente de comandos ROS, latidos, selección inmutable de imagen y supervisión del publicador del visor | `1448a31` activo; unidad versionada con AF_NETLINK y GPU NVIDIA comprobada |
 | ROS Noetic y Gazebo | Flota dinámica de TurtleBot3 Burger, control de seguridad, orquestación de tareas y tres comportamientos escalables | Imagen inmutable de `1448a31` activa; las correcciones de formación I-136–I-138 permanecen locales hasta el PR correctivo |
 | MediaMTX y auxiliar del visor | Pantalla X privada y `gzclient` por concesión, publicación H.264/RTSP y origen HLS interno de baja latencia | HLS privado operativo; dos visores independientes, interacción y pantalla completa aprobados en Chrome visible; I-139 endurece localmente la renovación al vencer el TTL |
+
+La repetición visible de I-146 aprobó cuadrado N=5 en producción con
+58,203 FPS de Gazebo, 29,960 FPS decodificados en Chrome, RTF 2,9959 y cero
+colisiones. También hizo visible una carrera de disponibilidad: el frontend
+agotaba a los 30 s una preparación gráfica que normalmente consumía alrededor
+de 28 s. La corrección local amplía únicamente el presupuesto inicial HLS a
+60 s, conserva el TTL y la limpieza, y añade estado diagnóstico saneado al
+arnés. La matriz completa sobre el futuro SHA continúa pendiente.
 
 Las capas utilizan un único ciclo de vida correlacionado en vez de controles
 puntuales separados: el frontend invoca al backend autenticado, el backend
@@ -552,6 +560,13 @@ próximo SHA antes de desplegarlo:
   continúan fallando de inmediato. La
   [evidencia I-145](docs/assets/commissioning-2026-07/corrective-i145/README.md)
   conserva diagnóstico y contención.
+- La PR #109 publicó I-145 y el run `30055847809` dejó activo el release
+  exacto `2445a37`. I-146 conserva un cuadrado N=5 productivo aprobado y
+  corrige localmente la carrera del primer HLS: 60 s de presupuesto en vez de
+  30 s, sin cambiar el TTL. Frontend aprobó 164/164, build y 37/37 focales; el
+  arnés aprobó 74/74. La
+  [evidencia I-146](docs/assets/commissioning-2026-07/corrective-i146/README.md)
+  distingue el caso aprobado de la matriz todavía pendiente.
 - La imagen exacta del delta, sin montajes de fuentes, tiene ID
   `sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5`.
   En ventanas Gazebo no headless, el triángulo N=3 y la S N=10 conservaron el

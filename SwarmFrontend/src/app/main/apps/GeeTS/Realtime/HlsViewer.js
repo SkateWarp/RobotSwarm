@@ -8,7 +8,8 @@ import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import { Alert, Box, Button, Chip, CircularProgress, Tooltip, Typography } from "@mui/material";
 import { parseViewerTimestamp } from "./viewerTimestamp";
 
-export const VIEWER_STARTUP_BUDGET_MS = 30000;
+export const VIEWER_STARTUP_BUDGET_MS = 60000;
+const VIEWER_STARTUP_BUDGET_SECONDS = VIEWER_STARTUP_BUDGET_MS / 1000;
 export const viewerScreenReaderOnlySx = {
     border: 0,
     clip: "rect(0 0 0 0)",
@@ -83,7 +84,7 @@ export const hlsNetworkFailure = (statusCode) => {
 export const hlsFailureMessage = (failure, timedOut = false) => {
     if (failure === "pending") {
         return timedOut
-            ? "La vista fue preparada, pero la lista HLS no apareció después de 30 segundos."
+            ? `La vista fue preparada, pero la lista HLS no apareció después de ${VIEWER_STARTUP_BUDGET_SECONDS} segundos.`
             : "La publicación HLS todavía se está preparando…";
     }
     if (failure === "saturated") {
@@ -97,7 +98,7 @@ export const hlsFailureMessage = (failure, timedOut = false) => {
             : "El origen de video no responde (HTTP 502/504); intentando reconectar…";
     }
     return timedOut
-        ? "No fue posible contactar el servicio de video durante 30 segundos."
+        ? `No fue posible contactar el servicio de video durante ${VIEWER_STARTUP_BUDGET_SECONDS} segundos.`
         : "Reconectando con el servicio de video…";
 };
 

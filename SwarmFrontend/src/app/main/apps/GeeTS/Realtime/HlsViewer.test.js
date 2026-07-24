@@ -379,7 +379,7 @@ describe("interactive viewer input", () => {
 
 describe("HLS startup failures", () => {
     it("keeps a startup budget longer than the worker command timeout", () => {
-        expect(VIEWER_STARTUP_BUDGET_MS).toBeGreaterThanOrEqual(30000);
+        expect(VIEWER_STARTUP_BUDGET_MS).toBe(60000);
         expect(VIEWER_STARTUP_BUDGET_MS).toBeGreaterThan(15000);
     });
 
@@ -403,11 +403,11 @@ describe("HLS startup failures", () => {
         let now = 1000;
         const retryWindow = createHlsRetryWindow(() => now);
 
-        now += 29000;
+        now += VIEWER_STARTUP_BUDGET_MS - 1000;
         expect(retryWindow.beginOrContinueFailure()).toBe(1000);
         now += 1001;
         expect(retryWindow.beginOrContinueFailure()).toBe(0);
-        now += 30000;
+        now += VIEWER_STARTUP_BUDGET_MS;
         expect(retryWindow.beginOrContinueFailure()).toBe(0);
     });
 
