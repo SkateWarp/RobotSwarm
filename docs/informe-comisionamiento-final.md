@@ -1853,6 +1853,41 @@ no se reintenta; tres errores de transporte hacen fallar cerrado el job. La
 [evidencia saneada](assets/commissioning-2026-07/corrective-i145/README.md)
 registra los runs y confirma que no hubo mutación parcial.
 
+### I-146. El margen de arranque HLS era menor que la variación productiva
+
+**Síntoma.** Una matriz sobre `2445a37` aprobó triángulo N=3 y rechazó las
+cinco filas posteriores antes de ROS por ausencia de un visor interactivo.
+MediaMTX había recibido H.264 y creado los muxers HLS. Un cuadrado fresco
+también agotó la espera. Todas las filas liberaron sus recursos.
+
+**Cómo se encontró.** La secuencia real desde la orden de visor hasta el primer
+acceso HLS consumía aproximadamente 28 s. El reproductor React abandonaba a los
+30 s, de modo que una variación pequeña convertía un publicador sano en un
+fallo aparente. El arnés tampoco guardaba el último estado de la interfaz en
+esa frontera y esperaba solo 10 s por el protocolo del hijo cuando ROS ya era
+terminal.
+
+**Corrección local.** HLS dispone de 60 s para arranque o recuperación. El TTL
+del lease, sus autorizaciones y el cleanup no cambian. La matriz conserva el
+estado saneado del frontend al fallar y concede al teardown del hijo hasta
+60 s, sin superar el timeout del escenario, solo para recuperar sus dos
+documentos terminales. Una regresión verifica la evidencia del fallo.
+
+**Control visible.** Una repetición limpia de cuadrado N=5 aprobó antes del
+cambio: 58,203 FPS de Gazebo, 29,960 FPS decodificados, RTF 2,9959, error
+máximo 0,0888 m, separación mínima 0,4277 m y cero colisiones durante
+75,0451 s activos. La limpieza fue completa. Las dos ventanas observadas
+durante el ensayo correspondían al `gzclient` principal del lease y al cliente
+temporal de la sonda oficial; ambos compartían masters, no existía un segundo
+`gzserver`. Después del cierre se comprobaron cero procesos o contenedores ROS
+residuales.
+
+**Verificación y límite.** Frontend aprobó 164/164 y su build; el visor focal
+37/37 y la matriz contractual 74/74. La
+[evidencia saneada](assets/commissioning-2026-07/corrective-i146/README.md)
+conserva métricas y hashes. El cambio de 60 s y las filas restantes continúan
+pendientes de postdeploy; no se declara cierre global.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -2029,6 +2064,8 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-23 | Bloqueo de lotes I-143 y freeze final | Primer intento rechazado con cuatro robots retenidos; después S/N=10 aprobó con error 0,0936 m, RTF 2,9912 y cero colisiones | Imagen `4caa2ea…91e9`; ROS 625/625 en 117,379 s, contratos 253/253 |
 | 2026-07-23 | Postdeploy PR #107 e I-144 | Matriz productiva 3/6 rechazada por límites de ensamblaje; cuadrado/V/diamante locales aprobaron tras calibración acotada | SHA desplegado `1d497d4`; imagen local `56b82f5…be9f`; ROS 626/626 y contratos 253/253 |
 | 2026-07-23 | Despliegue PR #108 e I-145 | Gate y backend verdes; dos dispatches GPU fallaron por timeout DNS antes del lease, sin mutación parcial | SHA `ea25434`; runs `30054706834` y `30054818947`; release anterior activo |
+| 2026-07-23 | Despliegue PR #109 | CI, backend y GPU aprobaron; release exacto activo con NVIDIA disponible | SHA `2445a37`; run GPU `30055847809` |
+| 2026-07-23 | Diagnóstico visible I-146 | Cuadrado N=5 aprobó a 58,203 FPS, HLS 29,960 FPS, RTF 2,9959 y cero colisiones; el margen HLS de 30 s quedó identificado como intermitente | Reporte `f739be7…ce60d`; frontend 164/164, matriz contractual 74/74 |
 
 ## 6. Resultados previos y cortes históricos
 
