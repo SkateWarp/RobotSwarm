@@ -58,6 +58,7 @@ services:
       - Viewer__HlsOriginBaseUrl=http://media:8888
       - Viewer__HlsCdnSecret=${MEDIA_HLS_CDN_SECRET:-}
       - Viewer__HlsUpstreamTimeoutSeconds=${Viewer__HlsUpstreamTimeoutSeconds:-15}
+      - Viewer__LeaseMinutes=${VIEWER_LEASE_MINUTES:-15}
       - BootstrapAdmin__Email=${BootstrapAdmin__Email:-}
       - BootstrapAdmin__Password=${BootstrapAdmin__Password:-}
       - Workers__OrphanAfterSeconds=${Workers__OrphanAfterSeconds:-90}

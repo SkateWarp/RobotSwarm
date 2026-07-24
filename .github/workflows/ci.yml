@@ -95,6 +95,11 @@ jobs:
               raise SystemExit(
                   "Production Compose does not pass the transport-evidence gate."
               )
+          if "Viewer__LeaseMinutes=${VIEWER_LEASE_MINUTES:-15}" not in compose:
+              raise SystemExit(
+                  "Production Compose must keep the private viewer lease long "
+                  "enough for the verified long-running scenarios."
+              )
           PY
 
       - name: Compile production acceptance harnesses

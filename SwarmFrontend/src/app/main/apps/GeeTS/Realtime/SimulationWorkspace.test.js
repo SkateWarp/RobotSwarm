@@ -8,6 +8,7 @@ import SimulationWorkspace, {
     mergeViewerLeaseStatus,
     requestMessage,
     sendViewerControlInput,
+    sessionRobotRoleLabel,
     sessionRobotStateColor,
     sessionRobotSummary,
     viewerCommandFailureMessage,
@@ -202,6 +203,31 @@ describe("session robot monitor", () => {
         ).toEqual({ total: 5, operational: 2, provisioning: 1, unavailable: 2 });
         expect(sessionRobotStateColor("Ready")).toBe("success");
         expect(sessionRobotStateColor("Failed")).toBe("error");
+    });
+
+    it("shows a useful task function when the worker has not assigned a specific role", () => {
+        const robot = { ordinal: 2, role: null };
+
+        expect(sessionRobotRoleLabel(robot, [])).toBe("disponible");
+        expect(sessionRobotRoleLabel(robot, [{ type: "Figure", state: "Running" }])).toBe(
+            "miembro de formación"
+        );
+        expect(sessionRobotRoleLabel(robot, [{ type: "FollowLeader", state: "Running" }])).toBe("seguidor");
+        expect(
+            sessionRobotRoleLabel({ ...robot, ordinal: 0 }, [{ type: "FollowLeader", state: "Accepted" }])
+        ).toBe("líder");
+        expect(sessionRobotRoleLabel(robot, [{ type: "CollaborativeTransport", state: "Running" }])).toBe(
+            "búsqueda y transporte"
+        );
+    });
+
+    it("prefers and translates a role explicitly reported by the worker", () => {
+        expect(
+            sessionRobotRoleLabel({ ordinal: 4, role: "companion_push" }, [
+                { type: "CollaborativeTransport", state: "Running" },
+            ])
+        ).toBe("empuje de apoyo");
+        expect(sessionRobotRoleLabel({ role: "observer" }, [])).toBe("observer");
     });
 });
 

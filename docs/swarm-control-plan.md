@@ -892,20 +892,27 @@ progreso sin replans ni colisiones, pero el presupuesto histórico terminó a
 el supuesto del arnés: 120 s de pared cubren 324 s al RTF conservador 2,7.
 Precisión, ventana activa, RTF, aceleración y seguridad permanecen iguales.
 
-1. Publicar la calibración I-148 y su documentación en un único PR correctivo. Usar
-   un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar
-   evidencia.
-2. Después del merge, comprobar los servicios públicos y despachar el workflow
-   GPU una sola vez para el SHA exacto. Verificar imagen instalada, NVIDIA, RTF,
-   unidad versionada y ausencia de un release parcial.
-3. Ejecutar las seis formaciones corregidas en sesiones frescas. Exigir roster
-   completo, ventana activa, precisión, movimiento natural, cero colisiones,
-   RTF ≥2,90, video visible y limpieza por caso.
-4. Repetir transporte N=1 sobre el SHA nuevo. La comprobación previa contra
-   `1448a31` ya aprobó la preservación del informe, ROS, HLS y cleanup. Después,
-   desde React, ejecutar N=4 con
-   tolerancia 0,25 m y confirmar búsqueda de toda la flota, aviso, encuentro,
-   contribución útil, marcador sincronizado, interacción y fullscreen.
+I-148 se integró mediante la PR #114 como `b34c9a5`. CI, backend y GPU
+aprobaron en el primer intento. S/N=10 completó 75,0199 s activos con error
+0,0952 m, RTF 2,9645, HLS 31 FPS y cero colisiones. Las otras cinco
+formaciones, los tres seguimientos y transporte N=2/N=3/N=4/N=10 también
+aprobaron. En cada transporte todos los robots buscaron; el descubridor avisó
+a los demás y todos contribuyeron. N=1 terminó `DONE` y avanzó 0,5003 m, pero
+el lease de cinco minutos venció antes de la segunda medición HLS. Este
+hallazgo es I-149, no un fallo ROS.
+
+1. Integrar en un solo PR I-149 e I-150: lease de visor de 15 min, funciones
+   contextuales del roster y restauración visual del login. Usar un solo ciclo
+   normal de CI y no repetir jobs ya aprobados.
+2. Después del merge, comprobar Cloudflare y el backend. Despachar el workflow
+   GPU una sola vez para alinear el SHA, aunque la imagen ROS conserve el mismo
+   contenido algorítmico.
+3. Repetir N=1 y exigir dos mediciones HLS, `DONE`, 0,50 m, RTF ≥2,90, cero
+   colisiones y cleanup. Verificar en navegador que el monitor muestre
+   «búsqueda y transporte» o el rol explícito, nunca «sin asignar».
+4. Recorrer login, Control, Historial, Plantillas, Robots, Grupos y Usuarios
+   con la cuenta disponible; comprobar responsive, interacción, fullscreen y
+   aislamiento sin crear usuarios innecesarios ni elevar roles por SQL.
 5. Emparejar la sonda de carga de 0,75 kg y GRF con el preflight NVIDIA sobre el
    mismo master Gazebo. Exigir render ≥45 FPS, HLS ≥27 FPS y RTF ≥2,90, sin
    reducir masa o fricción para obtener el aprobado.
