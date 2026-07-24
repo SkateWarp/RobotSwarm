@@ -5,6 +5,7 @@ import path from "path";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
+import { MemoryRouter } from "react-router-dom";
 import Logo from "../../fuse-layouts/shared-components/Logo";
 import Login from "./Login";
 import Register from "./Register";
@@ -32,7 +33,12 @@ describe("RobotSwarm branding", () => {
 
     const render = (component) => {
         act(() => {
-            ReactDOM.render(<ThemeProvider theme={theme}>{component}</ThemeProvider>, host);
+            ReactDOM.render(
+                <MemoryRouter>
+                    <ThemeProvider theme={theme}>{component}</ThemeProvider>
+                </MemoryRouter>,
+                host
+            );
         });
     };
 
@@ -45,7 +51,7 @@ describe("RobotSwarm branding", () => {
     });
 
     it.each([
-        ["login", Login, "Iniciar sesión"],
+        ["login", Login, "BIENVENIDO"],
         ["register", Register, "Crear cuenta"],
     ])("keeps one page heading and the PNG on %s", (_name, Component, title) => {
         render(<Component />);
@@ -53,6 +59,16 @@ describe("RobotSwarm branding", () => {
         expect(document.querySelectorAll("h1")).toHaveLength(1);
         expect(document.querySelector("h1").textContent).toBe(title);
         expect(document.querySelector('img[alt="RobotSwarm"]').getAttribute("src")).toBe(LOGO_PATH);
+    });
+
+    it("restores the compact original login card and password recovery link", () => {
+        render(<Login />);
+
+        expect(document.querySelector(".max-w-384")).not.toBeNull();
+        expect(document.querySelectorAll('img[alt="RobotSwarm"]')).toHaveLength(2);
+        expect(document.querySelector('a[href="/forgot-password"]').textContent).toContain(
+            "Restablecer contraseña"
+        );
     });
 
     it("keeps the splash logo legible and exposes the same asset through the manifest", () => {

@@ -173,6 +173,13 @@ exact session and source path, then replaces it with a separate internal CDN
 credential on the private MediaMTX hop. MediaMTX never receives the user's
 read token.
 
+`Viewer:LeaseMinutes` vale 15 minutos por defecto en producción y el backend
+lo limita al intervalo de 1–30 minutos. Esta ventana cubre las tareas ROS
+aceptadas de mayor duración sin convertir el stream en permanente. Crear un
+lease sustituto, cerrar el visor, detener la sesión o alcanzar la caducidad
+sigue revocando el acceso; el frontend no puede extender el token de lectura
+por el solo hecho de renovar su grant interactivo de SignalR.
+
 The proxy rejects redirects, unknown query parameters, traversal and
 non-canonical paths. It applies bounded upstream timeouts and response sizes,
 and returns every authenticated playlist and part with `Cache-Control:

@@ -1,29 +1,21 @@
+import { motion } from "framer-motion";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Typography from "@mui/material/Typography";
 import clsx from "clsx";
+import { Link } from "react-router-dom";
 import { makeStyles } from "@mui/styles";
+import { darken } from "@mui/material/styles";
 import { LOGO } from "../../constants/constants";
 import JWTLoginTab from "./tabs/JWTLoginTab";
 
 const useStyles = makeStyles((theme) => ({
     root: {
-        backgroundColor: theme.palette.background.default,
-        color: theme.palette.text.primary,
-    },
-    card: {
-        border: `1px solid ${theme.palette.divider}`,
-        borderRadius: 8,
-        boxShadow: "none",
-    },
-    brand: {
-        marginBottom: 20,
-    },
-    brandLogo: {
-        display: "block",
-        height: "auto",
-        maxWidth: 220,
-        width: "62%",
+        background: `linear-gradient(to left, ${theme.palette.primary.dark} 0%, ${darken(
+            theme.palette.primary.dark,
+            0.5
+        )} 100%)`,
+        color: theme.palette.primary.contrastText,
     },
 }));
 
@@ -34,29 +26,40 @@ function Login() {
         <div
             className={clsx(classes.root, "flex flex-col flex-auto items-center justify-center p-16 sm:p-32")}
         >
-            <main className="w-full" style={{ maxWidth: 420 }}>
-                <header className={classes.brand}>
-                    <img className={classes.brandLogo} src={LOGO} alt="RobotSwarm" />
-                    <Typography color="textSecondary" variant="body2" className="mt-8">
-                        Plataforma de simulación multi-robot
-                    </Typography>
-                </header>
+            <div className="flex flex-col items-center justify-center w-full">
+                <motion.div initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }}>
+                    <Card className="w-full max-w-384">
+                        <CardContent className="flex flex-col items-center justify-center p-16 sm:p-24 md:p-32">
+                            <img className="w-128 m-32" src={LOGO} alt="RobotSwarm" />
 
-                <Card className={clsx(classes.card, "w-full")} variant="outlined">
-                    <CardContent className="p-24 sm:p-32">
-                        <Typography component="h1" variant="h6" className="font-semibold mb-8">
-                            Iniciar sesión
-                        </Typography>
-                        <Typography color="textSecondary" variant="body2" className="mb-24">
-                            Utilice las credenciales asignadas por el administrador.
-                        </Typography>
+                            <Typography
+                                component="h1"
+                                variant="h6"
+                                className="mt-16 mb-24 font-oswald text-18 sm:text-24"
+                            >
+                                BIENVENIDO
+                            </Typography>
                             <JWTLoginTab />
-                    </CardContent>
-                </Card>
-                <Typography variant="caption" color="textSecondary" className="block mt-16">
-                    Acceso restringido. Cada sesión de simulación y visor pertenece a una sola cuenta.
-                </Typography>
-            </main>
+                            <div className="flex flex-col items-center justify-center pt-32 pb-24">
+                                <span className="font-normal">¿Olvidaste tu contraseña?</span>
+                                <Link className="font-normal" to="/forgot-password">
+                                    Restablecer contraseña
+                                </Link>
+                            </div>
+                            <div className="w-1/3 mt-32">
+                                <img src={LOGO} alt="RobotSwarm" />
+                            </div>
+                            <Typography
+                                variant="caption"
+                                className="mt-16 text-center"
+                                style={{ fontSize: "12px", color: "#999999" }}
+                            >
+                                © RobotSwarm 2022. Todos los derechos reservados.
+                            </Typography>
+                        </CardContent>
+                    </Card>
+                </motion.div>
+            </div>
         </div>
     );
 }

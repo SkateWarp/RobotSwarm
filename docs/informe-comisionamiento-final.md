@@ -1986,6 +1986,56 @@ el RTF mínimo, la aceleración ni las distancias de seguridad. La ampliación s
 considerará válida solo si la corrida exacta posterior alcanza `moving` y
 aprueba todos esos gates.
 
+**Resultado productivo.** La PR #114 integró I-148 como
+`b34c9a53f66f1803ea6b101cd58dd69298c95527`. CI, backend y GPU aprobaron una
+sola vez; el worker activó la imagen
+`sha256:3c3f9f35bd3ee71149bbc69e04798f1ddb9432eb8a2f4b4088e67f3222b5ddac`
+con RTX 3080 y cero reinicios. S/N=10 alcanzó 75,0199 s activos, error máximo
+0,0952 m, RTF 2,9645, separación 0,4009 m, despeje 0,2463 m, aceleración
+0,6895 m/s² y cero colisiones. Usó dos lotes solapados, sin replans, HLS
+31,0 FPS y cleanup completo. El reporte saneado tiene SHA-256
+`8fef2dee974ddb0742a5753ae1a73962beac895f6fad2beb01c6ea33a9feb252`.
+I-148 queda cerrada sin modificar ningún gate físico.
+
+### I-149. El visor vencía durante una tarea físicamente válida
+
+**Hallazgo.** Las cinco formaciones restantes, los tres seguimientos y los
+transportes N=2/N=3/N=4/N=10 aprobaron sobre `b34c9a5`. N=1 también terminó
+`DONE`, desplazó la caja 0,5003 m, mantuvo RTF 2,9963, Gazebo 58,847 FPS, HLS
+inicial 30,016 FPS y cero colisiones. Se rechazó únicamente cuando el arnés
+pidió otra muestra HLS después de 264,8944 s de tarea: el lease privado de
+cinco minutos ya había vencido.
+
+**Diagnóstico.** El grant interactivo de SignalR se renueva, pero el token de
+lectura HLS tiene una vida independiente y no renovable. Los procesos y el
+stream estaban sanos; la caducidad respondió conforme al contrato. El reporte
+rechazado tiene SHA-256
+`669b3de00e6951df45ee5165889dba92cba66e43f42e2ba7351c30c8273a0b13`.
+
+**Corrección candidata.** El valor predeterminado pasa a quince minutos en
+configuración y Compose. El backend conserva el límite 1–30 minutos, la
+revocación al reemplazar el lease, el cierre explícito y la invalidación al
+detener la sesión. La repetición postdeploy debe comprobar una segunda muestra
+HLS y cleanup sobre el mismo SHA.
+
+### I-150. El monitor confundía falta de rol persistido con falta de función
+
+**Hallazgo.** El roster mostraba «rol sin asignar» cuando `SessionRobot.Role`
+era nulo, aunque el robot estuviera activo dentro de una formación, un
+seguimiento o una búsqueda. Era una representación incompleta del contrato, no
+una ausencia de control ROS.
+
+**Solución candidata.** Un rol explícito del worker conserva prioridad y se
+traduce cuando es conocido. Mientras todavía no existe, la interfaz deriva una
+función contextual: líder/seguidor, miembro de formación, búsqueda y
+transporte, o disponible sin tarea activa. No afirma «empuje directo» ni
+«empuje de apoyo» si el worker no los publicó. En el mismo candidato se
+restaura la composición visual histórica del login —gradiente, tarjeta
+compacta, PNG, «BIENVENIDO» y recuperación— sin modificar JWT ni habilitar
+registro público. La
+[evidencia saneada](assets/commissioning-2026-07/corrective-i149-i150/README.md)
+conserva el diagnóstico y los criterios pendientes de despliegue.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -2440,28 +2490,27 @@ La sonda cinemática inicial produjo evidencia técnica local en `/tmp/robotswar
 
 ## 7. Aceptación final en producción
 
-La PR #106 y su despliegue exacto cerraron el primer bloque pendiente, pero esta
-sección permanece abierta por los hallazgos I-136–I-143. Los ensayos rechazados
-se conservan como diagnóstico y no se reutilizan como resultados aprobados.
-`1448a31` ya demuestra API concurrente, visor privado, navegación User,
-responsive, seguimiento, transporte normal y marcador. Las seis formaciones
-fallaron en ese release. N=1 perdió su artefacto en el primer intento, pero la
-repetición con el arnés corregido ya aprobó contra la misma imagen productiva.
-Las correcciones ROS solo han aprobado localmente. Falta publicarlas en un único
-SHA, desplegar exactamente su imagen y repetir las formaciones, además del gate
-cargado N=4.
+La cadena correctiva I-136–I-148 ya fue integrada y desplegada hasta
+`b34c9a53f66f1803ea6b101cd58dd69298c95527`. Los ensayos rechazados se
+conservan como diagnóstico y no se reutilizan como resultados aprobados. La
+matriz productiva posterior aprobó las seis formaciones, los tres seguimientos
+y los cinco tamaños físicos de transporte. N=1 conserva un rechazo
+instrumental separado: ROS, Gazebo y la dinámica aprobaron, pero el lease HLS
+de cinco minutos venció antes de una comprobación redundante posterior. I-149
+e I-150 forman el último candidato web/configuración; todavía requieren una
+única integración, despliegue y observación en navegador.
 
 | Grupo de aceptación | Criterio pendiente | Estado actual |
 | --- | --- | --- |
 | API multiusuario | Crear simultáneamente rosters 3/7, ejecutar tareas paralelas, negar acceso cruzado, detener A sin afectar B y limpiar | **Aprobado en `1448a31`**; dos cuentas, rosters exactos, aislamiento y limpieza completa |
 | Interfaz visible | Operar dos Chrome no headless, interacción, pantalla completa, cierre aislado y tareas concurrentes | **Aprobado en `1448a31`**; dos HLS privados ≈30 FPS, cero drops y ROS B sobrevivió al cierre/reapertura de su visor |
 | Administración web | Probar Historial, Plantillas, Robots, Grupos y Usuarios según rol | Recorrido User y denegaciones 403 aprobados en `1448a31`. Admin no se repitió: no existe credencial bootstrap autorizada y no se creó ni elevó ninguna cuenta |
-| Video privado | Comprobar flujos separados, FPS y renovación sin compartir display | Aprobado en `1448a31`; N=1 volvió a aprobar con I-139 en el arnés, 58,711 FPS NVIDIA, 30,164 FPS HLS y cleanup completo. No necesitó renovación; esa rama conserva cobertura contractual |
-| Formaciones | Triángulo N=3, cuadrado N=5, A N=7, V N=8, rombo N=9 y S N=10 | Las seis filas de `1448a31` fallaron antes del gate activo. El candidato inmutable aprobó N=3/N=10 visibles, 96/96 focales y 576/576 globales; falta postdeploy de las seis |
-| Seguimiento de líder | Trayectorias circular N=3, cuadrada N=6 y figura de ocho N=10 | **3/3 aprobadas en `1448a31`**, con RTF 2,9963/2,9959/2,9740 y limpieza completa |
-| Transporte | GRF N=1, N=2, N=3, N=4 y N=10; para N>1, búsqueda, aviso y contribución completa | **N=1/N=2/N=3/N=4/N=10 aprobados contra `1448a31`**. N=1 utilizó I-139 en el arnés local; se repetirá sobre el SHA correctivo para no mezclar artefactos |
+| Video privado | Comprobar flujos separados, FPS y renovación sin compartir display | Dos usuarios aprobaron en `1448a31`. La matriz `b34c9a5` abrió cada HLS a ≈31 FPS; I-149 amplía el lease a 15 min para conservarlo durante tareas largas y requiere repetición final |
+| Formaciones | Triángulo N=3, cuadrado N=5, A N=7, V N=8, rombo N=9 y S N=10 | **6/6 aprobadas en `b34c9a5`**, RTF 2,9802–2,9959, ≈31 FPS HLS, cero colisiones y cleanup completo |
+| Seguimiento de líder | Trayectorias circular N=3, cuadrada N=6 y figura de ocho N=10 | **3/3 aprobadas en `b34c9a5`**, RTF 2,9668–2,9962, ≈31 FPS HLS, cero colisiones y cleanup completo |
+| Transporte | GRF N=1, N=2, N=3, N=4 y N=10; para N>1, búsqueda, aviso y contribución completa | **5/5 aprobaron físicamente en `b34c9a5`**. N=2/3/4/10 aprobaron el reporte completo; N=1 requiere repetir solo el gate HLS posterior con el lease de I-149 |
 | Carga física y rendimiento | Mantener 0,75 kg, `mu=0.25`, RTF ≥2,90, Gazebo visible ≥45 FPS y HLS ≥27 FPS durante la carga | Aprobado sobre `fbef23e`: capacidad 0,0070/0,0354/1,0836 m, GRF 0,5001 m a RTF 2,9942, NVIDIA 58,469/62,489 FPS y HLS ≈30 FPS. El intento posterior encontró la carrera de colocación; el gate corregido debe repetirse sobre el próximo SHA |
-| Limpieza | Eliminar sesiones, leases, contenedores, redes, perfiles y procesos creados por aceptación | Cada una de las catorce filas de la matriz `1448a31`, incluidas las rechazadas, informó cleanup completo; la entrega correctiva debe conservarlo |
+| Limpieza | Eliminar sesiones, leases, contenedores, redes, perfiles y procesos creados por aceptación | Las catorce filas de `b34c9a5`, incluida N=1 rechazada por TTL, informaron cleanup completo; la entrega final debe conservarlo |
 
 Los valores se incorporarán con el SHA del componente, hora de ejecución, criterios de aceptación, capturas y hashes de los artefactos sanitizados. Una fila solo cambiará a «Aprobada» cuando el resultado observado y el estado estructurado coincidan.
 
@@ -2539,8 +2588,10 @@ Antes de reservar las imágenes conviene separar la evidencia técnica que sí e
 | I-144 | Tres presupuestos históricos terminaban rutas sanas antes de su ventana activa | Presupuesto de ensamblaje 90 s para cuadrado, V y diamante; yaw de asentamiento 0,15 rad para la huella circular | PR #108; las seis filas postdeploy de `e3dc7ad` superaron el gate de arranque y cinco aprobaron ROS |
 | I-145 | Una intermitencia DNS agotaba el POST inicial de adquisición del lease | Tres intentos solo ante error de transporte, sin reintentar respuestas HTTP ni mutar antes del lease | PR #109 y despliegue GPU `30055847809` aprobados |
 | I-146 | El frontend esperaba 30 s frente a un arranque HLS real cercano a 28 s | Ventana acotada de 60 s y preservación del protocolo ROS al fallar antes del muestreo | PR #110; seis inicios HLS postdeploy y cinco filas aceptadas a ≈30 FPS |
-| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos aun después de despejar el corredor | Grafo por spawns/slots, corredores restantes desde poses vivas, liberación concurrente sin cruces y fallback 0,20 m/20 s | Rechazos `e3dc7ad`, `917b06b` y `2193c3d` preservados; tercer candidato 3/3 visible y 631/631 local, pendiente de integración y postdeploy |
-| I-148 | El presupuesto S/N=10 cubría 229,5 s simulados, menos que una colocación productiva todavía sana a 252,816 s | Envolvente exclusiva S/N=10 de 120 s; todos los gates físicos permanecen iguales | Rechazo `ec4980b` preservado; repetición exacta pendiente |
+| I-147 | Un miembro fuera de la histéresis podía dejar lotes posteriores detenidos aun después de despejar el corredor | Grafo por spawns/slots, corredores restantes desde poses vivas, liberación concurrente sin cruces y fallback 0,20 m/20 s | Cerrada en `b34c9a5`: seis formaciones aprobadas, incluida S/N=10 con dos lotes solapados y cero replans |
+| I-148 | El presupuesto S/N=10 cubría 229,5 s simulados, menos que una colocación productiva todavía sana a 252,816 s | Envolvente exclusiva S/N=10 de 120 s; todos los gates físicos permanecen iguales | Cerrada en `b34c9a5`: 75,0199 s activos, error 0,0952 m, RTF 2,9645 y cero colisiones |
+| I-149 | N=1 terminó ROS y física, pero el lease HLS de 5 min venció antes del muestreo posterior | TTL productivo predeterminado de 15 min, todavía acotado, privado y revocable | Candidato local; backend 253/253, frontend y repetición postdeploy pendientes de cierre |
+| I-150 | El roster decía «rol sin asignar» aunque ROS ya controlaba al robot | Rol explícito prioritario y función derivada de la tarea; login visual histórico restaurado | Pruebas focales aprobadas; falta captura del bundle productivo |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
@@ -2548,19 +2599,19 @@ El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre l
 | Figura reservada | Estado «antes» que debe mostrar | Estado «después» que debe mostrar | Situación |
 | --- | --- | --- | --- |
 | Figura 11 | Error del visor observado por el usuario, con datos privados recortados | La misma vista con estado «En vivo» y FPS | La escena visible de carga ya está versionada; falta la comparación final del visor posterior al despliegue |
-| Figura 12 | Formulario de acceso heredado | Nuevo login de RobotSwarm, error legible y control para mostrar contraseña | Frontend desplegado; captura pendiente |
+| Figura 12 | Login anterior a la restauración, con composición plana | Diseño histórico restaurado con gradiente, tarjeta compacta, PNG y «BIENVENIDO» | Candidato local I-150; comparación postdeploy pendiente |
 | Figura 13 | Lista de cuentas sin estado ni acciones claras | Filtros, cuentas activas/inactivas y diálogo de creación/edición | Frontend desplegado; captura pendiente |
 | Figura 14 | Espacio de simulación sin jerarquía operacional | Etapas sesión→visor→tarea y resultado terminal visible | Flujo integral observado sobre `fbef23e`; falta seleccionar y versionar la captura |
 | Figura 15 | Una sola vista o un escritorio compartido | Dos ventanas Chrome reales con sesiones y flujos privados diferentes | Aceptación concurrente aprobada; PNG temporal pendiente de saneamiento y versionado |
-| Figuras 16–18 | Escena previa a cada tarea | Formación, seguimiento y transporte final ejecutados desde el frontend | Pendientes de la matriz ROS |
+| Figuras 16–18 | Escena previa a cada tarea | Formación, seguimiento y transporte final ejecutados desde el frontend | Matriz física aprobada en `b34c9a5`; falta seleccionar capturas saneadas |
 | Figura 19 | Historial heredado vacío o basado en `TaskLog`, sin exponer datos privados | Historial `TaskRun` del propietario, con filtros, resultado y diálogo de detalle | Capturado durante los recorridos User/Admin; falta versión permanente |
 | Figura 20 | «Tareas» con crear/eliminar o campos que no corresponden al backend | «Plantillas de tareas» con catálogo real y edición `GET`/`PUT` de administrador | Captura Admin temporal sobre `fbef23e`; falta versionarla |
 | Figura 21 | Lista heredada de robots sin estados de carga/error ni separación de runtime | Registro persistente con búsqueda, estados, alta, edición y desactivación | Captura Admin temporal sobre `fbef23e`; falta versionarla |
 | Figura 22 | Ausencia de una gestión clara de grupos o acción que aparentaba iniciar ROS | Grupos administrativos con membresía, transferencia confirmada y aviso de alcance | Capturas Admin y grupo efímero temporales; falta versionarlas |
-| Figura 23 | Sesión sin detalle individual de las instancias `tb3_*` | Monitor runtime con rol, namespace, estado, actualización y resumen operativo | Observado en Control; falta seleccionar la captura final |
+| Figura 23 | Monitor con varias filas «rol sin asignar» | Función contextual y rol específico solo cuando el worker lo publica | Candidato I-150; captura antes/después pendiente |
 | Figura 24 | Visor sin cierre independiente y parada de sesión inmediata | Botón «Cerrar visor», estado posterior sin stream y evidencia de que ROS continúa | Operación aprobada en la corrida concurrente; PNG temporal pendiente |
 | Figura 25 | Menú con nombres heredados «Tareas»/«Cuentas» y sin Grupos | Navegación completa y adaptación a 360/768/1366/1920 px | Las cuatro capturas responsive de `fbef23e` ya están versionadas; falta la repetición del bundle final |
-| Figura 26 | Contador productivo de ≈244 min para un lease de 5 min | Contador corregido cercano a cinco minutos y expiración efectiva | «Antes» disponible en captura temporal; «después» pendiente del próximo despliegue |
+| Figura 26 | Contador productivo de ≈244 min para un lease de 5 min | Contador UTC correcto y lease de 15 min suficiente para la tarea larga | Parser ya desplegado; TTL I-149 y captura final pendientes |
 | Figura 27 | Transporte sin indicación gráfica del destino | Huella y caja fantasma magenta visibles, con estado sincronizado en el panel | Comparación saneada y permanente bajo `assets/commissioning-2026-07/final-1448a31/`; la imagen «después» pertenece al postdeploy `1448a31`. Las capturas `CopyFromScreen` y las PNG ambiguas de push/done permanecen rechazadas |
 
 La base cargada histórica se conserva en

@@ -1392,7 +1392,7 @@ public static class SessionControlRoute
         var now = DateTime.UtcNow;
         var leaseMinutes = int.TryParse(configuration["Viewer:LeaseMinutes"], out var configuredMinutes)
             ? Math.Clamp(configuredMinutes, 1, 30)
-            : 5;
+            : 15;
         var expiresAt = now.AddMinutes(leaseMinutes);
         var token = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
         var tokenHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));

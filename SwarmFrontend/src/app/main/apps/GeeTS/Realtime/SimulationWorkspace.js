@@ -42,6 +42,16 @@ const SESSION_ROBOT_STATE_LABELS = {
     Failed: "Fallido",
 };
 
+const SESSION_ROBOT_ROLE_LABELS = {
+    leader: "líder",
+    follower: "seguidor",
+    formation_member: "miembro de formación",
+    transporter: "transporte",
+    payload_push: "empuje directo",
+    companion_push: "empuje de apoyo",
+    searcher: "búsqueda",
+};
+
 export const sessionRobotStateColor = (state) => {
     if (state === "Ready" || state === "Active") return "success";
     if (state === "Offline" || state === "Removed") return "warning";
@@ -57,6 +67,26 @@ export const sessionRobotSummary = (robots) => {
         provisioning: list.filter((robot) => robot.state === "Provisioning").length,
         unavailable: list.filter((robot) => ["Offline", "Removed", "Failed"].includes(robot.state)).length,
     };
+};
+
+export const sessionRobotRoleLabel = (robot, tasks) => {
+    const assignedRole = String(robot?.role || "").trim();
+    if (assignedRole) {
+        return SESSION_ROBOT_ROLE_LABELS[assignedRole.toLowerCase()] || assignedRole;
+    }
+
+    const activeTask = (Array.isArray(tasks) ? tasks : []).find(
+        (task) => !TERMINAL_TASK_STATES.has(task.state)
+    );
+    if (!activeTask) return "disponible";
+
+    if (activeTask.type === "FollowLeader") {
+        return Number(robot?.ordinal) === 0 ? "líder" : "seguidor";
+    }
+    if (activeTask.type === "Figure") return "miembro de formación";
+    if (activeTask.type === "CollaborativeTransport") return "búsqueda y transporte";
+
+    return "participante";
 };
 
 const formatRobotUpdate = (value) => {
@@ -1324,8 +1354,9 @@ function SimulationWorkspace() {
                                                     />
                                                 </Box>
                                                 <Typography variant="caption" color="text.secondary">
-                                                    #{robot.ordinal + 1} · rol {robot.role || "sin asignar"} ·
-                                                    actualizado {formatRobotUpdate(robot.updatedAt)}
+                                                    #{robot.ordinal + 1} · función{" "}
+                                                    {sessionRobotRoleLabel(robot, tasks)} · actualizado{" "}
+                                                    {formatRobotUpdate(robot.updatedAt)}
                                                 </Typography>
                                             </Paper>
                                         </Grid>
