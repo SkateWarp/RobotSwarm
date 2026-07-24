@@ -1,0 +1,164 @@
+{
+  "browser": {
+    "cdpPort": 9350,
+    "gpuDisabled": false,
+    "headless": false,
+    "ownedPid": 2715590,
+    "product": "Chrome/150.0.7871.129",
+    "profile": "robotswarm-responsive-e2e-20260724T083856Z-2715586",
+    "profileOwned": true,
+    "visible": true
+  },
+  "captures": [
+    {
+      "observation": {
+        "clientWidth": 345,
+        "devicePixelRatio": 1,
+        "horizontalOverflowPx": 0,
+        "innerHeight": 900,
+        "layoutViewportWidth": 360,
+        "panelInsideViewport": true,
+        "panelVisible": true,
+        "panelVisibleHeight": 347,
+        "panelVisibleWidth": 313,
+        "scrollWidth": 345,
+        "visibleViewportWidth": 345,
+        "visualViewportWidth": 345
+      },
+      "requestedCssWidth": 360,
+      "screenshot": {
+        "bytes": 45827,
+        "file": "20260724T083856Z-2715586-control-360px.png",
+        "height": 900,
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/realtime",
+          "title": "RobotSwarm"
+        },
+        "sha256": "35dd36dee26cedcac1cba21616a5081a1f9596b9f94634549e4a17567c21095b",
+        "width": 360
+      },
+      "viewportHeight": 900
+    },
+    {
+      "observation": {
+        "clientWidth": 753,
+        "devicePixelRatio": 1,
+        "horizontalOverflowPx": 0,
+        "innerHeight": 900,
+        "layoutViewportWidth": 768,
+        "panelInsideViewport": true,
+        "panelVisible": true,
+        "panelVisibleHeight": 310,
+        "panelVisibleWidth": 721,
+        "scrollWidth": 753,
+        "visibleViewportWidth": 753,
+        "visualViewportWidth": 753
+      },
+      "requestedCssWidth": 768,
+      "screenshot": {
+        "bytes": 50521,
+        "file": "20260724T083856Z-2715586-control-768px.png",
+        "height": 900,
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/realtime",
+          "title": "RobotSwarm"
+        },
+        "sha256": "a58cb2fb00c01b521d66b121660b1a6f3b6ab7219459ca313769ccd8c75c1e1f",
+        "width": 768
+      },
+      "viewportHeight": 900
+    },
+    {
+      "observation": {
+        "clientWidth": 1358,
+        "devicePixelRatio": 1,
+        "horizontalOverflowPx": 0,
+        "innerHeight": 900,
+        "layoutViewportWidth": 1366,
+        "panelInsideViewport": true,
+        "panelVisible": true,
+        "panelVisibleHeight": 633,
+        "panelVisibleWidth": 381,
+        "scrollWidth": 1358,
+        "visibleViewportWidth": 1358,
+        "visualViewportWidth": 1358
+      },
+      "requestedCssWidth": 1366,
+      "screenshot": {
+        "bytes": 77103,
+        "file": "20260724T083856Z-2715586-control-1366px.png",
+        "height": 900,
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/realtime",
+          "title": "RobotSwarm"
+        },
+        "sha256": "548d9b1ccdfbc78af2cfcdcdb82ea24535ec358f02e749ccecb61990469808f8",
+        "width": 1366
+      },
+      "viewportHeight": 900
+    },
+    {
+      "observation": {
+        "clientWidth": 1912,
+        "devicePixelRatio": 1,
+        "horizontalOverflowPx": 0,
+        "innerHeight": 900,
+        "layoutViewportWidth": 1920,
+        "panelInsideViewport": true,
+        "panelVisible": true,
+        "panelVisibleHeight": 857,
+        "panelVisibleWidth": 418,
+        "scrollWidth": 1912,
+        "visibleViewportWidth": 1912,
+        "visualViewportWidth": 1912
+      },
+      "requestedCssWidth": 1920,
+      "screenshot": {
+        "bytes": 51001,
+        "file": "20260724T083856Z-2715586-control-1920px.png",
+        "height": 900,
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/realtime",
+          "title": "RobotSwarm"
+        },
+        "sha256": "9f4d9015971f99672f5ecc6bb5d5bcb95adbfa8be35c4ed12772da3dd29c9dc5",
+        "width": 1920
+      },
+      "viewportHeight": 900
+    }
+  ],
+  "cleanup": {
+    "browser": {
+      "method": "Browser.close",
+      "portFree": true,
+      "processExited": true,
+      "profileRemoved": true,
+      "requested": true
+    },
+    "deviceMetrics": {
+      "cleared": true,
+      "reason": "cleared"
+    },
+    "passed": true
+  },
+  "completedAt": "2026-07-24T08:39:03Z",
+  "deploymentCommit": "c3866d553015463e561b636f27860a2b8472b7fe",
+  "mutatingActionsRequested": false,
+  "productionExecution": true,
+  "readOnly": true,
+  "requestedCssWidths": [
+    360,
+    768,
+    1366,
+    1920
+  ],
+  "runId": "20260724T083856Z-2715586",
+  "schemaVersion": 1,
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-24T08:38:56Z",
+  "success": true
+}
