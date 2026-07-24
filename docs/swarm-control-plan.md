@@ -851,6 +851,12 @@ locales aprobaron en 62,64–86,34 s con error ≤0,0960 m, RTF ≥2,90 y cero
 colisiones. El plan sigue abierto hasta integrar el parche mínimo y repetir la
 matriz sobre su SHA.
 
+I-144 se integró como `ea25434`. El gate de `main` y el backend aprobaron, pero
+dos dispatches GPU se detuvieron antes del lease por timeout DNS. I-145 añade
+tres intentos acotados solamente para errores de transporte en la adquisición;
+el release anterior permaneció activo y no se repite el despliegue hasta que
+este guard pase CI.
+
 1. Publicar código, contratos y documentación en un único PR correctivo. Usar
    un solo ciclo normal de CI y no hacer reruns de jobs aprobados para duplicar
    evidencia.

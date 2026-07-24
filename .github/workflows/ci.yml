@@ -84,6 +84,10 @@ jobs:
               raise SystemExit(
                   "GPU deployment must tolerate transient drain-status network errors."
               )
+          if "Drain lease request failed; retrying in 5 seconds." not in gpu_worker:
+              raise SystemExit(
+                  "GPU deployment must retry transient drain-acquisition network errors."
+              )
           compose = Path("docker-compose.prod.yml").read_text(encoding="utf-8")
           if "bluenviron/mediamtx@sha256:" not in compose:
               raise SystemExit("Production MediaMTX must use an immutable digest.")

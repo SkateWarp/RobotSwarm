@@ -117,18 +117,31 @@ jobs:
           print(json.dumps({"targetRevision": os.environ["DEPLOY_SHA"]}))
           PY
 
-          status="$({
-            curl --silent --show-error \
-              --connect-timeout 5 \
-              --max-time 20 \
-              --output "$response_file" \
-              --write-out '%{http_code}' \
-              --request POST \
-              --header "Authorization: Bearer $credential" \
-              --header 'Content-Type: application/json' \
-              --data-binary "@$request_file" \
-              "$backend_url/api/worker-maintenance/drain"
-          })"
+          status=""
+          for attempt in 1 2 3; do
+            if status="$({
+              curl --silent --show-error \
+                --connect-timeout 5 \
+                --max-time 20 \
+                --output "$response_file" \
+                --write-out '%{http_code}' \
+                --request POST \
+                --header "Authorization: Bearer $credential" \
+                --header 'Content-Type: application/json' \
+                --data-binary "@$request_file" \
+                "$backend_url/api/worker-maintenance/drain"
+            })"
+            then
+              break
+            fi
+            if test "$attempt" = "3"; then
+              unset credential Worker__WorkerSecret
+              echo "The drain lease endpoint remained unavailable after 3 attempts." >&2
+              exit 1
+            fi
+            echo "Drain lease request failed; retrying in 5 seconds." >&2
+            sleep 5
+          done
           unset credential Worker__WorkerSecret
           test "$status" = "200"
 
