@@ -1834,6 +1834,25 @@ no quedaron procesos del fixture y la repetición aislada fue verde. Se
 clasificó como interferencia temporal del arnés y no se modificó el producto
 para ocultarla.
 
+### I-145. La adquisición del lease no toleraba una intermitencia DNS
+
+**Síntoma.** Los despliegues GPU `30054706834` y `30054818947` del corte
+`ea25434` fallaron al resolver `robot.zerav.la` durante los 5 s permitidos. Los
+dos terminaron antes de adquirir el lease, hacer checkout o cambiar el release;
+`1d497d4-30051789195-1` permaneció activo.
+
+**Diagnóstico.** Cinco sondas ordinarias resolvieron en 0,064–0,130 s. Tres
+sondas con el entorno de `Runner.Listener` resolvieron en 0,106–0,112 s, sin
+proxy y con HTTP 200. La consulta posterior de estado ya tenía reintentos,
+pero el POST inicial de adquisición se ejecutaba una sola vez.
+
+**Corrección.** El POST inicial admite tres intentos únicamente ante errores
+de transporte, separados por 5 s. Conserva los límites de conexión y total,
+la revisión objetivo, la autenticación y el gate HTTP 200. Una respuesta HTTP
+no se reintenta; tres errores de transporte hacen fallar cerrado el job. La
+[evidencia saneada](assets/commissioning-2026-07/corrective-i145/README.md)
+registra los runs y confirma que no hubo mutación parcial.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -2009,6 +2028,7 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-23 | Cierre web I-142 | Responsive 4/4 y dos Chrome visibles aprobaron entrada, fullscreen, tareas concurrentes, reapertura, ~30 FPS y continuidad tras detener A | API 17/17, visible 41/41, limpieza completa; evidencia saneada I-142 |
 | 2026-07-23 | Bloqueo de lotes I-143 y freeze final | Primer intento rechazado con cuatro robots retenidos; después S/N=10 aprobó con error 0,0936 m, RTF 2,9912 y cero colisiones | Imagen `4caa2ea…91e9`; ROS 625/625 en 117,379 s, contratos 253/253 |
 | 2026-07-23 | Postdeploy PR #107 e I-144 | Matriz productiva 3/6 rechazada por límites de ensamblaje; cuadrado/V/diamante locales aprobaron tras calibración acotada | SHA desplegado `1d497d4`; imagen local `56b82f5…be9f`; ROS 626/626 y contratos 253/253 |
+| 2026-07-23 | Despliegue PR #108 e I-145 | Gate y backend verdes; dos dispatches GPU fallaron por timeout DNS antes del lease, sin mutación parcial | SHA `ea25434`; runs `30054706834` y `30054818947`; release anterior activo |
 
 ## 6. Resultados previos y cortes históricos
 

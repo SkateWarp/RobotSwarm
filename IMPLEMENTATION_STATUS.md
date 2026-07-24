@@ -3,9 +3,10 @@
 **Fecha del corte:** 2026-07-23
 
 **Alcance:** producción observada en
-`1d497d4ac33c41416b48300475434a0d11e92d50`, integrada mediante la PR #107,
-y corrección local I-144 todavía sin publicar. Frontend, backend y
-worker GPU ejecutan el corte de la PR #107; la etiqueta
+`ea25434c17a45c9032857a5cc86c40ea42b46c21`, integrada mediante la PR #108,
+y corrección local I-145 todavía sin publicar. Frontend y backend ejecutan el
+corte de la PR #108; el worker GPU conserva `1d497d4` porque dos intentos de
+despliegue fallaron antes de adquirir el lease por timeout DNS. La etiqueta
 `rollback/pre-formation-ghost-9f49e17` conserva la revisión anterior. Este
 documento no constituye todavía el acta de cierre.
 
@@ -544,6 +545,13 @@ próximo SHA antes de desplegarlo:
   [evidencia I-144](docs/assets/commissioning-2026-07/corrective-i144/README.md)
   distingue el 3/6 productivo, el segfault ambiental y los aprobados locales.
   El freeze del delta aprobó 626/626 pruebas ROS y 253/253 contratos.
+- I-145 registra los runs GPU `30054706834` y `30054818947`: ambos agotaron
+  5 s al resolver el backend antes de adquirir el lease. El release `1d497d4`
+  siguió activo. La adquisición ahora reintenta únicamente errores de
+  transporte hasta tres veces, con pausa de 5 s; los HTTP distintos de 200
+  continúan fallando de inmediato. La
+  [evidencia I-145](docs/assets/commissioning-2026-07/corrective-i145/README.md)
+  conserva diagnóstico y contención.
 - La imagen exacta del delta, sin montajes de fuentes, tiene ID
   `sha256:6f1af927d149c3be17115d50c6f2785a5fa4e91cc67ff2ff95bac86ee9844cb5`.
   En ventanas Gazebo no headless, el triángulo N=3 y la S N=10 conservaron el
