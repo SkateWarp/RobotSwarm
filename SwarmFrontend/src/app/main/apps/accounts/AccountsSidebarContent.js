@@ -26,7 +26,7 @@ function AccountsSidebarContent() {
                 </Button>
                 <Typography className="mt-16" color="textSecondary" variant="body2">
                     El administrador crea y gestiona el acceso de cada usuario. Las cuentas desactivadas no
-                    pueden iniciar sesión.
+                    pueden iniciar sesión hasta que un administrador las reactive.
                 </Typography>
             </Paper>
         </div>

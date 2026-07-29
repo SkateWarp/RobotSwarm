@@ -274,6 +274,7 @@ def passing_video_metrics(fps=29.8, dropped_ratio=0.02, media_advance=5.0):
         "droppedFrames": 3,
         "droppedRatio": dropped_ratio,
         "mediaTimeAdvancedSeconds": media_advance,
+        "mediaTimeRegressedSeconds": 0.0,
         "readyState": 4,
         "paused": False,
         "playbackRate": 1.0,
@@ -1574,6 +1575,19 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             with self.assertRaisesRegex(DRIVER.MatrixError, "live preflight process"):
                 DRIVER.load_active_probe_evidence(report, ":120", changed)
 
+            document["render_measurement"]["configured_render_rate_fps"] = 49.0
+            report.write_text(json.dumps(document), encoding="utf-8")
+            report.chmod(0o600)
+            raw = report.read_bytes()
+            attestation = DRIVER.ActiveProbeAttestation(
+                hashlib.sha256(raw).hexdigest(),
+                document["process"]["pid"],
+                document["process"]["start_ticks"],
+            )
+            with self.assertRaisesRegex(DRIVER.MatrixError, "50 FPS cap"):
+                DRIVER.load_active_probe_evidence(report, ":120", attestation)
+
+            document["render_measurement"]["configured_render_rate_fps"] = 50.0
             document["render_measurement"]["sample_seconds"] = 4.0
             report.write_text(json.dumps(document), encoding="utf-8")
             report.chmod(0o600)
@@ -1654,6 +1668,23 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             DRIVER.validate_browser_video(
                 passing_video_metrics(dropped_ratio=0.101)
             )
+
+        raw_failure = passing_video_metrics(media_advance=2.0)
+        raw_failure.update(
+            {
+                "decodedFps": float("nan"),
+                "paused": "false",
+                "privateDiagnostic": "must not be retained",
+            }
+        )
+        failed = DRIVER.failed_browser_video_evidence(raw_failure)
+        self.assertFalse(failed["validated"])
+        self.assertEqual("failedLiveHlsUnderScenarioLoad", failed["scope"])
+        self.assertEqual(2.0, failed["mediaTimeAdvancedSeconds"])
+        self.assertIsNone(failed["decodedFps"])
+        self.assertIsNone(failed["paused"])
+        self.assertNotIn("privateDiagnostic", failed)
+        self.assertNotIn("must not be retained", json.dumps(failed))
 
     def test_active_probe_command_uses_official_thresholds_and_private_sandbox(self):
         runtime = DRIVER.ActiveProbeRuntime(
@@ -1773,6 +1804,10 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             "http://172.20.0.4:11345", runtime.environment["GAZEBO_MASTER_URI"]
         )
         self.assertEqual("172.20.0.1", runtime.environment["GAZEBO_IP"])
+        self.assertEqual(50.0, DRIVER.ACTIVE_PROBE_RENDER_RATE_FPS)
+        self.assertEqual(
+            "50.0", runtime.environment["ROBOTSWARM_GUI_RENDER_RATE"]
+        )
         self.assertEqual(primary_environment, runtime.primary_environment)
         self.assertIn("--unshare-all", runtime.command_prefix)
         self.assertIn("--share-net", runtime.command_prefix)
@@ -2033,12 +2068,87 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
 
         self.assertEqual("beforeVisualSampling", raised.exception.phase)
         self.assertIs(child, raised.exception.scenario_output)
+        self.assertIn(
+            "min(150.0, scenario_timeout)",
+            SCRIPT.read_text(encoding="utf-8"),
+        )
         self.assertFalse(
             DRIVER.parse_ros_protocol(
                 raised.exception.scenario_output, scenario
             ).result["passed"]
         )
         probe.assert_not_called()
+
+    def test_terminal_protocol_wait_does_not_delay_an_operator_stop(self):
+        thread = mock.Mock()
+        thread.is_alive.return_value = True
+        stop_event = threading.Event()
+        stop_event.set()
+
+        interrupted = DRIVER._join_for_terminal_protocol(
+            thread,
+            stop_event,
+            timeout=150.0,
+        )
+
+        self.assertTrue(interrupted)
+        thread.join.assert_not_called()
+
+    def test_active_gate_keeps_failed_hls_metrics_with_the_ros_protocol(self):
+        scenario = DRIVER.SCENARIOS[0]
+        child = child_output()
+        probe_output = DRIVER.ProcessOutput(0, "probe passed\n", "")
+        failed_metrics = passing_video_metrics(media_advance=2.0)
+        failed_metrics["privateDiagnostic"] = "untrusted browser text"
+        docker = mock.Mock()
+        docker.wait_task_active.return_value = {
+            "behavior": scenario.behavior,
+            "behaviorPhase": "",
+            "behaviorState": "moving",
+            "completeFormation": True,
+            "confirmed": True,
+            "taskStatus": "running",
+        }
+        ui = mock.Mock()
+        ui.video_metrics.return_value = failed_metrics
+
+        def run_scenario(
+            _container,
+            _scenario,
+            _timeout,
+            _task_id,
+            _run_token,
+            **kwargs,
+        ):
+            kwargs["on_started"](time.monotonic())
+            kwargs["cancel_event"].wait(2)
+            kwargs["on_exited"](time.monotonic())
+            return child
+
+        def run_probe(_command, **kwargs):
+            kwargs["on_started"](time.monotonic())
+            kwargs["cancel_event"].wait(2)
+            kwargs["on_exited"](time.monotonic())
+            return probe_output
+
+        docker.run_acceptance.side_effect = run_scenario
+        with mock.patch.object(DRIVER, "run_command", side_effect=run_probe):
+            with self.assertRaises(DRIVER.ActiveScenarioGateError) as raised:
+                DRIVER.run_active_scenario_gate(
+                    docker=docker,
+                    container=DRIVER.ContainerHandle("c" * 64, "version"),
+                    scenario=scenario,
+                    scenario_timeout=2,
+                    probe_command=["active-probe"],
+                    probe_environment={},
+                    ui=ui,
+                    stop_event=threading.Event(),
+                )
+
+        self.assertEqual("duringVisualSampling", raised.exception.phase)
+        self.assertIs(child, raised.exception.scenario_output)
+        self.assertEqual(failed_metrics, raised.exception.failed_video_metrics)
+        self.assertIn("did not keep progressing", str(raised.exception))
 
     def test_active_gate_preserves_probe_before_the_scenario_releases_its_lease(self):
         scenario = DRIVER.SCENARIOS[0]
@@ -2226,6 +2336,82 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         )
         self.assertNotIn("opaque", json.dumps(classified_unknown))
 
+    def test_open_bound_viewer_binds_before_waiting_for_a_frame(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        runtime_dir = Path("/tmp/viewer-runtime")
+        bound_directory = runtime_dir / "lease-bound"
+        stop_event = threading.Event()
+        lease = DRIVER.ViewerLeaseState(Path("/tmp/old-lease"))
+        ui = mock.Mock()
+        events = []
+        ui.request_viewer.side_effect = lambda: events.append("request")
+
+        def bind_directory(*_args, **_kwargs):
+            events.append("bind")
+            return bound_directory
+
+        def wait_for_frame(timeout):
+            events.append(("frame", lease.binding_known, lease.directory, timeout))
+
+        ui.wait_viewer_frame.side_effect = wait_for_frame
+        with mock.patch.object(
+            DRIVER.time,
+            "monotonic",
+            side_effect=[10.0, 11.0, 12.0],
+        ), mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            side_effect=bind_directory,
+        ) as bind:
+            result = DRIVER.open_bound_viewer(
+                ui,
+                session_id,
+                lease,
+                runtime_dir=runtime_dir,
+                timeout=10.0,
+                stop_event=stop_event,
+            )
+
+        self.assertEqual(bound_directory, result)
+        self.assertEqual(
+            ["request", "bind", ("frame", True, bound_directory, 8.0)],
+            events,
+        )
+        self.assertEqual(9.0, bind.call_args.kwargs["timeout"])
+        self.assertIs(stop_event, bind.call_args.kwargs["stop_event"])
+
+    def test_open_bound_viewer_keeps_a_late_binding_for_cleanup(self):
+        session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        bound_directory = Path("/tmp/viewer-runtime/lease-bound")
+        lease = DRIVER.ViewerLeaseState()
+        ui = mock.Mock()
+
+        with mock.patch.object(
+            DRIVER.time,
+            "monotonic",
+            side_effect=[10.0, 11.0, 20.0],
+        ), mock.patch.object(
+            DRIVER,
+            "active_viewer_lease_directory",
+            return_value=bound_directory,
+        ):
+            with self.assertRaisesRegex(
+                DRIVER.MatrixError,
+                "exceeded its startup deadline",
+            ):
+                DRIVER.open_bound_viewer(
+                    ui,
+                    session_id,
+                    lease,
+                    runtime_dir=Path("/tmp/viewer-runtime"),
+                    timeout=10.0,
+                    stop_event=threading.Event(),
+                )
+
+        self.assertTrue(lease.binding_known)
+        self.assertEqual(bound_directory, lease.directory)
+        ui.wait_viewer_frame.assert_not_called()
+
     def test_post_scenario_viewer_does_not_renew_an_unproven_expiry(self):
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
         ui = mock.Mock()
@@ -2252,7 +2438,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                     stop_event=threading.Event(),
                 )
 
-        ui.open_viewer.assert_not_called()
+        ui.request_viewer.assert_not_called()
+        ui.wait_viewer_frame.assert_not_called()
         ui._occupying_sessions.assert_not_called()
         bind.assert_not_called()
 
@@ -2312,7 +2499,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertEqual(renewed_lease, lease.directory)
         self.assertEqual(3, ui.viewer_startup_state.call_count)
         self.assertEqual(2, stop_event.wait.call_count)
-        ui.open_viewer.assert_called_once_with(1)
+        ui.request_viewer.assert_called_once_with()
+        ui.wait_viewer_frame.assert_called_once()
 
     def test_post_scenario_viewer_fails_closed_when_closing_never_finishes(self):
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -2339,7 +2527,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                     stop_event=threading.Event(),
                 )
 
-        ui.open_viewer.assert_not_called()
+        ui.request_viewer.assert_not_called()
+        ui.wait_viewer_frame.assert_not_called()
         ui.require_interactive_hls.assert_not_called()
         ui._occupying_sessions.assert_not_called()
         bind.assert_not_called()
@@ -2393,7 +2582,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertTrue(renewed)
         self.assertEqual(renewed_lease, lease_state.directory)
         self.assertTrue(state["hlsInteractive"])
-        ui.open_viewer.assert_called_once_with(1)
+        ui.request_viewer.assert_called_once_with()
+        ui.wait_viewer_frame.assert_called_once()
 
     def test_post_scenario_viewer_rejects_persistent_old_lease_cleanup(self):
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -2437,7 +2627,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
                     timeout=0.1,
                 )
 
-        ui.open_viewer.assert_not_called()
+        ui.request_viewer.assert_not_called()
+        ui.wait_viewer_frame.assert_not_called()
         ui._occupying_sessions.assert_not_called()
         bind.assert_not_called()
         self.assertFalse(cleanup["leaseRuntimeAbsent"])
@@ -2776,7 +2967,8 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         )
         self.assertTrue(report["ros"]["taskCleanupVerified"])
         self.assertTrue(report["viewer"]["leaseRenewedAfterScenario"])
-        self.assertEqual(2, ui.open_viewer.call_count)
+        self.assertEqual(2, ui.request_viewer.call_count)
+        self.assertEqual(2, ui.wait_viewer_frame.call_count)
         self.assertTrue(report["activeScenarioGuiProbe"]["caseCompleted"])
         self.assertNotIn("activeScenarioGuiProbeCapture", report)
         self.assertEqual(
@@ -3356,7 +3548,7 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         )
         self.assertTrue(report["cleanup"]["complete"])
 
-    def test_failed_probe_capture_retains_sanitized_parsed_protocol_and_hashes(self):
+    def test_failed_hls_gate_retains_sanitized_metrics_protocol_and_hashes(self):
         scenario = DRIVER.SCENARIOS[0]
         session_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
         ui = mock.Mock()
@@ -3397,6 +3589,11 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             "failed_scenarios": [scenario.name],
         }
         failed_child = child_output(failed_result, failed_summary, returncode=1)
+        failed_video_metrics = passing_video_metrics(media_advance=2.0)
+        failed_video_metrics["privateDiagnostic"] = (
+            "owner@example.test secret "
+            "11111111-1111-4111-8111-111111111111"
+        )
         docker.verify_full_roster.return_value = {
             "source": "/gazebo/model_states",
             "expectedRobots": scenario.robot_count,
@@ -3454,9 +3651,10 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
             DRIVER,
             "run_active_scenario_gate",
             side_effect=DRIVER.ActiveScenarioGateError(
-                "The Gazebo render report is unavailable",
-                "probeEvidencePreservation",
+                "The HLS media time did not keep progressing",
+                "duringVisualSampling",
                 failed_child,
+                failed_video_metrics=failed_video_metrics,
             ),
         ), mock.patch.object(
             DRIVER, "load_active_probe_evidence", return_value=startup
@@ -3484,17 +3682,31 @@ exec(compile(probe_source, "<stop-probe>", "exec"), {"__name__": "__main__"})
         self.assertFalse(report["ros"]["taskCleanupVerified"])
         self.assertEqual(
             {
-                "phase": "probeEvidencePreservation",
+                "phase": "duringVisualSampling",
                 "childProtocolAvailable": True,
                 "childProtocolPreserved": True,
             },
             report["activeScenarioGateFailure"],
         )
+        failed_video = report["activeScenarioVideoFailure"]
+        self.assertFalse(failed_video["validated"])
+        self.assertEqual(2.0, failed_video["mediaTimeAdvancedSeconds"])
+        self.assertNotIn("activeScenarioVideo", report)
+        self.assertNotIn("privateDiagnostic", failed_video)
+        self.assertEqual(
+            DRIVER.json_evidence_hash(failed_video),
+            report["hashes"]["activeScenarioVideoFailureMetricsSha256"],
+        )
         serialized = json.dumps(report["ros"])
         self.assertNotIn("owner@example.test", serialized)
         self.assertNotIn(str(session_id), serialized)
+        self.assertNotIn("secret", json.dumps(failed_video))
         self.assertRegex(report["hashes"]["resultJsonSha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(report["hashes"]["summaryJsonSha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            report["hashes"]["activeScenarioVideoFailureMetricsSha256"],
+            r"^[0-9a-f]{64}$",
+        )
         self.assertRegex(report["hashes"]["evidenceBundleSha256"], r"^[0-9a-f]{64}$")
 
     def test_incomplete_cleanup_blocks_the_next_scenario(self):

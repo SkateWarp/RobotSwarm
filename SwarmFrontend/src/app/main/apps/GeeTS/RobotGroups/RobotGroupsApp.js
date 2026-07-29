@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-    Add,
-    DeleteOutline,
-    EditOutlined,
-    Refresh,
-    RemoveCircleOutline,
-} from "@mui/icons-material";
+import { Add, DeleteOutline, EditOutlined, Refresh, RemoveCircleOutline } from "@mui/icons-material";
 import {
     Alert,
     Box,
@@ -189,14 +183,11 @@ function RobotGroupsApp() {
         <Box data-testid="robot-groups-page" sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
             <PageHeading
                 title="Grupos de robots"
-                description="Organice el inventario en flotas reutilizables para las simulaciones."
+                description="Organice el inventario administrativo. La selección de robots de Gazebo se realiza en cada sesión."
                 meta={`${groups.length} grupos · ${assignedRobotCount} de ${robots.length} robots activos asignados`}
                 actions={
                     <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", gap: 1 }}>
-                        <Button
-                            variant="outlined"
-                            onClick={() => navigate("/apps/GTS/realtime")}
-                        >
+                        <Button variant="outlined" onClick={() => navigate("/apps/GTS/realtime")}>
                             Abrir Control
                         </Button>
                         <Button

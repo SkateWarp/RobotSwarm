@@ -696,6 +696,78 @@ public class AccountService : IAccountService
         return AccountResponse.From(account);
     }
 
+    public async Task<Result<AccountResponse>> ReactivateAuthorized(
+        int actorAccountId,
+        ClaimsPrincipal principal,
+        int accountId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!PrincipalIsAdministrator(principal))
+        {
+            return UnauthorizedMutation<AccountResponse>();
+        }
+
+        await using var transaction = await _dataContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        await AccountResourceLock.AcquireAdministratorMutation(
+            _dataContext,
+            cancellationToken);
+        if (!await AccountResourceLock.AcquireActorAndTarget(
+                _dataContext,
+                actorAccountId,
+                principal,
+                accountId,
+                cancellationToken))
+        {
+            return UnauthorizedMutation<AccountResponse>();
+        }
+
+        Account? account;
+        if (_dataContext.Database.IsRelational())
+        {
+            account = await _dataContext.Accounts
+                .FromSqlInterpolated($"""
+                    SELECT *
+                    FROM "Accounts"
+                    WHERE "Id" = {accountId}
+                    FOR UPDATE
+                    """)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (account != null)
+            {
+                await _dataContext.Entry(account)
+                    .Collection(candidate => candidate.RefreshTokens)
+                    .LoadAsync(cancellationToken);
+            }
+        }
+        else
+        {
+            account = await _dataContext.Accounts
+                .Include(candidate => candidate.RefreshTokens)
+                .SingleOrDefaultAsync(
+                    candidate => candidate.Id == accountId,
+                    cancellationToken);
+        }
+
+        if (account == null)
+        {
+            return new Result<AccountResponse>(new Exception("Cuenta no encontrada"));
+        }
+
+        if (!account.Enabled)
+        {
+            var now = DateTime.UtcNow;
+            RevokeRefreshTokens(account, now);
+            account.Enabled = true;
+            account.Updated = now;
+            await _dataContext.SaveChangesAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return AccountResponse.From(account);
+    }
+
     public async Task<bool> Delete(int accountId)
     {
         var outcome = await DeleteCore(

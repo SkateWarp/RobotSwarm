@@ -53,6 +53,12 @@ public static class AccountRoute
             .ProducesValidationProblem()
             .Produces<AccountResponse>();
 
+        group.MapPut("/{accountId:int}/reactivate", Reactivate)
+            .RequireAuthorization(policy => policy.RequireRole(Role.Admin.ToString()))
+            .Produces<AccountResponse>()
+            .Produces(StatusCodes.Status401Unauthorized)
+            .Produces(StatusCodes.Status403Forbidden);
+
         group.MapDelete("/{accountId}", Delete)
             .RequireAuthorization()
             .Produces(StatusCodes.Status401Unauthorized)
@@ -300,6 +306,25 @@ public static class AccountRoute
         return AuthorizedResult(
             response,
             deleted => deleted ? Results.Ok() : Results.BadRequest());
+    }
+
+    public static async Task<IResult> Reactivate(
+        int accountId,
+        IAccountService accountService,
+        HttpContext context)
+    {
+        var currentAccountId = GetAccountId(context);
+        if (!currentAccountId.HasValue)
+        {
+            return Results.Unauthorized();
+        }
+
+        var response = await accountService.ReactivateAuthorized(
+            currentAccountId.Value,
+            context.User,
+            accountId,
+            context.RequestAborted);
+        return AuthorizedResult(response, Results.Ok);
     }
 
     private static IResult AuthorizedResult<T>(

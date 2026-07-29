@@ -2,7 +2,12 @@
 
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
-import { createRegistryRobot, getRobotRegistryErrorMessage, listRegistryRobots } from "./robotRegistryApi";
+import {
+    createRegistryRobot,
+    getRobotRegistryErrorMessage,
+    listRegistryRobots,
+    reactivateRegistryRobot,
+} from "./robotRegistryApi";
 import RobotRegistryApp from "./RobotRegistryApp";
 
 const mockNavigate = jest.fn();
@@ -17,6 +22,7 @@ jest.mock("./robotRegistryApi", () => ({
     disableRegistryRobot: jest.fn(),
     getRobotRegistryErrorMessage: jest.fn(),
     listRegistryRobots: jest.fn(),
+    reactivateRegistryRobot: jest.fn(),
     updateRegistryRobot: jest.fn(),
 }));
 
@@ -88,7 +94,7 @@ describe("RobotRegistryApp", () => {
         renderApp();
         await flush();
 
-        expect(document.body.textContent).toContain("No hay robots activos");
+        expect(document.body.textContent).toContain("No hay robots registrados");
         expect(document.body.textContent).not.toContain("No fue posible cargar el registro.");
     });
 
@@ -99,13 +105,13 @@ describe("RobotRegistryApp", () => {
         await flush();
 
         expect(document.body.textContent).toContain("No fue posible cargar el registro.");
-        expect(document.body.textContent).not.toContain("No hay robots activos");
+        expect(document.body.textContent).not.toContain("No hay robots registrados");
 
         act(() => button("Reintentar").click());
         await flush();
 
         expect(listRegistryRobots).toHaveBeenCalledTimes(2);
-        expect(document.body.textContent).toContain("No hay robots activos");
+        expect(document.body.textContent).toContain("No hay robots registrados");
         expect(document.body.textContent).not.toContain("No fue posible cargar el registro.");
     });
 
@@ -136,5 +142,34 @@ describe("RobotRegistryApp", () => {
         expect(listRegistryRobots).toHaveBeenCalledTimes(2);
         expect(document.body.textContent).toContain("tb3_7");
         expect(document.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("shows disabled inventory and reactivates it through an explicit action", async () => {
+        const disabledRobot = {
+            id: 9,
+            name: "tb3_9",
+            status: 2,
+            statusDescription: "Disabled",
+            isPublic: false,
+            isConnected: false,
+        };
+        listRegistryRobots
+            .mockResolvedValueOnce([disabledRobot])
+            .mockResolvedValueOnce([{ ...disabledRobot, status: 0, statusDescription: "Idle" }]);
+        reactivateRegistryRobot.mockResolvedValue({ ...disabledRobot, status: 0 });
+
+        renderApp();
+        await flush();
+
+        expect(document.body.textContent).toContain("1 inactivos");
+        const reactivate = document.querySelector('[aria-label="Reactivar tb3_9"]');
+        expect(reactivate).not.toBeNull();
+
+        act(() => reactivate.click());
+        await flush();
+
+        expect(reactivateRegistryRobot).toHaveBeenCalledWith(disabledRobot);
+        expect(listRegistryRobots).toHaveBeenCalledTimes(2);
+        expect(document.body.textContent).toContain("1 activos");
     });
 });

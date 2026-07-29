@@ -96,6 +96,7 @@ public static class ComputeWorkerRoute
     private static async Task<IResult> RotateCredential(
         Guid id,
         DataContext dataContext,
+        WorkerConnectionRegistry connectionRegistry,
         CancellationToken cancellationToken)
     {
         var worker = await dataContext.ComputeWorkers
@@ -114,7 +115,7 @@ public static class ComputeWorkerRoute
         worker.State = ComputeWorkerState.Offline;
         worker.UpdatedAt = now;
         await dataContext.SaveChangesAsync(cancellationToken);
-        WorkerHub.InvalidateConnection(worker.Id);
+        connectionRegistry.Invalidate(worker.Id);
 
         return Results.Ok(new ComputeWorkerEnrollmentResponse(
             ToResponse(worker),
@@ -124,6 +125,7 @@ public static class ComputeWorkerRoute
     private static async Task<IResult> RevokeCredential(
         Guid id,
         DataContext dataContext,
+        WorkerConnectionRegistry connectionRegistry,
         CancellationToken cancellationToken)
     {
         var worker = await dataContext.ComputeWorkers
@@ -139,7 +141,7 @@ public static class ComputeWorkerRoute
         worker.State = ComputeWorkerState.Offline;
         worker.UpdatedAt = now;
         await dataContext.SaveChangesAsync(cancellationToken);
-        WorkerHub.InvalidateConnection(worker.Id);
+        connectionRegistry.Invalidate(worker.Id);
         return Results.NoContent();
     }
 

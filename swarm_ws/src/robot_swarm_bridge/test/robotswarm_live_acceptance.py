@@ -72,7 +72,7 @@ RESULT_BEHAVIOR_STATUS_KEYS = (
     "queue_settling", "approach_stage", "rendezvous_ready_count",
     "compression_progress", "searching_robot_count", "route_target",
     "assembly_routes", "discovery",
-    "robot_assignments", "routing", "useful_contributor_count",
+    "robot_assignments", "routing", "planning", "useful_contributor_count",
     "useful_contributor_ids", "current_useful_pusher_count",
     "current_useful_pusher_ids", "all_pusher_proof_minimum_speed",
     "all_pushers_confirmed", "arrival_latched",
@@ -395,6 +395,26 @@ def formation_active_status_failures(
     elif reported_error > maximum_error:
         failures.append("moving formation position error exceeded the limit")
     return failures
+
+
+def formation_is_ready_or_terminal(
+    task, status, task_id, case, robot_ids, maximum_error,
+):
+    """Wake a moving-formation wait only for readiness or a final state."""
+    if (
+        not isinstance(task, dict)
+        or task.get("task_id") != task_id
+    ):
+        return False
+    task_status = task.get("status")
+    if task_status in TERMINAL_STATES:
+        return True
+    return (
+        task_status == "running"
+        and not formation_active_status_failures(
+            status, task_id, case, robot_ids, maximum_error
+        )
+    )
 
 
 def validate_formation_active_selection(seconds, cases):
@@ -3740,20 +3760,34 @@ class AcceptanceHarness:
                     "timeout_phase_elapsed_wall_s": None,
                 })
             elif case["behavior"] == "formation" and formation_active_seconds:
-                ready = self.wait_for(
-                    lambda: (
-                        self.swarm_task.get("task_id") == task_id
-                        and self.swarm_task.get("status") == "running"
-                        and not formation_active_status_failures(
-                            self.behavior_status["formation"],
-                            task_id,
-                            case,
-                            robot_ids,
-                            self.args.max_formation_error,
-                        )
+                ready_or_terminal = self.wait_for(
+                    lambda: formation_is_ready_or_terminal(
+                        self.swarm_task,
+                        self.behavior_status["formation"],
+                        task_id,
+                        case,
+                        robot_ids,
+                        self.args.max_formation_error,
                     ),
                     case["timeout"],
-                    "complete moving formation",
+                    "complete or terminal moving formation",
+                )
+                with self.lock:
+                    task_after_ready_wait = dict(self.swarm_task)
+                    formation_after_ready_wait = dict(
+                        self.behavior_status["formation"]
+                    )
+                ready = (
+                    ready_or_terminal
+                    and task_after_ready_wait.get("task_id") == task_id
+                    and task_after_ready_wait.get("status") == "running"
+                    and not formation_active_status_failures(
+                        formation_after_ready_wait,
+                        task_id,
+                        case,
+                        robot_ids,
+                        self.args.max_formation_error,
+                    )
                 )
                 window_started = time.monotonic()
                 fresh_samples = 0

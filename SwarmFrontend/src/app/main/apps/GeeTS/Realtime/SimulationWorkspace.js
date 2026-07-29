@@ -78,7 +78,7 @@ export const sessionRobotRoleLabel = (robot, tasks) => {
     const activeTask = (Array.isArray(tasks) ? tasks : []).find(
         (task) => !TERMINAL_TASK_STATES.has(task.state)
     );
-    if (!activeTask) return "disponible";
+    if (!activeTask) return "sin tarea asignada";
 
     if (activeTask.type === "FollowLeader") {
         return Number(robot?.ordinal) === 0 ? "líder" : "seguidor";
@@ -197,6 +197,22 @@ export const viewerCloseOutcomeNotice = (outcome) => {
 export const sendViewerControlInput = (connection, sessionId, leaseId, input) =>
     connection.invoke("SendViewerInput", sessionId, leaseId, input);
 
+export const releaseAndCloseViewerLease = (connection, sessionId, leaseId) => {
+    if (!sessionId || !leaseId) return null;
+
+    if (connection?.invoke) {
+        try {
+            Promise.resolve(
+                sendViewerControlInput(connection, sessionId, leaseId, { type: "releaseAll" })
+            ).catch(() => {});
+        } catch (_releaseError) {
+            // Closing the lease also revokes control, so it must still be attempted.
+        }
+    }
+
+    return SimulationSessionService.closeViewerLease(sessionId, leaseId);
+};
+
 const SESSION_STATE_LABELS = {
     Queued: "En cola",
     Provisioning: "Preparando recursos",
@@ -285,8 +301,82 @@ function SimulationWorkspace() {
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
+    const [pollingError, setPollingError] = useState("");
     const connectionRef = useRef(null);
     const joinedSessionRef = useRef(null);
+    const viewerLeaseRef = useRef(null);
+    const viewerCloseRequestsRef = useRef(new Map());
+    const viewerOpenVersionRef = useRef(0);
+    const viewerOpenPendingRef = useRef(null);
+    const viewerContextRef = useRef(null);
+    const mountedRef = useRef(true);
+
+    const updateViewerLease = useCallback((value) => {
+        if (typeof value !== "function") {
+            viewerLeaseRef.current = value;
+            setViewerLease(value);
+            return;
+        }
+
+        setViewerLease((current) => {
+            const next = value(current);
+            viewerLeaseRef.current = next;
+            return next;
+        });
+    }, []);
+
+    const retireViewerLease = useCallback(
+        (lease = viewerLeaseRef.current, fallbackSessionId, reportError = true) => {
+            const leaseId = lease?.leaseId;
+            const sessionId = lease?.sessionId || fallbackSessionId;
+            if (!leaseId || !sessionId) return Promise.resolve(null);
+
+            if (mountedRef.current) {
+                setViewerControlReady(false);
+                updateViewerLease((current) => (current?.leaseId === leaseId ? null : current));
+            } else if (viewerLeaseRef.current?.leaseId === leaseId) {
+                viewerLeaseRef.current = null;
+            }
+
+            const requestKey = `${sessionId}:${leaseId}`;
+            const pendingRequest = viewerCloseRequestsRef.current.get(requestKey);
+            if (pendingRequest) return pendingRequest;
+
+            const connection = lease.controlConnection || connectionRef.current;
+            const request = releaseAndCloseViewerLease(connection, sessionId, leaseId)
+                .catch((requestError) => {
+                    if (reportError && mountedRef.current) {
+                        setError(
+                            requestMessage(
+                                requestError,
+                                "No fue posible liberar el visor privado anterior."
+                            )
+                        );
+                    }
+                    throw requestError;
+                })
+                .finally(() => {
+                    viewerCloseRequestsRef.current.delete(requestKey);
+                });
+            viewerCloseRequestsRef.current.set(requestKey, request);
+            return request;
+        },
+        [updateViewerLease]
+    );
+
+    const retireViewerContext = useCallback(
+        (lease = viewerLeaseRef.current, fallbackSessionId, reportError = true) => {
+            viewerOpenVersionRef.current += 1;
+            if (viewerOpenPendingRef.current !== null) {
+                viewerOpenPendingRef.current = null;
+                if (mountedRef.current) {
+                    setSubmitting(false);
+                }
+            }
+            return retireViewerLease(lease, fallbackSessionId, reportError);
+        },
+        [retireViewerLease]
+    );
 
     const activeSession = useMemo(
         () => sessions.find((session) => !TERMINAL_STATES.has(session.state)),
@@ -316,14 +406,23 @@ function SimulationWorkspace() {
     const viewerReady = viewerCommandState === "Completed" && !viewerLease?.revokedAt;
     const viewerPrompt = viewerPlaceholder(viewerLease, activeSession, Boolean(cleanupSession));
     const useWhepFallback = useCallback(() => setHlsUnavailable(true), []);
+    viewerContextRef.current = {
+        sessionId: activeSessionId,
+        robotCount: activeRobotCount,
+        source: viewerSource,
+        robotId: viewerRobotId,
+        canControl,
+    };
 
     const refreshSessions = useCallback(async () => {
         try {
             const result = await SimulationSessionService.list();
             setSessions(result);
-            setError("");
+            setPollingError("");
         } catch (requestError) {
-            setError(requestMessage(requestError, "No fue posible contactar el servicio de simulación."));
+            setPollingError(
+                requestMessage(requestError, "No fue posible contactar el servicio de simulación.")
+            );
         } finally {
             setLoading(false);
         }
@@ -338,7 +437,9 @@ function SimulationWorkspace() {
             setRobots(robotList);
             setTasks(taskList);
         } catch (requestError) {
-            setError(requestMessage(requestError, "No fue posible actualizar los detalles de la sesión."));
+            setPollingError(
+                requestMessage(requestError, "No fue posible actualizar los detalles de la sesión.")
+            );
         }
     }, []);
 
@@ -365,32 +466,42 @@ function SimulationWorkspace() {
         if (!activeSessionId) {
             setRobots([]);
             setTasks([]);
-            setViewerLease(null);
+            retireViewerContext(viewerLeaseRef.current, undefined).catch(() => {});
             setViewerControlReady(false);
             return undefined;
         }
 
         setFleetCount(activeRobotCount);
-        setViewerLease(null);
+        retireViewerContext(viewerLeaseRef.current, activeSessionId).catch(() => {});
         refreshSessionDetails(activeSessionId);
         const interval = window.setInterval(() => refreshSessionDetails(activeSessionId), 3000);
         return () => window.clearInterval(interval);
-    }, [activeRobotCount, activeSessionId, refreshSessionDetails]);
+    }, [activeRobotCount, activeSessionId, refreshSessionDetails, retireViewerContext]);
 
     useEffect(() => {
         if (!availableRobots.some((robot) => robot.runtimeId === viewerRobotId)) {
             setViewerRobotId(availableRobots[0]?.runtimeId || "");
             if (viewerSource === "RobotCamera") {
-                setViewerLease(null);
+                retireViewerContext(viewerLeaseRef.current, activeSessionId).catch(() => {});
             }
         }
-    }, [availableRobots, viewerRobotId, viewerSource]);
+    }, [activeSessionId, availableRobots, retireViewerContext, viewerRobotId, viewerSource]);
 
     useEffect(() => {
         if (!canControl) {
-            setViewerLease(null);
+            retireViewerContext(viewerLeaseRef.current, activeSessionId).catch(() => {});
         }
-    }, [canControl]);
+    }, [activeSessionId, canControl, retireViewerContext]);
+
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            viewerOpenVersionRef.current += 1;
+            viewerOpenPendingRef.current = null;
+            retireViewerLease(viewerLeaseRef.current, undefined, false).catch(() => {});
+        };
+    }, [retireViewerLease]);
 
     useEffect(() => {
         setHlsUnavailable(false);
@@ -451,7 +562,7 @@ function SimulationWorkspace() {
         connection.on("SessionUpdated", refresh);
         connection.on("TaskUpdated", refresh);
         connection.on("SessionEvent", (event) => {
-            setViewerLease((current) => mergeViewerCommandEvent(current, event));
+            updateViewerLease((current) => mergeViewerCommandEvent(current, event));
             if (event?.error) {
                 setError(
                     typeof event.error === "string"
@@ -490,6 +601,7 @@ function SimulationWorkspace() {
             disposed = true;
             window.clearTimeout(retryTimer);
             const joinedSessionId = joinedSessionRef.current;
+            retireViewerContext(viewerLeaseRef.current, joinedSessionId, false).catch(() => {});
             if (joinedSessionId && connection.state === "Connected") {
                 connection.invoke("LeaveSession", joinedSessionId).catch(() => {});
             }
@@ -497,7 +609,14 @@ function SimulationWorkspace() {
             connectionRef.current = null;
             joinedSessionRef.current = null;
         };
-    }, [activeSessionId, realtimeRetryVersion, refreshSessionDetails, refreshSessions]);
+    }, [
+        activeSessionId,
+        realtimeRetryVersion,
+        refreshSessionDetails,
+        refreshSessions,
+        retireViewerContext,
+        updateViewerLease,
+    ]);
 
     useEffect(() => {
         if (closingViewer || !activeSessionId || !viewerLease?.leaseId || !viewerReady) {
@@ -574,7 +693,7 @@ function SimulationWorkspace() {
                     viewerLease.leaseId
                 );
                 if (!disposed) {
-                    setViewerLease((current) => mergeViewerLeaseStatus(current, status));
+                    updateViewerLease((current) => mergeViewerLeaseStatus(current, status));
                 }
             } catch (_requestError) {
                 // SignalR remains the primary path; the next poll can recover a missed event.
@@ -587,7 +706,7 @@ function SimulationWorkspace() {
             disposed = true;
             window.clearInterval(interval);
         };
-    }, [activeSessionId, viewerCommandPending, viewerLease?.leaseId]);
+    }, [activeSessionId, updateViewerLease, viewerCommandPending, viewerLease?.leaseId]);
 
     const runRequest = async (request, fallbackMessage) => {
         setSubmitting(true);
@@ -619,7 +738,7 @@ function SimulationWorkspace() {
     const confirmStopSession = () => {
         if (!activeSession) return;
         setStopConfirmationOpen(false);
-        setViewerLease(null);
+        retireViewerContext(viewerLeaseRef.current, activeSession.id).catch(() => {});
         runRequest(
             () => SimulationSessionService.stop(activeSession.id),
             "No fue posible detener la sesión de simulación."
@@ -628,7 +747,7 @@ function SimulationWorkspace() {
 
     const retryCleanup = () => {
         if (!cleanupSession) return;
-        setViewerLease(null);
+        retireViewerContext(viewerLeaseRef.current, cleanupSession.id).catch(() => {});
         runRequest(
             () => SimulationSessionService.stop(cleanupSession.id),
             "No fue posible reintentar la limpieza de recursos GPU."
@@ -682,77 +801,134 @@ function SimulationWorkspace() {
         }
         setSubmitting(true);
         setError("");
+        const requestVersion = viewerOpenVersionRef.current + 1;
+        viewerOpenVersionRef.current = requestVersion;
+        viewerOpenPendingRef.current = requestVersion;
+        const context = {
+            sessionId: activeSession.id,
+            robotCount: activeSession.desiredRobotCount,
+            source: viewerSource,
+            robotId: viewerRobotId,
+        };
+        const controlConnection = connectionRef.current;
         try {
+            const previousLease = viewerLeaseRef.current;
+            if (previousLease) {
+                await retireViewerLease(previousLease, activeSession.id, false);
+            }
+            if (!mountedRef.current || viewerOpenVersionRef.current !== requestVersion) {
+                return;
+            }
+
             const lease = await SimulationSessionService.createViewerLease(
-                activeSession.id,
-                viewerSource,
-                viewerSource === "RobotCamera" ? viewerRobotId : null
+                context.sessionId,
+                context.source,
+                context.source === "RobotCamera" ? context.robotId : null
             );
+            const currentContext = viewerContextRef.current;
+            const requestIsCurrent =
+                mountedRef.current &&
+                viewerOpenVersionRef.current === requestVersion &&
+                currentContext?.sessionId === context.sessionId &&
+                currentContext?.robotCount === context.robotCount &&
+                currentContext?.source === context.source &&
+                currentContext?.robotId === context.robotId &&
+                currentContext?.canControl;
+            if (!requestIsCurrent) {
+                await releaseAndCloseViewerLease(
+                    controlConnection,
+                    lease.sessionId || context.sessionId,
+                    lease.leaseId
+                ).catch(() => {});
+                return;
+            }
+
             setHlsUnavailable(false);
-            setViewerLease(lease);
+            updateViewerLease({
+                ...lease,
+                sessionId: lease.sessionId || context.sessionId,
+                controlConnection,
+            });
         } catch (requestError) {
-            setError(requestMessage(requestError, "No fue posible abrir el visor privado."));
+            if (mountedRef.current && viewerOpenVersionRef.current === requestVersion) {
+                setError(requestMessage(requestError, "No fue posible abrir el visor privado."));
+            }
         } finally {
-            setSubmitting(false);
+            if (viewerOpenPendingRef.current === requestVersion) {
+                viewerOpenPendingRef.current = null;
+                if (mountedRef.current) {
+                    setSubmitting(false);
+                }
+            }
         }
     };
 
     const closeViewer = async () => {
-        if (!activeSessionId || !viewerLease?.leaseId || closingViewer) {
+        const capturedLease = viewerLeaseRef.current || viewerLease;
+        const sessionId = capturedLease?.sessionId || activeSessionId;
+        if (!sessionId || !capturedLease?.leaseId || closingViewer) {
             return;
         }
 
-        const { leaseId } = viewerLease;
-        const connection = connectionRef.current;
-        const releaseInput =
-            viewerControlReady && connection?.state === "Connected"
-                ? sendViewerControlInput(connection, activeSessionId, leaseId, { type: "releaseAll" }).catch(
-                      () => {}
-                  )
-                : Promise.resolve();
+        const { leaseId } = capturedLease;
+        const connection = capturedLease.controlConnection || connectionRef.current;
+        const requestKey = `${sessionId}:${leaseId}`;
+        viewerOpenVersionRef.current += 1;
         setClosingViewer(true);
         setViewerControlReady(false);
         setViewerCloseNotice(null);
         setError("");
+
+        let closeRequest = viewerCloseRequestsRef.current.get(requestKey);
+        if (!closeRequest) {
+            closeRequest = (async () => {
+                const response = await releaseAndCloseViewerLease(connection, sessionId, leaseId);
+                const initialState = response?.command?.state;
+                if (initialState === "Completed" || (!response?.accepted && !response?.command)) {
+                    return { response, outcome: { state: "Completed", command: response?.command } };
+                }
+
+                const outcome = TERMINAL_VIEWER_COMMAND_STATES.has(initialState)
+                    ? { state: initialState, command: response.command }
+                    : await SimulationSessionService.waitForViewerClose(sessionId, leaseId);
+                return { response, outcome };
+            })();
+            viewerCloseRequestsRef.current.set(requestKey, closeRequest);
+        }
+
         try {
-            await releaseInput;
-            const response = await SimulationSessionService.closeViewerLease(activeSessionId, leaseId);
-            const initialState = response?.command?.state;
-            if (initialState === "Completed" || (!response?.accepted && !response?.command)) {
-                setHlsUnavailable(false);
-                setViewerLease((current) => (current?.leaseId === leaseId ? null : current));
+            const { response, outcome } = await closeRequest;
+            if (!mountedRef.current || viewerLeaseRef.current?.leaseId !== leaseId) {
                 return;
             }
 
-            setViewerLease((current) =>
+            if (outcome.state === "Completed") {
+                setHlsUnavailable(false);
+                updateViewerLease((current) => (current?.leaseId === leaseId ? null : current));
+                return;
+            }
+
+            updateViewerLease((current) =>
                 current?.leaseId === leaseId
                     ? {
                           ...current,
                           revokedAt: response.revokedAt || new Date().toISOString(),
-                          closeCommand: response.command,
+                          closeCommand: outcome.command || response.command,
                       }
-                    : current
-            );
-
-            const outcome = TERMINAL_VIEWER_COMMAND_STATES.has(initialState)
-                ? { state: initialState, command: response.command }
-                : await SimulationSessionService.waitForViewerClose(activeSessionId, leaseId);
-            if (outcome.state === "Completed") {
-                setHlsUnavailable(false);
-                setViewerLease((current) => (current?.leaseId === leaseId ? null : current));
-                return;
-            }
-
-            setViewerLease((current) =>
-                current?.leaseId === leaseId
-                    ? { ...current, closeCommand: outcome.command || current.closeCommand }
                     : current
             );
             setViewerCloseNotice(viewerCloseOutcomeNotice(outcome));
         } catch (requestError) {
-            setError(requestMessage(requestError, "No fue posible cerrar el visor privado."));
+            if (mountedRef.current && viewerLeaseRef.current?.leaseId === leaseId) {
+                setError(requestMessage(requestError, "No fue posible cerrar el visor privado."));
+            }
         } finally {
-            setClosingViewer(false);
+            if (viewerCloseRequestsRef.current.get(requestKey) === closeRequest) {
+                viewerCloseRequestsRef.current.delete(requestKey);
+            }
+            if (mountedRef.current) {
+                setClosingViewer(false);
+            }
         }
     };
 
@@ -947,6 +1123,12 @@ function SimulationWorkspace() {
             {error && (
                 <Alert data-testid="workspace-error" severity="error" aria-live="assertive" sx={{ mb: 2 }}>
                     {error}
+                </Alert>
+            )}
+
+            {pollingError && (
+                <Alert data-testid="workspace-polling-error" severity="warning" aria-live="polite" sx={{ mb: 2 }}>
+                    {pollingError}
                 </Alert>
             )}
 
@@ -1184,7 +1366,10 @@ function SimulationWorkspace() {
                                         label="Vista"
                                         onChange={(event) => {
                                             setViewerSource(event.target.value);
-                                            setViewerLease(null);
+                                            retireViewerContext(
+                                                viewerLeaseRef.current,
+                                                activeSessionId
+                                            ).catch(() => {});
                                         }}
                                         disabled={!canControl}
                                     >
@@ -1203,7 +1388,10 @@ function SimulationWorkspace() {
                                             label="Robot"
                                             onChange={(event) => {
                                                 setViewerRobotId(event.target.value);
-                                                setViewerLease(null);
+                                                retireViewerContext(
+                                                    viewerLeaseRef.current,
+                                                    activeSessionId
+                                                ).catch(() => {});
                                             }}
                                             disabled={!canControl || availableRobots.length === 0}
                                         >
@@ -1354,7 +1542,7 @@ function SimulationWorkspace() {
                                                     />
                                                 </Box>
                                                 <Typography variant="caption" color="text.secondary">
-                                                    #{robot.ordinal + 1} · función{" "}
+                                                    #{robot.ordinal + 1} · Rol:{" "}
                                                     {sessionRobotRoleLabel(robot, tasks)} · actualizado{" "}
                                                     {formatRobotUpdate(robot.updatedAt)}
                                                 </Typography>

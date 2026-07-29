@@ -23,7 +23,7 @@ function LeafTypesConfigApp() {
             >
                 <PageHeading
                     title="Plantillas de tareas"
-                    description="Catálogo administrativo de algoritmos y parámetros reutilizables."
+                    description="Catálogo administrativo de nombres y tipos de algoritmo. Los parámetros se configuran al ejecutar cada tarea."
                 />
                 <LeafTypesConfigList />
             </Box>

@@ -6,6 +6,13 @@ namespace SwarmWorker.Configuration;
 public sealed class WorkerOptions
 {
     public const string SectionName = "Worker";
+    public const int ControlHeartbeatDiscoveryTimeoutSeconds = 1;
+    public const int ControlHeartbeatPublishTimeoutSeconds = 5;
+    public const int ControlHeartbeatDockerExecTimeoutSeconds = 7;
+    public const double ControlHeartbeatDeadlineGuardSeconds = 0.25;
+    public const int RosControlHeartbeatTimeoutSeconds = 10;
+    public const double RosControlWatchdogCheckPeriodSeconds = 0.5;
+    public const double RosControlHeartbeatMaximumFutureSeconds = 15.0;
 
     public string BackendUrl { get; set; } = string.Empty;
     public Guid WorkerId { get; set; }
@@ -28,7 +35,7 @@ public sealed class WorkerOptions
     public int TaskCancellationTimeoutSeconds { get; set; } = 10;
     public int BackendDisconnectEmergencyStopSeconds { get; set; } = 30;
     public int ControlHeartbeatIntervalSeconds { get; set; } = 2;
-    public int ControlHeartbeatBackendLeaseSeconds { get; set; } = 15;
+    public int ControlHeartbeatBackendLeaseSeconds { get; set; } = 14;
     public int TaskStatusPollIntervalSeconds { get; set; } = 2;
     public double TaskProgressReportStep { get; set; } = 0.02;
     public int ShutdownDrainSeconds { get; set; } = 30;
@@ -47,12 +54,41 @@ public sealed class WorkerOptions
     public bool AllowInsecureTransport { get; set; }
     public ViewerPublisherOptions Viewer { get; set; } = new();
 
-    public Uri GetWorkerHubUri()
+    public double MaximumControlHeartbeatStopSeconds =>
+        ControlHeartbeatBackendLeaseSeconds
+        - ControlHeartbeatDeadlineGuardSeconds
+        + RosControlHeartbeatTimeoutSeconds
+        + RosControlWatchdogCheckPeriodSeconds;
+
+    public double MaximumHealthyControlHeartbeatGapSeconds =>
+        ControlHeartbeatIntervalSeconds
+        + ControlHeartbeatDiscoveryTimeoutSeconds
+        + ControlHeartbeatPublishTimeoutSeconds;
+
+    public Uri GetWorkerHubUri(Guid? agentInstanceId = null)
     {
         var baseUri = new Uri(BackendUrl, UriKind.Absolute);
-        return baseUri.AbsolutePath.TrimEnd('/').EndsWith("/hubs/worker", StringComparison.OrdinalIgnoreCase)
+        var hubUri = baseUri.AbsolutePath.TrimEnd('/').EndsWith(
+            "/hubs/worker",
+            StringComparison.OrdinalIgnoreCase)
             ? baseUri
             : new Uri(baseUri, "/hubs/worker");
+        if (!agentInstanceId.HasValue)
+        {
+            return hubUri;
+        }
+
+        var builder = new UriBuilder(hubUri);
+        var query = builder.Query.TrimStart('?');
+        if (query.Length > 0)
+        {
+            query += "&";
+        }
+
+        builder.Query = query
+            + "worker_instance_id="
+            + Uri.EscapeDataString(agentInstanceId.Value.ToString("D"));
+        return builder.Uri;
     }
 
     public string GetAccessToken() => $"{WorkerId:D}.{WorkerSecret}";
@@ -191,11 +227,32 @@ public sealed class WorkerOptionsValidator : IValidateOptions<WorkerOptions>
             12,
             60,
             "Worker:ControlHeartbeatBackendLeaseSeconds");
-        if (options.ControlHeartbeatBackendLeaseSeconds
-            >= options.BackendDisconnectEmergencyStopSeconds)
+        if (options.MaximumHealthyControlHeartbeatGapSeconds
+            >= WorkerOptions.RosControlHeartbeatTimeoutSeconds)
         {
             errors.Add(
-                "Worker:ControlHeartbeatBackendLeaseSeconds must be shorter than Worker:BackendDisconnectEmergencyStopSeconds.");
+                "The heartbeat interval, bounded Docker discovery, and "
+                + $"publication timeout total {options.MaximumHealthyControlHeartbeatGapSeconds:F1}s "
+                + "must stay below the ROS watchdog timeout "
+                + $"({WorkerOptions.RosControlHeartbeatTimeoutSeconds}s).");
+        }
+        if (options.MaximumControlHeartbeatStopSeconds
+            > options.BackendDisconnectEmergencyStopSeconds)
+        {
+            errors.Add(
+                "The worst-case control-heartbeat fail-safe "
+                + $"({options.MaximumControlHeartbeatStopSeconds:F1}s: backend lease, "
+                + "deadline guard, ROS watchdog, and watchdog polling) "
+                + "must not exceed Worker:BackendDisconnectEmergencyStopSeconds "
+                + $"({options.BackendDisconnectEmergencyStopSeconds}s).");
+        }
+        if (options.ControlHeartbeatBackendLeaseSeconds
+            >= WorkerOptions.RosControlHeartbeatMaximumFutureSeconds)
+        {
+            errors.Add(
+                "Worker:ControlHeartbeatBackendLeaseSeconds must stay below "
+                + "the maximum future deadline accepted by ROS "
+                + $"({WorkerOptions.RosControlHeartbeatMaximumFutureSeconds:F1}s).");
         }
         ValidateRange(
             errors,

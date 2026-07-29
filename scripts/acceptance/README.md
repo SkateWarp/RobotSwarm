@@ -265,8 +265,18 @@ que su etiqueta OCI corresponda al SHA solicitado y que `ImageVersion` tenga el
 formato `<sha>+<digest-corto>` generado por el despliegue. También contrasta las
 dos vistas de Docker: el contenedor debe figurar conectado exclusivamente a la
 red interna etiquetada y esa red debe registrar como único miembro el mismo ID
-completo de contenedor. Después abre el visor real, rechaza el fallback WHEP y
-asocia el runtime privado del lease al proceso publicador de esa sesión.
+completo de contenedor. Después solicita el visor real, asocia el runtime
+privado del lease al proceso publicador de esa sesión y sólo entonces espera el
+primer frame. La localización y la decodificación comparten un único plazo
+monotónico. El arnés rechaza el fallback WHEP.
+
+Chrome se ejecuta como una ventana normal, sin `--headless` ni
+`--disable-gpu`. La prueba selecciona únicamente el target aleatorio que creó.
+Si Windows minimiza esa ventana o deja la pestaña en segundo plano, la restaura
+y la trae al frente mediante los dominios reales de Browser y Page; no emula
+el estado de visibilidad. Un frame sólo es válido cuando
+`document.visibilityState` es `visible`, además de tener dimensiones y estado
+de decodificación válidos.
 
 El comando del contenedor siempre selecciona un único caso y conserva
 `--min-rtf 2.90`, pero deliberadamente no utiliza `--delete-after`. El runner

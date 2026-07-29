@@ -68,6 +68,7 @@ MINIMUM_STARTUP_SCENE_FPS = 45.0
 MINIMUM_REAL_TIME_FACTOR = 2.90
 ACTIVE_PROBE_WARMUP_SECONDS = 2.0
 ACTIVE_PROBE_SAMPLE_SECONDS = 5.0
+ACTIVE_PROBE_RENDER_RATE_FPS = 50.0
 # The previous active probe exhausted its 25 s budget and took about 28 s
 # including teardown.  Match the publisher's bounded 45 s startup allowance;
 # the 2 s warm-up and 5 s measurement remain unchanged.
@@ -182,9 +183,20 @@ class ProcessOutput:
 class ActiveScenarioGateError(MatrixError):
     """The active gate failed after the ROS child produced its protocol."""
 
-    def __init__(self, message: str, phase: str, scenario_output: ProcessOutput):
+    def __init__(
+        self,
+        message: str,
+        phase: str,
+        scenario_output: ProcessOutput,
+        failed_video_metrics: dict[str, Any] | None = None,
+    ):
         self.phase = phase
         self.scenario_output = scenario_output
+        self.failed_video_metrics = (
+            dict(failed_video_metrics)
+            if isinstance(failed_video_metrics, dict)
+            else None
+        )
         super().__init__(message)
 
 
@@ -2698,10 +2710,21 @@ def load_active_probe_evidence(
     display = document.get("display") or {}
     warmup = finite_number(render.get("warmup_seconds"), "active-probe warmup")
     sample = finite_number(render.get("sample_seconds"), "active-probe sample window")
+    render_rate = finite_number(
+        render.get("configured_render_rate_fps"),
+        "active-probe configured render rate",
+    )
     if warmup < ACTIVE_PROBE_WARMUP_SECONDS * 0.95:
         raise MatrixError("The active Gazebo GUI warmup window was too short")
     if sample < ACTIVE_PROBE_SAMPLE_SECONDS * 0.98:
         raise MatrixError("The active Gazebo GUI sampling window was too short")
+    if not math.isclose(
+        render_rate,
+        ACTIVE_PROBE_RENDER_RATE_FPS,
+        rel_tol=0.0,
+        abs_tol=0.01,
+    ):
+        raise MatrixError("The active Gazebo GUI probe did not confirm its 50 FPS cap")
     if display.get("x11") != expected_display:
         raise MatrixError("The active Gazebo GUI probe used a different private display")
     return evidence
@@ -3156,6 +3179,7 @@ def active_probe_runtime(
             "GAZEBO_MODEL_PATH": os.pathsep.join(sandbox_model_paths),
             "GAZEBO_MODEL_DATABASE_URI": "",
             "QT_X11_NO_MITSHM": "1",
+            "ROBOTSWARM_GUI_RENDER_RATE": f"{ACTIVE_PROBE_RENDER_RATE_FPS:.1f}",
         }
     )
     environment.setdefault("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA")
@@ -3449,6 +3473,21 @@ def _join_timed_command(
         raise record.error
 
 
+def _join_for_terminal_protocol(
+    thread: threading.Thread,
+    stop_event: threading.Event,
+    timeout: float,
+) -> bool:
+    """Wait briefly for a terminal protocol without delaying an operator stop."""
+    deadline = time.monotonic() + timeout
+    while thread.is_alive() and not stop_event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(timeout=min(0.25, remaining))
+    return stop_event.is_set()
+
+
 def run_active_scenario_gate(
     *,
     docker: DockerHost,
@@ -3472,6 +3511,9 @@ def run_active_scenario_gate(
     task_active_before_at: float | None = None
     task_active_after_at: float | None = None
     probe_completion_error: Exception | None = None
+    failed_video_metrics: dict[str, Any] | None = None
+    measured_video: Any = None
+    interrupted_during_protocol_wait = False
     gate_phase = "scenarioStartup"
 
     def run_scenario() -> None:
@@ -3536,10 +3578,16 @@ def run_active_scenario_gate(
         _wait_for_timed_start(probe_run, probe_thread, stop_event, 10)
         video_started = time.monotonic()
         try:
+            measured_video = ui.video_metrics(ACTIVE_SCENARIO_VIDEO_SECONDS)
             video = validate_browser_video(
-                ui.video_metrics(ACTIVE_SCENARIO_VIDEO_SECONDS),
+                measured_video,
                 requested_seconds=ACTIVE_SCENARIO_VIDEO_SECONDS,
             )
+        except MatrixError:
+            if isinstance(measured_video, dict):
+                failed_video_metrics = dict(measured_video)
+            cancel_event.set()
+            raise
         except BaseException:
             cancel_event.set()
             raise
@@ -3587,21 +3635,30 @@ def run_active_scenario_gate(
             and exc.reason == "task_terminal_before_activity"
         ):
             # A correlated terminal status means the runner is already winding
-            # down.  Gazebo teardown and the supervisor finalize step can take
-            # longer than ten seconds on the production WSL worker.  Preserve
-            # the child's RESULT_JSON/SUMMARY_JSON before cancellation so the
+            # down. Gazebo teardown and the supervisor finalize step can take
+            # more than a minute with ten robots on the production WSL worker.
+            # Preserve RESULT_JSON/SUMMARY_JSON before cancellation so the
             # report explains the terminal task instead of hiding it behind
             # the activity gate.
-            scenario_thread.join(timeout=min(60.0, scenario_timeout))
+            interrupted_during_protocol_wait = _join_for_terminal_protocol(
+                scenario_thread,
+                stop_event,
+                min(150.0, scenario_timeout),
+            )
         cancel_event.set()
         if probe_thread.ident is not None:
             probe_thread.join(timeout=50)
         scenario_thread.join(timeout=100)
         if scenario_thread.is_alive():
             raise CleanupError("The ROS scenario thread survived explicit cancellation")
+        if interrupted_during_protocol_wait:
+            raise KeyboardInterrupt
         if isinstance(exc, MatrixError) and scenario_run.output is not None:
             raise ActiveScenarioGateError(
-                str(exc), gate_phase, scenario_run.output
+                str(exc),
+                gate_phase,
+                scenario_run.output,
+                failed_video_metrics=failed_video_metrics,
             ) from exc
         raise
 
@@ -3737,6 +3794,38 @@ def require_one_session_uuid(ui: Any) -> uuid.UUID:
     return parsed
 
 
+def open_bound_viewer(
+    ui: Any,
+    session_id: uuid.UUID,
+    lease: ViewerLeaseState,
+    *,
+    runtime_dir: Path,
+    timeout: float,
+    stop_event: threading.Event,
+) -> Path:
+    """Open, bind and decode one viewer within a shared monotonic deadline."""
+    deadline = time.monotonic() + timeout
+    lease.begin_viewer_request()
+    ui.request_viewer()
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise MatrixError("The private viewer exceeded its startup deadline")
+    directory = active_viewer_lease_directory(
+        runtime_dir,
+        session_id,
+        timeout=remaining,
+        stop_event=stop_event,
+    )
+    lease.bind(directory)
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise MatrixError("The private viewer exceeded its startup deadline")
+    ui.wait_viewer_frame(remaining)
+    return directory
+
+
 def require_post_scenario_viewer(
     ui: Any,
     session_id: uuid.UUID,
@@ -3808,17 +3897,16 @@ def require_post_scenario_viewer(
             raise KeyboardInterrupt
     if require_one_session_uuid(ui) != session_id:
         raise MatrixError("The expired viewer is no longer bound to the same session")
-    lease.begin_viewer_request()
-    ui.open_viewer(timeout)
-    if require_one_session_uuid(ui) != session_id:
-        raise MatrixError("The renewed viewer changed simulation session")
-    renewed_directory = active_viewer_lease_directory(
-        runtime_dir,
+    renewed_directory = open_bound_viewer(
+        ui,
         session_id,
+        lease,
+        runtime_dir=runtime_dir,
         timeout=timeout,
         stop_event=stop_event,
     )
-    lease.bind(renewed_directory)
+    if require_one_session_uuid(ui) != session_id:
+        raise MatrixError("The renewed viewer changed simulation session")
     if renewed_directory == expired_directory:
         raise MatrixError("The expired viewer did not issue a fresh private lease")
     return ui.require_interactive_hls(), True
@@ -3931,6 +4019,58 @@ def validate_browser_video(
         "requestVideoFrameCallback": True,
         "getVideoPlaybackQuality": True,
     }
+
+
+def failed_browser_video_evidence(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Keep a fixed, non-textual subset of a failed browser measurement."""
+
+    evidence: dict[str, Any] = {
+        "schemaVersion": 1,
+        "phase": "duringActiveScenarioAndGuiProbe",
+        "scope": "failedLiveHlsUnderScenarioLoad",
+        "validated": False,
+        "measurementSeconds": ACTIVE_SCENARIO_VIDEO_SECONDS,
+        "minimumMediaAdvanceSeconds": ACTIVE_SCENARIO_VIDEO_SECONDS * 0.70,
+        "minimumAcceptedFps": MINIMUM_BROWSER_VIDEO_FPS,
+        "maximumDroppedRatio": MAXIMUM_BROWSER_DROPPED_RATIO,
+    }
+    for name in (
+        "requestVideoFrameCallbackSupported",
+        "getVideoPlaybackQualitySupported",
+        "paused",
+    ):
+        value = metrics.get(name)
+        evidence[name] = value if isinstance(value, bool) else None
+
+    for name in (
+        "elapsedSeconds",
+        "callbackFrames",
+        "callbackFps",
+        "decodedFrames",
+        "decodedFps",
+        "droppedFrames",
+        "droppedRatio",
+        "mediaTimeAdvancedSeconds",
+        "mediaTimeRegressedSeconds",
+        "readyState",
+        "playbackRate",
+        "width",
+        "height",
+        "visibleFraction",
+        "lastPresentedFrames",
+        "sampleChunks",
+    ):
+        value = metrics.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            evidence[name] = None
+            continue
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):
+            evidence[name] = None
+            continue
+        evidence[name] = number if math.isfinite(number) else None
+    return evidence
 
 
 def close_viewer(ui: Any, timeout: float) -> dict[str, Any]:
@@ -4268,16 +4408,15 @@ def run_one_case(
         )
         case_report["container"] = container_evidence
 
-        viewer_lease.begin_viewer_request()
         try:
-            ui.open_viewer(args.viewer_timeout)
-            lease_directory = active_viewer_lease_directory(
-                args.viewer_runtime_dir,
+            lease_directory = open_bound_viewer(
+                ui,
                 session_id,
+                viewer_lease,
+                runtime_dir=args.viewer_runtime_dir,
                 timeout=args.viewer_timeout,
                 stop_event=stop_event,
             )
-            viewer_lease.bind(lease_directory)
             initial_viewer = ui.require_interactive_hls()
         except Exception:
             with contextlib.suppress(Exception):
@@ -4386,6 +4525,12 @@ def run_one_case(
                 "minimumFps": MINIMUM_STARTUP_SCENE_FPS,
                 "averageFps": active_probe.average_fps,
                 "postRenderFps": active_probe.post_render_fps,
+                "configuredRenderRateFps": finite_number(
+                    (
+                        active_probe.document.get("render_measurement") or {}
+                    ).get("configured_render_rate_fps"),
+                    "active-probe configured render rate",
+                ),
                 "minimumRealTimeFactor": MINIMUM_REAL_TIME_FACTOR,
                 "realTimeFactor": active_probe.real_time_factor,
                 "warmupSeconds": ACTIVE_PROBE_WARMUP_SECONDS,
@@ -4423,6 +4568,14 @@ def run_one_case(
                 "childProtocolAvailable": True,
                 "childProtocolPreserved": False,
             }
+            if gate_error.failed_video_metrics is not None:
+                failed_video = failed_browser_video_evidence(
+                    gate_error.failed_video_metrics
+                )
+                case_report["activeScenarioVideoFailure"] = failed_video
+                case_report["hashes"][
+                    "activeScenarioVideoFailureMetricsSha256"
+                ] = json_evidence_hash(failed_video)
             try:
                 record_ros_protocol(
                     case_report,
@@ -4650,6 +4803,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "officialPreflight": True,
                 "warmupSeconds": ACTIVE_PROBE_WARMUP_SECONDS,
                 "sampleSeconds": ACTIVE_PROBE_SAMPLE_SECONDS,
+                "configuredRenderRateFps": ACTIVE_PROBE_RENDER_RATE_FPS,
                 "minimumGazeboFps": MINIMUM_STARTUP_SCENE_FPS,
                 "minimumRealTimeFactor": MINIMUM_REAL_TIME_FACTOR,
                 "requiresCompleteMonotonicOverlap": True,

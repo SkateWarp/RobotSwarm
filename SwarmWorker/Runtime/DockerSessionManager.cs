@@ -1,5 +1,6 @@
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using System.Globalization;
 using Microsoft.Extensions.Options;
 using SwarmWorker.Configuration;
 using SwarmWorker.Infrastructure;
@@ -64,7 +65,16 @@ public sealed class DockerSessionManager
     private const string PublishControlHeartbeatScript =
         "source /opt/ros/noetic/setup.bash"
         + " && source /catkin_ws/devel/setup.bash"
-        + " && exec rostopic pub -1 /swarm/control_heartbeat std_msgs/Empty '{}'";
+        + " && python3 -c 'import sys; "
+        + "now=float(open(\"/proc/uptime\").read().split()[0]); "
+        + "sys.exit(0 if now < float(sys.argv[1]) else 75)' \"$1\""
+        + " && exec rostopic pub -1 /swarm/control_heartbeat "
+        + "std_msgs/Float64 \"data: $1\"";
+
+    private const string HeartbeatSessionListFormat =
+        "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Label \""
+        + SessionLabels.SessionId
+        + "\"}}";
 
     private const string ReadSwarmStatusScript =
         "source /opt/ros/noetic/setup.bash"
@@ -202,6 +212,67 @@ public sealed class DockerSessionManager
             {
                 sessions.Add(inspection);
             }
+        }
+
+        return sessions;
+    }
+
+    public async Task<IReadOnlyList<ManagedSessionInfo>> GetHeartbeatSessionsAsync(
+        CancellationToken cancellationToken)
+    {
+        var listResult = await _docker.RunAsync(
+            new[]
+            {
+                "ps",
+                "--filter",
+                $"label={SessionLabels.Managed}=true",
+                "--filter",
+                $"label={SessionLabels.WorkerId}={_options.WorkerId:D}",
+                "--format",
+                HeartbeatSessionListFormat
+            },
+            cancellationToken,
+            TimeSpan.FromSeconds(
+                WorkerOptions.ControlHeartbeatDiscoveryTimeoutSeconds));
+
+        if (!listResult.IsSuccess)
+        {
+            throw new DockerCliException(
+                "list running heartbeat containers",
+                listResult);
+        }
+
+        var sessions = new List<ManagedSessionInfo>();
+        foreach (var line in listResult.StandardOutput.Split(
+                     '\n',
+                     StringSplitOptions.RemoveEmptyEntries
+                     | StringSplitOptions.TrimEntries))
+        {
+            var fields = line.Split('\t');
+            if (fields.Length != 4
+                || string.IsNullOrWhiteSpace(fields[0])
+                || string.IsNullOrWhiteSpace(fields[1])
+                || string.IsNullOrWhiteSpace(fields[2])
+                || !Guid.TryParse(fields[3], out var sessionId))
+            {
+                _logger.LogWarning(
+                    "Ignored a managed Docker container with malformed heartbeat metadata.");
+                continue;
+            }
+
+            sessions.Add(new ManagedSessionInfo(
+                sessionId,
+                fields[0],
+                fields[1],
+                fields[2],
+                _options.ContainerPidsLimit,
+                Running: true,
+                State: "running",
+                new Dictionary<string, string>
+                {
+                    [SessionLabels.WorkerId] = _options.WorkerId.ToString("D"),
+                    [SessionLabels.SessionId] = sessionId.ToString("D")
+                }));
         }
 
         return sessions;
@@ -495,6 +566,7 @@ public sealed class DockerSessionManager
 
     public async Task PublishControlHeartbeatAsync(
         ManagedSessionInfo session,
+        double monotonicDeadline,
         CancellationToken cancellationToken)
     {
         ValidateOwnership(session);
@@ -502,18 +574,30 @@ public sealed class DockerSessionManager
         {
             return;
         }
+        if (!double.IsFinite(monotonicDeadline))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(monotonicDeadline),
+                "Control heartbeat deadline must be finite.");
+        }
 
         var result = await _docker.RunAsync(
             new[]
             {
                 "exec",
                 session.ContainerId,
+                "/usr/bin/timeout",
+                "--signal=KILL",
+                $"{WorkerOptions.ControlHeartbeatPublishTimeoutSeconds}s",
                 "/bin/bash",
                 "-lc",
-                PublishControlHeartbeatScript
+                PublishControlHeartbeatScript,
+                "swarm-worker",
+                monotonicDeadline.ToString("R", CultureInfo.InvariantCulture)
             },
             cancellationToken,
-            TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(
+                WorkerOptions.ControlHeartbeatDockerExecTimeoutSeconds));
         if (!result.IsSuccess)
         {
             throw new DockerCliException("publish ROS control heartbeat", result);

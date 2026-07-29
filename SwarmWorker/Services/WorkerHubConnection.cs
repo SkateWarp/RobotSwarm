@@ -14,6 +14,8 @@ public interface IWorkerCommandHub
 {
     bool IsConnected { get; }
     DateTime LastSuccessfulContactUtc { get; }
+    TimeSpan LastSuccessfulContactAge { get; }
+    double LastSuccessfulContactMonotonicSeconds { get; }
 
     Task AcknowledgeCommandAsync(Guid commandId, CancellationToken cancellationToken);
     Task MarkCommandRunningAsync(Guid commandId, CancellationToken cancellationToken);
@@ -58,7 +60,10 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
     private Task<bool>? _viewerInputReleaseAttempt;
     private long _viewerInputReleaseGeneration;
     private long _connectionVersion;
-    private long _lastSuccessfulContactTicks = DateTime.UtcNow.Ticks;
+    private long _lastSuccessfulContactTicks = DateTime.UnixEpoch.Ticks;
+    private long _lastSuccessfulContactMonotonicBits =
+        BitConverter.DoubleToInt64Bits(double.NegativeInfinity);
+    private readonly Guid _agentInstanceId = Guid.NewGuid();
 
     public WorkerHubConnection(
         IOptions<WorkerOptions> options,
@@ -71,7 +76,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
 
         _connection = new HubConnectionBuilder()
             .WithUrl(
-                workerOptions.GetWorkerHubUri(),
+                workerOptions.GetWorkerHubUri(_agentInstanceId),
                 connectionOptions =>
                 {
                     connectionOptions.Transports =
@@ -110,10 +115,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
         };
         _connection.Reconnected += connectionId =>
         {
-            ResetViewerInputReleaseState();
-            Interlocked.Increment(ref _connectionVersion);
-            MarkSuccessfulContact();
-            NotifyCommandAvailable();
+            RecordTransportConnectionEstablished();
             _logger.LogInformation(
                 "Worker hub reconnected with connection {ConnectionId}.",
                 connectionId);
@@ -129,9 +131,31 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
     }
 
     public long ConnectionVersion => Interlocked.Read(ref _connectionVersion);
+    internal Guid AgentInstanceId => _agentInstanceId;
     public bool IsConnected => _connection.State == HubConnectionState.Connected;
     public DateTime LastSuccessfulContactUtc =>
         new(Interlocked.Read(ref _lastSuccessfulContactTicks), DateTimeKind.Utc);
+    public TimeSpan LastSuccessfulContactAge
+    {
+        get
+        {
+            var timestamp = LastSuccessfulContactMonotonicSeconds;
+            return !double.IsFinite(timestamp)
+                ? TimeSpan.MaxValue
+                : TimeSpan.FromSeconds(Math.Max(
+                    0,
+                    SharedMonotonicClock.GetSeconds() - timestamp));
+        }
+    }
+    public double LastSuccessfulContactMonotonicSeconds
+    {
+        get
+        {
+            var bits = Interlocked.Read(
+                ref _lastSuccessfulContactMonotonicBits);
+            return BitConverter.Int64BitsToDouble(bits);
+        }
+    }
 
     internal async Task DispatchViewerInputAsync(
         ViewerInputEnvelope request,
@@ -300,10 +324,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
                     try
                     {
                         await _connection.StartAsync(cancellationToken);
-                        ResetViewerInputReleaseState();
-                        Interlocked.Increment(ref _connectionVersion);
-                        MarkSuccessfulContact();
-                        NotifyCommandAvailable();
+                        RecordTransportConnectionEstablished();
                         _logger.LogInformation("Connected to the worker control hub.");
                     }
                     catch (Exception exception) when (IsTransient(exception))
@@ -451,7 +472,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
                     methodName,
                     arguments,
                     cancellationToken);
-                MarkSuccessfulContact();
+                RecordSuccessfulContact();
                 return result;
             }
             catch (HubException)
@@ -483,7 +504,7 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
                     methodName,
                     arguments,
                     cancellationToken);
-                MarkSuccessfulContact();
+                RecordSuccessfulContact();
                 return;
             }
             catch (HubException)
@@ -513,11 +534,25 @@ public sealed class WorkerHubConnection : IWorkerCommandHub, IAsyncDisposable
         }
     }
 
-    private void MarkSuccessfulContact()
+    internal void RecordTransportConnectionEstablished()
+    {
+        // SignalR can complete its transport handshake before the server runs
+        // WorkerHub.OnConnectedAsync. Only a completed hub invocation proves
+        // that the backend accepted the worker, so contact stays fail-closed.
+        ResetViewerInputReleaseState();
+        Interlocked.Increment(ref _connectionVersion);
+        NotifyCommandAvailable();
+    }
+
+    internal void RecordSuccessfulContact()
     {
         Interlocked.Exchange(
             ref _lastSuccessfulContactTicks,
             DateTime.UtcNow.Ticks);
+        Interlocked.Exchange(
+            ref _lastSuccessfulContactMonotonicBits,
+            BitConverter.DoubleToInt64Bits(
+                SharedMonotonicClock.GetSeconds()));
     }
 
     private static bool IsTransient(Exception exception)

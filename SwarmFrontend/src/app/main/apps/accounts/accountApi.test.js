@@ -2,7 +2,12 @@ import axios from "axios";
 import AxiosMockAdapter from "axios-mock-adapter";
 import { URL } from "app/constants/constants";
 import jwtService from "../../../services/jwtService";
-import { createAdminAccount, disableAdminAccount, patchAdminAccount } from "./accountApi";
+import {
+    createAdminAccount,
+    disableAdminAccount,
+    patchAdminAccount,
+    reactivateAdminAccount,
+} from "./accountApi";
 
 describe("accountApi", () => {
     let mock;
@@ -52,5 +57,21 @@ describe("accountApi", () => {
         mock.onDelete(`${URL}/Accounts/21`).reply(200);
 
         await expect(disableAdminAccount(21)).resolves.toBe(true);
+    });
+
+    it("reactivates the selected account without resending editable profile fields", async () => {
+        mock.onPut(`${URL}/Accounts/21/reactivate`).reply(200, {
+            id: 21,
+            enabled: true,
+        });
+
+        await expect(reactivateAdminAccount(21)).resolves.toEqual({
+            id: 21,
+            enabled: true,
+        });
+
+        const request = mock.history.put[0];
+        expect(request.headers.Authorization).toBe("Bearer admin-token");
+        expect(JSON.parse(request.data)).toEqual({});
     });
 });

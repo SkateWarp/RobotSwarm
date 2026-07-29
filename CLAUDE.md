@@ -147,6 +147,6 @@ Cloudflare Workers deploys the frontend from the connected GitHub repository
 after production-branch commits. GitHub Actions still builds the React app as
 a CI check.
 
-The `backend-prod` runner deploys only the backend, database, and media
-services, and only when those paths changed. GPU worker deployment is a
-separate manually approved maintenance workflow.
+After every successful `main` CI revision, the `backend-prod` runner deploys
+the backend, database, and media services. GPU worker deployment is a separate,
+manually approved maintenance workflow.

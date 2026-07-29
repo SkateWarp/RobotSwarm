@@ -74,11 +74,14 @@ public class RobotService : IRobotService
     public async Task<IEnumerable<RobotResponse>> GetAll(
         int? accountId = null,
         bool? isPublic = null,
-        Role? role = null)
+        Role? role = null,
+        bool includeDisabled = false)
     {
-        var query = context.Robots
-            .Include(x => x.Sensors)
-            .Where(x => x.Status != RobotStatus.Disabled);
+        var query = context.Robots.Include(x => x.Sensors).AsQueryable();
+        if (!includeDisabled || role != Role.Admin)
+        {
+            query = query.Where(x => x.Status != RobotStatus.Disabled);
+        }
 
         if (role == Role.Admin)
         {

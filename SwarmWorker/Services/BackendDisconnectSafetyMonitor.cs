@@ -45,7 +45,7 @@ public sealed class BackendDisconnectSafetyMonitor : BackgroundService
         {
             try
             {
-                var disconnectedFor = DateTime.UtcNow - _hub.LastSuccessfulContactUtc;
+                var disconnectedFor = _hub.LastSuccessfulContactAge;
                 var disconnectThreshold = TimeSpan.FromSeconds(
                     _options.BackendDisconnectEmergencyStopSeconds);
                 var contactUnavailable = disconnectedFor >= disconnectThreshold;

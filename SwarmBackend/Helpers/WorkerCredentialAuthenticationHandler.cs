@@ -9,6 +9,8 @@ namespace SwarmBackend.Helpers;
 public static class WorkerCredentialDefaults
 {
     public const string AuthenticationScheme = "WorkerCredential";
+    public const string AgentInstanceClaim = "worker_agent_instance_id";
+    public const string AgentInstanceQueryParameter = "worker_instance_id";
 }
 
 public class WorkerCredentialAuthenticationHandler(
@@ -38,7 +40,17 @@ public class WorkerCredentialAuthenticationHandler(
             return AuthenticateResult.Fail("Invalid worker credential.");
         }
 
-        var claims = new[]
+        if (!TryParseAgentInstanceId(
+                Request.Path.StartsWithSegments("/hubs/worker")
+                    ? Request.Query[WorkerCredentialDefaults.AgentInstanceQueryParameter]
+                        .ToString()
+                    : null,
+                out var agentInstanceId))
+        {
+            return AuthenticateResult.Fail("Invalid worker instance identifier.");
+        }
+
+        var claims = new List<Claim>
         {
             new Claim(ClaimTypes.NameIdentifier, worker.Id.ToString()),
             new Claim(ClaimTypes.Name, worker.Name),
@@ -47,6 +59,13 @@ public class WorkerCredentialAuthenticationHandler(
                 "worker_credential_version",
                 worker.CredentialCreatedAt?.Ticks.ToString() ?? string.Empty)
         };
+        if (agentInstanceId.HasValue)
+        {
+            claims.Add(new Claim(
+                WorkerCredentialDefaults.AgentInstanceClaim,
+                agentInstanceId.Value.ToString("D")));
+        }
+
         var identity = new ClaimsIdentity(claims, Scheme.Name);
         var principal = new ClaimsPrincipal(identity);
         return AuthenticateResult.Success(new AuthenticationTicket(principal, Scheme.Name));
@@ -67,5 +86,25 @@ public class WorkerCredentialAuthenticationHandler(
         }
 
         return null;
+    }
+
+    internal static bool TryParseAgentInstanceId(
+        string? value,
+        out Guid? agentInstanceId)
+    {
+        agentInstanceId = null;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (!Guid.TryParseExact(value, "D", out var parsed)
+            || parsed == Guid.Empty)
+        {
+            return false;
+        }
+
+        agentInstanceId = parsed;
+        return true;
     }
 }

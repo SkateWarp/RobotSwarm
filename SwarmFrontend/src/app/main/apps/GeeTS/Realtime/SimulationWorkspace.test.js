@@ -6,6 +6,7 @@ import SimulationSessionService from "../../../../../services/SimulationSessionS
 import SimulationWorkspace, {
     mergeViewerCommandEvent,
     mergeViewerLeaseStatus,
+    releaseAndCloseViewerLease,
     requestMessage,
     sendViewerControlInput,
     sessionRobotRoleLabel,
@@ -188,6 +189,50 @@ describe("acknowledged viewer input", () => {
         expect(connection.invoke).toHaveBeenCalledWith("SendViewerInput", "session-1", "lease-1", input);
         expect(connection.send).not.toHaveBeenCalled();
     });
+
+    it("still closes the captured lease when releasing the input is rejected", async () => {
+        const connection = {
+            invoke: jest.fn().mockRejectedValue(new Error("The realtime channel is closing.")),
+        };
+        SimulationSessionService.closeViewerLease.mockResolvedValue({ accepted: true });
+
+        await expect(
+            releaseAndCloseViewerLease(connection, "session-old", "lease-old")
+        ).resolves.toEqual({ accepted: true });
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "session-old",
+            "lease-old",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "session-old",
+            "lease-old"
+        );
+    });
+
+    it("does not let a stalled release block the lease close request", async () => {
+        const connection = {
+            invoke: jest.fn().mockReturnValue(new Promise(() => {})),
+        };
+        SimulationSessionService.closeViewerLease.mockResolvedValue({ accepted: true });
+
+        await expect(
+            releaseAndCloseViewerLease(connection, "session-stale", "lease-stale")
+        ).resolves.toEqual({ accepted: true });
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "session-stale",
+            "lease-stale",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "session-stale",
+            "lease-stale"
+        );
+    });
 });
 
 describe("session robot monitor", () => {
@@ -208,7 +253,7 @@ describe("session robot monitor", () => {
     it("shows a useful task function when the worker has not assigned a specific role", () => {
         const robot = { ordinal: 2, role: null };
 
-        expect(sessionRobotRoleLabel(robot, [])).toBe("disponible");
+        expect(sessionRobotRoleLabel(robot, [])).toBe("sin tarea asignada");
         expect(sessionRobotRoleLabel(robot, [{ type: "Figure", state: "Running" }])).toBe(
             "miembro de formación"
         );
@@ -285,6 +330,7 @@ describe("explicit viewer close", () => {
         SimulationSessionService.listTasks.mockResolvedValue([]);
         SimulationSessionService.createViewerLease.mockResolvedValue({
             leaseId: "a023236e-868c-4898-b4cb-d6361bc25945",
+            sessionId: "46643be0-a7b2-44ef-95c5-30c8657c6489",
             token: "private-token",
             expiresAt: "2099-01-01T00:00:00Z",
             hlsUrl: "https://robot.example/private/index.m3u8",
@@ -447,6 +493,392 @@ describe("explicit viewer close", () => {
         expect(host.querySelector("[data-testid='viewer-close-notice']")).not.toBeNull();
         expect(host.textContent).toContain("Publisher did not exit.");
         expect(button("Reintentar cierre")).toBeDefined();
+    });
+
+    it("releases and closes the captured lease when the component is unmounted", async () => {
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+
+        connection.invoke.mockClear();
+        SimulationSessionService.closeViewerLease.mockClear();
+        act(() => {
+            ReactDOM.unmountComponentAtNode(host);
+        });
+        await flush();
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945"
+        );
+    });
+
+    it("closes a viewer response that arrives after the component was unmounted", async () => {
+        let resolveViewer;
+        SimulationSessionService.createViewerLease.mockReturnValue(
+            new Promise((resolve) => {
+                resolveViewer = resolve;
+            })
+        );
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        act(() => {
+            button("Abrir visor").click();
+        });
+        act(() => {
+            ReactDOM.unmountComponentAtNode(host);
+        });
+
+        await act(async () => {
+            resolveViewer({
+                leaseId: "late-lease",
+                sessionId: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                token: "late-token",
+                command: { state: "Completed" },
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "late-lease",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "late-lease"
+        );
+    });
+
+    it("closes a late viewer with the old IDs after the active session changes", async () => {
+        jest.useFakeTimers();
+        let resolveViewer;
+        SimulationSessionService.createViewerLease.mockReturnValue(
+            new Promise((resolve) => {
+                resolveViewer = resolve;
+            })
+        );
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        act(() => {
+            button("Abrir visor").click();
+        });
+
+        SimulationSessionService.list.mockResolvedValue([
+            {
+                id: "new-session",
+                state: "Ready",
+                desiredRobotCount: 10,
+                arenaVersion: "test-arena",
+                computeWorkerId: "df4a00c0-2ee7-42a9-95a7-8b550bd40a63",
+                computeWorkerName: "gpu-test",
+                isEmergencyStopped: false,
+            },
+        ]);
+        await act(async () => {
+            jest.advanceTimersByTime(5000);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+        expect(button("Abrir visor").disabled).toBe(false);
+
+        await act(async () => {
+            resolveViewer({
+                leaseId: "old-late-lease",
+                sessionId: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                token: "old-token",
+                command: { state: "Completed" },
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "old-late-lease",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "old-late-lease"
+        );
+        expect(host.textContent).not.toContain("HLS activo");
+        jest.useRealTimers();
+    });
+
+    it("starts releasing an open viewer before stopping the old session connection", async () => {
+        jest.useFakeTimers();
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+
+        connection.invoke.mockClear();
+        connection.stop.mockClear();
+        SimulationSessionService.closeViewerLease.mockClear();
+        SimulationSessionService.list.mockResolvedValue([
+            {
+                id: "replacement-session",
+                state: "Ready",
+                desiredRobotCount: 10,
+                arenaVersion: "test-arena",
+                computeWorkerId: "df4a00c0-2ee7-42a9-95a7-8b550bd40a63",
+                computeWorkerName: "gpu-test",
+                isEmergencyStopped: false,
+            },
+        ]);
+
+        await act(async () => {
+            jest.advanceTimersByTime(5000);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        const releaseCall = connection.invoke.mock.calls.findIndex(
+            ([method, sessionId, leaseId]) =>
+                method === "SendViewerInput" &&
+                sessionId === "46643be0-a7b2-44ef-95c5-30c8657c6489" &&
+                leaseId === "a023236e-868c-4898-b4cb-d6361bc25945"
+        );
+        expect(releaseCall).toBeGreaterThanOrEqual(0);
+        expect(connection.invoke.mock.invocationCallOrder[releaseCall]).toBeLessThan(
+            connection.stop.mock.invocationCallOrder[0]
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945"
+        );
+        jest.useRealTimers();
+    });
+
+    it("releases the old viewer when a polled fleet size replaces its context", async () => {
+        jest.useFakeTimers();
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+
+        SimulationSessionService.closeViewerLease.mockClear();
+        connection.invoke.mockClear();
+        SimulationSessionService.list.mockResolvedValue([
+            {
+                id: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                state: "Ready",
+                desiredRobotCount: 8,
+                arenaVersion: "test-arena",
+                computeWorkerId: "df4a00c0-2ee7-42a9-95a7-8b550bd40a63",
+                computeWorkerName: "gpu-test",
+                isEmergencyStopped: false,
+            },
+        ]);
+
+        await act(async () => {
+            jest.advanceTimersByTime(5000);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(connection.invoke).toHaveBeenCalledWith(
+            "SendViewerInput",
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945",
+            { type: "releaseAll" }
+        );
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "a023236e-868c-4898-b4cb-d6361bc25945"
+        );
+        expect(host.textContent).not.toContain("HLS activo");
+        jest.useRealTimers();
+    });
+
+    it("does not erase a new viewer when the old fleet viewer finishes closing later", async () => {
+        jest.useFakeTimers();
+        let resolveOldClose;
+        const oldClose = new Promise((resolve) => {
+            resolveOldClose = resolve;
+        });
+        SimulationSessionService.closeViewerLease.mockImplementation((_sessionId, leaseId) =>
+            leaseId === "old-fleet-lease" ? oldClose : Promise.resolve({ leaseId })
+        );
+        SimulationSessionService.createViewerLease
+            .mockResolvedValueOnce({
+                leaseId: "old-fleet-lease",
+                sessionId: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                token: "old-private-token",
+                expiresAt: "2099-01-01T00:00:00Z",
+                hlsUrl: "https://robot.example/old/index.m3u8",
+                command: { state: "Completed" },
+            })
+            .mockResolvedValueOnce({
+                leaseId: "new-fleet-lease",
+                sessionId: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                token: "new-private-token",
+                expiresAt: "2099-01-01T00:00:00Z",
+                hlsUrl: "https://robot.example/new/index.m3u8",
+                command: { state: "Completed" },
+            });
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+
+        SimulationSessionService.list.mockResolvedValue([
+            {
+                id: "46643be0-a7b2-44ef-95c5-30c8657c6489",
+                state: "Ready",
+                desiredRobotCount: 8,
+                arenaVersion: "test-arena",
+                computeWorkerId: "df4a00c0-2ee7-42a9-95a7-8b550bd40a63",
+                computeWorkerName: "gpu-test",
+                isEmergencyStopped: false,
+            },
+        ]);
+        await act(async () => {
+            jest.advanceTimersByTime(5000);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+        expect(host.textContent).toContain("HLS activo");
+
+        await act(async () => {
+            resolveOldClose({ leaseId: "old-fleet-lease" });
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(host.textContent).toContain("HLS activo");
+        expect(SimulationSessionService.createViewerLease).toHaveBeenCalledTimes(2);
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "old-fleet-lease"
+        );
+        expect(SimulationSessionService.closeViewerLease).not.toHaveBeenCalledWith(
+            "46643be0-a7b2-44ef-95c5-30c8657c6489",
+            "new-fleet-lease"
+        );
+        jest.useRealTimers();
+    });
+
+    it("deduplicates an explicit close when the component unmounts mid-request", async () => {
+        let resolveClose;
+        SimulationSessionService.closeViewerLease.mockReturnValue(
+            new Promise((resolve) => {
+                resolveClose = resolve;
+            })
+        );
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+
+        act(() => {
+            button("Cerrar visor").click();
+        });
+        act(() => {
+            ReactDOM.unmountComponentAtNode(host);
+        });
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            resolveClose({
+                leaseId: "a023236e-868c-4898-b4cb-d6361bc25945",
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(SimulationSessionService.closeViewerLease).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps an action error visible after a successful background poll", async () => {
+        jest.useFakeTimers();
+        SimulationSessionService.createViewerLease.mockRejectedValueOnce({
+            response: { data: { detail: "El worker rechazó el visor." } },
+        });
+
+        await act(async () => {
+            ReactDOM.render(<SimulationWorkspace />, host);
+        });
+        await flush();
+        await flush();
+        await act(async () => {
+            button("Abrir visor").click();
+        });
+        await flush();
+
+        expect(host.querySelector("[data-testid='workspace-error']").textContent).toContain(
+            "El worker rechazó el visor."
+        );
+
+        await act(async () => {
+            jest.advanceTimersByTime(5000);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await flush();
+
+        expect(host.querySelector("[data-testid='workspace-error']").textContent).toContain(
+            "El worker rechazó el visor."
+        );
+        jest.useRealTimers();
     });
 
     it("shows every runtime robot separately from the persistent inventory", async () => {

@@ -64,10 +64,18 @@ public static class RobotRoute
             error => Task.FromResult(BadRequest(error)));
     }
 
-    public static async Task<IResult> GetAll(IRobotService robotService, HttpContext context, bool? isPublic = null)
+    public static async Task<IResult> GetAll(
+        IRobotService robotService,
+        HttpContext context,
+        bool? isPublic = null,
+        bool includeDisabled = false)
     {
         var accountId = GetAccountId(context);
-        var response = await robotService.GetAll(accountId, isPublic, GetRole(context));
+        var response = await robotService.GetAll(
+            accountId,
+            isPublic,
+            GetRole(context),
+            includeDisabled);
         return Results.Ok(response);
     }
 

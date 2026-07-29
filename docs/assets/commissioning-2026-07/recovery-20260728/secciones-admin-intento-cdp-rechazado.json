@@ -1,0 +1,41 @@
+{
+  "authorization": {},
+  "browser": {
+    "cdpPort": 9369,
+    "gpuDisabled": false,
+    "headless": false,
+    "profileOwned": true,
+    "visible": true
+  },
+  "cleanup": {
+    "browser": {
+      "method": "owned-pid-terminate",
+      "portFree": false,
+      "processExited": true,
+      "profileRemoved": false,
+      "requested": true
+    },
+    "passed": false,
+    "temporaryGroup": {
+      "reason": "not-created",
+      "requested": false
+    }
+  },
+  "completedAt": "2026-07-29T04:25:43Z",
+  "deploymentCommit": "907c89cc624e739be43b4689865d8ddd954fc5b2",
+  "error": {
+    "message": "Chrome Admin did not expose its owned CDP target on 9369",
+    "type": "DriverError"
+  },
+  "expectedRole": "Admin",
+  "productionExecution": true,
+  "runId": "20260729T042453Z-414349",
+  "schemaVersion": 1,
+  "sections": {},
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-29T04:24:53Z",
+  "success": false,
+  "temporaryGroup": {
+    "cleanupRequired": false
+  }
+}

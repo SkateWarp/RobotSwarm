@@ -14,7 +14,7 @@ la alineación de las secciones web, el drenaje compatible con Python 3.8 y la
 restauración del logotipo PNG histórico. La PR #106 publicó después el control
 escalable y el marcador visual de destino como
 `1448a31bbbbfd77588bada109947098cc95d9dda`. CI, Cloudflare, backend y un único
-despliegue GPU aprobaron; el worker ejecuta la imagen inmutable
+despliegue GPU aprobaron; en ese corte el worker ejecutaba la imagen inmutable
 `robotswarm/ros-noetic:git-1448a31bbbbfd77588bada109947098cc95d9dda-29893535071-1`.
 Sobre ese SHA aprobaron la API concurrente N=3/N=7, dos navegadores visibles y
 privados, interacción, pantalla completa, HLS cercano a 30 FPS, las cuatro
@@ -87,7 +87,7 @@ Al iniciar esta etapa, el sistema de control ya permitía crear sesiones aislada
 
 El primer SHA publicado del candidato descrito en las incidencias I-031 a I-052 fue `f3929bb8da7601264be51b84bf706babe86b7940`, dentro del PR #99. La ejecución CI #31 se rechazó por la dependencia ambiental de I-051; `23b280ecd434647ccff2f179432d5650761a1f5f` corrigió esa dependencia y aprobó CI #32. Después se reconstruyó el historial limpio en `9c0dc0598cd225278e71f924cf30fc1748697370`: CI #33 y GitGuardian aprobaron esa revisión, el PR #99 produjo el merge `bbc7c4611d6d3284c08da1fd2b713afafe641f40` y CI #34 aprobó sobre `main`. Cloudflare publicó el frontend del merge. El despliegue autohospedado que había quedado en espera por I-053 terminó correctamente con esa misma base, y `/health` volvió a comprobarse sano. En aquel corte, el trabajador GPU todavía conservaba el release `62a136a08b4955ea45a58447a87b6518301418fe`; esta diferencia histórica explica por qué las pruebas de esa etapa no se atribuyeron al candidato integrado.
 
-Después de integrar el PR #99 se auditó el resto de la navegación solicitada por el usuario. Esa revisión encontró que Historial, Plantillas, Robots y Grupos todavía mezclaban entidades heredadas con el plano de control ROS, y que el visor no podía cerrarse sin detener toda la sesión. Las incidencias I-055 a I-062 documentan el delta correctivo y su auditoría. El commit candidato `efdec9786fd4d5d4825704188e3eece4fc551250` aprobó el único CI del PR #100; su squash produjo `baba2c1fb4bc73dcd96254a7ab63a16175e6bce9`. El hotfix I-063 se integró después mediante el PR #101 como `538ba066`. I-064–I-091 se integraron mediante los PR #102 y #103, el parser de drenaje llegó con el PR #104 y I-093–I-105 quedaron integradas mediante el PR #105. Esta secuencia explica por qué varias incidencias conservan a `538ba066`, `1182dec`, `fbef23e` o `9f49e17` como evidencia histórica, aunque el corte productivo actual sea `1448a31`.
+Después de integrar el PR #99 se auditó el resto de la navegación solicitada por el usuario. Esa revisión encontró que Historial, Plantillas, Robots y Grupos todavía mezclaban entidades heredadas con el plano de control ROS, y que el visor no podía cerrarse sin detener toda la sesión. Las incidencias I-055 a I-062 documentan el delta correctivo y su auditoría. El commit candidato `efdec9786fd4d5d4825704188e3eece4fc551250` aprobó el único CI del PR #100; su squash produjo `baba2c1fb4bc73dcd96254a7ab63a16175e6bce9`. El hotfix I-063 se integró después mediante el PR #101 como `538ba066`. I-064–I-091 se integraron mediante los PR #102 y #103, el parser de drenaje llegó con el PR #104 y I-093–I-105 quedaron integradas mediante el PR #105. Esta secuencia explica por qué varias incidencias conservan a `538ba066`, `1182dec`, `fbef23e` o `9f49e17` como evidencia histórica, aunque el corte productivo de esa etapa fuera `1448a31`.
 
 ## 1. Objetivos
 
@@ -2036,6 +2036,232 @@ registro público. La
 [evidencia saneada](assets/commissioning-2026-07/corrective-i149-i150/README.md)
 conserva el diagnóstico y los criterios pendientes de despliegue.
 
+### I-153. El stack productivo no volvió a publicar sus puertos después del reinicio
+
+**Hallazgo.** Después del reinicio del 28 de julio, Cloudflare continuó
+entregando el frontend, pero el backend y Swagger no respondían. PostgreSQL
+seguía sano; `backend_prod` y `media_prod` habían terminado con código 255.
+Docker conservó el error `cannot assign requested address` para los puertos
+publicados sobre la IPv4 de la LAN.
+
+**Diagnóstico.** `network-online.target` se alcanzó sólo con IPv6 y Docker
+arrancó antes de que DHCP asignara la IPv4 cableada. El problema no pertenecía
+al commit desplegado ni a Nginx Proxy Manager. La diferencia entre el HTTP 200
+del sitio estático y la falta de respuesta del API permitió separar ambas
+capas antes de tocar contenedores.
+
+**Corrección y evidencia.** Se recuperaron los mismos contenedores, sin
+reconstruir imágenes ni leer secretos. NetworkManager dejó de considerar
+opcional la IPv4. Una unidad `systemd` espera cada dirección guardada en los
+bindings y sólo inicia los contenedores existentes, después de validar labels,
+estado y healthcheck. Un error ambiguo de `docker inspect` se clasifica como
+transitorio salvo que un listado exacto confirme la ausencia. La unidad
+instalada terminó con `ExecMainStatus=0`; backend, MediaMTX y PostgreSQL
+quedaron sanos, y 17/17 pruebas offline cubrieron las ramas de reintento,
+incluidos fallos ambiguos al leer identidad, bindings, estado y health. El
+procedimiento completo, los hashes y la reversión se conservan en el
+[informe del incidente](incidente-arranque-produccion-2026-07-28.md).
+
+### I-154. Una reconexión del mismo worker podía rechazarse como duplicada
+
+**Hallazgo.** Durante transporte N=1, el worker perdió SignalR y el backend
+rechazó la reconexión porque todavía conservaba el `connectionId` anterior. La
+identidad de credencial distinguía el worker, pero no la encarnación concreta
+del proceso; una desconexión tardía también podía retirar una conexión nueva.
+
+**Corrección fail-closed.** Cada proceso usa un identificador aleatorio estable
+durante su vida. Un registro singleton permite que sólo esa misma encarnación
+sustituya y aborte atómicamente su conexión obsoleta; procesos distintos y
+clientes heredados no obtienen takeover. La baja elimina únicamente el
+`connectionId` que todavía posea el registro. Rotación y revocación invalidan y
+aborta la conexión vigente. El hub vuelve a consultar la credencial, sin
+tracking, después del claim y antes de añadirla al grupo.
+
+El establecimiento del transporte no se cuenta como contacto exitoso. El
+último contacto empieza en `UnixEpoch`, de modo que un worker reiniciado
+durante una caída no recibe una gracia ficticia. La primera formulación de
+20 s de lease más 10 s de watchdog era incompleta. Una segunda versión sumó
+los 5 s de publicación, pero aún suponía que matar al cliente Docker impedía
+que un `exec` retrasado llegara después al contenedor.
+
+El contrato definitivo no transmite un pulso vacío. Calcula, a partir del
+último contacto aceptado, un vencimiento absoluto del reloj de arranque y lo
+publica como `std_msgs/Float64`. El host y los contenedores leen la misma época
+mediante `/proc/uptime`; en ROS se usa `CLOCK_BOOTTIME`. Después de una única
+consulta `docker ps`, limitada a 1 s y sin los `inspect` secuenciales, el worker
+vuelve a comprobar el lease. Si la consulta falla, conserva el último roster
+válido. Antes de iniciar `rostopic`, el propio contenedor rechaza un vencimiento
+agotado. El callback ROS repite la validación y descarta valores no finitos,
+agotados o adelantados más de 15 s. Por tanto, un `docker exec` que empiece
+tarde conserva el vencimiento original y no renueva el movimiento.
+
+Se reservan 0,25 s como margen de admisión. Con 14 s de lease, 10 s de
+watchdog y un sondeo de 0,5 s, la cota conservadora queda en
+`14 - 0,25 + 10 + 0,5 = 24,25 <= 30 s`. Los límites interior de 5 s y exterior
+de 7 s acotan la disponibilidad y la limpieza, pero ya no se suman a la cota:
+al vencer el deadline, shell y ROS rechazan la entrega. Se valida por separado
+que el ciclo sincrónico sano no alcance el watchdog:
+`2 + 1 + 5 = 8 < 10 s`.
+
+La ausencia permanente del primer pulso también queda cerrada. ROS concede
+15 s de arranque y, si no recibe evidencia, activa el mismo paro de emergencia.
+Además, `StartTask` comprueba un pulso fresco bajo el bloqueo de seguridad al
+registrar la tarea y justo antes de publicar al algoritmo. El reset aplica el
+mismo borde exacto `>= 10 s`; un pulso tardío no libera por sí solo el latch.
+El comando completo dentro del contenedor sigue protegido por
+`/usr/bin/timeout --signal=KILL 5s`; matar solamente el cliente Docker no se
+considera una cancelación suficiente.
+
+La revisión final también trató la publicación ROS como una entrega ambigua.
+El retorno de `publish()` no funciona como una transacción: el receptor puede
+haber aceptado el mensaje antes de que la llamada local se bloquee o lance una
+excepción. Por ello, `StartTask`, la reanudación y el control manual ya no
+mantienen el bloqueo de seguridad mientras esperan al socket. Cada ruta
+conserva la generación de emergencia y una secuencia monótona de paradas
+ordinarias entre la admisión inicial, la comprobación inmediatamente anterior
+a publicar y la comprobación posterior. Esto permite detectar incluso una
+pausa o parada que haya empezado y terminado mientras la publicación seguía
+bloqueada.
+
+Cuando el resultado de la entrega queda indeterminado, ROS activa el mismo
+latch fail-closed, mantiene deudas reintentables de parada para la tarea
+original y para cualquier tarea activa distinta, y vuelve a imponer velocidades
+cero. El control manual que observa el borde exacto del heartbeat utiliza la
+ruta normal del watchdog y conserva su diagnóstico `CONTROL HEARTBEAT LOST`.
+Las regresiones reprodujeron una entrega seguida de excepción, un socket
+bloqueado, un primer reintento fallido, una carrera latch-reset, una parada
+ordinaria completa y el cambio concurrente de identidad de tarea. Aprobaron
+249/249 pruebas de lifecycle, 9/9 de física y 65/65 del foco de watchdog,
+además de tres repeticiones del foco (195/195). Después, la regresión ROS
+global aprobó 667/667 en 108,897 s. Ninguna de estas verificaciones utilizó CI.
+
+### I-155. Las respuestas tardías y el desmontaje podían dejar un lease de visor
+
+**Hallazgo.** El frontend no capturaba de forma indivisible sesión, fuente,
+robot, cantidad y conexión al abrir el visor. Una respuesta antigua podía
+llegar después de cambiar de contexto. El cierre explícito, el desmontaje y la
+parada de SignalR tenían caminos parcialmente distintos, y un error de acción
+podía desaparecer cuando el sondeo siguiente aprobaba.
+
+**Corrección.** Cada solicitud recibe una generación y un contexto inmutable.
+Una respuesta tardía se revoca sin sustituir el visor actual. Todos los caminos
+de retiro comparten una operación deduplicada: inician `releaseAll` sobre la
+conexión capturada y ejecutan el cierre REST sin esperar indefinidamente el
+acuse de SignalR. Un lease anterior no puede borrar el nuevo. Los errores de
+acción y sondeo se presentan por separado.
+
+La misma revisión añadió filtro por estado al historial y cambió «Rol:
+disponible» por «Rol: sin tarea asignada» cuando no existe tarea. Durante una
+ejecución se mantienen líder, seguidor, formación o búsqueda y transporte.
+Las 31 suites frontend aprobaron 182/182 pruebas; el lint del alcance modificado
+y la compilación de producción terminaron correctamente.
+
+### I-156. La desactivación administrativa no tenía retorno visible
+
+**Hallazgo.** La página mostraba cuentas y robots inactivos, pero no ofrecía una
+recuperación completa y explícita. Además, los textos de Robots, Grupos y
+Plantillas podían sugerir que el inventario persistente seleccionaba
+directamente las instancias runtime de Gazebo.
+
+**Corrección y límite.** El administrador puede reactivar una cuenta mediante
+una mutación protegida por los mismos locks del actor y del objetivo. Se
+revocan nuevamente sus refresh tokens; no reviven JWT, sesiones, tareas,
+leases ni visores. El inventario de robots acepta `includeDisabled` únicamente
+para un administrador y reutiliza la actualización autorizada para devolver
+un robot a `Idle`. Los textos aclaran que las instancias runtime siguen
+perteneciendo a cada sesión. No se creó una relación de datos ficticia entre
+Robot/Grupo/Plantilla y `SessionRobot`/`TaskRun`; esa selección continúa como
+trabajo futuro documentado.
+
+### I-157. Una pestaña oculta impedía que la matriz solicitara HLS
+
+**Hallazgo instrumental.** Una repetición S/N=10 montó el visor y el worker
+publicó RTSP, pero Chrome informó `visibilityState=hidden`, video
+`readyState=0` y cero recursos HLS. El arnés activaba la pestaña sólo durante
+el clic y trataba `offsetParent !== null` como visibilidad suficiente. Por eso
+el resultado se rechazó como instrumental y no se atribuyó al algoritmo.
+
+**Corrección.** El target aleatorio propio se restaura si su ventana fue
+minimizada, se trae al frente con los dominios reales Browser/Page y se exige
+simultáneamente documento `visible` y frame decodificado. No se usa emulación
+de lifecycle y Chrome continúa normal, no headless y con GPU. La matriz
+solicita el visor, vincula el directorio privado del lease y después espera el
+frame bajo un único plazo monotónico; así conserva identidad de limpieza ante
+un fallo temprano. Aprobaron 50/50 contratos visibles, 78/78 de matriz y
+268/268 en los siete arneses combinados. La repetición física sobre el
+artefacto definitivo se registra por separado para no confundir un contrato
+del instrumento con evidencia de movimiento.
+
+### I-158. La formación se planificaba sobre una flota que todavía se estaba asentando
+
+**Hallazgo físico.** Después de corregir el foco del navegador, una repetición
+visible S/N=10 sí abrió HLS, decodificó aproximadamente 31 FPS y mantuvo
+Gazebo en D3D12 sobre la RTX 3080. La sonda gráfica midió 49,332 FPS de
+promedio, 50,071 FPS después del arranque y RTF 2,957. Sin embargo, la tarea
+terminó con `live_replan_attempts=2`, asignaciones vacías y el mensaje de que
+la arena había cambiado mientras se calculaba el plan. No se reinterpretó como
+éxito: siete robots se habían asentado unos 0,177 m y el plan inicial se había
+construido con poses anteriores a ese movimiento. El error terminal apareció
+54,057 s después del inicio del escenario; la versión anterior del arnés
+continuó hasta agotar los 120 s porque sólo despertaba cuando veía la formación
+activa.
+
+**Diagnóstico.** Al recibir `start`, el controlador marcaba la odometría como
+no confirmada para la tarea nueva, pero iniciaba el solver inmediatamente con
+la última pose de la tarea anterior. Después de un rechazo vivo publicaba
+velocidad cero, aunque volvía a despertar el solver sin comprobar que la flota
+hubiera permanecido quieta. La tolerancia estricta de commit de 5 mm era
+correcta; ampliarla habría ocultado que el snapshot ya no representaba el
+mundo. El reporte saneado no conserva el log crudo del contenedor y, por tanto,
+no se atribuye retrospectivamente el rechazo a un robot o gate exacto que no
+quedó registrado.
+
+**Corrección fail-closed.** El inicio y cada replan pasan ahora por una barrera
+previa de estabilidad en dos etapas. La primera odometría de la tarea dispone
+de una gracia propia de 10 s: el extremo exacto, `t = 10,000 s`, todavía es
+válido y el timeout se declara únicamente cuando `t > 10 s`. Cuando todos los
+robots han entregado una muestra fresca, se crea el ancla común y comienza un
+presupuesto independiente de 5 s. Dentro de este presupuesto, la flota debe
+permanecer durante 0,5 s de pared dentro de 0,01 m y 0,03 rad respecto del
+ancla. La comparación es acumulativa contra el ancla fija, no entre muestras
+consecutivas, de modo que una deriva lenta también reinicia la ventana.
+
+El temporizador de control de 20 Hz observa esa estabilidad incluso si la
+tarea está pausada o si el único worker todavía resuelve una generación
+anterior. Cuando la quietud se completa antes del deadline, conserva
+`ready_at`; un worker que quede disponible más tarde puede usar ese resultado
+sólo si la muestra actual continúa dentro del ancla y `ready_at` precede al
+deadline. Cualquier movimiento posterior invalida el sello. La comprobación
+final y la captura del snapshot inmutable se realizan bajo el mismo lock de
+poses, por lo que una callback de odometría no puede intercalarse entre ambas.
+Si alguna etapa agota su plazo, el controlador falla de forma correlacionada,
+mantiene velocidad cero y no libera asignaciones. El commit conserva además
+las revalidaciones geométrica, de frescura y de seguridad que ya existían.
+
+El mismo cierre protege las entradas activas. Un segundo `start` exige primero
+un stop `task_restart` confirmado; si algún publicador no acepta el cero, la
+tarea nueva no se activa. Al reducir la flota se envía un único stop a los
+endpoints anteriores. Al ampliarla o reemplazar miembros, los endpoints
+anteriores se detienen antes de construir recursos nuevos y después se envía
+un stop dirigido exclusivamente a los endpoints recién instalados: cada
+endpoint recibe un solo cero durante el cambio normal. Si el aprovisionamiento
+queda parcial, el controlador cancela la asignación, detiene todo endpoint que
+sí alcanzó a instalarse, publica `FAILED` y no continúa con una flota
+incompleta. El estado expone la fase de planificación, el tiempo estacionario,
+si la estabilidad ya fue alcanzada y un historial acotado de los tres últimos
+rechazos con su intento, sin publicar identificadores privados.
+
+**Verificación previa al despliegue.** Las pruebas nuevas cubren la gracia
+inclusiva de la primera odometría, la muestra posterior al ancla, la deriva
+acumulativa, la normalización angular alrededor de ±π, el timeout seguro, el
+replan, el worker ocupado, la tarea pausada, el reinicio activo, los tres tipos
+de cambio de flota y el aprovisionamiento parcial. La suite focal de formación
+aprobó 130/130 y la regresión ROS completa 653/653. El arnés visible reconoce
+ahora únicamente estados terminales correlacionados para salir antes;
+`initializing`, `paused` e `idle` no se confunden con una terminación. Estos
+resultados son evidencia local; la repetición física sobre el SHA desplegado
+queda como gate final y se documentará sin sustituir este intento rechazado.
+
 ## 5. Registro cronológico de cambios y pruebas
 
 Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las entradas y los criterios se desarrollan en la incidencia o evidencia citada; la hora se conserva únicamente cuando fue material para el diagnóstico.
@@ -2222,6 +2448,10 @@ Esta sección ofrece un índice cronológico resumido. Los SHA, el entorno, las 
 | 2026-07-24 | PR #112 y refutación productiva I-147 | El detector se desplegó correctamente, pero la llegada casi completa de cada lote continuó serializando la flota | SHA `2193c3d`; dos S/N=10 rechazadas con RTF ≥2,9908, un replan y cero colisiones |
 | 2026-07-24 | Tercer candidato I-147 | Liberación por corredores vivos sin cruce y continuidad de todos los lotes ya liberados | Tres S/N=10 visibles aprobadas; error ≤0,0963 m, RTF ≥2,9887, cero colisiones; ROS 631/631 y contratos 254/254 |
 | 2026-07-24 | PR #113 e I-148 | `ec4980b` liberó 9/10 sin estancamiento, pero el límite histórico terminó a 252,816 s simulados | RTF 2,9605, HLS 31,2 FPS, cero colisiones y cleanup completo; presupuesto S/N=10 calibrado a 120 s |
+| 2026-07-28 | Recuperación posterior al reinicio | Docker inició antes de recibir la IPv4 de la LAN; se recuperaron los contenedores existentes y se instaló una unidad de espera/reintento | I-153; PostgreSQL, backend y medios sanos; recuperación 17/17 |
+| 2026-07-28 | Cierre de reconexión, visor y administración | Takeover limitado a la misma encarnación del worker, lease frontend generacional y reactivación explícita de cuentas/robots | I-154–I-156; backend 275 + PostgreSQL 8, worker 143 y frontend 182 |
+| 2026-07-29 | Repetición visible S/N=10 posterior al arreglo de Chrome | Visor válido a ≈31 FPS HLS y ≈50 FPS Gazebo/NVIDIA; ROS rechazó dos replans sobre una flota aún asentándose | I-157–I-158; RTF 2,9687, cero colisiones y reporte saneado preservado |
+| 2026-07-29 | Cierre local de la barrera atómica I-158 | Gracia de primera odometría de 10 s con extremo incluido; después, ventana quieta de 0,5 s dentro de un plazo de 5 s, observada a 20 Hz incluso en pausa o con el worker ocupado | Snapshot atómico, `task_restart` confirmado, un cero por endpoint en cambios normales de flota y aprovisionamiento parcial fail-closed; formación 130/130, ROS 653/653, contratos 268/268 y `git diff --check` |
 
 ## 6. Resultados previos y cortes históricos
 
@@ -2610,14 +2840,14 @@ El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre l
 | --- | --- | --- | --- |
 | Figura 11 | Error del visor observado por el usuario, con datos privados recortados | La misma vista con estado «En vivo» y FPS | La escena visible de carga ya está versionada; falta la comparación final del visor posterior al despliegue |
 | Figura 12 | Login anterior a la restauración, con composición plana | Diseño histórico restaurado con gradiente, tarjeta compacta, PNG y «BIENVENIDO» | Comparación local/productiva versionada; despliegue `dc4745e` comprobado |
-| Figura 13 | Lista de cuentas sin estado ni acciones claras | Filtros, cuentas activas/inactivas y diálogo de creación/edición | Frontend desplegado; captura pendiente |
+| Figura 13 | Lista de cuentas sin estado ni acciones claras | Filtros, cuentas activas/inactivas y diálogo de creación/edición | Diálogo saneado versionado bajo `recovery-20260728/`; la reactivación candidata queda sujeta al despliegue final |
 | Figura 14 | Espacio de simulación sin jerarquía operacional | Etapas sesión→visor→tarea y resultado terminal visible | Flujo integral observado sobre `fbef23e`; falta seleccionar y versionar la captura |
 | Figura 15 | Una sola vista o un escritorio compartido | Dos ventanas Chrome reales con sesiones y flujos privados diferentes | Aceptación concurrente aprobada; PNG temporal pendiente de saneamiento y versionado |
 | Figuras 16–18 | Escena previa a cada tarea | Formación, seguimiento y transporte final ejecutados desde el frontend | Matriz física aprobada; búsqueda, PUSH y DONE de React N=4 versionados bajo `final-c3866d5/` |
 | Figura 19 | Historial heredado vacío o basado en `TaskLog`, sin exponer datos privados | Historial `TaskRun` del propietario, con filtros, resultado y diálogo de detalle | Recorrido User y captura saneada versionados bajo `final-c3866d5/`; Admin no autorizado |
-| Figura 20 | «Tareas» con crear/eliminar o campos que no corresponden al backend | «Plantillas de tareas» con catálogo real y edición `GET`/`PUT` de administrador | Captura Admin temporal sobre `fbef23e`; falta versionarla |
-| Figura 21 | Lista heredada de robots sin estados de carga/error ni separación de runtime | Registro persistente con búsqueda, estados, alta, edición y desactivación | Captura Admin temporal sobre `fbef23e`; falta versionarla |
-| Figura 22 | Ausencia de una gestión clara de grupos o acción que aparentaba iniciar ROS | Grupos administrativos con membresía, transferencia confirmada y aviso de alcance | Capturas Admin y grupo efímero temporales; falta versionarlas |
+| Figura 20 | «Tareas» con crear/eliminar o campos que no corresponden al backend | «Plantillas de tareas» con catálogo real y edición `GET`/`PUT` de administrador | Captura Admin saneada y versionada bajo `recovery-20260728/` |
+| Figura 21 | Lista heredada de robots sin estados de carga/error ni separación de runtime | Registro persistente con búsqueda, estados, alta, edición, desactivación y reactivación | Diálogo Admin saneado y versionado bajo `recovery-20260728/` |
+| Figura 22 | Ausencia de una gestión clara de grupos o acción que aparentaba iniciar ROS | Grupos administrativos con membresía, transferencia confirmada y aviso de alcance | Captura Admin saneada y versionada bajo `recovery-20260728/`; el grupo efímero se eliminó |
 | Figura 23 | Monitor con varias filas «rol sin asignar» | Función contextual y rol específico solo cuando el worker lo publica | Cerrada: captura N=4 muestra las cuatro filas como «función búsqueda y transporte» |
 | Figura 24 | Visor sin cierre independiente y parada de sesión inmediata | Botón «Cerrar visor», estado posterior sin stream y evidencia de que ROS continúa | Operación aprobada en la corrida concurrente; PNG temporal pendiente |
 | Figura 25 | Menú con nombres heredados «Tareas»/«Cuentas» y sin Grupos | Navegación completa y adaptación a 360/768/1366/1920 px | Las cuatro capturas responsive de `fbef23e` ya están versionadas; falta la repetición del bundle final |
@@ -2639,18 +2869,21 @@ una captura aislada no sustituye las series temporales de movimiento.
 - `npm audit` informa 99 avisos heredados de la revisión base. El cambio de visor no incrementó esa cifra ni añadió un hallazgo para `hls.js`, pero la actualización de dependencias antiguas requiere un trabajo separado y pruebas de regresión de la interfaz.
 - Las matrices de figuras, trayectorias y cantidades son muestras representativas; no constituyen una prueba exhaustiva de toda combinación posible de mapa y parámetros.
 - El gate de modelos y reloj evita aceptar una muerte durante aprovisionamiento o cambio de flota. Una muerte posterior a `Ready` todavía necesita un monitor periódico con umbral, gracia de arranque y exclusión mutua con las operaciones de sesión; implementarlo sin esa coordinación introduciría carreras de limpieza.
-- `538ba066`, `1182dec`, `fbef23e` y `9f49e17` son cortes históricos. La base
-  productiva observada es `1448a31`, resultado de la PR #106. Las correcciones
-  I-136–I-143 todavía requieren PR, CI, despliegue y aceptación sobre su SHA.
+- `538ba066`, `1182dec`, `fbef23e`, `9f49e17` y `1448a31` son cortes
+  históricos. La recuperación del 28 de julio partió de `907c89c` en
+  `main`, frontend y backend; el worker GPU todavía ejecutaba `c3866d5`.
+  I-153–I-158 pertenecen al candidato posterior y no se presentan como
+  desplegadas antes de su único PR y CI.
 - El PNG histórico restaurado es un wordmark rectangular. Es adecuado para las superficies web verificadas, pero el manifiesto PWA todavía carece de derivados cuadrados 192×192 y 512×512; algunos sistemas pueden encuadrarlo o recortarlo al instalar. Esta mejora debe preservar el original y validarse por separado.
 - La exclusividad del controlador vive en la única instancia de backend desplegada. Un despliegue horizontal necesitaría coordinación distribuida o una generación monotónica compartida antes de permitir takeover entre réplicas.
 - El lint completo de la aplicación conserva 211 errores heredados en módulos no modificados. Los archivos de esta intervención están limpios, pero sanear toda la base frontend sigue siendo trabajo futuro independiente.
 - El registro persistente y los grupos administrativos no son una selección de los modelos runtime. No se debe inferir que pertenecer a un grupo hará que ese robot aparezca con el mismo identificador en Gazebo; el roster de sesión informado por el worker sigue siendo la fuente viva.
 - El monitor runtime muestra estado, rol, namespace y tiempo de actualización, pero el contrato todavía no transporta pose, velocidad ni diagnóstico de sensores. Tampoco aplica por sí solo una política de parada ante una muerte tardía.
-- La aceptación pública de `1448a31` demuestra concurrencia, HLS, plano web,
-  marcador, seguimiento y cinco tamaños de transporte normal. No demuestra
-  todavía las seis formaciones corregidas ni la carga de 0,75 kg sobre el
-  release final. N=1 sí aprobó después con el arnés nuevo contra esa base.
+- La aceptación pública histórica de `1448a31` demuestra concurrencia, HLS,
+  plano web, marcador, seguimiento y cinco tamaños de transporte normal. Las
+  entregas posteriores cerraron aquellas formaciones y el transporte N=1; la
+  barrera de estabilidad I-158 todavía exige repetición física sobre el SHA
+  que finalmente se despliegue.
 - El grafo ROS se ejecuta dentro de una red privada y se considera confiable.
   Un proceso ya comprometido en el mismo contenedor podría emitir infinitos
   IDs de solicitud de ACK mientras el publisher inverso permanece bloqueado y
@@ -2660,31 +2893,33 @@ una captura aislada no sustituye las series temporales de movimiento.
 
 ## 9. Conclusiones
 
-La base `1448a31` demuestra que el plano web controla sesiones ROS aisladas y
-visualiza Gazebo con aceleración NVIDIA: aprobaron dos usuarios concurrentes,
-cuatro anchuras responsive, dos visores privados cercanos a 30 FPS, seguimiento
-N=3/N=6/N=10 y transporte N=2/N=3/N=4/N=10. El destino ya es visible mediante
-la huella y la caja fantasma magenta. El recorrido normal mayor no se obtuvo
-aligerando otra vez el objeto: se conservaron 0,25 kg y `mu=mu2=0.05`, y se
-redujo la tolerancia de llegada a 0,25 m. El perfil académico permanece separado
-en 0,75 kg y `mu=mu2=0.25`.
+La evidencia acumulada demuestra que el plano web puede crear sesiones ROS
+aisladas y visualizar Gazebo con aceleración NVIDIA. En entregas productivas
+anteriores aprobaron dos usuarios concurrentes, cuatro anchuras responsive,
+visores privados cercanos a 30 FPS, pantalla completa e interacción real,
+seguimiento N=3/N=6/N=10 y transporte N=1/N=2/N=3/N=4/N=10. El destino es
+visible mediante la huella y la caja fantasma magenta. Los perfiles normal y
+académico de la carga permanecen separados y documentados.
 
-El cierre sigue abierto porque la aceptación posterior al despliegue encontró
-defectos adicionales reales. I-136–I-138 corrigen la planificación bloqueante,
-la envolvente angular y la correlación de poses; I-139 corrige la carrera entre
-el TTL y el informe gráfico; I-140 hace fail-closed la publicación local de
-paradas y evita reactivaciones por reordenamiento start/stop. I-141 protege la
-planificación larga, I-142 endurece el arnés web e I-143 elimina un bloqueo
-entre lotes sin relajar el gate final. El árbol local final aprobó 625/625
-pruebas ROS y 253/253 contratos. La imagen exacta posterior
-aprobó S/N=10 con RTF 2,9912, error 0,0936 m y cero colisiones; las corridas
-anteriores N=3/N=10 midieron 58,493/57,507 FPS NVIDIA.
-N=1 volvió a aprobar en producción con el arnés corregido: 0,5013 m, RTF 2,9962,
-58,711 FPS de Gazebo, HLS 30,164 FPS y limpieza completa. La política
-conservadora mantiene un solo PR correctivo y un solo despliegue GPU. Después se
-repetirán las seis formaciones, N=1 sobre el nuevo artefacto, el transporte UI
-normal y la carga N=4 sobre el SHA exacto. Hasta entonces, esta conclusión es
-provisional y no sustituye el acta de aceptación final.
+La recuperación de julio añadió al candidato el arranque ordenado del backend,
+propiedad segura de conexiones del worker, reactivación explícita de cuentas y
+robots, cierre generacional del visor y una barrera atómica antes de planificar
+formaciones. Esta última no amplía la tolerancia final: espera odometría fresca
+y estabilidad, inmoviliza la flota y sólo entonces captura la instantánea que
+usa el solver. La validación local más reciente aprobó backend 275/275 con
+ocho casos PostgreSQL opt-in separados, PostgreSQL 8/8, worker 146/146,
+frontend 182/182, contratos 268/268 y recuperación 17/17. El último corte
+global ROS aprobó 667/667 e incluye el foco 258/258 del cierre; dentro de éste,
+lifecycle aprobó 249/249, física 9/9 y watchdog 65/65. Todo se ejecutó
+localmente para reservar Actions al único candidato consolidado.
+
+El cierre continúa abierto de forma deliberada. El candidato aún debe pasar un
+único PR/CI, desplegar backend, frontend y worker GPU sobre el mismo SHA y
+repetir Gazebo visible con distintos algoritmos y cantidades. Los criterios
+siguen siendo RTF no menor de 2,90, render NVIDIA, HLS no menor de 27 FPS,
+ausencia de colisiones inesperadas, resultado ROS correlacionado y limpieza
+completa. Hasta obtener esa evidencia postdeploy, las cifras locales no se
+presentan como acta de aceptación final.
 
 ## 10. Referencias
 

@@ -8,6 +8,7 @@ ENV ROS_PACKAGE=robot_swarm_bridge
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
+    coreutils \
     libgl-dev \
     python3-pip \
     python3-catkin-tools \

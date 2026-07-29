@@ -1,0 +1,273 @@
+{
+  "account": "A",
+  "browser": {
+    "gpuDisabled": false,
+    "headless": false,
+    "product": "Chrome/150.0.7871.187",
+    "visible": true
+  },
+  "captures": [
+    {
+      "bytes": 80484,
+      "file": "transport-search-panel.png",
+      "humanReviewRequired": true,
+      "phase": "SEARCH",
+      "sanitized": true,
+      "sha256": "6c4756c129ebc037acdcb22625230b68cd96acf978115c7666ae0b351ebf27e7",
+      "taskCorrelated": true
+    },
+    {
+      "bytes": 70657,
+      "file": "transport-search-gazebo.png",
+      "humanReviewRequired": true,
+      "phase": "SEARCH",
+      "sanitized": true,
+      "sha256": "567c973a6f7c1dd6fcda1a786bc61e062941e67df37fd2f9318f742479e4f70c",
+      "taskCorrelated": true
+    },
+    {
+      "bytes": 84303,
+      "file": "transport-push-panel.png",
+      "humanReviewRequired": true,
+      "phase": "PUSH",
+      "sanitized": true,
+      "sha256": "e5e3ac58291978c0c6b7b42dec298ef7e4909476ca47f0a34dc36eaefe4a2162",
+      "taskCorrelated": true
+    },
+    {
+      "bytes": 70384,
+      "file": "transport-push-gazebo.png",
+      "humanReviewRequired": true,
+      "phase": "PUSH",
+      "sanitized": true,
+      "sha256": "9d8abdf69291f6edb5c6ebf1b5112eaeff012715be82e089e7315e7938f08b71",
+      "taskCorrelated": true
+    },
+    {
+      "bytes": 82804,
+      "file": "transport-done-panel.png",
+      "humanReviewRequired": true,
+      "phase": "DONE",
+      "sanitized": true,
+      "sha256": "69c0794ed3edb1a81f64fa43a9e44a204ce1d70c533d6ac9c48e124d85a2a213",
+      "taskCorrelated": true
+    }
+  ],
+  "cleanup": {
+    "browserExited": true,
+    "cdpPortReleased": true,
+    "complete": true,
+    "containerAbsent": true,
+    "networkAbsent": true,
+    "profileRemoved": true,
+    "rosObserverExited": true,
+    "sessionReleased": true,
+    "viewerCloseCommandTerminal": true,
+    "viewerClosed": true,
+    "viewerLeaseInactive": true,
+    "viewerLeaseRevoked": true,
+    "viewerPublisherAbsent": true,
+    "viewerRuntimeAbsent": true,
+    "workspaceReleased": true
+  },
+  "completedAt": "2026-07-29T03:20:06.509160Z",
+  "container": {
+    "exclusiveNetworkAttachment": true,
+    "imageRevisionMatches": true,
+    "immutableImage": true,
+    "internalNetwork": true,
+    "managedContainer": true,
+    "privateEndpoint": true,
+    "running": true,
+    "workerLabelMatchesPrivateNetwork": true
+  },
+  "deploymentCommit": "c3866d553015463e561b636f27860a2b8472b7fe",
+  "interrupted": false,
+  "productionExecution": true,
+  "scenario": {
+    "freshSessionRequired": true,
+    "robotCount": 4,
+    "target": {
+      "planner": "grf",
+      "x": -3.0,
+      "y": -4.0
+    },
+    "taskType": "CollaborativeTransport"
+  },
+  "schemaVersion": 1,
+  "session": {
+    "activeRobots": 4,
+    "authoritativeRoster": {
+      "distinctRuntimeIds": 4,
+      "endpointRead": true,
+      "exactCount": 4
+    },
+    "fresh": true,
+    "ready": true,
+    "requestedRobots": 4
+  },
+  "start": {
+    "barrier": {
+      "centerHitTest": true,
+      "enabled": true,
+      "overlayFree": true,
+      "validationClear": true
+    },
+    "clickToRequestCausal": true,
+    "commandType": "StartTask",
+    "delayedRereadStable": true,
+    "fields": [
+      {
+        "constraintsVerified": true,
+        "label": "Destino X (m)",
+        "nativeNumberInput": true,
+        "value": -3.0
+      },
+      {
+        "constraintsVerified": true,
+        "label": "Destino Y (m)",
+        "nativeNumberInput": true,
+        "value": -4.0
+      }
+    ],
+    "gesture": {
+      "contextReplaced": false,
+      "description": "button Iniciar tarea",
+      "fallbackUsed": false,
+      "received": true,
+      "trusted": true
+    },
+    "httpAttempts": 1,
+    "idempotency": {
+      "fingerprint": "5dee3134d1811f20",
+      "rawKeyExported": false,
+      "sameKeyAcrossRetries": true
+    },
+    "initialCommandState": "Pending",
+    "logicalStartCommands": 1,
+    "logicalTaskRuns": 1,
+    "physicalClicks": 1,
+    "privateCorrelation": {
+      "containerStartedBeforeGesture": true,
+      "privateCommandTaskCorrelation": true,
+      "privateTaskIdMatched": true,
+      "taskAndCommandCreatedInPostWindow": true,
+      "workerAndContainerPrivatelyCorrelated": true
+    },
+    "retryableSerializationConflicts": 0,
+    "selectedCard": "CollaborativeTransport",
+    "targetAccepted": true,
+    "taskCommandCorrelation": true,
+    "trustedPrimaryClick": true
+  },
+  "startedAt": "2026-07-29T03:17:09.200473Z",
+  "success": true,
+  "task": {
+    "authoritativeRosterStable": true,
+    "collisionFailureBasis": "terminal success, empty task errors, and no nonzero explicit unexpected-contact field",
+    "discovery": {
+      "announced": true,
+      "completeRecipientFleet": true,
+      "event": "payload_found",
+      "finderInAuthoritativeRoster": true,
+      "notifiedTeammates": 3,
+      "taskCorrelated": true
+    },
+    "done": true,
+    "noUnexpectedCollisionOrFailure": true,
+    "outcome": "Succeeded",
+    "persistedApiObserver": {
+      "bounded": true,
+      "pollIntervalMs": 100
+    },
+    "persistedReads": 2,
+    "phasesObserved": [
+      "SEARCH",
+      "APPROACH",
+      "PUSH",
+      "DONE"
+    ],
+    "privateRosObservation": {
+      "criticalEvidenceRetainedUntilDone": true,
+      "discoveryDuringApproach": true,
+      "push": {
+        "exactCurrentPusherRoster": true,
+        "progressGain": 0.331,
+        "sustainedSamples": 19,
+        "sustainedSeconds": 5.538
+      },
+      "sameManagedWorkerContainer": true,
+      "samePrivateTask": true,
+      "search": {
+        "allRobotsSearching": true,
+        "minimumTravelMetres": 0.015,
+        "movementDirectlyObserved": true,
+        "robotsAboveMinimumTravel": 4
+      },
+      "strictAutomaton": [
+        "SEARCH",
+        "APPROACH",
+        "PUSH",
+        "DONE"
+      ]
+    },
+    "push": {
+      "allPushersConfirmed": true,
+      "exactAuthoritativeRoster": true,
+      "usefulContributors": 4
+    },
+    "search": {
+      "activeSearchingRobots": 4,
+      "allRobotsSearching": true,
+      "movementClaimedByPersistedApi": false
+    },
+    "statesObserved": [
+      "Queued",
+      "Accepted",
+      "Running",
+      "Completed"
+    ],
+    "target": {
+      "planner": "grf",
+      "x": -3.0,
+      "y": -4.0
+    },
+    "terminalState": "Completed",
+    "workerCommandConsumptionBasis": "persisted Accepted and Running reports",
+    "workerCommandConsumptionProven": true
+  },
+  "viewer": {
+    "activeBeforeTask": true,
+    "decodedFpsBeforeTask": 31.2,
+    "interactive": true,
+    "live": true,
+    "privateLeasePreserved": true,
+    "publisherCommandCompleted": true,
+    "runningMeasurement": {
+      "decodedFps": 30.144973523988185,
+      "decodedFrames": 152,
+      "droppedFrames": 0,
+      "droppedRatio": 0.0,
+      "elapsedSeconds": 5.0422999999998135,
+      "maximumDroppedRatio": 0.1,
+      "measuredWhileRunning": true,
+      "measurementSeconds": 5.0,
+      "mediaProgressing": true,
+      "mediaTimeAdvancedSeconds": 5.042508999999999,
+      "minimumAcceptedFps": 27.0,
+      "presentedFps": 30.144973523988185,
+      "presentedFrames": 152,
+      "taskCorrelated": true
+    },
+    "sessionBoundRuntime": true,
+    "taskVisualChange": {
+      "averageHashDistance": 0,
+      "changedPixelRatio": 0.000813,
+      "correlatedFrames": 2,
+      "differentFrames": true,
+      "minimumChangedPixelRatio": 0.0001,
+      "samePrivateTask": true
+    },
+    "transport": "HLS"
+  }
+}

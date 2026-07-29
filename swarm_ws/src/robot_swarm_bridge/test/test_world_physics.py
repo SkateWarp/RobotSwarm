@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Checks the simulation-speed contract shared by the swarm worlds."""
 
+import json
 import math
 import unittest
 import xml.etree.ElementTree as ET
@@ -8,6 +9,7 @@ from pathlib import Path
 
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
+REPOSITORY_DIR = Path(__file__).resolve().parents[4]
 WORLDS_DIR = PACKAGE_DIR / 'worlds'
 LAUNCH_DIR = PACKAGE_DIR / 'launch'
 MODELS_DIR = PACKAGE_DIR / 'models'
@@ -70,6 +72,91 @@ class WorldPhysicsTests(unittest.TestCase):
         self.assertIsNotNone(tf_setting)
         self.assertEqual('bool', tf_setting.get('type'))
         self.assertEqual('$(arg publish_robot_tf)', tf_setting.get('value'))
+
+    def test_worker_and_ros_share_the_thirty_second_fail_safe_budget(self):
+        root = ET.parse(LAUNCH_DIR / 'swarm_main.launch').getroot()
+        arguments = {
+            argument.get('name'): argument.get('default')
+            for argument in root.findall('./arg')
+        }
+        ros_watchdog_seconds = float(
+            arguments['control_heartbeat_timeout']
+        )
+        heartbeat_max_future_seconds = float(
+            arguments['control_heartbeat_max_future']
+        )
+        watchdog_startup_grace_seconds = float(
+            arguments['control_watchdog_startup_grace']
+        )
+        ros_watchdog_poll_seconds = float(
+            arguments['control_watchdog_check_period']
+        )
+
+        worker_config = json.loads(
+            (REPOSITORY_DIR / 'SwarmWorker' / 'appsettings.json').read_text(
+                encoding='utf-8'
+            )
+        )['Worker']
+        backend_lease_seconds = float(
+            worker_config['ControlHeartbeatBackendLeaseSeconds']
+        )
+        heartbeat_interval_seconds = float(
+            worker_config['ControlHeartbeatIntervalSeconds']
+        )
+        heartbeat_discovery_timeout_seconds = 1.0
+        heartbeat_publish_timeout_seconds = 5.0
+        heartbeat_deadline_guard_seconds = 0.25
+        declared_stop_seconds = float(
+            worker_config['BackendDisconnectEmergencyStopSeconds']
+        )
+
+        self.assertEqual(14.0, backend_lease_seconds)
+        self.assertEqual(2.0, heartbeat_interval_seconds)
+        self.assertEqual(1.0, heartbeat_discovery_timeout_seconds)
+        self.assertEqual(5.0, heartbeat_publish_timeout_seconds)
+        self.assertEqual(10.0, ros_watchdog_seconds)
+        self.assertEqual(15.0, heartbeat_max_future_seconds)
+        self.assertEqual(15.0, watchdog_startup_grace_seconds)
+        self.assertEqual(0.5, ros_watchdog_poll_seconds)
+        self.assertEqual(30.0, declared_stop_seconds)
+        worst_case_stop_seconds = (
+            backend_lease_seconds
+            - heartbeat_deadline_guard_seconds
+            + ros_watchdog_seconds
+            + ros_watchdog_poll_seconds
+        )
+        self.assertEqual(24.25, worst_case_stop_seconds)
+        self.assertLessEqual(worst_case_stop_seconds, declared_stop_seconds)
+        self.assertGreater(
+            heartbeat_max_future_seconds,
+            backend_lease_seconds,
+        )
+        self.assertLess(
+            heartbeat_interval_seconds
+            + heartbeat_discovery_timeout_seconds
+            + heartbeat_publish_timeout_seconds,
+            ros_watchdog_seconds,
+        )
+
+        dockerfile = (REPOSITORY_DIR / 'swarm_ws' / 'Dockerfile').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn('coreutils', dockerfile)
+
+        orchestrator = root.find("./node[@name='task_orchestrator']")
+        self.assertIsNotNone(orchestrator)
+        forwarded_params = {
+            param.get('name'): param.get('value')
+            for param in orchestrator.findall('./param')
+        }
+        self.assertEqual(
+            '$(arg control_heartbeat_max_future)',
+            forwarded_params['control_heartbeat_max_future'],
+        )
+        self.assertEqual(
+            '$(arg control_watchdog_startup_grace)',
+            forwarded_params['control_watchdog_startup_grace'],
+        )
 
     def test_ode_solver_uses_a_practical_iteration_count(self):
         physics = self._physics('swarm_arena.world')
