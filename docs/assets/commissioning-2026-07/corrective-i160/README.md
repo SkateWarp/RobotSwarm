@@ -91,5 +91,37 @@ La misma página a 360×640 tiene SHA-256
 ![Registro candidato local a 360 px](registro-candidato-local-360.png)
 
 Estas tres capturas son evidencia previa al despliegue. No se presentan como
-si procedieran de `rs.zerav.la`; la aceptación productiva se mantiene como un
-gate separado.
+si procedieran de `rs.zerav.la`.
+
+## Cierre productivo
+
+La única ejecución de CI de `main`, #30466968296, aprobó frontend, backend y
+ROS. Cloudflare Pages publicó el mismo commit y el workflow automático
+#30467358747 desplegó
+`swarmbackend:f60efc1f6a15a4a3f3cb244c7a396da852c15783`. No se despachó el
+workflow GPU. El contenedor quedó `running/healthy`, `/health` respondió
+`Healthy` y la inspección limitada confirmó
+`Accounts__PublicRegistrationEnabled=true`.
+
+Después se repitió el recorrido en Chrome visible contra `rs.zerav.la`. El ojo
+y el icono de correo coincidieron en `x=616`, el enlace conservó 24 px de alto,
+`/register` mostró cuatro campos y no hubo desbordamiento horizontal. Se creó
+una sola cuenta temporal mediante un clic físico confiable, el backend forzó
+el rol `User` y el login terminó con una sesión JWT válida. La propia sesión
+desactivó la cuenta con HTTP 200; el mismo token recibió 401 inmediatamente
+después. Una lectura PostgreSQL `READ ONLY` confirmó `Enabled=false` y cero
+refresh tokens activos. El perfil Chrome y el puerto CDP se retiraron.
+
+El [resumen estructurado](postdeploy-summary.json) conserva únicamente estados
+y métricas; no incluye correo, contraseña, token, nombre personal ni
+identificador de la cuenta temporal.
+
+La captura productiva del login tiene SHA-256
+`0b8281326c214fcb0b977506ee0b7c9cab2421c2d4cba1bd2b48c38434fb9a11`.
+
+![Login productivo después de I-160](login-despues-f60efc1.png)
+
+La captura productiva del formulario de registro tiene SHA-256
+`2edac2551c684cdb710a60a03bad7a97bdf86218e1706d3e272c20e56fa9fc34`.
+
+![Registro productivo después de I-160](registro-despues-f60efc1.png)

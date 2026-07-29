@@ -1,0 +1,42 @@
+{
+  "capturedAtUtc": "2026-07-29T15:47:43Z",
+  "deploymentCommit": "f60efc1f6a15a4a3f3cb244c7a396da852c15783",
+  "rollbackCommit": "3286cdcf5211309b14e49116d2f3b597ea53268d",
+  "github": {
+    "ciRunId": 30466968296,
+    "ciConclusion": "success",
+    "backendDeployRunId": 30467358747,
+    "backendDeployConclusion": "success",
+    "cloudflarePagesConclusion": "success",
+    "gpuDeploymentTriggered": false
+  },
+  "backend": {
+    "image": "swarmbackend:f60efc1f6a15a4a3f3cb244c7a396da852c15783",
+    "containerStatus": "running",
+    "containerHealth": "healthy",
+    "publicHealth": "Healthy",
+    "publicRegistrationEnabled": true
+  },
+  "visibleChrome": {
+    "loginPath": "/login",
+    "registerPath": "/register",
+    "registerFieldCount": 4,
+    "passwordEyeInsideField": true,
+    "passwordEyeCenterX": 616,
+    "emailAdornmentCenterX": 616,
+    "registerLinkHeightPx": 24,
+    "horizontalOverflow": false,
+    "trustedClicks": true,
+    "profileRemoved": true,
+    "debugPortReleased": true
+  },
+  "temporaryAccount": {
+    "created": true,
+    "assignedRole": "User",
+    "loginSucceeded": true,
+    "deleteStatus": 200,
+    "tokenAfterDeleteStatus": 401,
+    "databaseEnabledAfterDelete": false,
+    "activeRefreshTokensAfterDelete": 0
+  }
+}

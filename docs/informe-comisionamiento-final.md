@@ -2348,9 +2348,11 @@ coincidieron en `x=616`; el ojo terminó en `x=638` dentro del campo, cuyo borde
 era `x=640`. La vista 360×640 informó 345 px de cliente y documento, sin
 desbordamiento horizontal. La [evidencia saneada de I-160](assets/commissioning-2026-07/corrective-i160/README.md)
 separa expresamente la captura recibida de las tres imágenes del candidato
-local. La prueba productiva requiere activar la variable protegida antes del
-único workflow, crear una cuenta temporal desde el navegador y desactivarla al
-cerrar.
+local. El cierre productivo sobre `f60efc1` aprobó el único CI, Cloudflare y el
+workflow backend sin despachar GPU. Chrome visible creó una cuenta temporal
+con rol forzado `User`, inició sesión y la desactivó con HTTP 200; el token
+quedó rechazado con 401. PostgreSQL confirmó `Enabled=false` y cero refresh
+tokens activos. El perfil y el puerto efímeros se retiraron.
 
 ## 5. Registro cronológico de cambios y pruebas
 
@@ -2938,7 +2940,7 @@ la sección 7 y en las incidencias I-136–I-159.
 | I-151 | React creó una tarea y comando válidos, pero `createdAt` persistido llegó sin zona | Convertidor UTC común para Minimal API, controladores y SignalR; regresión con el `Unspecified` real de PostgreSQL | Cerrada en `c3866d5`: 184/184 fechas públicas con `Z` y React N=4 completo |
 | I-152 | El observador privado conservaba cada `/transport/status` y agotaba 8 MiB antes de leer `DONE` | Muestreo 4 Hz; cambios de fase y terminales inmediatos; campos redundantes retirados; quinto argumento cubierto | 45/45 focales, 255/255 contratos y React N=4 productivo completo |
 | I-159 | El preflight leía el reloj antes del lock y podía comparar una muestra nueva con un instante anterior | Snapshot, diagnóstico y reloj implícito bajo la misma sección crítica; `now` explícito conserva el rechazo de futuro | Antes: N=2 rechazado a −0,001 s sobre `8c643a3`; después local: lifecycle 251/251 y ROS 669/669; falta repetición física |
-| I-160 | `edge="end"` desplazaba el ojo y el registro estaba deshabilitado en tres fronteras | Alineación histórica, ruta y formulario seguros, contratos comunes y bandera fail-closed entregada por workflow | 191/191 frontend, 276/276 backend, build y Chrome visible aprobados; falta alta temporal postdeploy y su desactivación |
+| I-160 | `edge="end"` desplazaba el ojo y el registro estaba deshabilitado en tres fronteras | Alineación histórica, ruta y formulario seguros, contratos comunes y bandera fail-closed entregada por workflow | Cerrada en `f60efc1`: CI, Cloudflare y backend aprobados; alta/login `User`, desactivación, 401 posterior y base limpia comprobados |
 | 2026-07-22 | Freeze correctivo exacto | Imagen `6f1af927…4cb5` sin fuentes montadas, N=3/N=10 visibles con D3D12/NVIDIA | 58,493/57,507 FPS, 75 s activos, cero colisiones; resumen saneado versionado |
 
 El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre la base existente; no se presenta como captura ni como sustituto del CRUD visible. No se generó una PNG dedicada para I-088–I-091. Las capturas históricas de las Figuras 1–10 permanecen sin cambios.
@@ -2950,7 +2952,7 @@ El preflight textual de I-090 es una evidencia «antes» de solo lectura sobre l
 | Figura 13 | Lista de cuentas sin estado ni acciones claras | Filtros, cuentas activas/inactivas y diálogo de creación/edición | Diálogo saneado versionado bajo `recovery-20260728/`; reactivación integrada y desplegada en `8c643a3` |
 | Figura 14 | Espacio de simulación sin jerarquía operacional | Etapas sesión→visor→tarea y resultado terminal visible | Flujo integral observado sobre `fbef23e`; falta seleccionar y versionar la captura |
 | Figura 15 | Una sola vista o un escritorio compartido | Dos ventanas Chrome reales con sesiones y flujos privados diferentes | Cerrada: PNG saneada de rosters 3/7 y displays privados versionada bajo `final-8c643a3/` |
-| Figura 16 | Ojo desplazado y login sin acceso al alta | Ojo alineado, enlace de registro y formulario responsive | Comparación local saneada bajo `corrective-i160/`; falta captura productiva posterior al despliegue |
+| Figura 16 | Ojo desplazado y login sin acceso al alta | Ojo alineado, enlace de registro y formulario responsive | Cerrada: comparación local y dos capturas productivas saneadas bajo `corrective-i160/` |
 | Figuras 16–18 | Escena previa a cada tarea | Formación, seguimiento y transporte final ejecutados desde el frontend | Matriz física aprobada; búsqueda, PUSH y DONE de React N=4 versionados bajo `final-c3866d5/` |
 | Figura 19 | Historial heredado vacío o basado en `TaskLog`, sin exponer datos privados | Historial `TaskRun` del propietario, con filtros, resultado y diálogo de detalle | Recorridos User y Admin aprobados; captura User bajo `final-c3866d5/` y reporte Admin saneado bajo `recovery-20260728/` |
 | Figura 20 | «Tareas» con crear/eliminar o campos que no corresponden al backend | «Plantillas de tareas» con catálogo real y edición `GET`/`PUT` de administrador | Captura Admin saneada y versionada bajo `recovery-20260728/` |
