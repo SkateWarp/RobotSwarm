@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: check-project-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -126,6 +131,9 @@ jobs:
           python3 scripts/acceptance/test_transport_ui_acceptance_contract.py
           python3 scripts/acceptance/test_visible_acceptance_contract.py
           python3 scripts/acceptance/test_sections_acceptance_contract.py
+          python3 -m py_compile deploy/backend/test-recover-production-startup.py
+          python3 deploy/backend/test-recover-production-startup.py
+          bash -n deploy/backend/recover-production-startup.sh
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
@@ -429,6 +437,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: SwarmFrontend
@@ -534,6 +543,7 @@ jobs:
 
   ros:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 

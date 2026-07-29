@@ -1,0 +1,826 @@
+{
+  "account": "A",
+  "browser": {
+    "product": "Chrome/150.0.7871.187",
+    "visible": true
+  },
+  "cases": [
+    {
+      "activeScenarioGuiProbe": {
+        "adapter": "D3D12 (NVIDIA GeForce RTX 3080)",
+        "averageFps": 46.737,
+        "capturePreserved": true,
+        "caseCompleted": true,
+        "configuredRenderRateFps": 50.0,
+        "exitCode": 0,
+        "file": "01-formation_triangle_n3-active-scenario-gui-report.json",
+        "minimumFps": 45.0,
+        "minimumRealTimeFactor": 2.9,
+        "nvidiaD3d12": true,
+        "officialPreflight": true,
+        "phase": "duringScenarioProcess",
+        "postRenderFps": 50.03,
+        "realTimeFactor": 2.995,
+        "samePrivateDisplayAndMaster": true,
+        "sampleSeconds": 5.0,
+        "scenarioGatePassed": true,
+        "scenarioProcessActiveThroughout": true,
+        "scope": "officialGazeboGuiPreflightUnderScenarioLoad",
+        "visualMotionMeasured": false,
+        "warmupSeconds": 2.0
+      },
+      "activeScenarioOverlap": {
+        "clock": "time.monotonic",
+        "probeActiveThroughoutVideo": true,
+        "probeDurationSeconds": 23.745376889999534,
+        "probeEndBeforeScenarioSeconds": 51.49147972399987,
+        "probeStartAfterTaskActiveConfirmationSeconds": 0.002583240000603837,
+        "probeStartOffsetFromScenarioSeconds": 13.854402822998964,
+        "scenarioProbeOverlapSeconds": 23.745376889999534,
+        "scenarioProcessActiveThroughoutProbe": true,
+        "scenarioProcessActiveThroughoutVideo": true,
+        "taskActiveConfirmationAfterProbeSeconds": 1.7205598580003425,
+        "taskActiveConfirmedAfterProbe": true,
+        "taskActiveConfirmedBeforeProbe": true,
+        "taskActivityAfterProbe": {
+          "behavior": "formation",
+          "behaviorPhase": "",
+          "behaviorState": "moving",
+          "completeFormation": true,
+          "confirmed": true,
+          "taskStatus": "running"
+        },
+        "taskActivityBeforeProbe": {
+          "behavior": "formation",
+          "behaviorPhase": "",
+          "behaviorState": "moving",
+          "completeFormation": true,
+          "confirmed": true,
+          "taskStatus": "running"
+        },
+        "taskActivityCorrelation": "independentRosTaskAndBehaviorStatus",
+        "videoDurationSeconds": 5.036794984000153,
+        "videoEndBeforeScenarioSeconds": 70.18209198799923,
+        "videoStartOffsetFromScenarioSeconds": 13.872372464998989
+      },
+      "activeScenarioVideo": {
+        "activeProbeThroughout": true,
+        "decodedFps": 30.008545479847516,
+        "decodedFrames": 151,
+        "droppedFrames": 0,
+        "droppedRatio": 0.0,
+        "elapsedSeconds": 5.03189999999851,
+        "getVideoPlaybackQuality": true,
+        "maximumDroppedRatio": 0.1,
+        "measurementSeconds": 5.0,
+        "mediaProgressing": true,
+        "mediaTimeAdvancedSeconds": 5.031925999999999,
+        "minimumAcceptedFps": 27.0,
+        "phase": "duringActiveScenarioAndGuiProbe",
+        "presentedFps": 30.20727756911803,
+        "presentedFrames": 152,
+        "requestVideoFrameCallback": true,
+        "scenarioProcessActiveThroughout": true,
+        "scope": "liveHlsUnderScenarioLoad",
+        "targetFps": 30.0,
+        "visualMotionMeasured": false
+      },
+      "behavior": "formation",
+      "browserScreenshot": {
+        "bytes": 146894,
+        "file": "01-formation_triangle_n3-browser.png",
+        "sanitized": true,
+        "sha256": "1dd267ac0e9b4c90b52017e6eb1339d1ffdb13e5f3b7ae1a6dbb0e67f6949ec1"
+      },
+      "cleanup": {
+        "activeProbeProcessAbsent": true,
+        "complete": true,
+        "containerAbsent": true,
+        "leaseBindingKnown": true,
+        "leaseRuntimeAbsent": true,
+        "networkAbsent": true,
+        "probeWorkspaceReleased": true,
+        "resourceIdentityKnown": true,
+        "sessionStopped": true,
+        "viewerClosed": true,
+        "viewerPublisherAbsent": true,
+        "workspaceReleased": true
+      },
+      "container": {
+        "exclusiveNetworkAttachmentVerified": true,
+        "imagePinned": true,
+        "imageRevision": "c3866d553015463e561b636f27860a2b8472b7fe",
+        "imageVersion": "c3866d553015463e561b636f27860a2b8472b7fe+a2859ad62dcc",
+        "managed": true,
+        "privateMasterBindingReady": true,
+        "privateNetworkVerified": true,
+        "running": true
+      },
+      "finishedAt": "2026-07-29T04:12:01Z",
+      "hashes": {
+        "activeScenarioGuiReportSha256": "edfc29b6594c2e18ffa83cf3b5b88d8a609b8699491748ec98fe3e38c71313bb",
+        "activeScenarioVideoMetricsSha256": "3c23c2c07d5b95d83fe8674da627e3b7ec3a6a7d9cfcd850b1cb619374cfe210",
+        "browserPngSha256": "1dd267ac0e9b4c90b52017e6eb1339d1ffdb13e5f3b7ae1a6dbb0e67f6949ec1",
+        "evidenceBundleSha256": "362641e71dc1ef46da6a6b89ee326cb8ec1875a06d4d38595670a7b9f3502d40",
+        "preflightScriptSha256": "bf727277a869dbbb2442e4b0cc5b16c5a234e6e004adbafcf65f54e7b7c82551",
+        "probePluginSha256": "46cbdf7b7d1a47d0160b517647bbd228907c028e9dbf0c8d2bd7b6de857ef7e4",
+        "resultJsonSha256": "0851aed94d2721fab258c857a4b29293bdff207dbf6625278ba8f6b1826cf8a8",
+        "summaryJsonSha256": "ea91fa682527cf21cc3ff85737ef00e0d5cde7aae81e1f8434161322e414b3cd",
+        "viewerStartupSceneReportSha256": "e047ab3b67fa2e7940e8e952d2527dc7641329aa926f3f2804de330257aa5805"
+      },
+      "postScenarioFullRoster": {
+        "expectedRobots": 3,
+        "gazeboAfterScenario": {
+          "exactRoster": true,
+          "expectedRobots": 3,
+          "observedRobotModels": 3,
+          "source": "/gazebo/model_states"
+        },
+        "gazeboBeforeScenario": {
+          "exactRoster": true,
+          "expectedRobots": 3,
+          "observedRobotModels": 3,
+          "source": "/gazebo/model_states"
+        },
+        "phase": "afterTaskCleanupBeforeSessionCleanup",
+        "retainedAcrossScenario": true,
+        "uiActiveRobots": 3
+      },
+      "robotCount": 3,
+      "ros": {
+        "exitCode": 0,
+        "fleetDeletionRequestedByRunner": false,
+        "minimumRealTimeFactor": 2.9,
+        "observedRealTimeFactor": 2.9955,
+        "protocolParsed": true,
+        "result": {
+          "acceptance_thresholds": {
+            "follow_lap_timeout_wall_s": null,
+            "linear_acceleration_measurement_window_s": 0.06,
+            "maximum_follow_adjacent_spacing_error_m": 0.25,
+            "maximum_formation_target_error_m": 0.12,
+            "maximum_linear_acceleration_mps2": 1.0,
+            "maximum_linear_speed_mps": 0.35,
+            "minimum_boundary_clearance_m": 0.1,
+            "minimum_follow_active_wall_seconds": null,
+            "minimum_follow_completed_laps": null,
+            "minimum_follow_robot_travel_m": 0.25,
+            "minimum_moving_formation_wall_seconds": 75.0,
+            "minimum_real_time_factor": 2.9,
+            "minimum_robot_center_distance_m": 0.24,
+            "minimum_static_obstacle_clearance_m": 0.13
+          },
+          "behavior": "formation",
+          "behavior_status": {
+            "formation_type": "triangle",
+            "maximum_position_error": 0.0934,
+            "movement_mode": "moving",
+            "paused": false,
+            "robot_assignments": {
+              "tb3_0": {
+                "slot": 1,
+                "target_x": -1.465651152271819,
+                "target_y": 0.1776099361336556
+              },
+              "tb3_1": {
+                "slot": 2,
+                "target_x": -0.8156368517999018,
+                "target_y": 0.1776099361336556
+              },
+              "tb3_2": {
+                "slot": 0,
+                "target_x": -1.1406440020358604,
+                "target_y": 0.7405223203423359
+              }
+            },
+            "robot_count": 3,
+            "routing": {
+              "active_batch": [],
+              "batch_count": 2,
+              "batch_index": 2,
+              "last_stall": null,
+              "live_replan_attempts": 0,
+              "progress_threshold": 0.2,
+              "stall_timeout": 20.0
+            },
+            "settled_for": 225.5,
+            "stale_odometry": [],
+            "state": "moving",
+            "task_id": "matrix-[ID REDACTED]",
+            "waiting_for_odometry": []
+          },
+          "cleanup_failures": [],
+          "collision_count_delta": 0,
+          "collision_episode_attribution": {
+            "aggregate_collision_count_delta": 0,
+            "aggregate_count_matched": true,
+            "attribution_corroborated": true,
+            "baseline_sequence": 0,
+            "correlated_status_samples": 2484,
+            "docking_window_episode_count": 0,
+            "duplicate_event_count": 0,
+            "episode_count_by_phase": {},
+            "episode_count_by_robot": {},
+            "episode_records": [],
+            "event_stream_version": 1,
+            "last_sequence": 0,
+            "missing_robot_ids": [],
+            "observed_episode_count": 0,
+            "pre_docking_episode_count": 0,
+            "protocol_errors": [],
+            "reason": "sealed rising edges matched the authoritative aggregate episode delta",
+            "robots_with_observed_episodes": [],
+            "source": "/swarm/status collision_events.events sealed rising edges",
+            "temporal_attribution_complete": true,
+            "transport_docking_phases": [
+              "DONE",
+              "PUSH"
+            ],
+            "unattributed_episode_count": 0
+          },
+          "contact_episode_classification": {
+            "classification": "none",
+            "classification_basis": "filtered_safety_contact_counter",
+            "classification_is_inferred": true,
+            "classified_expected_contact_count_delta": 0,
+            "classified_unexpected_contact_count_delta": 0,
+            "clearance_limits_m": {
+              "minimum_boundary_clearance_m": 0.1,
+              "minimum_declared_chain_center_distance_m": 0.12,
+              "minimum_static_obstacle_clearance_m": 0.13,
+              "minimum_unexpected_robot_center_distance_m": 0.24
+            },
+            "clearance_measurements_m": {
+              "minimum_boundary_clearance_m": 3.5774,
+              "minimum_declared_chain_center_distance_m": null,
+              "minimum_static_obstacle_clearance_m": 0.3604,
+              "minimum_unexpected_robot_center_distance_m": 0.6143
+            },
+            "counter_metric": "per_robot_geometric_contact_episodes",
+            "crossed_clearance_limits": [],
+            "expected_contact_robots": [],
+            "hard_failure": false,
+            "missing_clearance_measurements": [],
+            "missing_expected_contact_robots": [
+              "tb3_0",
+              "tb3_1",
+              "tb3_2"
+            ],
+            "pre_docking_episode_count": 0,
+            "raw_collision_count_delta": 0,
+            "reasons": [
+              "the filtered safety-contact counter did not increase"
+            ],
+            "temporal_attribution_complete": true,
+            "temporal_attribution_used": true,
+            "transport_docking_phases": [
+              "DONE",
+              "PUSH"
+            ],
+            "unexpected_robot_pair_measurement_required": true
+          },
+          "expected_contact_count_delta": 0,
+          "failures": [],
+          "formation_active_window": {
+            "complete_fleet_required": true,
+            "completed": true,
+            "fresh_status_samples": 1494,
+            "live_safety_signals_monitored": true,
+            "observed_wall_seconds": 75.0322,
+            "requested_wall_seconds": 75.0,
+            "state": "moving"
+          },
+          "metrics": {
+            "correlated_behavior_samples": 10288,
+            "follow_chain": [
+              "tb3_0",
+              "tb3_1",
+              "tb3_2"
+            ],
+            "follow_final_adjacent_spacing_error_summary_m": {
+              "max": null,
+              "mean": null,
+              "p95": null,
+              "samples": 0
+            },
+            "follow_final_adjacent_spacing_m": {
+              "tb3_0->tb3_1": 0.6752,
+              "tb3_1->tb3_2": 0.6548
+            },
+            "follow_target_spacing_m": null,
+            "formation_final_target_error_m": {
+              "tb3_0": 0.0672,
+              "tb3_1": 0.0921,
+              "tb3_2": 0.0917
+            },
+            "formation_final_target_error_summary_m": {
+              "max": 0.0921,
+              "mean": 0.0837,
+              "p95": 0.0921,
+              "samples": 3
+            },
+            "formation_missing_final_targets": [],
+            "instantaneous_linear_acceleration_mps2": {
+              "max": 0.9435,
+              "mean": 0.0332,
+              "p95": 0.1261,
+              "samples": 30945
+            },
+            "linear_acceleration_mps2": {
+              "max": 0.7242,
+              "mean": 0.0145,
+              "p95": 0.0445,
+              "samples": 30939
+            },
+            "linear_speed_mps": {
+              "max": 0.223,
+              "mean": 0.0127,
+              "p95": 0.0146,
+              "samples": 30948
+            },
+            "maximum_instantaneous_acceleration_event": {
+              "dt_s": 0.024,
+              "phase": null,
+              "previous_velocity_mps": [
+                0.1703,
+                0.0157
+              ],
+              "robot": "tb3_1",
+              "sim_time_s": 156.048,
+              "value_mps2": 0.9435,
+              "velocity_mps": [
+                0.1478,
+                0.0134
+              ]
+            },
+            "maximum_linear_acceleration_event": {
+              "phase": null,
+              "previous_velocity_mps": [
+                0.0245,
+                -0.0003
+              ],
+              "robot": "tb3_1",
+              "sim_time_s": 154.992,
+              "value_mps2": 0.7242,
+              "velocity_mps": [
+                0.0767,
+                -0.0004
+              ],
+              "window_s": 0.072
+            },
+            "minimum_boundary_clearance_m": 3.5774,
+            "minimum_declared_chain_center_distance_m": null,
+            "minimum_declared_chain_center_event": null,
+            "minimum_declared_chain_center_pair": null,
+            "minimum_robot_center_distance_m": 0.6143,
+            "minimum_robot_center_pair": [
+              "tb3_1",
+              "tb3_2"
+            ],
+            "minimum_static_obstacle_clearance_m": 0.3604,
+            "minimum_static_obstacle_pair": [
+              "tb3_2",
+              "wall_1"
+            ],
+            "minimum_unexpected_robot_center_distance_m": 0.6143,
+            "minimum_unexpected_robot_center_event": {
+              "distance_m": 0.6143,
+              "pair": [
+                "tb3_1",
+                "tb3_2"
+              ],
+              "phase": null,
+              "sim_time_s": 315.6
+            },
+            "minimum_unexpected_robot_center_pair": [
+              "tb3_1",
+              "tb3_2"
+            ],
+            "model_samples": 10316,
+            "object_best_goal_distance_m": null,
+            "object_displacement_m": 0.0,
+            "object_final_goal_distance_m": null,
+            "object_final_xy": [
+              -3.0,
+              -3.0
+            ],
+            "object_final_yaw_rad": -0.0,
+            "object_goal_progress_efficiency": null,
+            "object_goal_progress_m": null,
+            "object_initial_goal_distance_m": null,
+            "object_initial_xy": [
+              -3.0,
+              -3.0
+            ],
+            "object_initial_yaw_rad": -0.0,
+            "object_path_length_m": 0.0,
+            "real_time_factor": 2.9955,
+            "robot_displacement_m": {
+              "tb3_0": 1.1769,
+              "tb3_1": 1.4511,
+              "tb3_2": 0.6531
+            },
+            "robot_travel_m": {
+              "tb3_0": 3.1556,
+              "tb3_1": 2.8003,
+              "tb3_2": 3.4908
+            },
+            "simulated_duration_s": 248.472,
+            "transport_active_push_latched": false,
+            "transport_all_nominal_pace_fraction": 0.0,
+            "transport_all_nominal_pace_samples": 0,
+            "transport_all_nominal_pace_warning": true,
+            "transport_all_reference_pace_fraction": 0.0,
+            "transport_all_reference_pace_samples": 0,
+            "transport_all_useful_batch_fraction": 0.0,
+            "transport_all_useful_fraction": 0.0,
+            "transport_all_useful_samples": 0,
+            "transport_discovery_response": {
+              "announced_sim_time_s": null,
+              "event_id": null,
+              "finder": null,
+              "minimum_payload_root_path_length_m": 0.03,
+              "minimum_rendezvous_path_length_m": 0.1,
+              "minimum_search_path_length_m": 0.05,
+              "missing_notice_recipients": [
+                "tb3_0",
+                "tb3_1",
+                "tb3_2"
+              ],
+              "missing_status_acknowledgements": [],
+              "motion_detection_distance_m": 0.01,
+              "moving_speed_threshold_mps": 0.02,
+              "notice_observed": false,
+              "notice_recipients": [],
+              "notified_robots": [],
+              "notified_robots_below_required_travel": [],
+              "observed_sim_time_s": null,
+              "peak_simultaneous_mover_fraction": 0.0,
+              "peak_simultaneous_mover_names": [],
+              "peak_simultaneous_movers": 0,
+              "peak_simultaneous_rendezvous_mover_names": [],
+              "peak_simultaneous_rendezvous_movers": 0,
+              "peak_simultaneous_search_movers": 0,
+              "rendezvous_motion_samples": 0,
+              "robots": {
+                "tb3_0": {
+                  "discovery_to_motion_latency_s": null,
+                  "finder": false,
+                  "met_pre_push_path_requirement": false,
+                  "motion_detected": false,
+                  "notice_recipient": false,
+                  "notified": false,
+                  "pre_push_displacement_m": null,
+                  "pre_push_path_length_m": 0.0,
+                  "required_pre_push_path_length_m": 0.1,
+                  "role": null,
+                  "status_acknowledged": false
+                },
+                "tb3_1": {
+                  "discovery_to_motion_latency_s": null,
+                  "finder": false,
+                  "met_pre_push_path_requirement": false,
+                  "motion_detected": false,
+                  "notice_recipient": false,
+                  "notified": false,
+                  "pre_push_displacement_m": null,
+                  "pre_push_path_length_m": 0.0,
+                  "required_pre_push_path_length_m": 0.1,
+                  "role": null,
+                  "status_acknowledged": false
+                },
+                "tb3_2": {
+                  "discovery_to_motion_latency_s": null,
+                  "finder": false,
+                  "met_pre_push_path_requirement": false,
+                  "motion_detected": false,
+                  "notice_recipient": false,
+                  "notified": false,
+                  "pre_push_displacement_m": null,
+                  "pre_push_path_length_m": 0.0,
+                  "required_pre_push_path_length_m": 0.1,
+                  "role": null,
+                  "status_acknowledged": false
+                }
+              },
+              "robots_below_required_search_travel": [
+                "tb3_0",
+                "tb3_1",
+                "tb3_2"
+              ],
+              "robots_below_required_travel": [
+                "tb3_0",
+                "tb3_1",
+                "tb3_2"
+              ],
+              "robots_not_observed_moving_during_search": [
+                "tb3_0",
+                "tb3_1",
+                "tb3_2"
+              ],
+              "robots_observed_moving_during_search": [],
+              "search_motion_samples": 0,
+              "search_motion_window_supported": false,
+              "search_path_length_m": {
+                "tb3_0": 0.0,
+                "tb3_1": 0.0,
+                "tb3_2": 0.0
+              },
+              "simultaneous_motion_window_supported": false,
+              "simultaneous_search_motion_window_supported": false,
+              "status_acknowledged_robots": [],
+              "status_acknowledgement_available": false
+            },
+            "transport_distinct_control_batches": 0,
+            "transport_duplicate_control_status_samples": 0,
+            "transport_first_all_useful_sim_time_s": null,
+            "transport_first_connection_loss": null,
+            "transport_grf_samples": 0,
+            "transport_last_control_sequence": null,
+            "transport_last_control_sim_time_s": null,
+            "transport_maximum_continuous_all_nominal_pace_s": 0.0,
+            "transport_maximum_continuous_all_nominal_pace_samples": 0,
+            "transport_maximum_continuous_all_useful_s": 0.0,
+            "transport_maximum_continuous_all_useful_samples": 0,
+            "transport_nominal_pace_warning_robots": [
+              "tb3_0",
+              "tb3_1",
+              "tb3_2"
+            ],
+            "transport_participation": {
+              "tb3_0": {
+                "adaptive_contribution_threshold_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "command_goal_speed_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "companion_contact_fraction": 0.0,
+                "companion_contact_samples": 0,
+                "connected_fraction": 0.0,
+                "connected_samples": 0,
+                "contributed_positive_goal_progress_m": 0.0,
+                "declared_fraction": 0.0,
+                "declared_parent_namespaces": [],
+                "declared_samples": 0,
+                "direct_contact_fraction": 0.0,
+                "direct_contact_samples": 0,
+                "maximum_continuous_nominal_pace_s": 0.0,
+                "maximum_continuous_nominal_pace_samples": 0,
+                "maximum_continuous_useful_pushing_s": 0.0,
+                "maximum_continuous_useful_pushing_samples": 0,
+                "nominal_pace_intent_samples": 0,
+                "nominal_pace_pushing_fraction": 0.0,
+                "nominal_pace_pushing_samples": 0,
+                "nominal_pace_warning": true,
+                "push_intent_fraction": 0.0,
+                "push_intent_samples": 0,
+                "push_phase_samples": 0,
+                "reference_pace_intent_fraction": 0.0,
+                "reference_pace_intent_samples": 0,
+                "role": null,
+                "role_reference_goal_speed_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "useful_pushing_batch_fraction": 0.0,
+                "useful_pushing_fraction": 0.0,
+                "useful_pushing_samples": 0
+              },
+              "tb3_1": {
+                "adaptive_contribution_threshold_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "command_goal_speed_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "companion_contact_fraction": 0.0,
+                "companion_contact_samples": 0,
+                "connected_fraction": 0.0,
+                "connected_samples": 0,
+                "contributed_positive_goal_progress_m": 0.0,
+                "declared_fraction": 0.0,
+                "declared_parent_namespaces": [],
+                "declared_samples": 0,
+                "direct_contact_fraction": 0.0,
+                "direct_contact_samples": 0,
+                "maximum_continuous_nominal_pace_s": 0.0,
+                "maximum_continuous_nominal_pace_samples": 0,
+                "maximum_continuous_useful_pushing_s": 0.0,
+                "maximum_continuous_useful_pushing_samples": 0,
+                "nominal_pace_intent_samples": 0,
+                "nominal_pace_pushing_fraction": 0.0,
+                "nominal_pace_pushing_samples": 0,
+                "nominal_pace_warning": true,
+                "push_intent_fraction": 0.0,
+                "push_intent_samples": 0,
+                "push_phase_samples": 0,
+                "reference_pace_intent_fraction": 0.0,
+                "reference_pace_intent_samples": 0,
+                "role": null,
+                "role_reference_goal_speed_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "useful_pushing_batch_fraction": 0.0,
+                "useful_pushing_fraction": 0.0,
+                "useful_pushing_samples": 0
+              },
+              "tb3_2": {
+                "adaptive_contribution_threshold_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "command_goal_speed_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "companion_contact_fraction": 0.0,
+                "companion_contact_samples": 0,
+                "connected_fraction": 0.0,
+                "connected_samples": 0,
+                "contributed_positive_goal_progress_m": 0.0,
+                "declared_fraction": 0.0,
+                "declared_parent_namespaces": [],
+                "declared_samples": 0,
+                "direct_contact_fraction": 0.0,
+                "direct_contact_samples": 0,
+                "maximum_continuous_nominal_pace_s": 0.0,
+                "maximum_continuous_nominal_pace_samples": 0,
+                "maximum_continuous_useful_pushing_s": 0.0,
+                "maximum_continuous_useful_pushing_samples": 0,
+                "nominal_pace_intent_samples": 0,
+                "nominal_pace_pushing_fraction": 0.0,
+                "nominal_pace_pushing_samples": 0,
+                "nominal_pace_warning": true,
+                "push_intent_fraction": 0.0,
+                "push_intent_samples": 0,
+                "push_phase_samples": 0,
+                "reference_pace_intent_fraction": 0.0,
+                "reference_pace_intent_samples": 0,
+                "role": null,
+                "role_reference_goal_speed_mps": {
+                  "max": null,
+                  "mean": null,
+                  "p95": null,
+                  "samples": 0
+                },
+                "useful_pushing_batch_fraction": 0.0,
+                "useful_pushing_fraction": 0.0,
+                "useful_pushing_samples": 0
+              }
+            },
+            "transport_positive_control_goal_progress_m": 0.0,
+            "transport_pre_active_object_displacement_m": null,
+            "transport_push_goal_progress_efficiency": null,
+            "transport_push_goal_progress_m": null,
+            "transport_push_initial_goal_distance_m": null,
+            "transport_push_object_final_xy": null,
+            "transport_push_object_initial_xy": null,
+            "transport_push_object_path_length_m": 0.0,
+            "transport_push_phase_samples": 0,
+            "transport_reference_pace_samples": 0,
+            "transport_time_to_first_all_useful_batch_sim_s": null,
+            "transport_time_to_first_all_useful_batch_wall_s": null,
+            "wall_duration_s": 82.9493
+          },
+          "passed": true,
+          "pre_spawn_cleanup": {
+            "departed_robot_ids": [
+              "tb3_0",
+              "tb3_1",
+              "tb3_2"
+            ],
+            "fleet_roster_empty": true,
+            "gazebo_departed_models_remaining": [],
+            "harness_cmd_vel_subscribers_remaining": [],
+            "harness_cmd_velocity_entries_remaining": []
+          },
+          "robot_count": 3,
+          "scenario": "formation_triangle_n3",
+          "spawn_pattern": "grid",
+          "task": {
+            "error": null,
+            "progress": 0.0,
+            "result": null,
+            "status": "running",
+            "task_id": "matrix-[ID REDACTED]",
+            "task_type": "formation"
+          },
+          "task_id": "matrix-[ID REDACTED]",
+          "task_outcome": "running_for_duration",
+          "unexpected_contact_count_delta": 0,
+          "warnings": []
+        },
+        "summary": {
+          "all_passed": true,
+          "cleanup_failures": [],
+          "cleanup_passed": true,
+          "executed": 1,
+          "failed": 0,
+          "failed_scenarios": [],
+          "passed": 1,
+          "selected": 1
+        },
+        "taskCleanupVerified": true
+      },
+      "scenario": "formation_triangle_n3",
+      "session": {
+        "activeRobots": 3,
+        "state": "Ready"
+      },
+      "startedAt": "2026-07-29T04:09:33Z",
+      "status": "passed",
+      "viewer": {
+        "decodedFps": 31.2,
+        "decodedFpsAfterScenario": 30.0,
+        "interactive": true,
+        "leaseRenewedAfterScenario": false,
+        "transport": "HLS"
+      },
+      "viewerStartupScene": {
+        "activeScenarioMotionMeasured": false,
+        "adapter": "D3D12 (NVIDIA GeForce RTX 3080)",
+        "averageStartupFps": 49.513,
+        "file": "01-formation_triangle_n3-viewer-startup-render-report.json",
+        "minimumStartupFps": 45.0,
+        "minimumStartupPhysicsRealTimeFactor": 2.9,
+        "nvidiaD3d12": true,
+        "phase": "viewerStartupBeforeScenario",
+        "postRenderStartupFps": 49.977,
+        "scope": "startupGpuCapability",
+        "startupPhysicsRealTimeFactor": 2.995
+      }
+    }
+  ],
+  "cleanup": {
+    "browserClosed": true,
+    "cdpPortReleased": true,
+    "profileRemoved": true
+  },
+  "completedAt": "2026-07-29T04:12:04Z",
+  "deploymentCommit": "c3866d553015463e561b636f27860a2b8472b7fe",
+  "evidenceDirectory": "report-evidence-20260729T040929Z-353392",
+  "interrupted": false,
+  "rendering": {
+    "activeScenarioGuiProbe": {
+      "configuredRenderRateFps": 50.0,
+      "minimumGazeboFps": 45.0,
+      "minimumRealTimeFactor": 2.9,
+      "officialPreflight": true,
+      "phase": "duringScenarioProcess",
+      "requiresCompleteMonotonicOverlap": true,
+      "sampleSeconds": 5.0,
+      "warmupSeconds": 2.0
+    },
+    "activeScenarioVideo": {
+      "maximumDroppedRatio": 0.1,
+      "measurementSeconds": 5.0,
+      "minimumBrowserFps": 27.0,
+      "phase": "duringScenarioAndGuiProbe",
+      "targetBrowserFps": 30.0,
+      "visualMotionMeasured": false
+    },
+    "gpuDisabled": false,
+    "headless": false,
+    "scenarioPhysics": {
+      "minimumRealTimeFactor": 2.9,
+      "source": "RESULT_JSON"
+    },
+    "viewerStartupScene": {
+      "activeScenarioMotionMeasured": false,
+      "capabilityOnly": true,
+      "minimumGazeboFps": 45.0,
+      "phase": "beforeScenario"
+    },
+    "visibleChrome": true
+  },
+  "runId": "20260729T040929Z-353392",
+  "schemaVersion": 1,
+  "selectedScenarios": [
+    "formation_triangle_n3"
+  ],
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-29T04:09:29Z",
+  "success": true
+}

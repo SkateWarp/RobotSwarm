@@ -130,13 +130,89 @@ public sealed class DockerSessionManagerTests
 
         await manager.PublishControlHeartbeatAsync(
             session,
+            123.5,
             CancellationToken.None);
 
         var arguments = Assert.Single(docker.Calls);
         Assert.Equal("exec", arguments[0]);
-        Assert.Contains(
-            "rostopic pub -1 /swarm/control_heartbeat std_msgs/Empty '{}'",
+        Assert.Equal("/usr/bin/timeout", arguments[2]);
+        Assert.Equal("--signal=KILL", arguments[3]);
+        Assert.Equal(
+            $"{WorkerOptions.ControlHeartbeatPublishTimeoutSeconds}s",
             arguments[4]);
+        Assert.Equal("/bin/bash", arguments[5]);
+        Assert.Equal("-lc", arguments[6]);
+        Assert.Contains("/proc/uptime", arguments[7]);
+        Assert.Contains(
+            "rostopic pub -1 /swarm/control_heartbeat std_msgs/Float64",
+            arguments[7]);
+        Assert.Contains("\"data: $1\"", arguments[7]);
+        Assert.Equal("swarm-worker", arguments[8]);
+        Assert.Equal("123.5", arguments[9]);
+        Assert.Equal(
+            TimeSpan.FromSeconds(
+                WorkerOptions.ControlHeartbeatDockerExecTimeoutSeconds),
+            docker.Timeouts.Single());
+    }
+
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public async Task RejectsANonFiniteControlHeartbeatDeadline(double deadline)
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli();
+        var manager = CreateManager(docker, workerId);
+        var session = new ManagedSessionInfo(
+            sessionId,
+            "container-1",
+            SessionResourceNames.Container(sessionId),
+            "robotswarm/ros-noetic:test",
+            1024,
+            true,
+            "running",
+            new Dictionary<string, string>
+            {
+                [SessionLabels.WorkerId] = workerId.ToString("D")
+            });
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => manager.PublishControlHeartbeatAsync(
+                session,
+                deadline,
+                CancellationToken.None));
+
+        Assert.Empty(docker.Calls);
+    }
+
+    [Fact]
+    public async Task HeartbeatDiscoveryUsesOneBoundedRunningContainerList()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(
+                0,
+                $"container-1\trobotswarm-test\trobotswarm:test\t{sessionId:D}\n",
+                string.Empty));
+        var manager = CreateManager(docker, workerId);
+
+        var session = Assert.Single(
+            await manager.GetHeartbeatSessionsAsync(CancellationToken.None));
+
+        Assert.Equal(sessionId, session.SessionId);
+        Assert.Equal("container-1", session.ContainerId);
+        Assert.Equal("robotswarm-test", session.ContainerName);
+        Assert.True(session.Running);
+        var arguments = Assert.Single(docker.Calls);
+        Assert.Equal("ps", arguments[0]);
+        Assert.DoesNotContain("-a", arguments);
+        Assert.Equal(
+            TimeSpan.FromSeconds(
+                WorkerOptions.ControlHeartbeatDiscoveryTimeoutSeconds),
+            docker.Timeouts.Single());
     }
 
     [Fact]

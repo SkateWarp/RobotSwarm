@@ -486,7 +486,7 @@ public sealed class BoundedCommandExecutorTests
     }
 
     [Fact]
-    public async Task BackendDisconnectFailSafeLatchesCommandsBeforeRosFallback()
+    public async Task BackendDisconnectFailSafeUsesMonotonicAgeBeforeRosFallback()
     {
         var workerId = Guid.NewGuid();
         var sessionId = Guid.NewGuid();
@@ -514,8 +514,11 @@ public sealed class BoundedCommandExecutorTests
             options,
             NullLogger<DockerSessionManager>.Instance);
         var hub = new RecordingWorkerCommandHub(
-            DateTime.UtcNow.AddMinutes(-1),
+            DateTime.UtcNow.AddHours(1),
             isConnected: false);
+        hub.SetLastSuccessfulContactAge(
+            TimeSpan.FromMinutes(1),
+            diagnosticUtc: DateTime.UtcNow.AddHours(1));
         var executor = new BoundedCommandExecutor(
             new SessionCommandHandler(sessions, options),
             hub,
@@ -551,6 +554,201 @@ public sealed class BoundedCommandExecutorTests
             using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await monitor.StopAsync(stop.Token);
             await executor.StopAsync(stop.Token);
+        }
+    }
+
+    [Fact]
+    public async Task NewWorkerWithoutBackendContactStopsAReconciledSessionWithoutHeartbeat()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var options = Options.Create(new WorkerOptions
+        {
+            BackendUrl = "https://robot.example.test",
+            WorkerId = workerId,
+            WorkerSecret = "abcdefghijklmnopqrstuvwxyzABCDEF_123456",
+            SessionImage = "robotswarm/ros-noetic:test",
+            MaxQueuedCommands = 4,
+            MaxParallelCommands = 1,
+            ShutdownDrainSeconds = 5
+        });
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                SessionInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(0, "container-1\n", string.Empty),
+            new DockerCommandResult(
+                0,
+                SessionInspection(workerId, sessionId),
+                string.Empty),
+            new DockerCommandResult(1, string.Empty, "ROS is unavailable"),
+            new DockerCommandResult(0, string.Empty, string.Empty));
+        var publisher = new RecordingViewerPublisher();
+        var sessions = new DockerSessionManager(
+            docker,
+            publisher,
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        await sessions.ReconcileAsync(CancellationToken.None);
+        await using var hub = new WorkerHubConnection(
+            options,
+            publisher,
+            NullLogger<WorkerHubConnection>.Instance);
+        var executor = new BoundedCommandExecutor(
+            new SessionCommandHandler(sessions, options),
+            hub,
+            new TaskStatusTracker(),
+            options,
+            NullLogger<BoundedCommandExecutor>.Instance);
+        var heartbeat = new SessionControlHeartbeat(
+            sessions,
+            hub,
+            options,
+            NullLogger<SessionControlHeartbeat>.Instance);
+        var monitor = new BackendDisconnectSafetyMonitor(
+            sessions,
+            hub,
+            executor,
+            options,
+            NullLogger<BackendDisconnectSafetyMonitor>.Instance);
+
+        await executor.StartAsync(CancellationToken.None);
+        await heartbeat.StartAsync(CancellationToken.None);
+        await monitor.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(() => docker.Calls.Count >= 6);
+
+            Assert.Equal(DateTime.UnixEpoch, hub.LastSuccessfulContactUtc);
+            Assert.DoesNotContain(
+                docker.Calls,
+                arguments => arguments.Count > 4
+                    && arguments[0] == "exec"
+                    && arguments.Any(argument => argument.Contains(
+                        "/swarm/control_heartbeat",
+                        StringComparison.Ordinal)));
+            Assert.Contains(
+                docker.Calls,
+                arguments => arguments.Count > 0
+                    && arguments[0] == "stop");
+        }
+        finally
+        {
+            using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await monitor.StopAsync(stop.Token);
+            await heartbeat.StopAsync(stop.Token);
+            await executor.StopAsync(stop.Token);
+        }
+    }
+
+    [Fact]
+    public async Task HeartbeatRechecksTheBackendLeaseAfterDockerDiscovery()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var hub = new RecordingWorkerCommandHub();
+        var options = Options.Create(new WorkerOptions
+        {
+            WorkerId = workerId,
+            SessionImage = "robotswarm/ros-noetic:test",
+            ControlHeartbeatIntervalSeconds = 5
+        });
+        var docker = new RecordingDockerCli(
+            new DockerCommandResult(
+                0,
+                HeartbeatSessionList(sessionId),
+                string.Empty))
+        {
+            OnCall = arguments =>
+            {
+                if (arguments.Count > 0 && arguments[0] == "ps")
+                {
+                    hub.SetLastSuccessfulContactAge(
+                        TimeSpan.FromMinutes(1),
+                        diagnosticUtc: DateTime.UtcNow.AddHours(1));
+                }
+            }
+        };
+        var sessions = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        var heartbeat = new SessionControlHeartbeat(
+            sessions,
+            hub,
+            options,
+            NullLogger<SessionControlHeartbeat>.Instance);
+
+        await heartbeat.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(() => docker.Calls.Count >= 1);
+            await Task.Delay(100);
+
+            Assert.DoesNotContain(
+                docker.Calls,
+                arguments => arguments.Count > 0
+                    && arguments[0] == "exec");
+
+            Assert.True(hub.LastSuccessfulContactUtc > DateTime.UtcNow);
+            Assert.True(
+                hub.LastSuccessfulContactAge
+                > TimeSpan.FromSeconds(
+                    options.Value.ControlHeartbeatBackendLeaseSeconds));
+        }
+        finally
+        {
+            using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await heartbeat.StopAsync(stop.Token);
+        }
+    }
+
+    [Fact]
+    public async Task CachedHeartbeatSurvivesASlowDiscoveryWithFreshBackendContact()
+    {
+        var workerId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var hub = new RecordingWorkerCommandHub();
+        var options = Options.Create(new WorkerOptions
+        {
+            WorkerId = workerId,
+            SessionImage = "robotswarm/ros-noetic:test",
+            ControlHeartbeatIntervalSeconds = 1
+        });
+        var docker = new SlowHeartbeatDiscoveryDockerCli(sessionId);
+        var sessions = new DockerSessionManager(
+            docker,
+            new RecordingViewerPublisher(),
+            options,
+            NullLogger<DockerSessionManager>.Instance);
+        var heartbeat = new SessionControlHeartbeat(
+            sessions,
+            hub,
+            options,
+            NullLogger<SessionControlHeartbeat>.Instance);
+
+        await heartbeat.StartAsync(CancellationToken.None);
+        try
+        {
+            await docker.WaitForSlowDiscoveryAsync();
+            await WaitUntilAsync(() => docker.HeartbeatPublications >= 2);
+
+            Assert.True(
+                hub.LastSuccessfulContactAge
+                < TimeSpan.FromSeconds(
+                    options.Value.ControlHeartbeatBackendLeaseSeconds));
+            Assert.Equal(
+                TimeSpan.FromSeconds(
+                    WorkerOptions.ControlHeartbeatDiscoveryTimeoutSeconds),
+                docker.DiscoveryTimeouts.Distinct().Single());
+        }
+        finally
+        {
+            using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await heartbeat.StopAsync(stop.Token);
         }
     }
 
@@ -833,6 +1031,11 @@ public sealed class BoundedCommandExecutorTests
         });
     }
 
+    private static string HeartbeatSessionList(Guid sessionId)
+    {
+        return $"container-1\trobotswarm-test\trobotswarm:test\t{sessionId:D}\n";
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow.AddSeconds(5);
@@ -858,6 +1061,7 @@ public sealed class BoundedCommandExecutorTests
 
         public ConcurrentQueue<IReadOnlyList<string>> Calls { get; } = new();
         public ConcurrentQueue<string>? Timeline { get; init; }
+        public Action<IReadOnlyList<string>>? OnCall { get; init; }
         public Func<bool>? StartTaskGate { get; set; }
         public ConcurrentQueue<bool> StartTaskGateObservations { get; } = new();
 
@@ -872,6 +1076,7 @@ public sealed class BoundedCommandExecutorTests
                 StartTaskGateObservations.Enqueue(StartTaskGate());
             }
             Calls.Enqueue(arguments.ToArray());
+            OnCall?.Invoke(arguments);
             if (_results.Count == 0)
             {
                 throw new InvalidOperationException("The safety-rejected command reached Docker.");
@@ -974,6 +1179,66 @@ public sealed class BoundedCommandExecutorTests
         public void ReleasePublish() => _releasePublish.TrySetResult();
     }
 
+    private sealed class SlowHeartbeatDiscoveryDockerCli : IDockerCli
+    {
+        private readonly Guid _sessionId;
+        private readonly TaskCompletionSource _slowDiscoveryStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _discoveries;
+        private int _heartbeatPublications;
+
+        public SlowHeartbeatDiscoveryDockerCli(Guid sessionId)
+        {
+            _sessionId = sessionId;
+        }
+
+        public int HeartbeatPublications =>
+            Volatile.Read(ref _heartbeatPublications);
+        public ConcurrentQueue<TimeSpan> DiscoveryTimeouts { get; } = new();
+
+        public async Task<DockerCommandResult> RunAsync(
+            IReadOnlyList<string> arguments,
+            CancellationToken cancellationToken,
+            TimeSpan? timeout = null)
+        {
+            if (arguments.Count > 0 && arguments[0] == "ps")
+            {
+                DiscoveryTimeouts.Enqueue(
+                    timeout ?? throw new InvalidOperationException(
+                        "Heartbeat discovery was not bounded."));
+                if (Interlocked.Increment(ref _discoveries) == 2)
+                {
+                    _slowDiscoveryStarted.TrySetResult();
+                    await Task.Delay(
+                        TimeSpan.FromMilliseconds(500),
+                        cancellationToken);
+                    throw new TimeoutException(
+                        "Simulated bounded Docker discovery timeout.");
+                }
+
+                return new DockerCommandResult(
+                    0,
+                    HeartbeatSessionList(_sessionId),
+                    string.Empty);
+            }
+
+            if (arguments.Count > 0 && arguments[0] == "exec")
+            {
+                Interlocked.Increment(ref _heartbeatPublications);
+                return new DockerCommandResult(0, string.Empty, string.Empty);
+            }
+
+            throw new InvalidOperationException(
+                $"Unexpected Docker command: {string.Join(' ', arguments)}");
+        }
+
+        public Task WaitForSlowDiscoveryAsync()
+        {
+            return _slowDiscoveryStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5));
+        }
+    }
+
     private sealed class RecordingViewerPublisher : IViewerPublisher
     {
         public ViewerPublisherAvailability Availability { get; } =
@@ -1027,6 +1292,7 @@ public sealed class BoundedCommandExecutorTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private long _lastSuccessfulContactTicks;
+        private long _lastSuccessfulContactAgeTicks;
         private int _isConnected;
         private Guid? _blockedCompletionCommandId;
 
@@ -1036,6 +1302,11 @@ public sealed class BoundedCommandExecutorTests
         {
             _lastSuccessfulContactTicks =
                 (lastSuccessfulContactUtc ?? DateTime.UtcNow).Ticks;
+            _lastSuccessfulContactAgeTicks = lastSuccessfulContactUtc.HasValue
+                ? Max(
+                    DateTime.UtcNow - lastSuccessfulContactUtc.Value.ToUniversalTime(),
+                    TimeSpan.Zero).Ticks
+                : TimeSpan.Zero.Ticks;
             _isConnected = isConnected ? 1 : 0;
         }
 
@@ -1043,6 +1314,11 @@ public sealed class BoundedCommandExecutorTests
         public DateTime LastSuccessfulContactUtc => new(
             Interlocked.Read(ref _lastSuccessfulContactTicks),
             DateTimeKind.Utc);
+        public TimeSpan LastSuccessfulContactAge => new(
+            Interlocked.Read(ref _lastSuccessfulContactAgeTicks));
+        public double LastSuccessfulContactMonotonicSeconds =>
+            SharedMonotonicClock.GetSeconds()
+            - LastSuccessfulContactAge.TotalSeconds;
         public ConcurrentQueue<Guid> AcknowledgedCommands { get; } = new();
         public ConcurrentQueue<Guid> RunningCommands { get; } = new();
         public ConcurrentQueue<WorkerCommandCompletionRequest> CompletedCommands { get; } = new();
@@ -1142,11 +1418,26 @@ public sealed class BoundedCommandExecutorTests
 
         public void MarkSuccessfulContact()
         {
-            Interlocked.Exchange(
-                ref _lastSuccessfulContactTicks,
-                DateTime.UtcNow.Ticks);
+            SetLastSuccessfulContactAge(
+                TimeSpan.Zero,
+                diagnosticUtc: DateTime.UtcNow);
             Volatile.Write(ref _isConnected, 1);
         }
+
+        public void SetLastSuccessfulContactAge(
+            TimeSpan age,
+            DateTime diagnosticUtc)
+        {
+            Interlocked.Exchange(
+                ref _lastSuccessfulContactTicks,
+                diagnosticUtc.ToUniversalTime().Ticks);
+            Interlocked.Exchange(
+                ref _lastSuccessfulContactAgeTicks,
+                age.Ticks);
+        }
+
+        private static TimeSpan Max(TimeSpan left, TimeSpan right) =>
+            left >= right ? left : right;
 
         public void BlockCompletion(Guid commandId)
         {

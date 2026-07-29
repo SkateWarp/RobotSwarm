@@ -662,6 +662,153 @@ class VisibleAcceptanceContractTests(unittest.TestCase):
         )
         self.assertIn("element.click()", evaluate_calls[-1].args[0])
 
+    def test_viewer_wait_restores_a_minimized_hidden_target(self):
+        ui = object.__new__(DRIVER.RobotSwarmUi)
+        ui.stop_event = threading.Event()
+        ui.cdp = mock.Mock()
+        states = iter(
+            [
+                {"visibilityState": "hidden", "focused": False, "decoded": False},
+                {"visibilityState": "visible", "focused": True, "decoded": True},
+            ]
+        )
+
+        def evaluate(expression, **_kwargs):
+            if expression == "window.focus(); true":
+                return True
+            return next(states)
+
+        def call(method, *_args, **_kwargs):
+            if method == "Browser.getWindowForTarget":
+                return {"windowId": 17, "bounds": {"windowState": "minimized"}}
+            return {}
+
+        ui.cdp.evaluate.side_effect = evaluate
+        ui.cdp.call.side_effect = call
+
+        with mock.patch.object(DRIVER.time, "sleep"):
+            ui.wait_viewer_frame(1.0)
+
+        self.assertEqual(
+            [entry.args[0] for entry in ui.cdp.call.call_args_list],
+            [
+                "Browser.getWindowForTarget",
+                "Browser.setWindowBounds",
+                "Page.bringToFront",
+            ],
+        )
+        self.assertEqual(
+            {
+                "windowId": 17,
+                "bounds": {"windowState": "normal"},
+            },
+            ui.cdp.call.call_args_list[1].args[1],
+        )
+        ui.cdp.evaluate.assert_any_call("window.focus(); true")
+
+    def test_viewer_wait_recovers_when_a_visible_target_becomes_hidden(self):
+        ui = object.__new__(DRIVER.RobotSwarmUi)
+        ui.stop_event = threading.Event()
+        ui.cdp = mock.Mock()
+        states = iter(
+            [
+                {"visibilityState": "visible", "focused": True, "decoded": False},
+                {"visibilityState": "hidden", "focused": False, "decoded": False},
+                {"visibilityState": "visible", "focused": True, "decoded": True},
+            ]
+        )
+
+        def evaluate(expression, **_kwargs):
+            if expression == "window.focus(); true":
+                return True
+            return next(states)
+
+        ui.cdp.evaluate.side_effect = evaluate
+        ui.cdp.call.side_effect = lambda method, *_args, **_kwargs: (
+            {"windowId": 19, "bounds": {"windowState": "normal"}}
+            if method == "Browser.getWindowForTarget"
+            else {}
+        )
+
+        with mock.patch.object(DRIVER.time, "sleep"):
+            ui.wait_viewer_frame(1.0)
+
+        methods = [entry.args[0] for entry in ui.cdp.call.call_args_list]
+        self.assertEqual(
+            ["Browser.getWindowForTarget", "Page.bringToFront"],
+            methods,
+        )
+
+    def test_viewer_wait_does_not_accept_a_hidden_decoded_frame(self):
+        ui = object.__new__(DRIVER.RobotSwarmUi)
+        ui.stop_event = threading.Event()
+        ui.cdp = mock.Mock()
+        states = iter(
+            [
+                {"visibilityState": "hidden", "focused": False, "decoded": True},
+                {"visibilityState": "visible", "focused": True, "decoded": True},
+            ]
+        )
+
+        def evaluate(expression, **_kwargs):
+            if expression == "window.focus(); true":
+                return True
+            return next(states)
+
+        ui.cdp.evaluate.side_effect = evaluate
+        ui.cdp.call.side_effect = lambda method, *_args, **_kwargs: (
+            {"windowId": 23, "bounds": {"windowState": "normal"}}
+            if method == "Browser.getWindowForTarget"
+            else {}
+        )
+
+        with mock.patch.object(DRIVER.time, "sleep"):
+            ui.wait_viewer_frame(1.0)
+
+        self.assertEqual(2, ui.cdp.call.call_count)
+        self.assertEqual(
+            "Page.bringToFront",
+            ui.cdp.call.call_args_list[-1].args[0],
+        )
+
+    def test_viewer_wait_fails_if_the_owned_target_stays_hidden(self):
+        ui = object.__new__(DRIVER.RobotSwarmUi)
+        ui.stop_event = threading.Event()
+        ui.cdp = mock.Mock()
+        ui.cdp.evaluate.side_effect = lambda expression, **_kwargs: (
+            True
+            if expression == "window.focus(); true"
+            else {"visibilityState": "hidden", "focused": False, "decoded": True}
+        )
+        ui.cdp.call.side_effect = lambda method, *_args, **_kwargs: (
+            {"windowId": 29, "bounds": {"windowState": "normal"}}
+            if method == "Browser.getWindowForTarget"
+            else {}
+        )
+
+        with mock.patch.object(
+            DRIVER.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.0, 0.0, 1.1],
+        ), mock.patch.object(DRIVER.time, "sleep"), self.assertRaisesRegex(
+            DRIVER.DriverError,
+            "decoded private viewer frame",
+        ):
+            ui.wait_viewer_frame(1.0)
+
+        self.assertEqual(
+            ["Browser.getWindowForTarget", "Page.bringToFront"],
+            [entry.args[0] for entry in ui.cdp.call.call_args_list],
+        )
+
+    def test_viewer_visibility_recovery_never_fakes_document_state(self):
+        source = inspect.getsource(DRIVER.RobotSwarmUi._restore_viewer_visibility)
+
+        self.assertIn('"Page.bringToFront"', source)
+        self.assertIn('"Browser.setWindowBounds"', source)
+        self.assertNotIn("Emulation.setPageVisibilityState", source)
+        self.assertNotIn("Page.setWebLifecycleState", source)
+
     def test_required_trusted_button_never_uses_the_runtime_fallback(self):
         ui = object.__new__(DRIVER.RobotSwarmUi)
         ui.cdp = mock.Mock()
@@ -951,6 +1098,137 @@ class VisibleAcceptanceContractTests(unittest.TestCase):
         self.assertIn('input[aria-label="Search"]', expression)
         self.assertIn('button[aria-label="Abrir menú de usuario"]', expression)
         self.assertIn(".MuiAvatar-root", expression)
+        self.assertIn("passwordValue.length >= 8", expression)
+        self.assertIn("containsBoundedPassword(value)", expression)
+        self.assertIn("hasShortPassword", expression)
+        self.assertIn("startsAtBoundary", expression)
+        self.assertIn("endsAtBoundary", expression)
+        self.assertNotIn(": value === passwordValue", expression)
+        self.assertLess(
+            expression.index("hasShortPassword"),
+            expression.index("passwordIsVisible"),
+        )
+        self.assertLess(expression.index("hasEmail"), expression.index("passwordIsVisible"))
+
+    def test_chrome_startup_waits_for_cdp_after_windows_handoff(self):
+        source = inspect.getsource(DRIVER.OwnedChrome._connect)
+
+        self.assertNotIn("process.poll()", source)
+        self.assertIn("webSocketDebuggerUrl", source)
+        self.assertIn("self.owns_launch_target", source)
+
+    def test_chrome_launch_target_uses_an_unpredictable_data_page(self):
+        chrome = DRIVER.OwnedChrome(
+            label="A",
+            port=9332,
+            profile=Path("/tmp/owned-profile"),
+            run_id="run",
+            chrome_path=Path("/chrome.exe"),
+            site_url=DRIVER.DEFAULT_URL,
+            target_nonce="owned-nonce",
+        )
+
+        self.assertTrue(chrome.owns_launch_target(chrome.launch_target))
+        self.assertFalse(chrome.owns_launch_target("data:text/html,foreign"))
+        self.assertFalse(
+            chrome.owns_launch_target(
+                "https://rs.zerav.la/#robotswarm-owned-owned-nonce"
+            )
+        )
+
+    def test_chrome_startup_rejects_a_foreign_cdp_endpoint_after_handoff(self):
+        chrome = DRIVER.OwnedChrome(
+            label="A",
+            port=9332,
+            profile=Path("/tmp/owned-profile"),
+            run_id="run",
+            chrome_path=Path("/chrome.exe"),
+            site_url=DRIVER.DEFAULT_URL,
+            target_nonce="owned-nonce",
+        )
+        chrome.process = mock.Mock()
+        chrome.process.poll.return_value = 0
+        foreign_version = {
+            "Browser": "Chrome/test",
+            "webSocketDebuggerUrl": (
+                "ws://127.0.0.1:9332/devtools/browser/foreign-browser"
+            ),
+        }
+        foreign_targets = [
+            {
+                "id": "foreign-page",
+                "type": "page",
+                "url": "about:blank",
+                "webSocketDebuggerUrl": (
+                    "ws://127.0.0.1:9332/devtools/page/foreign-page"
+                ),
+            }
+        ]
+
+        def local_json(url):
+            return foreign_version if url.endswith("/json/version") else foreign_targets
+
+        with mock.patch.object(
+            DRIVER, "local_json", side_effect=local_json
+        ), mock.patch.object(
+            DRIVER.time, "monotonic", side_effect=[0.0, 0.0, 36.0]
+        ), mock.patch.object(
+            DRIVER.time, "sleep"
+        ), self.assertRaisesRegex(
+            DRIVER.DriverError, "owned CDP target"
+        ):
+            chrome._connect()
+
+        chrome.process.poll.assert_not_called()
+
+    def test_chrome_startup_rejects_external_page_websocket_for_owned_target(self):
+        chrome = DRIVER.OwnedChrome(
+            label="A",
+            port=9332,
+            profile=Path("/tmp/owned-profile"),
+            run_id="run",
+            chrome_path=Path("/chrome.exe"),
+            site_url=DRIVER.DEFAULT_URL,
+            target_nonce="owned-nonce",
+        )
+        local_version = {
+            "Browser": "Chrome/test",
+            "webSocketDebuggerUrl": (
+                "ws://127.0.0.1:9332/devtools/browser/owned-browser"
+            ),
+        }
+        redirected_targets = [
+            {
+                "id": "owned-page",
+                "type": "page",
+                "url": chrome.launch_target,
+                "webSocketDebuggerUrl": "wss://attacker.invalid/collect",
+            }
+        ]
+
+        def local_json(url):
+            return local_version if url.endswith("/json/version") else redirected_targets
+
+        with mock.patch.object(
+            DRIVER, "local_json", side_effect=local_json
+        ), mock.patch.object(
+            DRIVER.time, "monotonic", side_effect=[0.0, 0.0, 36.0]
+        ), mock.patch.object(
+            DRIVER.time, "sleep"
+        ), mock.patch.object(
+            DRIVER, "CdpClient"
+        ) as cdp, self.assertRaisesRegex(
+            DRIVER.DriverError, "owned CDP target"
+        ):
+            chrome._connect()
+
+        cdp.assert_not_called()
+        self.assertFalse(
+            chrome.is_local_cdp_endpoint(
+                "wss://127.0.0.1:9332/devtools/browser/owned-browser",
+                "browser",
+            )
+        )
 
     def test_production_credentials_are_pinned_to_the_public_frontend(self):
         self.assertEqual(

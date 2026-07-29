@@ -7,6 +7,7 @@ import {
     disableRegistryRobot,
     getRobotRegistryErrorMessage,
     listRegistryRobots,
+    reactivateRegistryRobot,
     updateRegistryRobot,
 } from "./robotRegistryApi";
 
@@ -31,6 +32,7 @@ describe("robotRegistryApi", () => {
 
         await expect(listRegistryRobots()).resolves.toHaveLength(2);
         expect(mock.history.get[0].headers.Authorization).toBe("Bearer admin-token");
+        expect(mock.history.get[0].params).toEqual({ includeDisabled: true });
     });
 
     it("sends only normalized editable fields when creating and updating", async () => {
@@ -80,6 +82,29 @@ describe("robotRegistryApi", () => {
             description: null,
             notes: null,
             status: 2,
+            isPublic: false,
+        });
+    });
+
+    it("reactivates through the same validated update contract", async () => {
+        mock.onPut(`${URL}/Robots/9`).reply(200, { id: 9, status: 0 });
+
+        await reactivateRegistryRobot({
+            id: 9,
+            name: "tb3_9",
+            description: "Explorador",
+            notes: null,
+            status: 2,
+            isPublic: false,
+            accountId: 21,
+            namespace: "tb3_9",
+        });
+
+        expect(JSON.parse(mock.history.put[0].data)).toEqual({
+            name: "tb3_9",
+            description: "Explorador",
+            notes: null,
+            status: 0,
             isPublic: false,
         });
     });

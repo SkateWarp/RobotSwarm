@@ -10,6 +10,101 @@ namespace SwarmWorker.Tests;
 public sealed class WorkerHubConnectionTests
 {
     [Fact]
+    public async Task ConnectionUsesOneProcessIdentifierAcrossReconnects()
+    {
+        var options = new WorkerOptions
+        {
+            BackendUrl = "https://robot.example.test",
+            WorkerId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            WorkerSecret = "abcdefghijklmnopqrstuvwxyzABCDEF_123456"
+        };
+        await using var connection = new WorkerHubConnection(
+            Options.Create(options),
+            new RecordingViewerPublisher(),
+            NullLogger<WorkerHubConnection>.Instance);
+
+        var first = connection.AgentInstanceId;
+        connection.RecordTransportConnectionEstablished();
+        connection.RecordTransportConnectionEstablished();
+        var uri = options.GetWorkerHubUri(connection.AgentInstanceId);
+
+        Assert.NotEqual(Guid.Empty, first);
+        Assert.Equal(first, connection.AgentInstanceId);
+        Assert.Equal(2L, connection.ConnectionVersion);
+        Assert.Contains(
+            $"worker_instance_id={first:D}",
+            uri.Query,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SeparateWorkerProcessesUseDifferentInstanceIdentifiers()
+    {
+        var options = Options.Create(new WorkerOptions
+        {
+            BackendUrl = "https://robot.example.test",
+            WorkerId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            WorkerSecret = "abcdefghijklmnopqrstuvwxyzABCDEF_123456"
+        });
+        await using var first = new WorkerHubConnection(
+            options,
+            new RecordingViewerPublisher(),
+            NullLogger<WorkerHubConnection>.Instance);
+        await using var second = new WorkerHubConnection(
+            options,
+            new RecordingViewerPublisher(),
+            NullLogger<WorkerHubConnection>.Instance);
+
+        Assert.NotEqual(first.AgentInstanceId, second.AgentInstanceId);
+    }
+
+    [Fact]
+    public async Task NewProcessAndTransportHandshakeDoNotCountAsBackendContact()
+    {
+        await using var connection = new WorkerHubConnection(
+            Options.Create(new WorkerOptions
+            {
+                BackendUrl = "https://robot.example.test",
+                WorkerId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
+                WorkerSecret = "abcdefghijklmnopqrstuvwxyzABCDEF_123456"
+            }),
+            new RecordingViewerPublisher(),
+            NullLogger<WorkerHubConnection>.Instance);
+        var previousContact = connection.LastSuccessfulContactUtc;
+
+        Assert.Equal(DateTime.UnixEpoch, previousContact);
+        Assert.Equal(TimeSpan.MaxValue, connection.LastSuccessfulContactAge);
+
+        connection.RecordTransportConnectionEstablished();
+
+        Assert.Equal(previousContact, connection.LastSuccessfulContactUtc);
+        Assert.Equal(TimeSpan.MaxValue, connection.LastSuccessfulContactAge);
+        Assert.Equal(1L, connection.ConnectionVersion);
+    }
+
+    [Fact]
+    public async Task SuccessfulBackendContactStartsAMonotonicAge()
+    {
+        await using var connection = new WorkerHubConnection(
+            Options.Create(new WorkerOptions
+            {
+                BackendUrl = "https://robot.example.test",
+                WorkerId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
+                WorkerSecret = "abcdefghijklmnopqrstuvwxyzABCDEF_123456"
+            }),
+            new RecordingViewerPublisher(),
+            NullLogger<WorkerHubConnection>.Instance);
+
+        connection.RecordSuccessfulContact();
+
+        Assert.NotEqual(DateTime.UnixEpoch, connection.LastSuccessfulContactUtc);
+        Assert.InRange(
+            connection.LastSuccessfulContactAge,
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
     public async Task DisposeCanBeCalledMoreThanOnce()
     {
         var publisher = new RecordingViewerPublisher();

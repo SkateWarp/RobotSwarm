@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Add, DeleteOutline, EditOutlined, Refresh } from "@mui/icons-material";
+import { Add, DeleteOutline, EditOutlined, Refresh, Restore } from "@mui/icons-material";
 import {
     Alert,
     Box,
@@ -33,6 +33,7 @@ import {
     disableRegistryRobot,
     getRobotRegistryErrorMessage,
     listRegistryRobots,
+    reactivateRegistryRobot,
     updateRegistryRobot,
 } from "./robotRegistryApi";
 import { normalizeRobotDraft, robotRegistryStatus, validateRobotDraft } from "./robotRegistryModel";
@@ -83,7 +84,9 @@ function RobotRegistryApp() {
         );
     }, [robots, search]);
 
-    const connectedCount = robots.filter((robot) => robot.isConnected).length;
+    const activeCount = robots.filter((robot) => Number(robot.status) !== 2).length;
+    const disabledCount = robots.length - activeCount;
+    const connectedCount = robots.filter((robot) => Number(robot.status) !== 2 && robot.isConnected).length;
 
     const runAndRefresh = async (operation) => {
         setBusy(true);
@@ -118,24 +121,27 @@ function RobotRegistryApp() {
         if (disabled) setRobotToDisable(null);
     };
 
+    const reactivateRobot = (robot) => runAndRefresh(() => reactivateRegistryRobot(robot));
+
     return (
         <Box data-testid="robot-registry-page" sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
             <PageHeading
                 title="Robots"
-                description="Inventario persistente de TurtleBot3 disponibles para las simulaciones."
-                meta={`${robots.length} robots activos · ${connectedCount} conectados`}
+                description="Inventario administrativo persistente. Cada sesión crea por separado sus instancias de Gazebo."
+                meta={`${activeCount} activos · ${disabledCount} inactivos · ${connectedCount} conectados`}
                 actions={
                     <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", gap: 1 }}>
-                        <Button
-                            variant="outlined"
-                            onClick={() => navigate("/apps/GTS/realtime")}
-                        >
+                        <Button variant="outlined" onClick={() => navigate("/apps/GTS/realtime")}>
                             Ver robots de sesión
                         </Button>
-                        <Button variant="contained" startIcon={<Add />} onClick={() => {
-                            setEditor(emptyRobot);
-                            setEditorErrors({});
-                        }}>
+                        <Button
+                            variant="contained"
+                            startIcon={<Add />}
+                            onClick={() => {
+                                setEditor(emptyRobot);
+                                setEditorErrors({});
+                            }}
+                        >
                             Registrar robot
                         </Button>
                     </Stack>
@@ -192,7 +198,7 @@ function RobotRegistryApp() {
                     sx={{ p: 5, textAlign: "center", border: "1px dashed", borderColor: "divider" }}
                 >
                     <Typography variant="h6">
-                        {robots.length === 0 ? "No hay robots activos" : "No hay coincidencias"}
+                        {robots.length === 0 ? "No hay robots registrados" : "No hay coincidencias"}
                     </Typography>
                     <Typography color="text.secondary" sx={{ mt: 1 }}>
                         {robots.length === 0
@@ -269,14 +275,34 @@ function RobotRegistryApp() {
                                                     </IconButton>
                                                 </span>
                                             </Tooltip>
-                                            <Tooltip title="Desactivar robot">
+                                            <Tooltip
+                                                title={
+                                                    Number(robot.status) === 2
+                                                        ? "Reactivar robot"
+                                                        : "Desactivar robot"
+                                                }
+                                            >
                                                 <span>
                                                     <IconButton
-                                                        aria-label={`Desactivar ${robot.name}`}
+                                                        aria-label={`${
+                                                            Number(robot.status) === 2
+                                                                ? "Reactivar"
+                                                                : "Desactivar"
+                                                        } ${robot.name}`}
                                                         disabled={busy}
-                                                        onClick={() => setRobotToDisable(robot)}
+                                                        onClick={() => {
+                                                            if (Number(robot.status) === 2) {
+                                                                reactivateRobot(robot);
+                                                            } else {
+                                                                setRobotToDisable(robot);
+                                                            }
+                                                        }}
                                                     >
-                                                        <DeleteOutline />
+                                                        {Number(robot.status) === 2 ? (
+                                                            <Restore />
+                                                        ) : (
+                                                            <DeleteOutline />
+                                                        )}
                                                     </IconButton>
                                                 </span>
                                             </Tooltip>

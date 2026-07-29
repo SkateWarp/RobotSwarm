@@ -1,0 +1,127 @@
+{
+  "account": "A",
+  "browser": {
+    "product": "Chrome/150.0.7871.187",
+    "visible": true
+  },
+  "cases": [
+    {
+      "behavior": "formation",
+      "cleanup": {
+        "activeProbeProcessAbsent": true,
+        "complete": true,
+        "containerAbsent": true,
+        "leaseBindingKnown": true,
+        "leaseRuntimeAbsent": true,
+        "networkAbsent": true,
+        "probeWorkspaceReleased": true,
+        "resourceIdentityKnown": true,
+        "sessionStopped": true,
+        "viewerClosed": true,
+        "viewerPublisherAbsent": true,
+        "workspaceReleased": true
+      },
+      "container": {
+        "exclusiveNetworkAttachmentVerified": true,
+        "imagePinned": true,
+        "imageRevision": "c3866d553015463e561b636f27860a2b8472b7fe",
+        "imageVersion": "c3866d553015463e561b636f27860a2b8472b7fe+a2859ad62dcc",
+        "managed": true,
+        "privateMasterBindingReady": true,
+        "privateNetworkVerified": true,
+        "running": true
+      },
+      "failure": "Timed out waiting for a decoded private viewer frame",
+      "finishedAt": "2026-07-29T05:05:59Z",
+      "hashes": {},
+      "robotCount": 10,
+      "scenario": "formation_S_n10",
+      "session": {
+        "activeRobots": 10,
+        "state": "Ready"
+      },
+      "startedAt": "2026-07-29T05:01:07Z",
+      "status": "failed",
+      "viewerStartupFailure": {
+        "baselineAvc": true,
+        "closeButton": true,
+        "closing": false,
+        "commandError": false,
+        "focused": true,
+        "hlsResourceCount": 0,
+        "mediaSource": true,
+        "openButton": true,
+        "path": "/apps/GTS/realtime",
+        "preparing": false,
+        "privateViewerMounted": true,
+        "sourceBuffer": true,
+        "statuses": [
+          "Conectando"
+        ],
+        "userActivationActive": true,
+        "userActivationSeen": true,
+        "videos": [
+          {
+            "height": 0,
+            "mediaErrorCode": null,
+            "paused": true,
+            "readyState": 0,
+            "visible": true,
+            "width": 0
+          }
+        ],
+        "visibilityState": "hidden"
+      }
+    }
+  ],
+  "cleanup": {
+    "browserClosed": true,
+    "cdpPortReleased": true,
+    "profileRemoved": true
+  },
+  "completedAt": "2026-07-29T05:06:03Z",
+  "deploymentCommit": "c3866d553015463e561b636f27860a2b8472b7fe",
+  "evidenceDirectory": "report-evidence-20260729T050104Z-524006",
+  "interrupted": false,
+  "rendering": {
+    "activeScenarioGuiProbe": {
+      "configuredRenderRateFps": 50.0,
+      "minimumGazeboFps": 45.0,
+      "minimumRealTimeFactor": 2.9,
+      "officialPreflight": true,
+      "phase": "duringScenarioProcess",
+      "requiresCompleteMonotonicOverlap": true,
+      "sampleSeconds": 5.0,
+      "warmupSeconds": 2.0
+    },
+    "activeScenarioVideo": {
+      "maximumDroppedRatio": 0.1,
+      "measurementSeconds": 5.0,
+      "minimumBrowserFps": 27.0,
+      "phase": "duringScenarioAndGuiProbe",
+      "targetBrowserFps": 30.0,
+      "visualMotionMeasured": false
+    },
+    "gpuDisabled": false,
+    "headless": false,
+    "scenarioPhysics": {
+      "minimumRealTimeFactor": 2.9,
+      "source": "RESULT_JSON"
+    },
+    "viewerStartupScene": {
+      "activeScenarioMotionMeasured": false,
+      "capabilityOnly": true,
+      "minimumGazeboFps": 45.0,
+      "phase": "beforeScenario"
+    },
+    "visibleChrome": true
+  },
+  "runId": "20260729T050104Z-524006",
+  "schemaVersion": 1,
+  "selectedScenarios": [
+    "formation_S_n10"
+  ],
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-29T05:01:04Z",
+  "success": false
+}

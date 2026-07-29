@@ -84,8 +84,8 @@ function LeafTypesConfigDialog() {
                 <DialogTitle id="task-template-dialog-title">Editar plantilla de tarea</DialogTitle>
                 <DialogContent className="flex flex-col gap-16 pt-8">
                     <Typography color="textSecondary" variant="body2">
-                        Los cambios modifican el catálogo compartido de algoritmos. No crean ni eliminan tareas
-                        ejecutadas.
+                        Los cambios modifican la clasificación administrativa. No cambian parámetros ni crean
+                        tareas ejecutadas.
                     </Typography>
 
                     {saveError ? (
@@ -111,7 +111,7 @@ function LeafTypesConfigDialog() {
                         disabled={saving}
                         error={Boolean(errors.taskType)}
                         fullWidth
-                        helperText={errors.taskType || "Algoritmo asociado a la plantilla."}
+                        helperText={errors.taskType || "Tipo usado para clasificar la plantilla."}
                         label="Tipo de tarea"
                         onChange={(event) =>
                             setDraft((current) => ({

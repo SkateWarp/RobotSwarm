@@ -41,6 +41,11 @@ export const disableAdminAccount = async (id) => {
     return true;
 };
 
+export const reactivateAdminAccount = async (id) => {
+    const response = await axios.put(`${URL}/Accounts/${id}/reactivate`, {}, requestConfig());
+    return response.data ?? null;
+};
+
 export const getAccountErrorMessage = (error) => {
     const response = error?.response?.data || error;
     if (typeof response === "string") {

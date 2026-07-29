@@ -267,6 +267,38 @@ class FakeResource:
         self.closed = True
 
 
+class ContentionAwareRLock:
+    """RLock that exposes when another thread has reached its boundary."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._metadata_lock = threading.Lock()
+        self._owner = None
+        self._depth = 0
+        self.contended = threading.Event()
+
+    def __enter__(self):
+        thread_id = threading.get_ident()
+        with self._metadata_lock:
+            if self._owner not in (None, thread_id):
+                self.contended.set()
+        self._lock.acquire()
+        with self._metadata_lock:
+            if self._owner == thread_id:
+                self._depth += 1
+            else:
+                self._owner = thread_id
+                self._depth = 1
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        with self._metadata_lock:
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+        self._lock.release()
+
+
 class FakePid:
     def __init__(self):
         self.reset_count = 0
@@ -408,6 +440,8 @@ def make_controller():
     controller._route_stall_duration = {}
     controller._active_route_batch_ids = ()
     controller._last_route_stall_detail = None
+    controller._last_live_safety_failure = None
+    controller._live_safety_failure_history = []
     controller.active_placement_plan = None
     controller.assignment_pending = False
     controller._assignment_generation = 0
@@ -436,6 +470,17 @@ def make_controller():
     controller._shutdown_motion_inflight = frozenset()
     controller.assignment_pose_drift_tolerance = 0.02
     controller.assignment_yaw_drift_tolerance = 0.05
+    controller.assignment_settle_time_wall_s = 0.5
+    controller.assignment_settle_timeout_wall_s = 5.0
+    controller.assignment_settle_position_tolerance = 0.01
+    controller.assignment_settle_yaw_tolerance = 0.03
+    controller._assignment_settle_anchor = {}
+    controller._assignment_settle_since = None
+    controller._assignment_settle_deadline = None
+    controller._assignment_settle_odom_deadline = None
+    controller._assignment_settle_ready_at = None
+    controller._assignment_planning_phase = 'idle'
+    controller._assignment_settle_waiting = ()
     controller._assignment_worker_stop = threading.Event()
     controller._assignment_worker_wakeup = threading.Event()
     controller._assignment_worker = None
@@ -503,6 +548,36 @@ def make_controller():
     )
     controller._odom_subs = {}
     controller.avoidance = {}
+    with controller.lock:
+        controller._refresh_shutdown_publisher_snapshot_locked()
+    return controller
+
+
+def make_two_robot_controller():
+    """Extend the small controller fixture without starting ROS resources."""
+    controller = make_controller()
+    controller.robot_ids = ['tb3_0', 'tb3_1']
+    controller.robot_count = 2
+    controller.robot_poses = {
+        'tb3_0': Pose(x=0.0, y=0.0),
+        'tb3_1': Pose(x=1.0, y=0.0),
+    }
+    controller.robot_yaws = {'tb3_0': 0.0, 'tb3_1': 0.0}
+    controller.odom_received_at = {'tb3_0': None, 'tb3_1': None}
+    controller.odom_confirmed_for_task = {
+        'tb3_0': False,
+        'tb3_1': False,
+    }
+    controller.formation_offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    controller.assignments = {'tb3_0': 0, 'tb3_1': 1}
+    controller._slot_reached = {'tb3_0': False, 'tb3_1': False}
+    controller.pid_linear['tb3_1'] = FakePid()
+    controller.pid_angular['tb3_1'] = FakePid()
+    second_publisher = FakePublisher()
+    controller.cmd_vel_pubs['tb3_1'] = second_publisher
+    controller._register_safety_fallback_lane(
+        'tb3_1', second_publisher
+    )
     with controller.lock:
         controller._refresh_shutdown_publisher_snapshot_locked()
     return controller
@@ -655,6 +730,78 @@ def apply_production_spawn_pattern(controller, robot_count, pattern):
 
 
 class FormationAssignmentTests(unittest.TestCase):
+    def test_assignment_worker_waits_for_the_stationary_pose_gate(self):
+        controller = make_controller()
+        clock = [100.0]
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 99.9
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = clock[0]
+        controller._reset_assignment_settle_locked(now=clock[0])
+        gate_checked = threading.Event()
+        prepare_entered = threading.Event()
+        plan_finished = threading.Event()
+        prepare_after_settle = (
+            controller._prepare_assignment_after_settle_locked
+        )
+
+        def observe_gate(*args, **kwargs):
+            result = prepare_after_settle(*args, **kwargs)
+            gate_checked.set()
+            return result
+
+        def prepare_snapshot(*_args, **_kwargs):
+            prepare_entered.set()
+            return {'generation': controller._assignment_generation}
+
+        def compute_snapshot(_snapshot):
+            controller.assignment_pending = False
+            plan_finished.set()
+            return True
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: clock[0],
+        ), mock.patch.object(
+            controller,
+            '_prepare_assignment_after_settle_locked',
+            side_effect=observe_gate,
+        ), mock.patch.object(
+            controller,
+            '_prepare_assignment_locked',
+            side_effect=prepare_snapshot,
+        ), mock.patch.object(
+            controller,
+            '_compute_and_commit_assignment',
+            side_effect=compute_snapshot,
+        ):
+            worker.start()
+            try:
+                controller._request_pending_assignment()
+                self.assertTrue(gate_checked.wait(1.0))
+                self.assertFalse(prepare_entered.is_set())
+                self.assertTrue(controller._assignment_settle_anchor)
+
+                gate_checked.clear()
+                with controller.command_lock:
+                    clock[0] = 100.51
+                    controller.odom_received_at['tb3_0'] = clock[0]
+                controller._request_pending_assignment()
+                self.assertTrue(prepare_entered.wait(1.0))
+                self.assertTrue(plan_finished.wait(1.0))
+            finally:
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+
     def test_last_first_odometry_does_not_run_the_planner_inline(self):
         controller = make_controller()
         controller.robot_poses['tb3_0'] = None
@@ -959,6 +1106,16 @@ class FormationAssignmentTests(unittest.TestCase):
         controller.formation_offsets = [(0.0, 0.0)]
         controller.assignment_pending = True
         controller.is_running = True
+        settled_at = time.monotonic()
+        first_sample_at = settled_at - 0.51
+        controller.task_started_at = first_sample_at - 0.1
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = first_sample_at
+        controller._reset_assignment_settle_locked(now=first_sample_at)
+        controller._assignment_settle_readiness_locked(
+            now=first_sample_at
+        )
+        controller.odom_received_at['tb3_0'] = settled_at
         planner_entered = threading.Event()
         release_planner = threading.Event()
 
@@ -1011,6 +1168,16 @@ class FormationAssignmentTests(unittest.TestCase):
         controller.formation_offsets = [(0.0, 0.0)]
         controller.assignment_pending = True
         controller.is_running = True
+        settled_at = time.monotonic()
+        first_sample_at = settled_at - 0.51
+        controller.task_started_at = first_sample_at - 0.1
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = first_sample_at
+        controller._reset_assignment_settle_locked(now=first_sample_at)
+        controller._assignment_settle_readiness_locked(
+            now=first_sample_at
+        )
+        controller.odom_received_at['tb3_0'] = settled_at
         planner_entered = threading.Event()
         release_planner = threading.Event()
 
@@ -1090,7 +1257,7 @@ class FormationAssignmentTests(unittest.TestCase):
                     {'tb3_0'}, set(controller.route_waypoints)
                 )
 
-    def test_start_plans_a_safe_orbit_and_holds_its_entry_pose(self):
+    def test_start_plans_a_safe_orbit_after_stationary_odometry(self):
         controller = make_controller()
         controller.robot_poses['tb3_0'] = Pose(x=2.0, y=3.0)
         captured = {}
@@ -1112,6 +1279,44 @@ class FormationAssignmentTests(unittest.TestCase):
                 'movement_mode': 'moving',
                 'spacing': 1.0,
             })))
+            self.assertTrue(controller.assignment_pending)
+            self.assertEqual(
+                'waiting_for_stability',
+                controller._assignment_planning_phase,
+            )
+            self.assertFalse(controller.orbit_path_validated)
+
+            first_sample_at = controller.task_started_at + 0.01
+            controller.odom_confirmed_for_task['tb3_0'] = True
+            controller.odom_received_at['tb3_0'] = first_sample_at
+            ready, timed_out, _ = (
+                controller._assignment_settle_readiness_locked(
+                    now=first_sample_at
+                )
+            )
+            self.assertFalse(ready)
+            self.assertFalse(timed_out)
+
+            settled_at = (
+                first_sample_at
+                + controller.assignment_settle_time_wall_s
+                + 0.01
+            )
+            controller.odom_received_at['tb3_0'] = settled_at
+            ready, timed_out, _ = (
+                controller._assignment_settle_readiness_locked(
+                    now=settled_at
+                )
+            )
+            self.assertTrue(ready)
+            self.assertFalse(timed_out)
+            controller._assignment_planning_phase = 'solving'
+            snapshot = controller._prepare_assignment_locked(
+                settle_gate_passed=True
+            )
+            self.assertTrue(
+                controller._compute_and_commit_assignment(snapshot)
+            )
 
         self.assertTrue(controller.orbit_path_validated)
         self.assertAlmostEqual(controller.centroid_heading, math.pi / 2.0)
@@ -1120,7 +1325,7 @@ class FormationAssignmentTests(unittest.TestCase):
             controller.path_center_x + controller.effective_path_radius,
         )
         self.assertAlmostEqual(
-            captured['targets'][0][0], controller.centroid_x + 1.0
+            captured['targets'][0][0], controller.centroid_x
         )
         self.assertAlmostEqual(
             captured['targets'][0][1], controller.centroid_y
@@ -1147,6 +1352,86 @@ class FormationAssignmentTests(unittest.TestCase):
         controller._update_centroid(1.0 / 20.0)
         self.assertEqual(held_time, controller.centroid_time)
 
+    def test_active_second_start_requires_a_confirmed_synchronous_stop(self):
+        controller = make_controller()
+        controller.current_task_id = 'first-task'
+        controller.task_started_at = 50.0
+        controller.is_running = True
+        publisher = controller.cmd_vel_pubs['tb3_0']
+        queued_after_stop = []
+        queue_assignment = controller._queue_assignment_after_settle_locked
+
+        def observe_queue():
+            queued_after_stop.append(len(publisher.messages))
+            return queue_assignment()
+
+        with mock.patch.object(
+            controller,
+            '_queue_assignment_after_settle_locked',
+            side_effect=observe_queue,
+        ), mock.patch.object(
+            controller,
+            '_stop_all_robots',
+            wraps=controller._stop_all_robots,
+        ) as stop_all:
+            controller._start_cb(String(data=json.dumps({
+                'task_id': 'second-task',
+                'formation_type': 'triangle',
+            })))
+
+        stop_all.assert_called_once_with('task_restart')
+        self.assertEqual([1], queued_after_stop)
+        self.assertEqual(1, len(publisher.messages))
+        restart_zero = publisher.messages[0]
+        self.assertEqual(0.0, restart_zero.linear.x)
+        self.assertEqual(0.0, restart_zero.angular.z)
+        self.assertEqual('second-task', controller.current_task_id)
+        self.assertTrue(controller.is_running)
+        self.assertTrue(controller.assignment_pending)
+        self.assertEqual(
+            'waiting_for_stability',
+            controller._assignment_planning_phase,
+        )
+
+        failed_controller = make_controller()
+        failed_controller.current_task_id = 'original-task'
+        failed_controller.task_started_at = 75.0
+        failed_controller.is_running = True
+        broken_publisher = FlakyPublisher(failures=10)
+        failed_controller.cmd_vel_pubs = {
+            'tb3_0': broken_publisher
+        }
+
+        with mock.patch.object(
+            failed_controller,
+            '_queue_assignment_after_settle_locked',
+        ) as queue_after_failure:
+            failed_controller._start_cb(String(data=json.dumps({
+                'task_id': 'must-not-activate',
+                'formation_type': 'square',
+            })))
+
+        queue_after_failure.assert_not_called()
+        self.assertEqual(
+            'original-task', failed_controller.current_task_id
+        )
+        self.assertEqual(75.0, failed_controller.task_started_at)
+        self.assertFalse(failed_controller.is_running)
+        self.assertFalse(failed_controller.assignment_pending)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            failed_controller.formation_state,
+        )
+        self.assertEqual(
+            'task_restart',
+            failed_controller._last_stop_publication['reason'],
+        )
+        self.assertFalse(
+            failed_controller._last_stop_publication[
+                'publication_confirmed'
+            ]
+        )
+
     def test_emergency_stop_is_not_blocked_and_rejects_stale_solution(self):
         controller = make_controller()
         solver_entered = threading.Event()
@@ -1171,8 +1456,35 @@ class FormationAssignmentTests(unittest.TestCase):
             '_plan_routes_to_targets',
             side_effect=blocking_routes,
         ):
+            controller._start_cb(start_message)
+            first_sample_at = controller.task_started_at + 0.01
+            controller.odom_confirmed_for_task['tb3_0'] = True
+            controller.odom_received_at['tb3_0'] = first_sample_at
+            controller._assignment_settle_readiness_locked(
+                now=first_sample_at
+            )
+            settled_at = (
+                first_sample_at
+                + controller.assignment_settle_time_wall_s
+                + 0.01
+            )
+            controller.odom_received_at['tb3_0'] = settled_at
+            ready, timed_out, _ = (
+                controller._assignment_settle_readiness_locked(
+                    now=settled_at
+                )
+            )
+            self.assertTrue(ready)
+            self.assertFalse(timed_out)
+            with controller.command_lock:
+                controller._assignment_planning_phase = 'solving'
+                snapshot = controller._prepare_assignment_locked(
+                    settle_gate_passed=True
+                )
+
             start_thread = threading.Thread(
-                target=controller._start_cb, args=(start_message,)
+                target=controller._compute_and_commit_assignment,
+                args=(snapshot,),
             )
             start_thread.start()
             self.assertTrue(solver_entered.wait(1.0))
@@ -1225,7 +1537,9 @@ class FormationAssignmentTests(unittest.TestCase):
         # A shape or fleet update prepares under command_lock, then solves
         # outside it. Exercise the timer interleaving in that open window.
         controller.formation_offsets = [(-0.25, 0.0)]
-        replacement = controller._prepare_assignment_locked()
+        replacement = controller._prepare_assignment_locked(
+            settle_gate_passed=True
+        )
         self.assertTrue(controller.assignment_pending)
         self.assertEqual({}, controller.assignments)
         self.assertIsNone(controller.active_placement_plan)
@@ -1610,7 +1924,9 @@ class FormationAssignmentTests(unittest.TestCase):
         controller.current_task_id = 'unsafe-formation'
         controller.is_running = True
 
-        snapshot = controller._prepare_assignment_locked()
+        snapshot = controller._prepare_assignment_locked(
+            settle_gate_passed=True
+        )
         controller._compute_and_commit_assignment(snapshot)
         controller._control_step(None)
 
@@ -1696,7 +2012,9 @@ class FormationAssignmentTests(unittest.TestCase):
             'width': 1.0,
             'height': 4.0,
         }]
-        snapshot = controller._prepare_assignment_locked()
+        snapshot = controller._prepare_assignment_locked(
+            settle_gate_passed=True
+        )
         controller.robot_poses['tb3_0'] = Pose(x=0.2965, y=0.0)
         routes = {'tb3_0': [(0.4355, 0.0), (0.4355, 0.0)]}
 
@@ -1727,12 +2045,22 @@ class FormationAssignmentTests(unittest.TestCase):
                 'position_drift': 0.139,
                 'yaw_drift': 0.0,
                 'stage': 'assignment_commit',
+                'plan_attempt': 1,
             },
             controller._last_live_safety_failure,
         )
         self.assertTrue(controller.assignment_pending)
         self.assertEqual({}, controller.assignments)
         self.assertTrue(controller._assignment_worker_wakeup.is_set())
+        self.assertEqual(
+            'waiting_for_stability',
+            controller._assignment_planning_phase,
+        )
+        ready, timed_out, _ = (
+            controller._assignment_settle_readiness_locked()
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
         command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
         self.assertEqual(0.0, command.linear.x)
         self.assertEqual(0.0, command.angular.z)
@@ -1838,6 +2166,1067 @@ class FormationAssignmentTests(unittest.TestCase):
         self.assertEqual('tb3_0', drift['robot'])
         self.assertEqual(0.151, drift['yaw_drift'])
 
+    def test_start_waits_for_fresh_cumulative_pose_settling(self):
+        controller = make_controller()
+        controller._start_cb(String(data=json.dumps({
+            'task_id': 'settling-start',
+            'formation_type': 'line',
+        })))
+
+        first_at = controller.task_started_at + 0.01
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=first_at)
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual('odometry', detail['reason'])
+
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = first_at
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=first_at)
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual('first_sample', detail['reason'])
+
+        controller.robot_poses['tb3_0'] = Pose(x=0.006, y=0.0)
+        controller.odom_received_at['tb3_0'] = first_at + 0.20
+        ready, _, _ = controller._assignment_settle_readiness_locked(
+            now=first_at + 0.20
+        )
+        self.assertFalse(ready)
+
+        # Each step is smaller than 1 cm, but the cumulative drift from the
+        # anchor is not. The quiet window must restart here.
+        controller.robot_poses['tb3_0'] = Pose(x=0.012, y=0.0)
+        controller.odom_received_at['tb3_0'] = first_at + 0.40
+        ready, _, detail = controller._assignment_settle_readiness_locked(
+            now=first_at + 0.40
+        )
+        self.assertFalse(ready)
+        self.assertEqual('movement', detail['reason'])
+        self.assertEqual(['tb3_0'], detail['robots'])
+
+        controller.odom_received_at['tb3_0'] = first_at + 0.70
+        ready, _, _ = controller._assignment_settle_readiness_locked(
+            now=first_at + 0.70
+        )
+        self.assertFalse(ready)
+
+        settled_at = first_at + 0.91
+        controller.odom_received_at['tb3_0'] = settled_at
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=settled_at)
+        )
+        self.assertTrue(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual('stable', detail['reason'])
+        self.assertEqual({}, controller.assignments)
+
+    def test_assignment_settle_gate_normalizes_wrapped_yaw(self):
+        controller = make_controller()
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 100.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.robot_yaws['tb3_0'] = math.pi - 0.01
+        controller.odom_received_at['tb3_0'] = 100.1
+        controller._reset_assignment_settle_locked(now=100.1)
+
+        ready, timed_out, _ = (
+            controller._assignment_settle_readiness_locked(now=100.1)
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
+
+        controller.robot_yaws['tb3_0'] = -math.pi + 0.01
+        controller.odom_received_at['tb3_0'] = 100.61
+        ready, timed_out, _ = (
+            controller._assignment_settle_readiness_locked(now=100.61)
+        )
+        self.assertTrue(ready)
+        self.assertFalse(timed_out)
+
+    def test_assignment_settle_timeout_fails_closed(self):
+        controller = make_controller()
+        controller.current_task_id = 'settle-timeout'
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 100.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = 100.1
+        controller._reset_assignment_settle_locked(now=100.1)
+        controller._assignment_settle_readiness_locked(now=100.1)
+
+        timeout_at = (
+            100.1 + controller.assignment_settle_timeout_wall_s + 0.01
+        )
+        controller.robot_poses['tb3_0'] = Pose(x=0.02, y=0.0)
+        controller.odom_received_at['tb3_0'] = timeout_at
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=timeout_at)
+        )
+        self.assertFalse(ready)
+        self.assertTrue(timed_out)
+        self.assertTrue(
+            controller._fail_assignment_settle_timeout_locked(detail)
+        )
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual({}, controller.assignments)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn('did not become stationary', controller.placement_error)
+        command = controller.cmd_vel_pubs['tb3_0'].messages[-1]
+        self.assertEqual(0.0, command.linear.x)
+        self.assertEqual(0.0, command.angular.z)
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual(
+            'assignment_pose_settle',
+            status['routing']['last_live_safety_failure']['gate'],
+        )
+        self.assertEqual(
+            'assignment_pose_settle',
+            status['routing']['live_safety_failure_history'][-1]['gate'],
+        )
+
+    def test_settle_deadline_wins_over_late_stability(self):
+        controller = make_controller()
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = 100.0
+        controller._reset_assignment_settle_locked(now=100.0)
+
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=100.0)
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual('first_sample', detail['reason'])
+
+        deadline = controller._assignment_settle_deadline
+        controller.odom_received_at['tb3_0'] = deadline
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=deadline)
+        )
+
+        self.assertFalse(ready)
+        self.assertTrue(timed_out)
+        self.assertEqual('quiet_window', detail['reason'])
+        self.assertEqual(['tb3_0'], detail['robots'])
+
+    def test_control_timer_preserves_predeadline_stability_for_late_worker(
+        self,
+    ):
+        def seal_stability_without_running_the_worker():
+            controller = make_controller()
+            clock = [100.0]
+            controller.current_task_id = 'timer-settle'
+            controller.is_running = True
+            controller.task_started_at = 99.0
+            controller.movement_mode = formation.MovementMode.STATIC
+            controller.formation_offsets = [(0.0, 0.0)]
+            controller.odom_confirmed_for_task['tb3_0'] = True
+            controller.odom_received_at['tb3_0'] = clock[0]
+            controller._publish_status = lambda *args, **kwargs: None
+            controller._publish_markers = lambda *args, **kwargs: None
+
+            with mock.patch.object(
+                formation.time,
+                'monotonic',
+                side_effect=lambda: clock[0],
+            ):
+                controller._queue_assignment_after_settle_locked()
+                with mock.patch.object(
+                    controller, '_request_pending_assignment'
+                ) as wake_worker:
+                    controller._control_step(None)
+                    clock[0] = 100.51
+                    controller.odom_received_at['tb3_0'] = clock[0]
+                    controller._control_step(None)
+
+            wake_worker.assert_called_once_with()
+            self.assertEqual(
+                100.51, controller._assignment_settle_ready_at
+            )
+            self.assertEqual(
+                'waiting_for_stability',
+                controller._assignment_planning_phase,
+            )
+            return controller
+
+        stable_controller = seal_stability_without_running_the_worker()
+        stable_controller.odom_received_at['tb3_0'] = 105.01
+        with stable_controller.command_lock:
+            snapshot, timed_out, detail = (
+                stable_controller._prepare_assignment_after_settle_locked(
+                    now=105.01
+                )
+            )
+
+        self.assertIsNotNone(snapshot)
+        self.assertFalse(timed_out)
+        self.assertEqual('stable', detail['reason'])
+        self.assertEqual(100.51, detail['ready_at'])
+
+        moved_controller = seal_stability_without_running_the_worker()
+        moved_controller.robot_poses['tb3_0'] = Pose(x=0.02, y=0.0)
+        moved_controller.odom_received_at['tb3_0'] = 105.01
+        with moved_controller.command_lock:
+            snapshot, timed_out, detail = (
+                moved_controller._prepare_assignment_after_settle_locked(
+                    now=105.01
+                )
+            )
+            failed_closed = (
+                moved_controller._fail_assignment_settle_timeout_locked(
+                    detail
+                )
+            )
+
+        self.assertIsNone(snapshot)
+        self.assertTrue(timed_out)
+        self.assertEqual('movement', detail['reason'])
+        self.assertEqual(['tb3_0'], detail['robots'])
+        self.assertTrue(failed_closed)
+        self.assertIsNone(moved_controller._assignment_settle_ready_at)
+        self.assertFalse(moved_controller.is_running)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            moved_controller.formation_state,
+        )
+
+    def test_paused_control_loop_seals_stability_for_late_worker(self):
+        controller = make_controller()
+        clock = [100.0]
+        controller.current_task_id = 'paused-settle'
+        controller.is_running = True
+        controller.is_paused = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = clock[0]
+
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: clock[0],
+        ):
+            controller._queue_assignment_after_settle_locked()
+            with mock.patch.object(
+                controller, '_request_pending_assignment'
+            ) as wake_worker:
+                controller._control_loop(None)
+                clock[0] = 100.51
+                controller.odom_received_at['tb3_0'] = clock[0]
+                controller._control_loop(None)
+
+        wake_worker.assert_called_once_with()
+        self.assertEqual(100.51, controller._assignment_settle_ready_at)
+        self.assertEqual([], controller.cmd_vel_pubs['tb3_0'].messages)
+        self.assertTrue(controller.is_paused)
+
+        controller.odom_received_at['tb3_0'] = 105.01
+        with controller.command_lock:
+            snapshot, timed_out, detail = (
+                controller._prepare_assignment_after_settle_locked(
+                    now=105.01
+                )
+            )
+
+        self.assertIsNotNone(snapshot)
+        self.assertFalse(timed_out)
+        self.assertEqual('stable', detail['reason'])
+        self.assertEqual(100.51, detail['ready_at'])
+
+    def test_start_gives_initial_odometry_its_own_deadline(self):
+        controller = make_controller()
+        controller._publish_markers = lambda *args, **kwargs: None
+        clock = [0.0]
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: clock[0],
+        ):
+            controller._start_cb(String(data=json.dumps({
+                'task_id': 'late-first-odometry',
+                'formation_type': 'line',
+            })))
+            self.assertIsNone(controller._assignment_settle_deadline)
+            self.assertEqual(
+                10.0, controller._assignment_settle_odom_deadline
+            )
+
+            clock[0] = 5.01
+            controller._control_loop(None)
+            self.assertTrue(controller.is_running)
+            self.assertTrue(controller.assignment_pending)
+            self.assertEqual(
+                formation.FormationState.FORMING,
+                controller.formation_state,
+            )
+            self.assertEqual(
+                ('tb3_0',), controller._assignment_settle_waiting
+            )
+
+            clock[0] = 10.0
+            controller._control_loop(None)
+            self.assertTrue(controller.is_running)
+            self.assertTrue(controller.assignment_pending)
+
+            controller._odom_cb(Odometry(), 'tb3_0')
+            timed_out = controller._observe_assignment_settle_locked(
+                now=clock[0]
+            )
+
+        self.assertFalse(timed_out)
+        self.assertTrue(
+            controller.odom_confirmed_for_task['tb3_0']
+        )
+        self.assertEqual(10.0, controller._assignment_settle_since)
+        self.assertEqual(15.0, controller._assignment_settle_deadline)
+        self.assertIsNone(controller._assignment_settle_odom_deadline)
+
+        missing_controller = make_controller()
+        missing_controller._publish_markers = (
+            lambda *args, **kwargs: None
+        )
+        missing_clock = [0.0]
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: missing_clock[0],
+        ):
+            missing_controller._start_cb(String(data=json.dumps({
+                'task_id': 'missing-first-odometry',
+                'formation_type': 'line',
+            })))
+            missing_clock[0] = 10.01
+            missing_controller._control_loop(None)
+
+        self.assertFalse(missing_controller.is_running)
+        self.assertFalse(missing_controller.assignment_pending)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            missing_controller.formation_state,
+        )
+        self.assertIn(
+            'did not become stationary',
+            missing_controller.placement_error,
+        )
+
+    def test_multi_robot_gate_waits_for_all_and_restarts_for_one_mover(self):
+        controller = make_two_robot_controller()
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task = {
+            'tb3_0': True,
+            'tb3_1': True,
+        }
+        controller.odom_received_at = {
+            'tb3_0': 100.0,
+            'tb3_1': 100.0,
+        }
+        controller._reset_assignment_settle_locked(now=100.0)
+        controller._assignment_settle_readiness_locked(now=100.0)
+
+        controller.odom_received_at['tb3_0'] = 100.51
+        ready, timed_out, _ = (
+            controller._assignment_settle_readiness_locked(now=100.51)
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual(
+            ('tb3_1',), controller._assignment_settle_waiting
+        )
+
+        controller.robot_poses['tb3_1'] = Pose(x=1.02, y=0.0)
+        controller.odom_received_at['tb3_1'] = 100.60
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=100.60)
+        )
+        self.assertFalse(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual('movement', detail['reason'])
+        self.assertEqual(['tb3_1'], detail['robots'])
+
+        controller.odom_received_at = {
+            'tb3_0': 101.11,
+            'tb3_1': 101.11,
+        }
+        ready, timed_out, detail = (
+            controller._assignment_settle_readiness_locked(now=101.11)
+        )
+        self.assertTrue(ready)
+        self.assertFalse(timed_out)
+        self.assertEqual('stable', detail['reason'])
+        self.assertEqual((), controller._assignment_settle_waiting)
+
+    def test_settle_check_and_snapshot_share_one_pose_lock_epoch(self):
+        controller = make_controller()
+        controller.lock = ContentionAwareRLock()
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = 100.0
+        controller._reset_assignment_settle_locked(now=100.0)
+        controller._assignment_settle_readiness_locked(now=100.0)
+        controller.odom_received_at['tb3_0'] = 100.51
+
+        snapshot_entered = threading.Event()
+        release_snapshot = threading.Event()
+        odometry_finished = threading.Event()
+        planner_result = []
+        original_prepare = controller._prepare_assignment_locked
+
+        def blocking_prepare(*args, **kwargs):
+            snapshot_entered.set()
+            release_snapshot.wait(1.0)
+            return original_prepare(*args, **kwargs)
+
+        def prepare_snapshot():
+            with controller.command_lock:
+                planner_result.append(
+                    controller._prepare_assignment_after_settle_locked(
+                        now=100.51
+                    )
+                )
+
+        odometry = Odometry()
+        odometry.pose.pose.position.x = 0.20
+
+        def publish_odometry():
+            controller._odom_cb(odometry, 'tb3_0')
+            odometry_finished.set()
+
+        planner = threading.Thread(target=prepare_snapshot)
+        odometry_thread = threading.Thread(target=publish_odometry)
+        with mock.patch.object(
+            formation.time, 'monotonic', return_value=100.52
+        ), mock.patch.object(
+            controller,
+            '_prepare_assignment_locked',
+            side_effect=blocking_prepare,
+        ):
+            planner.start()
+            try:
+                self.assertTrue(snapshot_entered.wait(1.0))
+                odometry_thread.start()
+                self.assertTrue(controller.lock.contended.wait(1.0))
+                self.assertFalse(odometry_finished.is_set())
+            finally:
+                release_snapshot.set()
+                planner.join(1.0)
+                odometry_thread.join(1.0)
+
+        self.assertFalse(planner.is_alive())
+        self.assertFalse(odometry_thread.is_alive())
+        snapshot, timed_out, detail = planner_result[0]
+        self.assertFalse(timed_out)
+        self.assertEqual('stable', detail['reason'])
+        self.assertEqual(((0.0, 0.0),), snapshot['robot_positions'])
+        self.assertEqual(
+            0.20, controller.robot_poses['tb3_0'].position.x
+        )
+
+    def test_worker_times_out_without_an_odometry_wakeup(self):
+        controller = make_controller()
+        clock = [100.0]
+        controller.current_task_id = 'worker-settle-timeout'
+        controller.is_running = True
+        controller.assignment_pending = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = clock[0]
+        controller._reset_assignment_settle_locked(now=clock[0])
+        controller._assignment_settle_readiness_locked(now=clock[0])
+        controller._assignment_worker_wakeup.clear()
+        clock[0] = controller._assignment_settle_deadline + 0.01
+
+        timeout_handled = threading.Event()
+        fail_timeout = controller._fail_assignment_settle_timeout_locked
+
+        def observe_timeout(detail):
+            result = fail_timeout(detail)
+            timeout_handled.set()
+            return result
+
+        worker = threading.Thread(
+            target=controller._assignment_worker_loop
+        )
+        controller._assignment_worker = worker
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: clock[0],
+        ), mock.patch.object(
+            controller,
+            '_fail_assignment_settle_timeout_locked',
+            side_effect=observe_timeout,
+        ), mock.patch.object(
+            controller,
+            '_prepare_assignment_locked',
+        ) as prepare:
+            worker.start()
+            try:
+                self.assertTrue(timeout_handled.wait(1.0))
+            finally:
+                controller._assignment_worker_stop.set()
+                controller._assignment_worker_wakeup.set()
+                worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+        prepare.assert_not_called()
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+
+    def test_second_live_replan_opens_a_new_settle_window(self):
+        controller = make_controller()
+        clock = [100.0]
+        controller.current_task_id = 'second-live-replan'
+        controller.is_running = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = clock[0]
+        plan = {
+            'arena_size': 10.0,
+            'arena_profile': 'swarm_arena',
+            'exclusion_zones': (),
+            'model_poses': {},
+        }
+        positions = {'tb3_0': (0.0, 0.0)}
+        detail = {'gate': 'assignment_pose_snapshot', 'robot': 'tb3_0'}
+
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: clock[0],
+        ):
+            self.assertTrue(controller._schedule_live_replan_locked(
+                plan, positions, {}, detail
+            ))
+            controller._assignment_settle_readiness_locked(now=100.0)
+            controller.odom_received_at['tb3_0'] = 100.51
+            snapshot, timed_out, _ = (
+                controller._prepare_assignment_after_settle_locked(
+                    now=100.51
+                )
+            )
+            self.assertIsNotNone(snapshot)
+            self.assertFalse(timed_out)
+
+            clock[0] = 101.0
+            controller._assignment_worker_wakeup.clear()
+            self.assertTrue(controller._schedule_live_replan_locked(
+                plan, positions, {}, detail
+            ))
+            second_deadline = controller._assignment_settle_deadline
+            snapshot, timed_out, detail = (
+                controller._prepare_assignment_after_settle_locked(
+                    now=101.0
+                )
+            )
+
+        self.assertEqual(2, controller._live_replan_attempts)
+        self.assertEqual(106.0, second_deadline)
+        self.assertIsNone(snapshot)
+        self.assertFalse(timed_out)
+        self.assertEqual('first_sample', detail['reason'])
+        self.assertEqual(
+            'waiting_for_stability',
+            controller._assignment_planning_phase,
+        )
+        self.assertTrue(controller._assignment_worker_wakeup.is_set())
+
+    def test_cancel_and_stop_clear_planning_status(self):
+        controller = make_controller()
+        controller.current_task_id = 'settle-cleanup'
+        controller.is_running = True
+        controller.task_started_at = 99.0
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = 100.0
+        controller._queue_assignment_after_settle_locked()
+        controller._assignment_settle_deadline = 105.0
+        controller._assignment_settle_readiness_locked(now=100.0)
+
+        with mock.patch.object(
+            formation.time, 'monotonic', return_value=100.25
+        ):
+            controller._publish_status([], 0.0)
+        planning = json.loads(
+            controller.status_pub.messages[-1].data
+        )['planning']
+        self.assertEqual('waiting_for_stability', planning['phase'])
+        self.assertFalse(planning['stability_reached'])
+        self.assertEqual(0.25, planning['stationary_for'])
+        self.assertEqual(0.5, planning['required_stationary_time'])
+        self.assertEqual(
+            ['tb3_0'], planning['waiting_for_stability']
+        )
+
+        controller.odom_received_at['tb3_0'] = 100.51
+        ready, timed_out, _ = (
+            controller._assignment_settle_readiness_locked(now=100.51)
+        )
+        self.assertTrue(ready)
+        self.assertFalse(timed_out)
+        with mock.patch.object(
+            formation.time, 'monotonic', return_value=100.51
+        ):
+            controller._publish_status([], 0.0)
+        stable_planning = json.loads(
+            controller.status_pub.messages[-1].data
+        )['planning']
+        self.assertTrue(stable_planning['stability_reached'])
+        self.assertEqual([], stable_planning['waiting_for_stability'])
+
+        with controller.command_lock:
+            controller._cancel_pending_assignment_locked(
+                clear_assignments=True
+            )
+        controller._publish_status([], 0.0)
+        cancelled_status = json.loads(
+            controller.status_pub.messages[-1].data
+        )
+        self.assertNotIn('planning', cancelled_status)
+        self.assertEqual({}, controller._assignment_settle_anchor)
+        self.assertIsNone(controller._assignment_settle_since)
+        self.assertIsNone(controller._assignment_settle_deadline)
+        self.assertIsNone(controller._assignment_settle_odom_deadline)
+        self.assertIsNone(controller._assignment_settle_ready_at)
+        self.assertEqual('idle', controller._assignment_planning_phase)
+        self.assertEqual((), controller._assignment_settle_waiting)
+
+        with mock.patch.object(
+            formation.time, 'monotonic', return_value=101.0
+        ):
+            controller._queue_assignment_after_settle_locked()
+        controller._stop_cb(String(data=json.dumps({
+            'task_id': 'settle-cleanup',
+        })))
+        stopped_status = json.loads(
+            controller.status_pub.messages[-1].data
+        )
+        self.assertNotIn('planning', stopped_status)
+        self.assertFalse(controller.assignment_pending)
+        self.assertIsNone(controller._assignment_settle_odom_deadline)
+        self.assertIsNone(controller._assignment_settle_ready_at)
+        self.assertEqual('idle', controller._assignment_planning_phase)
+
+    def test_active_replan_entry_points_never_run_the_solver_inline(self):
+        for entry_point in ('shape', 'fleet', 'recompute', 'assign'):
+            with self.subTest(entry_point=entry_point):
+                controller = (
+                    make_two_robot_controller()
+                    if entry_point == 'fleet'
+                    else make_controller()
+                )
+                controller.current_task_id = f'{entry_point}-gate'
+                controller.is_running = True
+                controller._assignment_worker_wakeup.clear()
+
+                with mock.patch.object(
+                    formation, 'minimum_distance_assignment'
+                ) as solver:
+                    if entry_point == 'shape':
+                        controller._set_shape_cb(String(data='triangle'))
+                    elif entry_point == 'fleet':
+                        controller._fleet_list_cb(String(data='tb3_0'))
+                    elif entry_point == 'recompute':
+                        controller._recompute_formation()
+                    else:
+                        controller._assign_robots_to_positions()
+
+                solver.assert_not_called()
+                self.assertTrue(controller.assignment_pending)
+                self.assertEqual({}, controller.assignments)
+                self.assertEqual(
+                    'waiting_for_stability',
+                    controller._assignment_planning_phase,
+                )
+                self.assertTrue(
+                    controller._assignment_worker_wakeup.is_set()
+                )
+
+    def test_active_fleet_resize_reuses_one_confirmed_stop(self):
+        controller = make_two_robot_controller()
+        controller.current_task_id = 'single-resize-stop'
+        controller.is_running = True
+        original_publishers = dict(controller.cmd_vel_pubs)
+
+        with mock.patch.object(
+            controller,
+            '_stop_all_robots',
+            wraps=controller._stop_all_robots,
+        ) as stop_all:
+            controller._fleet_list_cb(String(data='tb3_0'))
+
+        stop_all.assert_called_once_with('fleet_change')
+        self.assertEqual(['tb3_0'], controller.robot_ids)
+        self.assertTrue(controller.assignment_pending)
+        self.assertEqual(
+            'waiting_for_stability',
+            controller._assignment_planning_phase,
+        )
+        for robot_id, publisher in original_publishers.items():
+            with self.subTest(robot_id=robot_id):
+                self.assertEqual(1, len(publisher.messages))
+                command = publisher.messages[0]
+                self.assertEqual(0.0, command.linear.x)
+                self.assertEqual(0.0, command.angular.z)
+
+        self.assertEqual(
+            'fleet_change',
+            controller._last_stop_publication['reason'],
+        )
+        self.assertEqual(
+            1, controller._last_stop_publication['attempt']
+        )
+        self.assertEqual(
+            2, controller._last_stop_publication['requested_count']
+        )
+        self.assertTrue(
+            controller._last_stop_publication['publication_confirmed']
+        )
+
+    def test_active_fleet_growth_and_replacement_stop_every_endpoint_once(
+        self,
+    ):
+        class ProvisionedAvoidance:
+            max_linear_velocity = 0.22
+            max_angular_velocity = 2.84
+
+            def __init__(self, _robot_id):
+                self.closed = False
+
+            def shutdown(self):
+                self.closed = True
+
+        cases = (
+            ('grow', 'tb3_0,tb3_1', ['tb3_0', 'tb3_1']),
+            ('replace', 'tb3_1', ['tb3_1']),
+        )
+        for label, roster, expected_ids in cases:
+            with self.subTest(case=label):
+                controller = make_controller()
+                controller.current_task_id = f'{label}-single-stop'
+                controller.is_running = True
+                original_publisher = controller.cmd_vel_pubs['tb3_0']
+                created_publishers = []
+
+                def create_publisher(*_args, **_kwargs):
+                    publisher = FakePublisher()
+                    created_publishers.append(publisher)
+                    return publisher
+
+                with mock.patch.object(
+                    formation.rospy,
+                    'Publisher',
+                    side_effect=create_publisher,
+                    create=True,
+                ) as publisher_factory, mock.patch.object(
+                    formation.rospy,
+                    'Subscriber',
+                    side_effect=lambda *_args, **_kwargs: FakeResource(),
+                    create=True,
+                ), mock.patch.object(
+                    formation,
+                    'ObstacleAvoidance',
+                    ProvisionedAvoidance,
+                ), mock.patch.object(
+                    controller,
+                    '_stop_all_robots',
+                    wraps=controller._stop_all_robots,
+                ) as stop_all:
+                    controller._fleet_list_cb(String(data=roster))
+
+                publisher_factory.assert_called_once()
+                self.assertEqual(1, len(created_publishers))
+                self.assertEqual(2, stop_all.call_count)
+                self.assertEqual(
+                    mock.call('fleet_change'),
+                    stop_all.call_args_list[0],
+                )
+                second_call = stop_all.call_args_list[1]
+                self.assertEqual(
+                    ('fleet_change',), second_call.args
+                )
+                new_snapshot = second_call.kwargs['publisher_snapshot']
+                self.assertEqual(1, len(new_snapshot))
+                self.assertEqual('tb3_1', new_snapshot[0]['robot_id'])
+                self.assertEqual(expected_ids, controller.robot_ids)
+                self.assertTrue(
+                    controller._last_stop_publication[
+                        'publication_confirmed'
+                    ]
+                )
+                self.assertEqual(
+                    1,
+                    controller._last_stop_publication['requested_count'],
+                )
+                self.assertEqual(
+                    'fleet_change',
+                    controller._last_stop_publication['reason'],
+                )
+                self.assertEqual(
+                    2, controller._last_stop_publication['attempt']
+                )
+                self.assertTrue(controller.assignment_pending)
+                self.assertEqual(
+                    'waiting_for_stability',
+                    controller._assignment_planning_phase,
+                )
+
+                affected_publishers = [
+                    original_publisher, created_publishers[0]
+                ]
+                for index, publisher in enumerate(affected_publishers):
+                    with self.subTest(case=label, publisher=index):
+                        self.assertEqual(1, len(publisher.messages))
+                        command = publisher.messages[0]
+                        self.assertEqual(0.0, command.linear.x)
+                        self.assertEqual(0.0, command.angular.z)
+
+    def test_growth_stops_old_fleet_before_new_publisher_setup_finishes(
+        self,
+    ):
+        class ProvisionedAvoidance:
+            max_linear_velocity = 0.22
+            max_angular_velocity = 2.84
+
+            def __init__(self, _robot_id):
+                pass
+
+            def shutdown(self):
+                pass
+
+        controller = make_controller()
+        controller.current_task_id = 'blocked-grow-setup'
+        controller.is_running = True
+        old_publisher = controller.cmd_vel_pubs['tb3_0']
+        publisher_setup_started = threading.Event()
+        release_publisher_setup = threading.Event()
+        created_publishers = []
+
+        def blocked_publisher_setup(*_args, **_kwargs):
+            publisher_setup_started.set()
+            release_publisher_setup.wait(1.0)
+            publisher = FakePublisher()
+            created_publishers.append(publisher)
+            return publisher
+
+        roster = threading.Thread(
+            target=controller._fleet_list_cb,
+            args=(String(data='tb3_0,tb3_1'),),
+        )
+        with mock.patch.object(
+            formation.rospy,
+            'Publisher',
+            side_effect=blocked_publisher_setup,
+            create=True,
+        ), mock.patch.object(
+            formation.rospy,
+            'Subscriber',
+            side_effect=lambda *_args, **_kwargs: FakeResource(),
+            create=True,
+        ), mock.patch.object(
+            formation,
+            'ObstacleAvoidance',
+            ProvisionedAvoidance,
+        ), mock.patch.object(
+            controller,
+            '_stop_all_robots',
+            wraps=controller._stop_all_robots,
+        ) as stop_all:
+            roster.start()
+            try:
+                self.assertTrue(publisher_setup_started.wait(0.5))
+                self.assertEqual(1, len(old_publisher.messages))
+                old_zero = old_publisher.messages[0]
+                self.assertEqual(0.0, old_zero.linear.x)
+                self.assertEqual(0.0, old_zero.angular.z)
+                self.assertEqual(
+                    1, controller._last_stop_publication['attempt']
+                )
+                self.assertEqual(
+                    'fleet_change',
+                    controller._last_stop_publication['reason'],
+                )
+            finally:
+                release_publisher_setup.set()
+                roster.join(1.0)
+
+        self.assertFalse(roster.is_alive())
+        self.assertEqual(2, stop_all.call_count)
+        self.assertEqual(1, len(created_publishers))
+        self.assertEqual(1, len(created_publishers[0].messages))
+        new_zero = created_publishers[0].messages[0]
+        self.assertEqual(0.0, new_zero.linear.x)
+        self.assertEqual(0.0, new_zero.angular.z)
+        self.assertEqual(
+            2, controller._last_stop_publication['attempt']
+        )
+        self.assertEqual(
+            'fleet_change',
+            controller._last_stop_publication['reason'],
+        )
+
+    def test_partial_fleet_provision_failure_fails_closed(self):
+        class ProvisionedAvoidance:
+            max_linear_velocity = 0.22
+            max_angular_velocity = 2.84
+
+            def __init__(self, _robot_id):
+                pass
+
+            def shutdown(self):
+                pass
+
+        controller = make_controller()
+        controller.current_task_id = 'partial-grow-failure'
+        controller.is_running = True
+        old_publisher = controller.cmd_vel_pubs['tb3_0']
+        created_publishers = []
+
+        def create_then_fail(*_args, **_kwargs):
+            if created_publishers:
+                raise RuntimeError('publisher setup failed')
+            publisher = FakePublisher()
+            created_publishers.append(publisher)
+            return publisher
+
+        with mock.patch.object(
+            formation.rospy,
+            'Publisher',
+            side_effect=create_then_fail,
+            create=True,
+        ), mock.patch.object(
+            formation.rospy,
+            'Subscriber',
+            side_effect=lambda *_args, **_kwargs: FakeResource(),
+            create=True,
+        ), mock.patch.object(
+            formation,
+            'ObstacleAvoidance',
+            ProvisionedAvoidance,
+        ):
+            controller._fleet_list_cb(
+                String(data='tb3_0,tb3_1,tb3_2')
+            )
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual({}, controller.assignments)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+        self.assertIn('could not provision', controller.placement_error)
+        self.assertEqual(['tb3_0'], controller.robot_ids)
+        self.assertIn('tb3_1', controller.cmd_vel_pubs)
+        self.assertEqual(2, len(old_publisher.messages))
+        self.assertEqual(1, len(created_publishers[0].messages))
+        self.assertEqual(
+            'fleet_provision_failure',
+            controller._last_stop_publication['reason'],
+        )
+        self.assertEqual(
+            2, controller._last_stop_publication['requested_count']
+        )
+        self.assertTrue(
+            controller._last_stop_publication['publication_confirmed']
+        )
+        status = json.loads(controller.status_pub.messages[-1].data)
+        self.assertEqual('failed', status['state'])
+        self.assertEqual(
+            'fleet_provision_failure',
+            status['stop_publication']['reason'],
+        )
+
+    def test_grow_uses_roster_odometry_deadline_not_original_task_age(
+        self,
+    ):
+        class ProvisionedAvoidance:
+            max_linear_velocity = 0.22
+            max_angular_velocity = 2.84
+
+            def __init__(self, _robot_id):
+                pass
+
+            def shutdown(self):
+                pass
+
+        controller = make_controller()
+        clock = [100.0]
+        controller.current_task_id = 'old-running-task'
+        controller.task_started_at = 0.0
+        controller.is_running = True
+        controller.formation_state = formation.FormationState.MOVING
+        controller._publish_markers = lambda *args, **kwargs: None
+        controller.odom_confirmed_for_task['tb3_0'] = True
+        controller.odom_received_at['tb3_0'] = clock[0]
+
+        with mock.patch.object(
+            formation.time,
+            'monotonic',
+            side_effect=lambda: clock[0],
+        ), mock.patch.object(
+            formation.rospy,
+            'Publisher',
+            side_effect=lambda *_args, **_kwargs: FakePublisher(),
+            create=True,
+        ), mock.patch.object(
+            formation.rospy,
+            'Subscriber',
+            side_effect=lambda *_args, **_kwargs: FakeResource(),
+            create=True,
+        ), mock.patch.object(
+            formation,
+            'ObstacleAvoidance',
+            ProvisionedAvoidance,
+        ):
+            controller._fleet_list_cb(String(data='tb3_0,tb3_1'))
+            self.assertEqual(
+                110.0, controller._assignment_settle_odom_deadline
+            )
+            self.assertFalse(
+                controller.odom_confirmed_for_task['tb3_1']
+            )
+
+            clock[0] = 100.01
+            controller._control_loop(None)
+            self.assertTrue(controller.is_running)
+            self.assertEqual(
+                formation.FormationState.FORMING,
+                controller.formation_state,
+            )
+            self.assertEqual(
+                ['tb3_1'], controller.waiting_for_odometry
+            )
+            self.assertEqual([], controller.stale_odometry)
+            self.assertIsNone(controller.placement_error)
+
+            clock[0] = 110.01
+            controller._control_loop(None)
+
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
+
     def test_persistent_pose_churn_exhausts_replan_budget(self):
         controller = make_controller()
         controller.is_running = True
@@ -1856,7 +3245,9 @@ class FormationAssignmentTests(unittest.TestCase):
 
         for attempt in range(3):
             old_x = controller.robot_poses['tb3_0'].position.x
-            snapshot = controller._prepare_assignment_locked()
+            snapshot = controller._prepare_assignment_locked(
+                settle_gate_passed=True
+            )
             new_x = 0.2965 if old_x > 0.40 else 0.4355
             controller.robot_poses['tb3_0'] = Pose(x=new_x, y=0.0)
             routes = {'tb3_0': [(old_x, 0.0), (0.60, 0.0)]}
@@ -2429,7 +3820,9 @@ class FormationConvergenceTests(unittest.TestCase):
         controller.movement_mode = formation.MovementMode.MOVING
         controller._initial_formation_acquired = False
 
-        snapshot = controller._prepare_assignment_locked()
+        snapshot = controller._prepare_assignment_locked(
+            settle_gate_passed=True
+        )
         self.assertTrue(controller._compute_and_commit_assignment(snapshot))
         anchored_centroid = (controller.centroid_x, controller.centroid_y)
 
@@ -2531,7 +3924,9 @@ class FormationConvergenceTests(unittest.TestCase):
                     controller, robot_count, spawn_pattern
                 )
 
-                snapshot = controller._prepare_assignment_locked()
+                snapshot = controller._prepare_assignment_locked(
+                    settle_gate_passed=True
+                )
                 self.assertTrue(
                     controller._compute_and_commit_assignment(snapshot),
                     controller.placement_error,
@@ -4619,18 +6014,16 @@ class FormationLifecycleTests(unittest.TestCase):
             return_value=retained_avoidance,
         ), mock.patch.object(
             controller, '_recompute_formation_locked', return_value=None
-        ):
+        ) as replan:
             controller._fleet_list_cb(String(data='tb3_0,tb3_1'))
 
         create_publisher.assert_not_called()
+        replan.assert_not_called()
         self.assertIs(broken, controller.cmd_vel_pubs['tb3_1'])
         self.assertFalse(broken.unregistered)
-        self.assertEqual(3, broken.calls)
+        self.assertEqual(4, broken.calls)
         self.assertEqual(2, len(controller._command_publisher_generations))
-        self.assertEqual(1, len(controller._stop_publication_debts))
-
-        broken.failures_remaining = 0
-        controller._stop_cb(old_task_stop)
+        self.assertEqual({}, controller._stop_publication_debts)
         recovered_status = json.loads(
             controller.status_pub.messages[-1].data
         )
@@ -4645,6 +6038,12 @@ class FormationLifecycleTests(unittest.TestCase):
         self.assertEqual({}, controller._stop_publication_debts)
         self.assertIs(broken, controller.cmd_vel_pubs['tb3_1'])
         self.assertFalse(broken.unregistered)
+        self.assertFalse(controller.is_running)
+        self.assertFalse(controller.assignment_pending)
+        self.assertEqual(
+            formation.FormationState.FAILED,
+            controller.formation_state,
+        )
 
         with mock.patch.object(
             controller, '_prepare_assignment_locked', return_value=None

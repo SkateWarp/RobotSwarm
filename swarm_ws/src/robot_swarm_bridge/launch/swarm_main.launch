@@ -22,6 +22,9 @@
   <arg name="start_legacy_bridge" default="true"/>
   <arg name="control_watchdog_enabled" default="true"/>
   <arg name="control_heartbeat_timeout" default="10.0"/>
+  <arg name="control_heartbeat_max_future" default="15.0"/>
+  <arg name="control_watchdog_startup_grace" default="15.0"/>
+  <arg name="control_watchdog_check_period" default="0.5"/>
 
   <!-- Set TurtleBot3 model environment variable -->
   <env name="TURTLEBOT3_MODEL" value="$(arg robot_model)"/>
@@ -59,6 +62,9 @@
   <node pkg="robot_swarm_bridge" type="task_orchestrator.py" name="task_orchestrator" output="screen">
     <param name="control_watchdog_enabled" value="$(arg control_watchdog_enabled)"/>
     <param name="control_heartbeat_timeout" value="$(arg control_heartbeat_timeout)"/>
+    <param name="control_heartbeat_max_future" value="$(arg control_heartbeat_max_future)"/>
+    <param name="control_watchdog_startup_grace" value="$(arg control_watchdog_startup_grace)"/>
+    <param name="control_watchdog_check_period" value="$(arg control_watchdog_check_period)"/>
   </node>
 
   <!-- Obstacle generator (provides /environment/spawn_obstacles service) -->

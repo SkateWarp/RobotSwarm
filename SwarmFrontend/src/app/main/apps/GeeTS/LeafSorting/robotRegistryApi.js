@@ -19,7 +19,10 @@ export const getRobotRegistryErrorMessage = (error) => {
 };
 
 export const listRegistryRobots = async () => {
-    const response = await axios.get(`${URL}/Robots`, requestConfig());
+    const response = await axios.get(`${URL}/Robots`, {
+        ...requestConfig(),
+        params: { includeDisabled: true },
+    });
     return Array.isArray(response.data) ? response.data : [];
 };
 
@@ -37,6 +40,15 @@ export const disableRegistryRobot = async (robot) => {
     const response = await axios.put(
         `${URL}/Robots/${robot.id}`,
         { ...normalizeRobotDraft(robot), status: 2 },
+        requestConfig()
+    );
+    return response.data;
+};
+
+export const reactivateRegistryRobot = async (robot) => {
+    const response = await axios.put(
+        `${URL}/Robots/${robot.id}`,
+        { ...normalizeRobotDraft(robot), status: 0 },
         requestConfig()
     );
     return response.data;

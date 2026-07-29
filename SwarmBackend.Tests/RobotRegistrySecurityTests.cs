@@ -90,13 +90,80 @@ public sealed class RobotRegistrySecurityTests
         await dataContext.SaveChangesAsync();
         var service = new RobotService(dataContext, new RealtimeRecorder());
 
-        var administrator = (await service.GetAll(role: Role.Admin)).ToArray();
+        var administrator = (await service.GetAll(
+            role: Role.Admin,
+            includeDisabled: true)).ToArray();
         var user = (await service.GetAll(accountId: 11, role: Role.User)).ToArray();
         var anonymous = (await service.GetAll()).ToArray();
 
-        Assert.Equal(new[] { "privado-ajeno", "propio", "publico" }, Names(administrator));
+        Assert.Equal(
+            new[] { "deshabilitado", "privado-ajeno", "propio", "publico" },
+            Names(administrator));
         Assert.Equal(new[] { "propio", "publico" }, Names(user));
         Assert.Equal(new[] { "publico" }, Names(anonymous));
+    }
+
+    [Fact]
+    public async Task DisabledInventoryIsNeverExposedToAUserOrAnonymousCaller()
+    {
+        await using var dataContext = TestDataContext.Create();
+        dataContext.Robots.AddRange(
+            new Robot { Name = "activo", AccountId = 11, IsPublic = true },
+            new Robot
+            {
+                Name = "deshabilitado",
+                AccountId = 11,
+                IsPublic = true,
+                Status = RobotStatus.Disabled
+            });
+        await dataContext.SaveChangesAsync();
+        var service = new RobotService(dataContext, new RealtimeRecorder());
+
+        var user = await service.GetAll(
+            accountId: 11,
+            role: Role.User,
+            includeDisabled: true);
+        var anonymous = await service.GetAll(includeDisabled: true);
+
+        Assert.Equal(new[] { "activo" }, Names(user));
+        Assert.Equal(new[] { "activo" }, Names(anonymous));
+    }
+
+    [Fact]
+    public async Task AdministratorCanReactivateWithoutChangingRobotIdentityOrMembership()
+    {
+        await using var dataContext = TestDataContext.Create();
+        var group = new RobotGroup { Name = "Exploradores" };
+        var robot = new Robot
+        {
+            Name = "tb3_5",
+            Namespace = "tb3_5",
+            AccountId = 22,
+            RobotGroup = group,
+            IsPublic = false,
+            Status = RobotStatus.Disabled
+        };
+        dataContext.AddRange(group, robot);
+        await dataContext.SaveChangesAsync();
+        var realtime = new RealtimeRecorder();
+        var service = new RobotService(dataContext, realtime);
+
+        var reactivated = Success(await service.Update(
+            robot.Id,
+            new RobotRequest(
+                robot.Name,
+                robot.Description,
+                robot.Notes,
+                RobotStatus.Idle,
+                robot.IsPublic),
+            accountId: 1,
+            Role.Admin));
+
+        Assert.Equal(RobotStatus.Idle, reactivated.Status);
+        Assert.Equal(22, reactivated.AccountId);
+        Assert.Equal("tb3_5", reactivated.Namespace);
+        Assert.Equal(group.Id, robot.RobotGroupId);
+        Assert.Equal(1, realtime.AvailabilityNotifications);
     }
 
     [Fact]
@@ -270,7 +337,8 @@ public sealed class RobotRegistrySecurityTests
         public Task<IEnumerable<RobotResponse>> GetAll(
             int? accountId = null,
             bool? isPublic = null,
-            Role? role = null) => throw new NotSupportedException();
+            Role? role = null,
+            bool includeDisabled = false) => throw new NotSupportedException();
 
         public Task<LanguageExt.Common.Result<RobotResponse>> GetById(
             int id,

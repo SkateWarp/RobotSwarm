@@ -61,6 +61,7 @@ builder.Services.AddScoped<ITaskTemplateService, TaskTemplateService>();
 builder.Services.AddScoped<IRealtimeService, RobotHub>();
 builder.Services.AddScoped<IRobotGroupService, RobotGroupService>();
 builder.Services.AddScoped<WorkerCommandService>();
+builder.Services.AddSingleton<WorkerConnectionRegistry>();
 builder.Services.AddSingleton<ViewerControlRegistry>();
 builder.Services.AddViewerHlsProxy();
 builder.Services.AddHostedService<SimulationSessionScheduler>();

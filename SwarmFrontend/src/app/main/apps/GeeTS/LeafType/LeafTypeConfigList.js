@@ -41,15 +41,10 @@ function LeafTypesConfigList() {
                 <Box>
                     <Typography variant="body1">{templates.length} plantillas disponibles</Typography>
                     <Typography color="textSecondary" variant="body2">
-                        Catálogo del backend. Se puede editar el nombre y el algoritmo asociado.
+                        Este catálogo clasifica algoritmos; no inicia tareas ni selecciona robots.
                     </Typography>
                 </Box>
-                <Button
-                    disabled={loading}
-                    onClick={retry}
-                    startIcon={<Icon>refresh</Icon>}
-                    variant="outlined"
-                >
+                <Button disabled={loading} onClick={retry} startIcon={<Icon>refresh</Icon>} variant="outlined">
                     Actualizar
                 </Button>
             </Box>
@@ -86,11 +81,7 @@ function LeafTypesConfigList() {
             ) : null}
 
             {templates.length > 0 ? (
-                <TableContainer
-                    component={Paper}
-                    elevation={0}
-                    variant="outlined"
-                >
+                <TableContainer component={Paper} elevation={0} variant="outlined">
                     <Table aria-label="Plantillas de tareas" size="small" stickyHeader>
                         <TableHead>
                             <TableRow>

@@ -40,6 +40,12 @@ public interface IAccountService
         AccountPatchRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<Result<AccountResponse>> ReactivateAuthorized(
+        int actorAccountId,
+        ClaimsPrincipal principal,
+        int accountId,
+        CancellationToken cancellationToken = default);
+
     Task<bool> Delete(int accountId);
     Task<Result<bool>> DeleteAuthorized(
         int actorAccountId,

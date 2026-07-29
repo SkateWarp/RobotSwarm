@@ -97,6 +97,51 @@ class FormationLiveAcceptanceTest(unittest.TestCase):
                     )
                 )
 
+    def test_ready_wait_ignores_intermediate_states_but_wakes_on_failure(self):
+        case = self.formation_case()
+        task_id = "formation-ready-wait"
+        robots = LIVE.acceptance_robot_ids(case["count"])
+        valid = self.valid_status(case, task_id)
+
+        for state in (None, "initializing", "queued", "paused"):
+            with self.subTest(state=state):
+                self.assertFalse(LIVE.formation_is_ready_or_terminal(
+                    {"task_id": task_id, "status": state},
+                    valid,
+                    task_id,
+                    case,
+                    robots,
+                    0.12,
+                ))
+
+        invalid_running = {**valid, "state": "forming"}
+        self.assertFalse(LIVE.formation_is_ready_or_terminal(
+            {"task_id": task_id, "status": "running"},
+            invalid_running,
+            task_id,
+            case,
+            robots,
+            0.12,
+        ))
+        self.assertTrue(LIVE.formation_is_ready_or_terminal(
+            {"task_id": task_id, "status": "running"},
+            valid,
+            task_id,
+            case,
+            robots,
+            0.12,
+        ))
+        for state in LIVE.TERMINAL_STATES:
+            with self.subTest(state=state):
+                self.assertTrue(LIVE.formation_is_ready_or_terminal(
+                    {"task_id": task_id, "status": state},
+                    invalid_running,
+                    task_id,
+                    case,
+                    robots,
+                    0.12,
+                ))
+
     def test_active_window_is_bounded_and_only_for_one_formation(self):
         formation = self.formation_case()
         transport = next(

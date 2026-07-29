@@ -115,6 +115,7 @@ function TaskRunHistoryApp() {
     const [page, setPage] = useState(0);
     const [rowsPerPage, setRowsPerPage] = useState(10);
     const [type, setType] = useState("");
+    const [state, setState] = useState("");
     const [outcome, setOutcome] = useState("");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -128,6 +129,7 @@ function TaskRunHistoryApp() {
                 offset: page * rowsPerPage,
                 limit: rowsPerPage,
                 type,
+                state,
                 outcome,
             });
             setItems(Array.isArray(response?.items) ? response.items : []);
@@ -139,13 +141,13 @@ function TaskRunHistoryApp() {
         } finally {
             setLoading(false);
         }
-    }, [outcome, page, rowsPerPage, type]);
+    }, [outcome, page, rowsPerPage, state, type]);
 
     useEffect(() => {
         loadHistory();
     }, [loadHistory]);
 
-    const filtersActive = Boolean(type || outcome);
+    const filtersActive = Boolean(type || state || outcome);
     const summary = useMemo(() => {
         if (loading) return "Actualizando…";
         if (total === 1) return "1 tarea real de simulación";
@@ -160,6 +162,11 @@ function TaskRunHistoryApp() {
     const changeOutcome = (event) => {
         setPage(0);
         setOutcome(event.target.value);
+    };
+
+    const changeState = (event) => {
+        setPage(0);
+        setState(event.target.value);
     };
 
     return (
@@ -194,6 +201,22 @@ function TaskRunHistoryApp() {
                         </Select>
                     </FormControl>
                     <FormControl size="small" sx={{ minWidth: 190 }}>
+                        <InputLabel id="history-state-label">Estado</InputLabel>
+                        <Select
+                            labelId="history-state-label"
+                            value={state}
+                            label="Estado"
+                            onChange={changeState}
+                        >
+                            <MenuItem value="">Todos los estados</MenuItem>
+                            {Object.entries(STATE_LABELS).map(([value, label]) => (
+                                <MenuItem key={value} value={value}>
+                                    {label}
+                                </MenuItem>
+                            ))}
+                        </Select>
+                    </FormControl>
+                    <FormControl size="small" sx={{ minWidth: 190 }}>
                         <InputLabel id="history-outcome-label">Resultado</InputLabel>
                         <Select
                             labelId="history-outcome-label"
@@ -214,6 +237,7 @@ function TaskRunHistoryApp() {
                             onClick={() => {
                                 setPage(0);
                                 setType("");
+                                setState("");
                                 setOutcome("");
                             }}
                         >

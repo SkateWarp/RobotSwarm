@@ -9,7 +9,8 @@ public interface IRobotService
     Task<IEnumerable<RobotResponse>> GetAll(
         int? accountId = null,
         bool? isPublic = null,
-        Role? role = null);
+        Role? role = null,
+        bool includeDisabled = false);
     Task<Result<RobotResponse>> GetById(int id, int? accountId = null, Role? role = null);
 
     Task<Result<RobotResponse>> Create(RobotRequest request, int accountId);

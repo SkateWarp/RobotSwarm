@@ -9,6 +9,7 @@ import {
     disableAdminAccount,
     getAccountErrorMessage,
     patchAdminAccount,
+    reactivateAdminAccount,
 } from "../accountApi";
 import { ACCOUNTS_PAGE_SIZE, normalizeAccount } from "../accountsViewModel";
 // import HEADERS from "../../../../constants/authorizationHeaders";
@@ -173,6 +174,19 @@ export const disableAccount = createAsyncThunk(
     async (accountId, { dispatch, rejectWithValue }) => {
         try {
             await disableAdminAccount(accountId);
+            await dispatch(getAccounts());
+            return accountId;
+        } catch (error) {
+            return rejectWithValue(getAccountErrorMessage(error));
+        }
+    }
+);
+
+export const reactivateAccount = createAsyncThunk(
+    "accountsApp/accounts/reactivateAccount",
+    async (accountId, { dispatch, rejectWithValue }) => {
+        try {
+            await reactivateAdminAccount(accountId);
             await dispatch(getAccounts());
             return accountId;
         } catch (error) {

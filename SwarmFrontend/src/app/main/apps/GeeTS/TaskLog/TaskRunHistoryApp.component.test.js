@@ -42,6 +42,19 @@ describe("TaskRunHistoryApp requests", () => {
             candidate.textContent.includes(label)
         );
 
+    const selectOption = (labelId, optionText) => {
+        const select = document.querySelector(`[aria-labelledby="${labelId}"]`);
+        act(() => {
+            select.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        });
+        const option = Array.from(document.querySelectorAll('[role="option"]')).find(
+            (candidate) => candidate.textContent === optionText
+        );
+        act(() => {
+            option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+    };
+
     beforeEach(() => {
         host = document.createElement("div");
         document.body.appendChild(host);
@@ -76,10 +89,29 @@ describe("TaskRunHistoryApp requests", () => {
             offset: 0,
             limit: 10,
             type: "",
+            state: "",
             outcome: "",
         });
         expect(document.body.textContent).toContain("No hay tareas para estos filtros");
         expect(document.querySelector('[aria-label="Historial de tareas ROS"]')).toBeNull();
+    });
+
+    it("sends the selected task state to the history endpoint", async () => {
+        SimulationSessionService.listTaskHistory.mockResolvedValue({ total: 0, items: [] });
+
+        renderApp();
+        await flush();
+        selectOption("history-state-label", "En ejecución");
+        await flush();
+
+        expect(SimulationSessionService.listTaskHistory).toHaveBeenLastCalledWith({
+            offset: 0,
+            limit: 10,
+            type: "",
+            state: "Running",
+            outcome: "",
+        });
+        expect(document.body.textContent).toContain("Limpiar filtros");
     });
 
     it("does not render an empty table on failure and recovers through Reintentar", async () => {

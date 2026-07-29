@@ -24,6 +24,7 @@ import {
     disableAccount,
     getAccounts,
     openEditAccountDialog,
+    reactivateAccount,
     selectAccounts,
     setAccountsSearchText,
 } from "./store/accountsSlice";
@@ -35,6 +36,19 @@ const roleLabels = {
     User: "Usuario",
 };
 
+const describeStatusChange = (statusChange) => {
+    if (!statusChange?.account) {
+        return "";
+    }
+
+    const { account, enable } = statusChange;
+    if (enable) {
+        return `${account.firstName} ${account.lastName} podrá iniciar sesión de nuevo. Sus sesiones y visores anteriores permanecerán cerrados.`;
+    }
+
+    return `Se impedirá el acceso de ${account.firstName} ${account.lastName} y se cerrarán sus sesiones activas.`;
+};
+
 function AccountsList({ embedded, showSearch }) {
     const dispatch = useDispatch();
     const accounts = useSelector(selectAccounts);
@@ -42,8 +56,8 @@ function AccountsList({ embedded, showSearch }) {
     const { error, loading, searchText } = useSelector(({ accountsApp }) => accountsApp.accounts);
     const [roleFilter, setRoleFilter] = useState("all");
     const [statusFilter, setStatusFilter] = useState("active");
-    const [accountToDisable, setAccountToDisable] = useState(null);
-    const [disabling, setDisabling] = useState(false);
+    const [statusChange, setStatusChange] = useState(null);
+    const [changingStatus, setChangingStatus] = useState(false);
 
     const filteredAccounts = useMemo(
         () =>
@@ -96,27 +110,27 @@ function AccountsList({ embedded, showSearch }) {
                 Cell: ({ row }) => {
                     const account = row.original;
                     const belongsToCurrentUser = isCurrentAccount(account, currentUser);
-                    const disabled = belongsToCurrentUser || !account.enabled;
-                    let title = "Desactivar cuenta";
+                    const reactivating = !account.enabled;
+                    const disabled = belongsToCurrentUser;
+                    const actionLabel = reactivating ? "Reactivar" : "Desactivar";
+                    let title = `${actionLabel} cuenta`;
                     if (belongsToCurrentUser) {
-                        title = "No puede desactivar la cuenta con la que inició sesión.";
-                    } else if (!account.enabled) {
-                        title = "La cuenta ya está inactiva.";
+                        title = "No puede cambiar el estado de la cuenta con la que inició sesión.";
                     }
 
                     return (
                         <Tooltip title={title}>
                             <span>
                                 <IconButton
-                                    aria-label={`Desactivar la cuenta de ${account.firstName} ${account.lastName}`}
+                                    aria-label={`${actionLabel} la cuenta de ${account.firstName} ${account.lastName}`}
                                     disabled={disabled}
                                     onClick={(event) => {
                                         event.stopPropagation();
-                                        setAccountToDisable(account);
+                                        setStatusChange({ account, enable: reactivating });
                                     }}
                                     size="large"
                                 >
-                                    <Icon>person_off</Icon>
+                                    <Icon>{reactivating ? "person_add" : "person_off"}</Icon>
                                 </IconButton>
                             </span>
                         </Tooltip>
@@ -127,34 +141,44 @@ function AccountsList({ embedded, showSearch }) {
         [currentUser]
     );
 
-    const closeDisableDialog = () => {
-        if (!disabling) {
-            setAccountToDisable(null);
+    const closeStatusDialog = () => {
+        if (!changingStatus) {
+            setStatusChange(null);
         }
     };
 
-    const confirmDisable = async () => {
-        if (!accountToDisable || isCurrentAccount(accountToDisable, currentUser)) {
+    const confirmStatusChange = async () => {
+        const account = statusChange?.account;
+        if (!account || isCurrentAccount(account, currentUser)) {
             return;
         }
 
-        setDisabling(true);
+        setChangingStatus(true);
         try {
-            await dispatch(disableAccount(accountToDisable.id)).unwrap();
-            dispatch(showMessage({ message: "Cuenta desactivada.", variant: "success" }));
-            setAccountToDisable(null);
-        } catch (requestError) {
+            const action = statusChange.enable ? reactivateAccount : disableAccount;
+            await dispatch(action(account.id)).unwrap();
             dispatch(
                 showMessage({
-                    message:
-                        typeof requestError === "string"
-                            ? requestError
-                            : "No fue posible desactivar la cuenta.",
+                    message: statusChange.enable ? "Cuenta reactivada." : "Cuenta desactivada.",
+                    variant: "success",
+                })
+            );
+            setStatusChange(null);
+        } catch (requestError) {
+            let errorMessage = statusChange.enable
+                ? "No fue posible reactivar la cuenta."
+                : "No fue posible desactivar la cuenta.";
+            if (typeof requestError === "string") {
+                errorMessage = requestError;
+            }
+            dispatch(
+                showMessage({
+                    message: errorMessage,
                     variant: "error",
                 })
             );
         } finally {
-            setDisabling(false);
+            setChangingStatus(false);
         }
     };
 
@@ -165,6 +189,10 @@ function AccountsList({ embedded, showSearch }) {
             </div>
         );
     }
+
+    const statusActionLabel = statusChange?.enable ? "Reactivar" : "Desactivar";
+    const changingStatusLabel = statusChange?.enable ? "Reactivando…" : "Desactivando…";
+    const statusButtonLabel = changingStatus ? changingStatusLabel : statusActionLabel;
 
     return (
         <div
@@ -257,21 +285,22 @@ function AccountsList({ embedded, showSearch }) {
                 </div>
             ) : null}
 
-            <Dialog open={!!accountToDisable} onClose={closeDisableDialog}>
-                <DialogTitle>Desactivar cuenta</DialogTitle>
+            <Dialog open={!!statusChange} onClose={closeStatusDialog}>
+                <DialogTitle>{statusActionLabel} cuenta</DialogTitle>
                 <DialogContent>
-                    <DialogContentText>
-                        {accountToDisable
-                            ? `Se impedirá el acceso de ${accountToDisable.firstName} ${accountToDisable.lastName} y se cerrarán sus sesiones activas.`
-                            : ""}
-                    </DialogContentText>
+                    <DialogContentText>{describeStatusChange(statusChange)}</DialogContentText>
                 </DialogContent>
                 <DialogActions>
-                    <Button disabled={disabling} onClick={closeDisableDialog}>
+                    <Button disabled={changingStatus} onClick={closeStatusDialog}>
                         Cancelar
                     </Button>
-                    <Button color="error" disabled={disabling} onClick={confirmDisable} variant="contained">
-                        {disabling ? "Desactivando…" : "Desactivar"}
+                    <Button
+                        color={statusChange?.enable ? "primary" : "error"}
+                        disabled={changingStatus}
+                        onClick={confirmStatusChange}
+                        variant="contained"
+                    >
+                        {statusButtonLabel}
                     </Button>
                 </DialogActions>
             </Dialog>

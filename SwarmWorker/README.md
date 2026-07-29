@@ -99,14 +99,30 @@ permissions.
 - Worker shutdown stops pulling commands and drains the executor. Session
   containers remain available for restart recovery, but their ROS watchdog
   emergency-stops motion when worker heartbeats cease.
-- If backend contact is lost for 30 seconds, the independent safety monitor
-  latches every running session before asking ROS to emergency-stop. The same
-  latch cancels active work and rejects queued motion/fleet commands until a
-  confirmed reset or stop. If ROS cannot acknowledge the stop, the worker
+- Once the 30-second disconnect threshold is observed, the independent safety
+  monitor applies a supplemental explicit stop to every running session. The
+  same latch cancels active work and rejects queued motion/fleet commands until
+  a confirmed reset or stop. If ROS cannot acknowledge the stop, the worker
   stops that session container and reports the failure after reconnecting.
-- Control-heartbeat pulses stop when backend contact is older than 15 seconds.
-  ROS then latches its own watchdog stop after the configured 10-second
-  timeout, covering a dead worker or a stale worker lease.
+- Control-heartbeat publications carry the absolute backend-lease deadline as
+  `std_msgs/Float64`. Both the worker and its containers read the host boot
+  clock through `/proc/uptime`, so neither a WSL wall-clock correction nor a
+  delayed `docker exec` can renew an expired lease. Discovery is one
+  running-container `docker ps` bounded to one second; a failed refresh keeps
+  the last safe roster and never falls back to sequential inspection. The
+  lease is checked again after that refresh, the shell rejects an expired
+  deadline before starting `rostopic`, and ROS independently rejects expired,
+  non-finite, or implausibly future deadlines. The complete in-container
+  publication is killed after five seconds by `/usr/bin/timeout`; the outer
+  Docker call has a separate seven-second cleanup timeout. ROS uses an exact
+  10-second stale boundary and checks it every 0.5 seconds. A 0.25-second
+  admission guard makes the conservative stop bound
+  `14 - 0.25 + 10 + 0.5 = 24.25` seconds, inside the declared 30-second budget.
+  The watchdog also fails closed after a 15-second first-pulse grace, and a
+  task is checked for a fresh pulse both before initialization and immediately
+  before its behavior message is published.
+  The healthy cadence also reserves every synchronous term:
+  `2 + 1 + 5 = 8 < 10` seconds.
 
 ## Current scaffold boundaries
 

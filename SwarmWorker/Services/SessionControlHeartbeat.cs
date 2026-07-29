@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using SwarmWorker.Configuration;
 using SwarmWorker.Infrastructure;
@@ -8,14 +9,16 @@ namespace SwarmWorker.Services;
 public sealed class SessionControlHeartbeat : BackgroundService
 {
     private readonly DockerSessionManager _sessions;
-    private readonly WorkerHubConnection _hub;
+    private readonly IWorkerCommandHub _hub;
     private readonly WorkerOptions _options;
     private readonly ILogger<SessionControlHeartbeat> _logger;
+    private ManagedSessionInfo[] _runningSessions =
+        Array.Empty<ManagedSessionInfo>();
     private bool _leaseSuspended;
 
     public SessionControlHeartbeat(
         DockerSessionManager sessions,
-        WorkerHubConnection hub,
+        IWorkerCommandHub hub,
         IOptions<WorkerOptions> options,
         ILogger<SessionControlHeartbeat> logger)
     {
@@ -29,35 +32,51 @@ public sealed class SessionControlHeartbeat : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var cycleStarted = Stopwatch.GetTimestamp();
             try
             {
-                var backendContactAge = DateTime.UtcNow - _hub.LastSuccessfulContactUtc;
-                if (backendContactAge > TimeSpan.FromSeconds(
-                        _options.ControlHeartbeatBackendLeaseSeconds))
+                if (BackendLeaseExpired())
                 {
-                    if (!_leaseSuspended)
-                    {
-                        _leaseSuspended = true;
-                        _logger.LogCritical(
-                            "Session heartbeat pulses are suspended because the backend lease is stale.");
-                    }
-
-                    await DelayNextHeartbeat(stoppingToken);
+                    SuspendLease();
+                    await DelayNextHeartbeat(cycleStarted, stoppingToken);
                     continue;
                 }
 
-                if (_leaseSuspended)
+                ResumeLease();
+                try
                 {
-                    _leaseSuspended = false;
-                    _logger.LogInformation(
-                        "Session heartbeat pulses resumed after backend contact recovered.");
+                    _runningSessions = (await _sessions
+                            .GetHeartbeatSessionsAsync(stoppingToken))
+                        .ToArray();
+                }
+                catch (Exception exception)
+                    when (exception is DockerCliException
+                          or TimeoutException
+                          or InvalidOperationException)
+                {
+                    _logger.LogDebug(
+                        exception,
+                        "Docker discovery is unavailable; publishing to the last known running sessions.");
                 }
 
-                var runningSessions = (await _sessions.GetManagedSessionsAsync(stoppingToken))
-                    .Where(session => session.Running)
-                    .ToArray();
-                await Task.WhenAll(runningSessions.Select(
-                    session => PublishHeartbeat(session, stoppingToken)));
+                var publications = new List<Task>(_runningSessions.Length);
+                foreach (var session in _runningSessions)
+                {
+                    // Discovery has its own short timeout, but the backend
+                    // lease still has to be fresh when each publication starts.
+                    if (BackendLeaseExpired())
+                    {
+                        SuspendLease();
+                        break;
+                    }
+
+                    publications.Add(PublishHeartbeat(
+                        session,
+                        BackendLeaseDeadline(),
+                        stoppingToken));
+                }
+
+                await Task.WhenAll(publications);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -73,24 +92,74 @@ public sealed class SessionControlHeartbeat : BackgroundService
                     "Docker is unavailable while publishing session control heartbeats.");
             }
 
-            await DelayNextHeartbeat(stoppingToken);
+            await DelayNextHeartbeat(cycleStarted, stoppingToken);
         }
     }
 
-    private Task DelayNextHeartbeat(CancellationToken cancellationToken)
+    private Task DelayNextHeartbeat(
+        long cycleStarted,
+        CancellationToken cancellationToken)
     {
-        return Task.Delay(
-            TimeSpan.FromSeconds(_options.ControlHeartbeatIntervalSeconds),
-            cancellationToken);
+        var interval = TimeSpan.FromSeconds(
+            _options.ControlHeartbeatIntervalSeconds);
+        var remaining = interval - Stopwatch.GetElapsedTime(cycleStarted);
+        return remaining > TimeSpan.Zero
+            ? Task.Delay(remaining, cancellationToken)
+            : Task.CompletedTask;
+    }
+
+    private bool BackendLeaseExpired()
+    {
+        return CurrentMonotonicSeconds() >= BackendLeaseDeadline();
+    }
+
+    private double BackendLeaseDeadline()
+    {
+        return _hub.LastSuccessfulContactMonotonicSeconds
+            + _options.ControlHeartbeatBackendLeaseSeconds
+            - WorkerOptions.ControlHeartbeatDeadlineGuardSeconds;
+    }
+
+    private static double CurrentMonotonicSeconds()
+    {
+        return SharedMonotonicClock.GetSeconds();
+    }
+
+    private void SuspendLease()
+    {
+        if (_leaseSuspended)
+        {
+            return;
+        }
+
+        _leaseSuspended = true;
+        _logger.LogCritical(
+            "Session heartbeat pulses are suspended because the backend lease is stale.");
+    }
+
+    private void ResumeLease()
+    {
+        if (!_leaseSuspended)
+        {
+            return;
+        }
+
+        _leaseSuspended = false;
+        _logger.LogInformation(
+            "Session heartbeat pulses resumed after backend contact recovered.");
     }
 
     private async Task PublishHeartbeat(
         ManagedSessionInfo session,
+        double deadline,
         CancellationToken cancellationToken)
     {
         try
         {
-            await _sessions.PublishControlHeartbeatAsync(session, cancellationToken);
+            await _sessions.PublishControlHeartbeatAsync(
+                session,
+                deadline,
+                cancellationToken);
         }
         catch (Exception exception)
             when (exception is DockerCliException

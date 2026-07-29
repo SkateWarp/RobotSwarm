@@ -8,6 +8,24 @@ históricos, no el estado vigente. La PR #106 integró ese conjunto como
 `1448a31bbbbfd77588bada109947098cc95d9dda`; CI, Cloudflare, backend y el
 despliegue GPU exacto aprobaron.
 
+El estado vigente al 29 de julio parte de `907c89c` en `main`, frontend y
+backend, mientras el worker GPU conserva `c3866d5`. El candidato local añade
+la recuperación ordenada de la VM, propiedad de conexión por encarnación del
+worker, reactivación explícita de cuentas y robots, cierre generacional del
+visor y la barrera atómica de odometría/estabilidad para formación. También
+endurece el enlace de seguridad: el heartbeat transporta un deadline
+monotónico absoluto, ROS rechaza publicaciones tardías, la ausencia del primer
+pulso enclava la parada a los 15 s y ninguna tarea puede publicarse sin dos
+comprobaciones de frescura. La cota conservadora desde el último contacto
+confirmado es 24,25 s frente al presupuesto declarado de 30 s.
+
+Antes de usar Actions aprobaron backend 275/275 más 8/8 sobre PostgreSQL 17,
+worker 146/146, frontend 182/182, ROS 667/667, los siete arneses contractuales
+268/268 y la recuperación 17/17. Estas cifras son locales. El cierre permanece
+abierto hasta que un único candidato pase PR y `main`, los tres planos queden
+en el mismo SHA y la matriz visible postdeploy confirme RTF, FPS, aislamiento,
+interacción, movimiento y limpieza.
+
 Sobre `1448a31` aprobaron API multiusuario N=3/N=7, dos visores privados en
 Chrome visible, interacción, pantalla completa, responsive a 360/768/1366/1920
 px, seguimiento N=3/N=6/N=10 y transporte N=2/N=3/N=4/N=10. El marcador
@@ -154,11 +172,11 @@ siguiente manera:
 | Sección | Fuente y autorización | Función implementada | Límite explícito |
 | --- | --- | --- | --- |
 | Historial de tareas | `TaskRun` de sesiones pertenecientes al usuario autenticado | Lista paginada, filtros por tipo/estado/resultado y detalle de parámetros, resultado, motivo y tiempos | `TaskLog` es un registro global heredado; queda fuera de la navegación y restringido al administrador por compatibilidad/diagnóstico, sin mostrarse como ejecución ROS actual |
-| Plantillas de tareas | Catálogo `TaskTemplate`, rol `Admin` | `GET` para listar y `PUT` para editar nombre y tipo con validación | No se ofrecen crear ni eliminar, porque esas operaciones no existen en el contrato real |
-| Robots | Registro persistente `/Robots`; propietario autenticado y excepción administrativa | Buscar, registrar, editar y desactivar; un administrador ve el inventario activo completo | Un robot público puede consultarse, pero solo su propietario o un administrador puede modificarlo; este registro no es el roster runtime de Gazebo |
+| Plantillas de tareas | Catálogo `TaskTemplate`, rol `Admin` | `GET` para listar y `PUT` para editar nombre y tipo con validación | No contiene parámetros de ejecución ni se ofrece crear o eliminar, porque esas operaciones no existen en el contrato real |
+| Robots | Registro persistente `/Robots`; propietario autenticado y excepción administrativa | Buscar, registrar, editar, desactivar y reactivar; un administrador puede incluir el inventario inactivo | Un robot público puede consultarse, pero solo su propietario o un administrador puede modificarlo; este registro no es el roster runtime de Gazebo |
 | Grupos de robots | Registro global de administración, rol `Admin` | Crear, editar y eliminar grupos; agregar, quitar o transferir membresía con confirmación | Se retiró `POST /RobotGroups/{id}/tasks`: generaba `TaskLog` y estados, pero no enviaba órdenes a ROS |
 | Robots de esta sesión | Roster informado por el worker para la sesión propiedad del usuario | Estado, rol, namespace, ordinal, última actualización y resumen operativo | No fabrica posición ni velocidad: esos campos no forman parte del contrato actual |
-| Usuarios | CRUD de cuentas existente, rol `Admin` | Navegación y encabezado coherentes bajo el nombre «Usuarios» | No cambia el modelo de roles ni crea permisos nuevos |
+| Usuarios | Cuentas persistentes, rol `Admin` | Crear, editar, desactivar y reactivar; la reactivación exige un inicio de sesión nuevo | Reactivar no recupera sesiones, visores ni tokens revocados |
 
 Dos URLs que seguían montando módulos heredados ya no abren pantallas falsas.
 `/apps/configs/task` redirige a `/apps/GTS/task-templates`, protegida como
@@ -177,6 +195,15 @@ Las tareas ROS se inician exclusivamente en Control de simulación. Un grupo
 administrativo puede ayudar a organizar el inventario, pero no selecciona por
 sí mismo las instancias `tb3_*` de una sesión ni sustituye el roster que publica
 el worker.
+
+La selección operativa desde catálogos queda como trabajo posterior. Para
+implementarla sin confundir datos administrativos con recursos vivos se
+necesita conservar en la sesión una instantánea del grupo y su roster, validar
+propiedad y namespaces, y relacionar `TaskRun` con una versión de plantilla que
+incluya parámetros. Los modelos actuales solo aceptan `robotCount` al crear la
+sesión y `type + parameters` al iniciar una tarea. Por ello no se añadió un
+selector que se limitara a copiar la cantidad del grupo: habría mostrado una
+reutilización que el backend y el worker todavía no garantizan.
 
 El mismo espacio de simulación conserva sondeo periódico si SignalR no está
 disponible, muestra esa degradación y reintenta también un fallo del primer
@@ -329,18 +356,52 @@ only bounded, validated summary fields cross the control plane.
 
 ## Worker-to-ROS heartbeat
 
-Each running worker session publishes `std_msgs/Empty` on
-`/swarm/control_heartbeat` at least once every two seconds. The publisher is
-owned by the worker process rather than a detached command in the container, so
-pulses stop when the worker loses control. Its loop runs outside the serialized
-task/fleet executor so provisioning or resize work cannot create a false
-expiry.
+Each running worker session uses a two-second publication interval for
+`std_msgs/Float64` on `/swarm/control_heartbeat`. Its value is the absolute
+deadline derived from the last confirmed backend contact, not a timestamp made
+when `rostopic` finally runs. The worker process owns the publisher, so pulses
+stop when the worker loses control. Its loop runs outside the serialized
+task/fleet executor. Worker and container both use the host boot clock exposed
+by `/proc/uptime`; WSL wall-clock changes cannot renew the lease. Heartbeat
+discovery is a single `docker ps` for running containers, bounded to one
+second; a failed refresh retains the last valid roster instead of executing
+sequential inspections. The worker checks the lease again after discovery. The
+container shell rejects an already expired deadline before launching
+`rostopic`, and ROS independently rejects a non-finite, expired, or more than
+15 seconds future deadline. The whole ROS command runs below
+`/usr/bin/timeout --signal=KILL 5s` inside the container, while the outer
+seven-second timeout is only a cleanup bound for the Docker client.
 
-The task orchestrator measures arrival with wall-clock monotonic time. It stays
-disarmed until the first pulse, then latches the normal ROS emergency-stop path
-if no pulse arrives within `~control_heartbeat_timeout` (10 seconds by default).
-A late pulse does not silently clear the stop. The worker must restore pulses
-and explicitly issue `reset_emergency_stop` before starting another task.
+The task orchestrator measures arrival with `CLOCK_BOOTTIME`, which shares the
+same epoch. It latches the normal ROS emergency-stop path when pulse age reaches
+`~control_heartbeat_timeout` (10 seconds by default). If the first pulse never
+arrives, a separate 15-second startup grace closes the same fail-safe latch.
+`StartTask` also requires a fresh pulse under the safety lock during its initial
+commit and again immediately before publishing to a behavior node. The
+wall-clock loop checks every 0.5 seconds. With a 0.25-second deadline guard, the
+conservative upper bound is `14 - 0.25 + 10 + 0.5 = 24.25` seconds. The inner
+five-second and outer seven-second execution limits do not add to that stop
+bound: every delayed process receives the original absolute deadline and is
+rejected once it expires. They still participate in the separate healthy-path
+inequality `2 + 1 + 5 = 8 < 10`, including bounded discovery. A late pulse does
+not silently clear the stop. The worker must restore pulses and explicitly
+issue `reset_emergency_stop` before starting another task; the reset uses the
+same exact `>= 10` stale boundary as the watchdog.
+
+A ROS `publish()` is not a transactional acknowledgement: a subscriber may
+receive the message before the local call blocks or raises. Start, resume, and
+manual motion therefore keep the blocking socket outside the safety lock and
+carry two admission tokens across their initial, pre-publish, and post-publish
+gates: the emergency generation and the monotonic ordinary-stop sequence. A
+late return, including a completed pause/stop cycle, is treated as an ambiguous
+delivery. The orchestrator latches the emergency path, records retryable
+behavior-stop debts for both the original and any concurrently active task,
+and reasserts velocity zeros. A manual command that first observes the exact
+heartbeat boundary enters the same watchdog path, including its normal
+`CONTROL HEARTBEAT LOST` diagnostic. The focused validation covers a publisher
+that records delivery and then throws, a blocked publisher, a transiently
+failing stop channel, latch/reset races, and distinct original/active task
+identities.
 
 ## Algorithms
 
@@ -928,12 +989,30 @@ User e Historial y los cuatro anchos responsive también aprobaron. Plantillas,
 Robots, Grupos y Usuarios permanecen restringidos al rol Admin; no se creó ni
 elevó una cuenta para aparentar ese recorrido.
 
-1. Integrar I-152 y la evidencia final en un único PR documental/instrumental.
-   No volver a desplegar GPU: el runtime productivo no cambia.
-2. Confirmar que CI aprueba el arnés y que el árbol local queda limpio.
-3. Conservar el rollback y los reportes privados hasta la entrega académica.
-4. Si el operador facilita una credencial Admin existente, ejecutar el
-   recorrido administrativo sin modificar roles por SQL.
+1. Congelar el árbol local, escanear secretos y confirmar nuevamente la base
+   de rollback `907c89c`.
+2. Publicar un solo commit candidato y una sola PR. La concurrencia del workflow
+   cancela corridas obsoletas y cada job tiene un límite de 30 min; no se
+   solicitarán reruns sin corregir primero una causa reproducida localmente.
+3. Antes del merge, comprobar que no existen sesiones activas. El despliegue
+   automático del backend no adquiere el drain del worker, por lo que la
+   ventana se realiza sin tareas de usuario.
+4. Después del merge, esperar el CI de `main` y el workflow de backend del
+   mismo SHA. Verificar `backend_prod`, PostgreSQL, MediaMTX y `/health`;
+   confirmar además que Cloudflare publicó ese commit.
+5. Instalar por SSH la unidad y el script de recuperación —no forman parte del
+   workflow—, ejecutar `daemon-reload`, `enable` y `restart`, y comprobar el
+   estado `active (exited)`.
+6. Reconfirmar cero sesiones y lanzar una sola vez el workflow GPU manual. El
+   lock de producción serializa backend y GPU, pero no decide su orden: el
+   dispatch solo se hace después de comprobar el backend.
+7. Ejecutar Chrome visible y Gazebo no headless con NVIDIA: formaciones y
+   cantidades distintas, seguimiento, transporte N=1 y multi-robot, dos
+   usuarios privados, interacción, fullscreen, RTF ≥2,90, Gazebo ≥45 FPS,
+   HLS ≥27 FPS y cero colisiones inesperadas.
+8. Eliminar sesiones, cuenta y credenciales temporales. La evidencia postdeploy
+   se conservará primero fuera del repositorio para no provocar otro ciclo
+   completo de CI y despliegue únicamente por documentación.
 
 ## Deferred work
 

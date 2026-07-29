@@ -1,0 +1,276 @@
+{
+  "authorization": {
+    "backendAdminEndpoints": {
+      "robotGroups": 200,
+      "taskTemplates": 200
+    }
+  },
+  "browser": {
+    "cdpPort": 9369,
+    "gpuDisabled": false,
+    "headless": false,
+    "ownedPid": 418075,
+    "product": "Chrome/150.0.7871.187",
+    "profile": "robotswarm-sections-e2e-20260729T042640Z-418033-[REDACTED]",
+    "profileOwned": true,
+    "visible": true
+  },
+  "cleanup": {
+    "browser": {
+      "method": "Browser.close",
+      "portFree": true,
+      "processExited": true,
+      "profileRemoved": true,
+      "requested": true
+    },
+    "passed": true,
+    "temporaryGroup": {
+      "alreadyAbsent": false,
+      "released": true,
+      "requested": true
+    }
+  },
+  "completedAt": "2026-07-29T04:26:53Z",
+  "deploymentCommit": "907c89cc624e739be43b4689865d8ddd954fc5b2",
+  "error": {
+    "message": "A credential appeared in visible text; screenshot was refused",
+    "type": "DriverError"
+  },
+  "expectedRole": "Admin",
+  "failureScreenshot": {
+    "captured": false,
+    "error": "A credential appeared in visible text; screenshot was refused"
+  },
+  "navigation": {
+    "completeForRole": true,
+    "observed": {
+      "Control": true,
+      "Grupos": true,
+      "Historial": true,
+      "Plantillas": true,
+      "Robots": true,
+      "Usuarios": true
+    }
+  },
+  "observedRole": "Admin",
+  "productionExecution": true,
+  "runId": "20260729T042640Z-418033",
+  "schemaVersion": 1,
+  "sections": {
+    "groups": {
+      "cards": 2,
+      "dialog": {
+        "available": true,
+        "cancelled": true,
+        "opened": true,
+        "screenshot": {
+          "bytes": 45769,
+          "file": "20260729T042640Z-418033-[REDACTED]-groups-dialog.png",
+          "page": {
+            "origin": "https://rs.zerav.la",
+            "path": "/apps/GTS/robot-groups",
+            "title": "RobotSwarm"
+          },
+          "redaction": {
+            "emails": true,
+            "ipAddresses": true,
+            "personalCells": true,
+            "uuids": true,
+            "workerNames": true
+          },
+          "sha256": "d129d08fd349904dccab0982087eb23444fa059a7364f5b9ea5c6e9afa34dafa"
+        }
+      },
+      "emptyState": false,
+      "heading": true,
+      "marker": "[data-testid=\"robot-groups-page\"]",
+      "path": "/apps/GTS/robot-groups",
+      "screenshot": {
+        "bytes": 38956,
+        "file": "20260729T042640Z-418033-[REDACTED]-groups.png",
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/robot-groups",
+          "title": "RobotSwarm"
+        },
+        "redaction": {
+          "emails": true,
+          "ipAddresses": true,
+          "personalCells": true,
+          "uuids": true,
+          "workerNames": true
+        },
+        "sha256": "16fa42e470d03c31cba0d2e8112425ff5c1de55b8604e79ad5ada40211bb3c01"
+      },
+      "tableRows": 0,
+      "temporaryGroup": {
+        "created": true,
+        "membershipChanged": false,
+        "screenshot": {
+          "bytes": 38354,
+          "file": "20260729T042640Z-418033-[REDACTED]-groups-temporary.png",
+          "page": {
+            "origin": "https://rs.zerav.la",
+            "path": "/apps/GTS/robot-groups",
+            "title": "RobotSwarm"
+          },
+          "redaction": {
+            "emails": true,
+            "ipAddresses": true,
+            "personalCells": true,
+            "uuids": true,
+            "workerNames": true
+          },
+          "sha256": "59e4710fcf1481f9da594da2c1ca2824858c6a68581081bc9fb24be9f7aa8e9b"
+        }
+      }
+    },
+    "history": {
+      "cards": 0,
+      "dialog": {
+        "available": true,
+        "cancelled": true,
+        "opened": true,
+        "screenshot": {
+          "bytes": 45198,
+          "file": "20260729T042640Z-418033-[REDACTED]-history-dialog.png",
+          "page": {
+            "origin": "https://rs.zerav.la",
+            "path": "/apps/GTS/taskLogs",
+            "title": "RobotSwarm"
+          },
+          "redaction": {
+            "emails": true,
+            "ipAddresses": true,
+            "personalCells": true,
+            "uuids": true,
+            "workerNames": true
+          },
+          "sha256": "c3717765dc4b03b6e00a79aa4debd907475d13a04a68a80bf74b37fdeb1f7fbb"
+        }
+      },
+      "emptyState": false,
+      "heading": true,
+      "marker": "[data-testid=\"task-history-page\"]",
+      "path": "/apps/GTS/taskLogs",
+      "screenshot": {
+        "bytes": 30830,
+        "file": "20260729T042640Z-418033-[REDACTED]-history.png",
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/taskLogs",
+          "title": "RobotSwarm"
+        },
+        "redaction": {
+          "emails": true,
+          "ipAddresses": true,
+          "personalCells": true,
+          "uuids": true,
+          "workerNames": true
+        },
+        "sha256": "5fbee4b558d12a85107d39b3c1e244beec4695297b299207422b2910bc0ab933"
+      },
+      "tableRows": 1
+    },
+    "robots": {
+      "cards": 0,
+      "dialog": {
+        "available": true,
+        "cancelled": true,
+        "opened": true,
+        "screenshot": {
+          "bytes": 50275,
+          "file": "20260729T042640Z-418033-[REDACTED]-robots-dialog.png",
+          "page": {
+            "origin": "https://rs.zerav.la",
+            "path": "/apps/GTS/leafSorting",
+            "title": "RobotSwarm"
+          },
+          "redaction": {
+            "emails": true,
+            "ipAddresses": true,
+            "personalCells": true,
+            "uuids": true,
+            "workerNames": true
+          },
+          "sha256": "220e5a005f5f0098ac337f0439da1a991af155fb6d226405695fef1fe01f57d6"
+        }
+      },
+      "emptyState": false,
+      "heading": true,
+      "marker": "[data-testid=\"robot-registry-page\"]",
+      "path": "/apps/GTS/leafSorting",
+      "screenshot": {
+        "bytes": 40638,
+        "file": "20260729T042640Z-418033-[REDACTED]-robots.png",
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/leafSorting",
+          "title": "RobotSwarm"
+        },
+        "redaction": {
+          "emails": true,
+          "ipAddresses": true,
+          "personalCells": true,
+          "uuids": true,
+          "workerNames": true
+        },
+        "sha256": "86771057909fc37115ef40d8ed2616717ce0622c345cf653f6b3c497381f2f39"
+      },
+      "tableRows": 5
+    },
+    "templates": {
+      "cards": 0,
+      "dialog": {
+        "available": true,
+        "cancelled": true,
+        "opened": true,
+        "screenshot": {
+          "bytes": 52770,
+          "file": "20260729T042640Z-418033-[REDACTED]-templates-dialog.png",
+          "page": {
+            "origin": "https://rs.zerav.la",
+            "path": "/apps/GTS/task-templates",
+            "title": "RobotSwarm"
+          },
+          "redaction": {
+            "emails": true,
+            "ipAddresses": true,
+            "personalCells": true,
+            "uuids": true,
+            "workerNames": true
+          },
+          "sha256": "d17be8e04222454ef223e6afdd674e45f102ab39ddd570879a1c03701482ec22"
+        }
+      },
+      "emptyState": false,
+      "heading": true,
+      "marker": "[data-testid=\"task-templates-page\"]",
+      "path": "/apps/GTS/task-templates",
+      "screenshot": {
+        "bytes": 31290,
+        "file": "20260729T042640Z-418033-[REDACTED]-templates.png",
+        "page": {
+          "origin": "https://rs.zerav.la",
+          "path": "/apps/GTS/task-templates",
+          "title": "RobotSwarm"
+        },
+        "redaction": {
+          "emails": true,
+          "ipAddresses": true,
+          "personalCells": true,
+          "uuids": true,
+          "workerNames": true
+        },
+        "sha256": "63edd4d9fef0e780ff8d3dd022eeb5f93971eb62bc5baf343d826e1bc91a9566"
+      },
+      "tableRows": 5
+    }
+  },
+  "site": "https://rs.zerav.la/apps/GTS/realtime",
+  "startedAt": "2026-07-29T04:26:40Z",
+  "success": false,
+  "temporaryGroup": {
+    "cleanupRequired": true
+  }
+}

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using SwarmBackend.Entities;
 using SwarmBackend.Helpers;
@@ -557,15 +558,26 @@ public sealed class PostgresConcurrencyTests
     {
         await using var context = PostgresTestDatabase.OpenContext();
         var logger = new PersistenceConflictLogger();
+        var callerContext = new WorkerCallerContext(
+            seeded.WorkerId,
+            seeded.CredentialCreatedAt);
+        var connections = new WorkerConnectionRegistry(
+            NullLogger<WorkerConnectionRegistry>.Instance);
+        Assert.Equal(
+            WorkerConnectionClaim.Accepted,
+            connections.Claim(
+                seeded.WorkerId,
+                agentInstanceId: null,
+                callerContext.ConnectionId,
+                callerContext.Abort));
         var hub = new WorkerHub(
             context,
             SilentSessionHubContext.Instance,
+            connections,
             Configuration(),
             logger)
         {
-            Context = new WorkerCallerContext(
-                seeded.WorkerId,
-                seeded.CredentialCreatedAt)
+            Context = callerContext
         };
 
         var response = await hub.Heartbeat(new WorkerHeartbeatRequest(

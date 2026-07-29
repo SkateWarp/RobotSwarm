@@ -20,7 +20,7 @@ from collections import deque
 from enum import Enum
 from datetime import datetime
 
-from std_msgs.msg import String, Bool, Float32, Empty
+from std_msgs.msg import String, Bool, Float32, Float64
 from geometry_msgs.msg import Twist, Pose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
@@ -64,7 +64,7 @@ class TaskOrchestrator:
 
     Communication:
     - Input:  /swarm/commands (JSON String from bridge.py)
-    - Lease:  /swarm/control_heartbeat (std_msgs/Empty, periodic worker pulse)
+    - Lease:  /swarm/control_heartbeat (std_msgs/Float64 monotonic deadline)
     - Output: /swarm/status   (JSON String to bridge.py)
     - Fleet:  /fleet/spawn_command, /fleet/delete_command (JSON topics)
     """
@@ -151,6 +151,16 @@ class TaskOrchestrator:
             1.0,
             float(rospy.get_param('~control_heartbeat_timeout', 10.0)),
         )
+        self.control_heartbeat_max_future = max(
+            1.0,
+            float(rospy.get_param('~control_heartbeat_max_future', 15.0)),
+        )
+        self.control_watchdog_startup_grace = max(
+            1.0,
+            float(rospy.get_param(
+                '~control_watchdog_startup_grace', 15.0
+            )),
+        )
         self.control_watchdog_check_period = max(
             0.1,
             min(
@@ -160,13 +170,17 @@ class TaskOrchestrator:
                 )),
             ),
         )
-        self._control_clock = time.monotonic
+        self._control_clock = lambda: time.clock_gettime(
+            getattr(time, 'CLOCK_BOOTTIME', time.CLOCK_MONOTONIC)
+        )
         self.behavior_connection_timeout = max(
             0.1,
             float(rospy.get_param('~behavior_connection_timeout', 10.0)),
         )
         self.control_heartbeat_seen = False
         self.last_control_heartbeat = None
+        self.last_control_heartbeat_deadline = None
+        self.control_watchdog_started_at = self._control_clock()
         self.control_watchdog_tripped = False
         self._control_watchdog_stop = threading.Event()
 
@@ -270,7 +284,7 @@ class TaskOrchestrator:
         rospy.Subscriber('/swarm/task_complete', Bool, self._task_complete_callback, queue_size=1)
         rospy.Subscriber(
             '/swarm/control_heartbeat',
-            Empty,
+            Float64,
             self._control_heartbeat_callback,
             queue_size=1,
         )
@@ -557,6 +571,8 @@ class TaskOrchestrator:
             self._record_rejected_task(task_id, task_type, str(exc))
             return
         start_config['task_id'] = task_id
+        initial_safety_generation = None
+        initial_stop_sequence = None
 
         with self.task_lock:
             if (
@@ -622,6 +638,33 @@ class TaskOrchestrator:
                     or self.ordinary_stop_active
                 ):
                     return
+                if not self._control_heartbeat_is_fresh_locked(
+                    self._control_clock()
+                ):
+                    self.current_task_id = task_id
+                    self.current_task_type = task_type
+                    self.current_task_config = start_config
+                    self.task_state = TaskState.FAILED
+                    self.task_progress = 0.0
+                    self.task_result = None
+                    self.task_error = (
+                        "Control heartbeat watchdog is not armed or is stale"
+                    )
+                    self.task_dispatched = False
+                    self.task_ever_dispatched = False
+                    self.task_dispatched_at = None
+                    self.last_behavior_status_at = None
+                    rospy.logwarn(
+                        "Rejected task %s because the control heartbeat "
+                        "is not fresh",
+                        task_id,
+                    )
+                    return
+
+                initial_safety_generation = (
+                    self._emergency_order_generation
+                )
+                initial_stop_sequence = self._ordinary_stop_sequence
 
                 # A new task starts a fresh delivery window. Keep the global
                 # watermark monotonic, but do not retransmit another task's
@@ -683,7 +726,10 @@ class TaskOrchestrator:
             return
 
         dispatch_error = None
+        publish_attempted = False
         late_safety_latch = False
+        safety_generation = None
+        safety_stop_sequence = None
         with self.task_lock:
             if (
                 self.current_task_id != task_id
@@ -694,46 +740,81 @@ class TaskOrchestrator:
                 or not self.robots
             ):
                 return
-            self.task_state = TaskState.RUNNING
-            # Once a start publish is attempted, the same identity must never
-            # be treated as "never dispatched" again. ROS can raise after a
-            # subscriber has already received the message.
-            self.task_ever_dispatched = True
-            try:
-                self._publish_current_task()
-            except Exception as exc:
-                dispatch_error = exc
-                self.task_state = TaskState.FAILED
-                self.task_error = str(exc)
-                rospy.logerr(
-                    "Failed to dispatch task %s: %s", task_id, exc
-                )
             with self._safety_zero_lock:
-                late_safety_latch = (
-                    self._shutdown_started
-                    or self.supervised_stop_active
-                    or self.emergency_stop_active
-                    or self.ordinary_stop_active
+                gate_closed = self._motion_gate_closed_locked(
+                    self._control_clock(),
+                    admitted_generation=initial_safety_generation,
+                    admitted_stop_sequence=initial_stop_sequence,
                 )
-                if late_safety_latch:
+                if gate_closed:
                     self.task_state = TaskState.FAILED
                     self.task_error = (
-                        "Task start returned after the safety latch closed"
+                        "Task start reached dispatch after its safety gate closed"
                     )
                     self.task_dispatched = False
                     self.task_dispatched_at = None
                     self.last_behavior_status_at = None
-                elif dispatch_error is None:
+                else:
+                    safety_generation = self._emergency_order_generation
+                    safety_stop_sequence = self._ordinary_stop_sequence
+                    self.task_state = TaskState.RUNNING
+                    # Once a start publish is attempted, the same identity
+                    # must never be treated as "never dispatched" again.
+                    self.task_ever_dispatched = True
+
+            if gate_closed:
+                return
+
+            # A ROS publisher can block in its socket. Do not hold the safety
+            # gate while it does: the watchdog must be able to latch and fan
+            # out stops immediately. The generation/postcheck below detects a
+            # stop even if an explicit reset races before this call returns.
+            publish_attempted = True
+            try:
+                self._publish_current_task()
+            except Exception as exc:
+                dispatch_error = exc
+
+            with self._safety_zero_lock:
+                late_safety_latch = self._motion_gate_closed_locked(
+                    self._control_clock(),
+                    admitted_generation=safety_generation,
+                    admitted_stop_sequence=safety_stop_sequence,
+                )
+                if late_safety_latch:
+                    if not self._shutdown_started:
+                        self.task_state = TaskState.FAILED
+                        self.task_error = (
+                            "Task start returned after its safety gate closed"
+                        )
+                        self.task_dispatched = False
+                        self.task_dispatched_at = None
+                        self.last_behavior_status_at = None
+                elif dispatch_error is not None:
+                    self.task_state = TaskState.FAILED
+                    self.task_error = str(dispatch_error)
+                else:
                     self.task_dispatched = True
                     self.task_dispatched_at = self._control_clock()
                     self.last_behavior_status_at = None
 
-        if late_safety_latch:
-            self._compensate_late_lifecycle_message(
-                task_id, 'late-start'
+        if publish_attempted and (
+            late_safety_latch or dispatch_error is not None
+        ):
+            self._secure_ambiguous_lifecycle_publish(
+                task_id,
+                (
+                    'failed-start'
+                    if dispatch_error is not None
+                    else 'late-start'
+                ),
+            )
+        if dispatch_error is not None:
+            rospy.logerr(
+                "Failed to dispatch task %s: %s", task_id, dispatch_error
             )
             return
-        if dispatch_error is not None:
+        if late_safety_latch:
             return
         rospy.loginfo(f"Started task: {task_type} (ID: {task_id}) config={start_config}")
 
@@ -793,21 +874,30 @@ class TaskOrchestrator:
     def _handle_resume_task(self, params):
         task_id = None
         publish_error = None
+        publish_attempted = False
         late_safety_latch = False
+        initial_safety_generation = None
+        initial_stop_sequence = None
+        safety_generation = None
+        safety_stop_sequence = None
         with self.task_lock:
             if (
                 not self._task_matches(params)
                 or self.task_state != TaskState.PAUSED
             ):
                 return
-            if (
-                self.supervised_stop_active
-                or self.emergency_stop_active
-                or self.ordinary_stop_active
-                or not self.robots
-            ):
+            with self._safety_zero_lock:
+                gate_closed = self._motion_gate_closed_locked(
+                    self._control_clock()
+                )
+                if not gate_closed:
+                    initial_safety_generation = (
+                        self._emergency_order_generation
+                    )
+                    initial_stop_sequence = self._ordinary_stop_sequence
+            if gate_closed:
                 rospy.logwarn(
-                    "Cannot resume task while the fleet is unavailable or stopped"
+                    "Cannot resume task while the control safety gate is closed"
                 )
                 return
 
@@ -818,41 +908,69 @@ class TaskOrchestrator:
             pub = self.behavior_resume_pubs.get(self.current_task_type)
             if pub is None:
                 return
-            self.task_state = TaskState.RUNNING
+            with self._safety_zero_lock:
+                if self._motion_gate_closed_locked(
+                    self._control_clock(),
+                    admitted_generation=initial_safety_generation,
+                    admitted_stop_sequence=initial_stop_sequence,
+                ):
+                    rospy.logwarn(
+                        "Cannot resume task while the control safety gate is closed"
+                    )
+                    return
+                safety_generation = self._emergency_order_generation
+                safety_stop_sequence = self._ordinary_stop_sequence
+                self.task_state = TaskState.RUNNING
+
+            # Keep the blocking socket outside the safety lock. A watchdog or
+            # manual stop can latch while this thread remains in publish().
+            publish_attempted = True
             try:
                 pub.publish(payload)
             except Exception as exc:
                 publish_error = exc
             with self._safety_zero_lock:
-                late_safety_latch = (
-                    self._shutdown_started
-                    or self.supervised_stop_active
-                    or self.emergency_stop_active
+                late_safety_latch = self._motion_gate_closed_locked(
+                    self._control_clock(),
+                    admitted_generation=safety_generation,
+                    admitted_stop_sequence=safety_stop_sequence,
                 )
                 if late_safety_latch:
-                    self.task_state = TaskState.FAILED
-                    self.task_error = (
-                        "Task resume returned after the safety latch closed"
-                    )
-                    self.task_dispatched = False
-                    self.task_dispatched_at = None
-                    self.last_behavior_status_at = None
+                    if not self._shutdown_started:
+                        self.task_state = TaskState.FAILED
+                        self.task_error = (
+                            "Task resume returned after the safety latch closed"
+                        )
+                        self.task_dispatched = False
+                        self.task_dispatched_at = None
+                        self.last_behavior_status_at = None
                 elif publish_error is not None:
                     self.task_state = TaskState.FAILED
                     self.task_error = str(publish_error)
+                    self.task_dispatched = False
+                    self.task_dispatched_at = None
+                    self.last_behavior_status_at = None
                 else:
                     self.task_dispatched_at = self._control_clock()
                     self.last_behavior_status_at = None
 
-        if late_safety_latch:
-            self._compensate_late_lifecycle_message(
-                task_id, 'late-resume'
+        if publish_attempted and (
+            late_safety_latch or publish_error is not None
+        ):
+            self._secure_ambiguous_lifecycle_publish(
+                task_id,
+                (
+                    'failed-resume'
+                    if publish_error is not None
+                    else 'late-resume'
+                ),
             )
-            return
         if publish_error is not None:
             rospy.logerr(
                 "Failed to resume task %s: %s", task_id, publish_error
             )
+            return
+        if late_safety_latch:
             return
         rospy.loginfo("Resumed task: %s", task_id)
 
@@ -1242,6 +1360,44 @@ class TaskOrchestrator:
         self._install_emergency_publication_debts(task_id, context)
         self._schedule_safety_zero_batch()
 
+    def _secure_ambiguous_lifecycle_publish(self, task_id, context):
+        """Latch locally, then put stops after a possibly delivered command."""
+        latched, active_task_id, generation = self._begin_emergency_true()
+        if not latched:
+            self._compensate_late_lifecycle_message(task_id, context)
+            return
+        try:
+            self._compensate_late_lifecycle_message(task_id, context)
+            if active_task_id and active_task_id != task_id:
+                self._install_emergency_publication_debts(
+                    active_task_id, '{}-active'.format(context)
+                )
+            self._commit_ambiguous_publish_state(task_id)
+        finally:
+            self._finish_emergency_true(generation)
+
+    def _commit_ambiguous_publish_state(self, task_id):
+        """Close any task admitted before an ambiguous publish was latched."""
+        with self.task_lock:
+            with self._safety_zero_lock:
+                if (
+                    self._shutdown_started
+                    or self.supervised_stop_active
+                    or not self.emergency_stop_active
+                ):
+                    return False
+                if not (
+                    self.current_task_id == task_id
+                    and self.task_state == TaskState.FAILED
+                ):
+                    self.task_state = TaskState.STOPPED
+                    self.task_error = None
+                self.task_progress = 0.0
+                self.task_dispatched = False
+                self.task_dispatched_at = None
+                self.last_behavior_status_at = None
+        return True
+
     def _install_emergency_publication_debts(self, task_id, context):
         """Keep failed e-stop and behavior-stop messages eligible for retry."""
         publications = [
@@ -1256,7 +1412,7 @@ class TaskOrchestrator:
             stop_message = String(data=json.dumps({'task_id': task_id}))
             publications.extend(
                 (
-                    ('stop', index, id(publisher)),
+                    ('stop', task_id, index, id(publisher)),
                     '{}-stop-{}'.format(context, index),
                     publisher,
                     stop_message,
@@ -1330,15 +1486,61 @@ class TaskOrchestrator:
         """Check the watchdog trip predicate under ``_safety_zero_lock``."""
         if (
             not self.control_watchdog_enabled
-            or not self.control_heartbeat_seen
-            or self.last_control_heartbeat is None
             or self.control_watchdog_tripped
             or self._shutdown_started
         ):
             return False
+        if (
+            not self.control_heartbeat_seen
+            or self.last_control_heartbeat is None
+        ):
+            return (
+                now - self.control_watchdog_started_at
+                >= self.control_watchdog_startup_grace
+            )
+        return now - self.last_control_heartbeat >= (
+            self.control_heartbeat_timeout
+        )
+
+    def _control_heartbeat_is_fresh_locked(self, now):
+        """Return whether motion may rely on the worker heartbeat."""
+        if not self.control_watchdog_enabled:
+            return True
+        if (
+            not self.control_heartbeat_seen
+            or self.last_control_heartbeat is None
+        ):
+            return False
+        age = now - self.last_control_heartbeat
         return (
-            now - self.last_control_heartbeat
-            > self.control_heartbeat_timeout
+            math.isfinite(age)
+            and 0.0 <= age < self.control_heartbeat_timeout
+        )
+
+    def _motion_gate_closed_locked(
+        self,
+        now,
+        admitted_generation=None,
+        admitted_stop_sequence=None,
+    ):
+        """Check every motion gate while ``_safety_zero_lock`` is held."""
+        return (
+            self._shutdown_started
+            or self.supervised_stop_active
+            or self.emergency_stop_active
+            or self.ordinary_stop_active
+            or not self.robots
+            or not self._control_heartbeat_is_fresh_locked(now)
+            or (
+                admitted_generation is not None
+                and self._emergency_order_generation
+                != admitted_generation
+            )
+            or (
+                admitted_stop_sequence is not None
+                and self._ordinary_stop_sequence
+                != admitted_stop_sequence
+            )
         )
 
     def _begin_emergency_true(self, watchdog=False, now=None):
@@ -1928,16 +2130,10 @@ class TaskOrchestrator:
                         )
                         return
                     now = self._control_clock()
-                    if (
-                        self.control_watchdog_enabled
-                        and self.control_heartbeat_seen
-                        and self.last_control_heartbeat is not None
-                        and now - self.last_control_heartbeat
-                        > self.control_heartbeat_timeout
-                    ):
+                    if not self._control_heartbeat_is_fresh_locked(now):
                         rospy.logwarn(
                             "Emergency-stop reset rejected while the "
-                            "control heartbeat is stale"
+                            "control heartbeat is absent or stale"
                         )
                         return
                     self.emergency_stop_active = False
@@ -2006,12 +2202,42 @@ class TaskOrchestrator:
 
     # ==================== Control-plane Watchdog ====================
 
-    def _control_heartbeat_callback(self, _msg):
-        """Arm/refresh the worker lease using local monotonic arrival time."""
+    def _control_heartbeat_callback(self, msg):
+        """Accept only a worker lease that is still valid on this host."""
+        try:
+            deadline = float(msg.data)
+        except (AttributeError, TypeError, ValueError):
+            rospy.logwarn_throttle(
+                5.0,
+                "Rejected a control heartbeat with an invalid deadline",
+            )
+            return
+
+        now = self._control_clock()
+        remaining = deadline - now
+        if (
+            not math.isfinite(deadline)
+            or remaining <= 0.0
+            or remaining > self.control_heartbeat_max_future
+        ):
+            rospy.logwarn_throttle(
+                5.0,
+                "Rejected a stale or incompatible control heartbeat deadline",
+            )
+            return
+
         with self._safety_zero_lock:
+            now = self._control_clock()
+            remaining = deadline - now
+            if (
+                remaining <= 0.0
+                or remaining > self.control_heartbeat_max_future
+            ):
+                return
             first_heartbeat = not self.control_heartbeat_seen
             self.control_heartbeat_seen = True
-            self.last_control_heartbeat = self._control_clock()
+            self.last_control_heartbeat = now
+            self.last_control_heartbeat_deadline = deadline
         if first_heartbeat:
             rospy.loginfo(
                 "Control heartbeat watchdog armed (timeout %.1fs)",
@@ -2022,24 +2248,35 @@ class TaskOrchestrator:
         """
         Trip the normal latched emergency-stop path after heartbeat expiry.
 
-        The watchdog deliberately remains disarmed until the first heartbeat,
-        preventing a startup false-positive while the worker/container link is
-        still being established.
+        A short startup grace lets the worker/container link come up. If the
+        first heartbeat never arrives, the same fail-closed stop is latched
+        when that grace expires.
         """
         current_time = self._control_clock() if now is None else now
         with self._safety_zero_lock:
             if (
                 not self.control_watchdog_enabled
-                or not self.control_heartbeat_seen
-                or self.last_control_heartbeat is None
                 or self.control_watchdog_tripped
                 or self._shutdown_started
             ):
                 return False
 
-            age = current_time - self.last_control_heartbeat
-            if age <= self.control_heartbeat_timeout:
+            if not self._watchdog_can_latch_locked(current_time):
                 return False
+            missing_first_heartbeat = (
+                not self.control_heartbeat_seen
+                or self.last_control_heartbeat is None
+            )
+            age = (
+                current_time - self.control_watchdog_started_at
+                if missing_first_heartbeat
+                else current_time - self.last_control_heartbeat
+            )
+            timeout = (
+                self.control_watchdog_startup_grace
+                if missing_first_heartbeat
+                else self.control_heartbeat_timeout
+            )
 
         latched, _committed = self._latch_and_publish_emergency_stop(
             'control-watchdog', watchdog=True, now=current_time
@@ -2048,9 +2285,10 @@ class TaskOrchestrator:
             return False
 
         rospy.logerr(
-            "CONTROL HEARTBEAT LOST (%.1fs > %.1fs); emergency stop latched",
+            "CONTROL HEARTBEAT %s (%.1fs >= %.1fs); emergency stop latched",
+            "NEVER ARRIVED" if missing_first_heartbeat else "LOST",
             age,
-            self.control_heartbeat_timeout,
+            timeout,
         )
         return True
 
@@ -2069,37 +2307,101 @@ class TaskOrchestrator:
                 )
 
     def _handle_control_leader(self, params):
-        cmd = Twist()
         with self._safety_zero_lock:
-            stopped = (
-                self.supervised_stop_active
-                or self.emergency_stop_active
+            gate_time = self._control_clock()
+            gate_closed = self._motion_gate_closed_locked(
+                gate_time
             )
-        if not stopped:
-            cmd.linear.x = max(
-                -0.26, min(0.26, params.get('linear_velocity', 0.0))
+            latch_stale_heartbeat = (
+                gate_closed
+                and not self._shutdown_started
+                and not self.supervised_stop_active
+                and not self.emergency_stop_active
+                and not self.ordinary_stop_active
+                and bool(self.robots)
+                and self._watchdog_can_latch_locked(gate_time)
             )
-            cmd.angular.z = max(
-                -1.82, min(1.82, params.get('angular_velocity', 0.0))
+            if not gate_closed:
+                initial_safety_generation = (
+                    self._emergency_order_generation
+                )
+                initial_stop_sequence = self._ordinary_stop_sequence
+        if gate_closed:
+            if latch_stale_heartbeat:
+                self._check_control_watchdog(now=gate_time)
+            self._schedule_safety_zero(
+                'leader',
+                self.leader_cmd_pub,
+                lane='manual-gate',
             )
+            return
+
+        cmd = Twist()
+        cmd.linear.x = max(
+            -0.26, min(0.26, params.get('linear_velocity', 0.0))
+        )
+        cmd.angular.z = max(
+            -1.82, min(1.82, params.get('angular_velocity', 0.0))
+        )
+
+        with self._safety_zero_lock:
+            gate_time = self._control_clock()
+            gate_closed = self._motion_gate_closed_locked(
+                gate_time,
+                admitted_generation=initial_safety_generation,
+                admitted_stop_sequence=initial_stop_sequence,
+            )
+            latch_stale_heartbeat = (
+                gate_closed
+                and not self._shutdown_started
+                and not self.supervised_stop_active
+                and not self.emergency_stop_active
+                and not self.ordinary_stop_active
+                and bool(self.robots)
+                and self._watchdog_can_latch_locked(gate_time)
+            )
+            if not gate_closed:
+                safety_generation = self._emergency_order_generation
+                safety_stop_sequence = self._ordinary_stop_sequence
+        if gate_closed:
+            if latch_stale_heartbeat:
+                self._check_control_watchdog(now=gate_time)
+            self._schedule_safety_zero(
+                'leader',
+                self.leader_cmd_pub,
+                lane='manual-gate',
+            )
+            return
+
+        publish_failed = False
         try:
             self.leader_cmd_pub.publish(cmd)
+        except Exception:
+            publish_failed = True
+            self._secure_ambiguous_lifecycle_publish(
+                self.current_task_id, 'failed-manual'
+            )
+            raise
         finally:
             # A request can latch while a previously admitted ROS publish is
             # blocked. Once that call returns, put a zero after it instead of
             # letting its late velocity become the final message.
-            if not stopped:
-                with self._safety_zero_lock:
-                    stopped_after_publish = (
-                        self.supervised_stop_active
-                        or self.emergency_stop_active
-                    )
-                if stopped_after_publish:
-                    self._schedule_safety_zero(
-                        'leader',
-                        self.leader_cmd_pub,
-                        lane='manual-compensation',
-                    )
+            with self._safety_zero_lock:
+                gate_closed = self._motion_gate_closed_locked(
+                    self._control_clock(),
+                    admitted_generation=safety_generation,
+                    admitted_stop_sequence=safety_stop_sequence,
+                )
+            if gate_closed and not publish_failed:
+                self._secure_ambiguous_lifecycle_publish(
+                    self.current_task_id, 'late-manual'
+                )
+            if gate_closed or publish_failed:
+                self._schedule_safety_zero(
+                    'leader',
+                    self.leader_cmd_pub,
+                    lane='manual-compensation',
+                )
 
     def _handle_get_status(self, params):
         return self._build_status()
@@ -3189,9 +3491,13 @@ class TaskOrchestrator:
             ]
             heartbeat_seen = self.control_heartbeat_seen
             last_heartbeat = self.last_control_heartbeat
+            heartbeat_deadline = self.last_control_heartbeat_deadline
             watchdog_tripped = self.control_watchdog_tripped
             watchdog_enabled = self.control_watchdog_enabled
             heartbeat_timeout = self.control_heartbeat_timeout
+            heartbeat_max_future = self.control_heartbeat_max_future
+            watchdog_started_at = self.control_watchdog_started_at
+            watchdog_startup_grace = self.control_watchdog_startup_grace
 
         robots_list = []
         stale_robot_ids = []
@@ -3257,9 +3563,19 @@ class TaskOrchestrator:
                 'armed': heartbeat_seen,
                 'tripped': watchdog_tripped,
                 'timeout_seconds': heartbeat_timeout,
+                'maximum_future_seconds': heartbeat_max_future,
+                'startup_grace_seconds': watchdog_startup_grace,
+                'startup_age_seconds': round(max(
+                    0.0, safety_now - watchdog_started_at
+                ), 3),
                 'heartbeat_age_seconds': (
                     round(max(0.0, safety_now - last_heartbeat), 3)
                     if last_heartbeat is not None
+                    else None
+                ),
+                'deadline_remaining_seconds': (
+                    round(heartbeat_deadline - safety_now, 3)
+                    if heartbeat_deadline is not None
                     else None
                 ),
             },

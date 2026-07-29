@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Data;
 using System.Security.Claims;
 using System.Text.Json;
@@ -16,32 +15,40 @@ namespace SwarmBackend.Services;
 public class WorkerHub(
     DataContext dataContext,
     IHubContext<SessionHub> sessionHubContext,
+    WorkerConnectionRegistry connectionRegistry,
     IConfiguration configuration,
     ILogger<WorkerHub> logger) : Hub
 {
-    private static readonly ConcurrentDictionary<Guid, string> ActiveConnections = new();
     internal const int MaximumTerminalCleanupAttempts = TerminalCleanupPolicy.MaximumAttempts;
     internal static readonly TimeSpan TerminalCleanupBaseDelay =
         TerminalCleanupPolicy.BaseRetryDelay;
     private const int MaximumFailSafeTransactionAttempts = 3;
     private const int MaximumCommandTransitionAttempts = 3;
 
-    public static void InvalidateConnection(Guid workerId)
-    {
-        ActiveConnections.TryRemove(workerId, out _);
-    }
-
     public override async Task OnConnectedAsync()
     {
         var workerId = GetWorkerId();
-        if (!ActiveConnections.TryAdd(workerId, Context.ConnectionId))
+        var claim = connectionRegistry.Claim(
+            workerId,
+            GetAgentInstanceId(),
+            Context.ConnectionId,
+            Context.Abort);
+        if (claim == WorkerConnectionClaim.Rejected)
         {
             Context.Abort();
             throw new HubException("This compute worker already has an active connection.");
         }
+        if (claim == WorkerConnectionClaim.Replaced)
+        {
+            logger.LogInformation(
+                "Compute worker {WorkerId} superseded its stale connection with {ConnectionId}.",
+                workerId,
+                Context.ConnectionId);
+        }
 
         try
         {
+            await RevalidateConnectionCredential(workerId);
             await Groups.AddToGroupAsync(
                 Context.ConnectionId,
                 ControlPlaneGroups.Worker(workerId),
@@ -50,14 +57,14 @@ public class WorkerHub(
         }
         catch
         {
-            RemoveActiveConnection(workerId, Context.ConnectionId);
+            connectionRegistry.Release(workerId, Context.ConnectionId);
             throw;
         }
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        RemoveActiveConnection(GetWorkerId(), Context.ConnectionId);
+        connectionRegistry.Release(GetWorkerId(), Context.ConnectionId);
         await base.OnDisconnectedAsync(exception);
     }
 
@@ -985,6 +992,68 @@ public class WorkerHub(
         return workerId;
     }
 
+    private Guid? GetAgentInstanceId()
+    {
+        var claim = Context.User?.FindFirst(
+            WorkerCredentialDefaults.AgentInstanceClaim);
+        if (claim == null)
+        {
+            return null;
+        }
+
+        if (!Guid.TryParseExact(claim.Value, "D", out var agentInstanceId)
+            || agentInstanceId == Guid.Empty)
+        {
+            throw new HubException(
+                "Authenticated worker instance identifier is invalid.");
+        }
+
+        return agentInstanceId;
+    }
+
+    private async Task RevalidateConnectionCredential(Guid workerId)
+    {
+        if (!connectionRegistry.IsCurrent(workerId, Context.ConnectionId))
+        {
+            Context.Abort();
+            throw new HubException(
+                "This compute worker connection has been superseded.");
+        }
+
+        var credential = await dataContext.ComputeWorkers
+            .AsNoTracking()
+            .Where(worker => worker.Id == workerId)
+            .Select(worker => new
+            {
+                worker.CredentialHash,
+                worker.CredentialCreatedAt,
+                worker.CredentialRevokedAt
+            })
+            .SingleOrDefaultAsync(Context.ConnectionAborted);
+        var credentialVersion = Context.User?
+            .FindFirst("worker_credential_version")?
+            .Value;
+        if (credential?.CredentialHash == null
+            || credential.CredentialRevokedAt.HasValue
+            || credentialVersion
+                != credential.CredentialCreatedAt?.Ticks.ToString())
+        {
+            connectionRegistry.Release(workerId, Context.ConnectionId);
+            Context.Abort();
+            throw new HubException(
+                "Compute worker credential is no longer active.");
+        }
+
+        // Invalidation can race the database read. The exact connection check
+        // prevents an invalidated or superseded caller from joining the group.
+        if (!connectionRegistry.IsCurrent(workerId, Context.ConnectionId))
+        {
+            Context.Abort();
+            throw new HubException(
+                "This compute worker connection has been superseded.");
+        }
+    }
+
     private async Task<SimulationSession?> LockAssignedSession(
         Guid sessionId,
         Guid workerId,
@@ -1024,18 +1093,16 @@ public class WorkerHub(
         return session;
     }
 
-    private static void RemoveActiveConnection(Guid workerId, string connectionId)
-    {
-        if (ActiveConnections.TryGetValue(workerId, out var currentConnectionId)
-            && currentConnectionId == connectionId)
-        {
-            ActiveConnections.TryRemove(workerId, out _);
-        }
-    }
-
     private async Task<ComputeWorker> GetWorker()
     {
         var workerId = GetWorkerId();
+        if (!connectionRegistry.IsCurrent(workerId, Context.ConnectionId))
+        {
+            Context.Abort();
+            throw new HubException(
+                "This compute worker connection has been superseded.");
+        }
+
         var worker = await dataContext.ComputeWorkers.SingleOrDefaultAsync(
                 worker => worker.Id == workerId,
                 Context.ConnectionAborted);
@@ -1044,7 +1111,7 @@ public class WorkerHub(
             || worker.CredentialRevokedAt.HasValue
             || credentialVersion != worker.CredentialCreatedAt?.Ticks.ToString())
         {
-            RemoveActiveConnection(workerId, Context.ConnectionId);
+            connectionRegistry.Release(workerId, Context.ConnectionId);
             Context.Abort();
             throw new HubException("Compute worker credential is no longer active.");
         }

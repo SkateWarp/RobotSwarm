@@ -299,6 +299,10 @@ class FormationController:
         ~centroid_path      : str   (default 'circular')
         ~odom_timeout_wall_s: float (default 0.75 s)
         ~odom_initialization_timeout_wall_s: float (default 10.0 s)
+        ~assignment_settle_time_wall_s: float (default 0.5 s)
+        ~assignment_settle_timeout_wall_s: float (default 5.0 s)
+        ~assignment_settle_position_tolerance: float (default 0.01 m)
+        ~assignment_settle_yaw_tolerance: float (default 0.03 rad)
 
     Published topics:
         /{ns}/cmd_vel               geometry_msgs/Twist
@@ -530,6 +534,8 @@ class FormationController:
         self._route_stall_duration: Dict[str, float] = {}
         self._active_route_batch_ids: Tuple[str, ...] = ()
         self._last_route_stall_detail: Optional[Dict] = None
+        self._last_live_safety_failure: Optional[Dict] = None
+        self._live_safety_failure_history: List[Dict] = []
         self._stop_publication_attempt = 0
         self._last_stop_publication = None
         # A failed zero command belongs to one publisher instance, not merely
@@ -577,6 +583,44 @@ class FormationController:
                 '~assignment_yaw_drift_tolerance', 0.15
             ))),
         )
+        # A freshly spawned Burger can still slide while Gazebo resolves its
+        # wheel and caster contacts. Plan only after every post-task odometry
+        # stream has remained inside one small pose envelope for a continuous
+        # wall-clock window. The later live-plan gate remains authoritative.
+        self.assignment_settle_time_wall_s = min(
+            2.0,
+            max(0.1, float(rospy.get_param(
+                '~assignment_settle_time_wall_s', 0.5
+            ))),
+        )
+        self.assignment_settle_timeout_wall_s = min(
+            30.0,
+            max(
+                self.assignment_settle_time_wall_s,
+                float(rospy.get_param(
+                    '~assignment_settle_timeout_wall_s', 5.0
+                )),
+            ),
+        )
+        self.assignment_settle_position_tolerance = min(
+            0.03,
+            max(0.001, float(rospy.get_param(
+                '~assignment_settle_position_tolerance', 0.01
+            ))),
+        )
+        self.assignment_settle_yaw_tolerance = min(
+            0.10,
+            max(0.005, float(rospy.get_param(
+                '~assignment_settle_yaw_tolerance', 0.03
+            ))),
+        )
+        self._assignment_settle_anchor = {}
+        self._assignment_settle_since = None
+        self._assignment_settle_deadline = None
+        self._assignment_settle_odom_deadline = None
+        self._assignment_settle_ready_at = None
+        self._assignment_planning_phase = 'idle'
+        self._assignment_settle_waiting = ()
         # Route and orbit planning can take several seconds for ten robots.
         # Never perform that work on an odometry callback thread: blocking the
         # callback would make the very sample which triggered planning appear
@@ -692,10 +736,14 @@ class FormationController:
         )
         assignment_snapshot = None
         fleet_stop_publication = None
+        fleet_stop_confirmed = True
+        queued_for_stability = False
         with self.command_lock:
             if self._shutdown_started:
                 return
             if ids != self.robot_ids:
+                previous_ids = set(self.robot_ids)
+                added_ids = set(ids) - previous_ids
                 self._initial_formation_acquired = False
                 if self.robot_ids:
                     if not ids:
@@ -708,6 +756,9 @@ class FormationController:
                     fleet_stop_publication = self._stop_all_robots(
                         'fleet_empty' if not ids else 'fleet_change'
                     )
+                    fleet_stop_confirmed = fleet_stop_publication[
+                        'publication_confirmed'
+                    ]
                     if self._shutdown_started:
                         return
                     if (
@@ -718,27 +769,82 @@ class FormationController:
                     ):
                         self.current_task_id = None
 
-                self._update_robot_list(ids)
+                try:
+                    self._update_robot_list(ids)
+                except Exception as exc:
+                    if self._shutdown_started:
+                        return
+                    self.is_running = False
+                    self.is_paused = False
+                    self._initial_formation_acquired = False
+                    self._cancel_pending_assignment_locked(
+                        clear_assignments=True
+                    )
+                    self.formation_state = FormationState.FAILED
+                    self.placement_error = (
+                        "The fleet roster could not provision every robot; "
+                        "motion was disabled and the installed command "
+                        "endpoints were stopped."
+                    )
+                    self._stop_all_robots('fleet_provision_failure')
+                    self._publish_stop_status_safely(
+                        'fleet provisioning failure'
+                    )
+                    rospy.logerr(
+                        "Formation fleet update failed closed: %s", exc
+                    )
+                    return
                 if self._shutdown_started:
                     return
+                if previous_ids and added_ids:
+                    # Publisher/subscriber construction can block. The old
+                    # fleet was therefore stopped first; now stop only the
+                    # newly installed endpoints, without sending a duplicate
+                    # zero to retained robots.
+                    new_publishers = tuple(
+                        target
+                        for target in self._command_publisher_snapshot()
+                        if target['robot_id'] in added_ids
+                    )
+                    new_stop = self._stop_all_robots(
+                        'fleet_change',
+                        publisher_snapshot=new_publishers,
+                    )
+                    fleet_stop_publication = new_stop
+                    fleet_stop_confirmed = (
+                        fleet_stop_confirmed
+                        and new_stop['publication_confirmed']
+                    )
                 if (
                     ids
                     and (
                         fleet_stop_publication is None
-                        or fleet_stop_publication[
-                            'publication_confirmed'
-                        ]
+                        or fleet_stop_confirmed
                     )
                 ):
-                    assignment_snapshot = self._recompute_formation_locked()
+                    assignment_snapshot = self._recompute_formation_locked(
+                        stop_already_confirmed=(
+                            fleet_stop_publication is not None
+                            and fleet_stop_confirmed
+                        ),
+                        reassignment_reason='fleet_change',
+                    )
                 else:
                     if not ids:
                         self.formation_offsets = []
                     self.assignments = {}
                     self.assignment_pending = False
+                queued_for_stability = (
+                    self.assignment_pending
+                    and self._assignment_planning_phase
+                    == 'waiting_for_stability'
+                )
         if fleet_stop_publication is not None:
             self._publish_stop_status_safely('fleet-change stop')
-        self._compute_and_commit_assignment(assignment_snapshot)
+        if queued_for_stability:
+            self._request_pending_assignment()
+        else:
+            self._compute_and_commit_assignment(assignment_snapshot)
 
     def _model_states_cb(self, msg: ModelStates):
         """Track configured obstacle poses, including the pushable object."""
@@ -826,6 +932,7 @@ class FormationController:
         """Dynamically change formation type at runtime."""
         new_type = msg.data.strip()
         assignment_snapshot = None
+        queued_for_stability = False
         with self.command_lock:
             if self._shutdown_started:
                 return
@@ -836,13 +943,23 @@ class FormationController:
                 )
                 self.formation_type = new_type
                 self._initial_formation_acquired = False
-                assignment_snapshot = self._recompute_formation_locked()
+                assignment_snapshot = self._recompute_formation_locked(
+                    reassignment_reason='shape_change'
+                )
                 if self._shutdown_started:
                     self._cancel_pending_assignment_locked(
                         clear_assignments=True
                     )
                     return
-        self._compute_and_commit_assignment(assignment_snapshot)
+                queued_for_stability = (
+                    self.assignment_pending
+                    and self._assignment_planning_phase
+                    == 'waiting_for_stability'
+                )
+        if queued_for_stability:
+            self._request_pending_assignment()
+        else:
+            self._compute_and_commit_assignment(assignment_snapshot)
 
     def _start_cb(self, msg):
         """Start the formation behavior with optional runtime config."""
@@ -864,7 +981,6 @@ class FormationController:
             )
             return
 
-        assignment_snapshot = None
         with self.command_lock:
             if getattr(self, '_shutdown_started', False):
                 rospy.logwarn(
@@ -911,15 +1027,22 @@ class FormationController:
                 )
                 self._publish_stop_status_safely('start rejection')
                 return
+            if self.is_running:
+                restart_stop = self._stop_all_robots('task_restart')
+                if self._shutdown_started:
+                    return
+                if not restart_stop['publication_confirmed']:
+                    self._publish_stop_status_safely(
+                        'active task restart'
+                    )
+                    return
 
             requested_formation = self.formation_type
             requested_mode = self.movement_mode
             requested_spacing = self.spacing
             requested_radius = self.path_radius
-            recompute = False
             if 'formation_type' in config:
                 new_type = config['formation_type']
-                recompute = recompute or new_type != self.formation_type
                 requested_formation = new_type
             if 'movement_mode' in config:
                 try:
@@ -929,14 +1052,12 @@ class FormationController:
             if 'spacing' in config:
                 try:
                     new_spacing = max(0.35, float(config['spacing']))
-                    recompute = recompute or new_spacing != self.spacing
                     requested_spacing = new_spacing
                 except (TypeError, ValueError):
                     pass
             if 'path_radius' in config:
                 try:
                     new_radius = max(0.10, float(config['path_radius']))
-                    recompute = recompute or new_radius != self.path_radius
                     requested_radius = new_radius
                 except (TypeError, ValueError):
                     pass
@@ -974,6 +1095,8 @@ class FormationController:
                     self._live_replan_attempts = 0
                     self._active_route_batch_ids = ()
                     self._last_route_stall_detail = None
+                    self._last_live_safety_failure = None
+                    self._live_safety_failure_history = []
                     self._reset_centroid_path_pose_locked()
 
                     for pid in self.pid_linear.values():
@@ -981,10 +1104,13 @@ class FormationController:
                     for pid in self.pid_angular.values():
                         pid.reset()
 
-            if recompute:
-                assignment_snapshot = self._recompute_formation_locked()
-            else:
-                assignment_snapshot = self._prepare_assignment_locked()
+            # Shape generation is cheap; route planning is not. Keep the
+            # solver off the command callback until every robot has supplied
+            # fresh, stationary odometry for this task.
+            self.formation_offsets = self._compute_formation_positions(
+                self.formation_type, len(self.robot_ids), self.spacing
+            )
+            self._queue_assignment_after_settle_locked()
 
             if self._shutdown_started:
                 self.is_running = False
@@ -993,28 +1119,19 @@ class FormationController:
                     clear_assignments=True
                 )
                 return
-        # Route planning for a large fleet can take longer than the normal
-        # behavior heartbeat window. Publish the correlated, stationary
-        # FORMING state before entering the solver so the orchestrator can
-        # distinguish bounded planning from a node that never accepted the
-        # task.
+        # Publish the correlated hold before waking the asynchronous planner.
+        # The control loop continues that zero-command heartbeat throughout
+        # the stability window and the bounded solve.
         try:
             self._publish_status([], 0.0)
         except Exception as exc:
             rospy.logwarn(
                 "Formation planning status could not be published: %s", exc
             )
-        self._compute_and_commit_assignment(assignment_snapshot)
-        if self._shutdown_started:
-            return
-        if self.placement_error:
-            rospy.logerr(
-                "Formation control could not start: %s",
-                self.placement_error,
-            )
-            return
+        self._request_pending_assignment()
         rospy.loginfo(
-            "Formation control STARTED: type=%s, mode=%s",
+            "Formation control STARTED: type=%s, mode=%s; waiting for "
+            "stationary odometry before route planning",
             self.formation_type, self.movement_mode.value,
         )
 
@@ -1703,7 +1820,6 @@ class FormationController:
                 self.invalid_robot_poses = tuple(sorted(invalid_robots))
                 return
 
-            first_update = self.robot_poses.get(robot_id) is None
             invalid_robots.discard(robot_id)
             self.invalid_robot_poses = tuple(sorted(invalid_robots))
             observed_at = time.monotonic()
@@ -1716,8 +1832,7 @@ class FormationController:
             ):
                 self.odom_confirmed_for_task[robot_id] = True
             should_assign = (
-                first_update
-                and self.assignment_pending
+                self.assignment_pending
                 and all(
                     self.robot_poses.get(rid) is not None
                     for rid in self.robot_ids
@@ -1737,21 +1852,322 @@ class FormationController:
         if wakeup is not None:
             wakeup.set()
 
+    def _reset_assignment_settle_locked(self, now=None):
+        """Start a new zero-command stability window for the current fleet."""
+        if now is None:
+            now = time.monotonic()
+        self._assignment_settle_anchor = {}
+        self._assignment_settle_since = None
+        waiting_for_first_odometry = any(
+            not self.odom_confirmed_for_task.get(robot_id, False)
+            for robot_id in self.robot_ids
+        )
+        self._assignment_settle_deadline = (
+            None
+            if waiting_for_first_odometry
+            else now + self.assignment_settle_timeout_wall_s
+        )
+        self._assignment_settle_odom_deadline = (
+            now + self.odom_initialization_timeout_wall_s
+            if waiting_for_first_odometry
+            else None
+        )
+        self._assignment_settle_ready_at = None
+        self._assignment_planning_phase = 'waiting_for_stability'
+        self._assignment_settle_waiting = tuple(self.robot_ids)
+
+    def _queue_assignment_after_settle_locked(self):
+        """Invalidate old geometry and queue one stationary-pose solve."""
+        self._cancel_pending_assignment_locked(clear_assignments=True)
+        self.assignment_pending = True
+        self.orbit_path_validated = False
+        self.placement_error = None
+        self.formation_state = FormationState.FORMING
+        self._initial_formation_acquired = False
+        self._reset_assignment_settle_locked()
+
+    def _assignment_settle_readiness_locked(self, now=None):
+        """Return whether fresh odometry has stayed quiet long enough."""
+        if now is None:
+            now = time.monotonic()
+        if (
+            self._shutdown_started
+            or not self.is_running
+            or not self.assignment_pending
+        ):
+            return False, False, {'reason': 'inactive'}
+
+        with self.lock:
+            waiting, stale = self._odometry_readiness(
+                self.robot_ids, now=now
+            )
+            current = {}
+            for robot_id in self.robot_ids:
+                pose = self.robot_poses.get(robot_id)
+                yaw = self.robot_yaws.get(robot_id)
+                stamp = self.odom_received_at.get(robot_id)
+                if pose is None or yaw is None or stamp is None:
+                    waiting.append(robot_id)
+                    continue
+                try:
+                    sample = (
+                        float(pose.position.x),
+                        float(pose.position.y),
+                        float(yaw),
+                        float(stamp),
+                    )
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    stale.append(robot_id)
+                    continue
+                if not all(math.isfinite(value) for value in sample):
+                    stale.append(robot_id)
+                    continue
+                current[robot_id] = sample
+
+        waiting = sorted(set(waiting))
+        stale = sorted(set(stale))
+        settle_deadline = self._assignment_settle_deadline
+        odom_deadline = self._assignment_settle_odom_deadline
+        if settle_deadline is not None:
+            deadline_expired = now >= settle_deadline
+        else:
+            # _odometry_readiness deliberately includes the exact endpoint
+            # of the initialization grace (elapsed <= timeout).
+            deadline_expired = (
+                odom_deadline is not None and now > odom_deadline
+            )
+        if waiting or stale or set(current) != set(self.robot_ids):
+            blocked = sorted(set(
+                waiting + stale + [
+                    robot_id for robot_id in self.robot_ids
+                    if robot_id not in current
+                ]
+            ))
+            self._assignment_settle_anchor = {}
+            self._assignment_settle_since = None
+            self._assignment_settle_ready_at = None
+            self._assignment_settle_waiting = tuple(blocked)
+            return False, deadline_expired, {
+                'reason': 'odometry',
+                'waiting': waiting,
+                'stale': stale,
+                'robots': blocked,
+            }
+
+        anchor = getattr(self, '_assignment_settle_anchor', {})
+        if set(anchor) != set(current):
+            self._assignment_settle_ready_at = None
+            if deadline_expired:
+                blocked = sorted(self.robot_ids)
+                self._assignment_settle_waiting = tuple(blocked)
+                return False, True, {
+                    'reason': 'first_sample',
+                    'robots': blocked,
+                    'quiet_for': 0.0,
+                }
+            self._assignment_settle_anchor = dict(current)
+            self._assignment_settle_since = now
+            if self._assignment_settle_deadline is None:
+                self._assignment_settle_deadline = (
+                    now + self.assignment_settle_timeout_wall_s
+                )
+            self._assignment_settle_odom_deadline = None
+            self._assignment_settle_waiting = tuple(self.robot_ids)
+            return False, False, {'reason': 'first_sample'}
+
+        moved = []
+        sampled_after_anchor = []
+        for robot_id in self.robot_ids:
+            x, y, yaw, stamp = current[robot_id]
+            old_x, old_y, old_yaw, old_stamp = anchor[robot_id]
+            if stamp > old_stamp:
+                sampled_after_anchor.append(robot_id)
+            if (
+                math.hypot(x - old_x, y - old_y)
+                > self.assignment_settle_position_tolerance
+                or abs(normalize_angle(yaw - old_yaw))
+                > self.assignment_settle_yaw_tolerance
+            ):
+                moved.append(robot_id)
+
+        if moved:
+            # Compare against one anchor rather than adjacent samples. That
+            # keeps slow, cumulative sliding from looking stationary.
+            self._assignment_settle_ready_at = None
+            if deadline_expired:
+                self._assignment_settle_waiting = tuple(moved)
+                return False, True, {
+                    'reason': 'movement',
+                    'robots': list(moved),
+                    'quiet_for': max(
+                        0.0,
+                        now - (self._assignment_settle_since or now),
+                    ),
+                }
+            self._assignment_settle_anchor = dict(current)
+            self._assignment_settle_since = now
+            self._assignment_settle_waiting = tuple(moved)
+        else:
+            since = self._assignment_settle_since
+            quiet_for = 0.0 if since is None else max(0.0, now - since)
+            waiting_for_sample = [
+                robot_id for robot_id in self.robot_ids
+                if robot_id not in sampled_after_anchor
+            ]
+            ready_at = getattr(
+                self, '_assignment_settle_ready_at', None
+            )
+            if ready_at is not None and not waiting_for_sample:
+                self._assignment_settle_waiting = ()
+                return True, False, {
+                    'reason': 'stable',
+                    'quiet_for': quiet_for,
+                    'ready_at': ready_at,
+                }
+            if waiting_for_sample:
+                self._assignment_settle_ready_at = None
+            if deadline_expired:
+                blocked = waiting_for_sample or list(self.robot_ids)
+                self._assignment_settle_waiting = tuple(blocked)
+                return False, True, {
+                    'reason': 'quiet_window',
+                    'robots': blocked,
+                    'quiet_for': quiet_for,
+                }
+            if (
+                quiet_for >= self.assignment_settle_time_wall_s
+                and len(sampled_after_anchor) == len(self.robot_ids)
+            ):
+                self._assignment_settle_waiting = ()
+                self._assignment_settle_ready_at = now
+                return True, False, {
+                    'reason': 'stable',
+                    'quiet_for': quiet_for,
+                    'ready_at': now,
+                }
+            self._assignment_settle_waiting = tuple(waiting_for_sample)
+
+        return False, False, {
+            'reason': 'movement' if moved else 'quiet_window',
+            'robots': list(moved),
+            'quiet_for': max(
+                0.0,
+                now - (self._assignment_settle_since or now),
+            ),
+        }
+
+    def _prepare_assignment_after_settle_locked(self, now=None):
+        """
+        Validate the quiet window and capture its assignment atomically.
+
+        command_lock must already be held. Keeping pose_lock across both steps
+        prevents an odometry callback from moving a robot between the stable
+        decision and the immutable planner snapshot.
+        """
+        supplied_now = now is not None
+        checked_at = time.monotonic() if now is None else now
+        with self.lock:
+            ready, timed_out, detail = (
+                self._assignment_settle_readiness_locked(now=checked_at)
+            )
+            if not ready:
+                return None, timed_out, detail
+
+            final_check_at = checked_at if supplied_now else time.monotonic()
+            deadline = self._assignment_settle_deadline
+            ready_at = getattr(
+                self, '_assignment_settle_ready_at', None
+            )
+            if (
+                deadline is not None
+                and final_check_at >= deadline
+                and (ready_at is None or ready_at >= deadline)
+            ):
+                blocked = list(self.robot_ids)
+                self._assignment_settle_waiting = tuple(blocked)
+                return None, True, {
+                    'reason': 'quiet_window',
+                    'robots': blocked,
+                    'quiet_for': detail.get('quiet_for', 0.0),
+                }
+
+            self._assignment_planning_phase = 'solving'
+            snapshot = self._prepare_assignment_locked(
+                settle_gate_passed=True
+            )
+            return snapshot, False, detail
+
+    def _fail_assignment_settle_timeout_locked(self, detail):
+        """Fail closed when a stopped fleet never becomes stationary."""
+        if (
+            self._shutdown_started
+            or not self.is_running
+            or not self.assignment_pending
+        ):
+            return False
+        error = (
+            "The robot fleet did not become stationary before formation "
+            "planning; no robot was released."
+        )
+        self._record_live_safety_failure({
+            'gate': 'assignment_pose_settle',
+            'kind': 'timeout',
+            'robots': list(detail.get('robots', ())),
+            'stage': 'assignment_prepare',
+        })
+        self.is_running = False
+        self.is_paused = False
+        self._initial_formation_acquired = False
+        self._cancel_pending_assignment_locked(clear_assignments=True)
+        self.orbit_path_validated = False
+        self.placement_error = error
+        self.formation_state = FormationState.FAILED
+        self._stop_all_robots('assignment_settle_timeout')
+        self._publish_status([], 0.0)
+        rospy.logerr(
+            "Formation planning failed because the fleet did not settle "
+            "within %.2fs.",
+            self.assignment_settle_timeout_wall_s,
+        )
+        return True
+
     def _assignment_worker_loop(self):
         """Coalesce pending plans and solve them away from ROS callbacks."""
         while not self._assignment_worker_stop.is_set():
-            self._assignment_worker_wakeup.wait(0.25)
+            received_wakeup = self._assignment_worker_wakeup.wait(0.25)
             if self._assignment_worker_stop.is_set():
                 break
-            if not self._assignment_worker_wakeup.is_set():
-                continue
-            self._assignment_worker_wakeup.clear()
+            if received_wakeup:
+                self._assignment_worker_wakeup.clear()
             prepared_generation = None
             with self.command_lock:
                 if not self.assignment_pending:
                     continue
+                planning_phase = getattr(
+                    self, '_assignment_planning_phase', 'idle'
+                )
+                if (
+                    not received_wakeup
+                    and planning_phase != 'waiting_for_stability'
+                ):
+                    continue
                 try:
-                    assignment_snapshot = self._prepare_assignment_locked()
+                    if (
+                        planning_phase == 'waiting_for_stability'
+                    ):
+                        assignment_snapshot, timed_out, detail = (
+                            self._prepare_assignment_after_settle_locked()
+                        )
+                        if timed_out:
+                            self._fail_assignment_settle_timeout_locked(detail)
+                            continue
+                        if assignment_snapshot is None:
+                            continue
+                    else:
+                        self._assignment_planning_phase = 'solving'
+                        assignment_snapshot = (
+                            self._prepare_assignment_locked()
+                        )
                     prepared_generation = self._assignment_generation
                 except Exception as exc:
                     failed_generation = self._assignment_generation
@@ -1997,12 +2413,13 @@ class FormationController:
             new_set = set(new_ids)
 
             # Remove departed robots
-            for rid in old_set - new_set:
+            for rid in sort_robot_ids(old_set - new_set):
                 self._remove_robot(rid)
 
             # Add new robots
-            for rid in new_set - old_set:
-                self._add_robot(rid)
+            for rid in sort_robot_ids(new_set - old_set):
+                if rid not in self.cmd_vel_pubs:
+                    self._add_robot(rid)
 
             # Maintain ordered list
             self.robot_ids = sort_robot_ids(
@@ -2251,13 +2668,28 @@ class FormationController:
     # ------------------------------------------------------------------
     def _recompute_formation(self):
         """Recompute formation offsets and reassign robots."""
+        queued_for_stability = False
         with self.command_lock:
             if self._shutdown_started:
                 return False
-            assignment_snapshot = self._recompute_formation_locked()
-        self._compute_and_commit_assignment(assignment_snapshot)
+            assignment_snapshot = self._recompute_formation_locked(
+                reassignment_reason='formation_recompute'
+            )
+            queued_for_stability = (
+                self.assignment_pending
+                and self._assignment_planning_phase
+                == 'waiting_for_stability'
+            )
+        if queued_for_stability:
+            self._request_pending_assignment()
+            return False
+        return self._compute_and_commit_assignment(assignment_snapshot)
 
-    def _recompute_formation_locked(self) -> Optional[Dict]:
+    def _recompute_formation_locked(
+        self,
+        stop_already_confirmed: bool = False,
+        reassignment_reason: str = 'formation_recompute',
+    ) -> Optional[Dict]:
         """Recompute offsets and snapshot an assignment under command_lock."""
         if self._shutdown_started:
             return None
@@ -2270,7 +2702,10 @@ class FormationController:
         self.formation_offsets = self._compute_formation_positions(
             self.formation_type, n, self.spacing
         )
-        return self._prepare_assignment_locked()
+        return self._prepare_assignment_locked(
+            reassignment_stop_confirmed=stop_already_confirmed,
+            reassignment_reason=reassignment_reason,
+        )
 
     def _compute_formation_positions(
         self, formation_type: str, n_robots: int, spacing: float
@@ -2491,10 +2926,17 @@ class FormationController:
         with self.command_lock:
             if self._shutdown_started:
                 return False
-            assignment_snapshot = self._prepare_assignment_locked()
+            assignment_snapshot = self._prepare_assignment_locked(
+                reassignment_reason='formation_reassign'
+            )
         return self._compute_and_commit_assignment(assignment_snapshot)
 
-    def _prepare_assignment_locked(self) -> Optional[Dict]:
+    def _prepare_assignment_locked(
+        self,
+        settle_gate_passed: bool = False,
+        reassignment_stop_confirmed: bool = False,
+        reassignment_reason: str = 'active_reassignment',
+    ) -> Optional[Dict]:
         """
         Capture an immutable assignment request while holding command_lock.
 
@@ -2503,6 +2945,17 @@ class FormationController:
         queued behind its O(n^3) computation.
         """
         if self._shutdown_started:
+            return None
+        if self.is_running and not settle_gate_passed:
+            if not reassignment_stop_confirmed:
+                publication = self._stop_all_robots(reassignment_reason)
+                if not publication['publication_confirmed']:
+                    self._publish_stop_status_safely(
+                        'active formation reassignment'
+                    )
+                    return None
+            self._queue_assignment_after_settle_locked()
+            self._request_pending_assignment()
             return None
         self._assignment_generation += 1
         generation = self._assignment_generation
@@ -3283,6 +3736,9 @@ class FormationController:
                         'gate': 'assignment_live_revalidation'
                     }
                     detail['stage'] = 'assignment_commit'
+                    detail['plan_attempt'] = (
+                        self._live_replan_attempts + 1
+                    )
                     self._record_live_safety_failure(detail)
                     if (
                         not invalid_live_model_poses
@@ -3339,6 +3795,7 @@ class FormationController:
             self._live_orbit_validation_key = None
             self._live_orbit_validation_safe = False
             self.assignment_pending = False
+            self._clear_assignment_settle_locked()
             self._slot_reached = {
                 robot_id: False
                 for robot_id in assignment_snapshot['robot_ids']
@@ -3368,6 +3825,7 @@ class FormationController:
             self._live_orbit_validation_key = None
             self._live_orbit_validation_safe = False
             self.assignment_pending = False
+            self._clear_assignment_settle_locked()
             self.orbit_path_validated = False
             self.placement_error = error
             self.formation_state = FormationState.FAILED
@@ -3386,6 +3844,7 @@ class FormationController:
         """Invalidate any solver result that was computed from older state."""
         self._assignment_generation += 1
         self.assignment_pending = False
+        self._clear_assignment_settle_locked()
         if clear_assignments:
             self.assignments = {}
             self.route_waypoints = {}
@@ -3397,6 +3856,16 @@ class FormationController:
             self._live_orbit_validation_safe = False
             self._slot_reached = {}
         self._settled_duration = 0.0
+
+    def _clear_assignment_settle_locked(self):
+        """Discard pre-plan stability state for an obsolete generation."""
+        self._assignment_settle_anchor = {}
+        self._assignment_settle_since = None
+        self._assignment_settle_deadline = None
+        self._assignment_settle_odom_deadline = None
+        self._assignment_settle_ready_at = None
+        self._assignment_planning_phase = 'idle'
+        self._assignment_settle_waiting = ()
 
     def _model_geometry_matches_plan(self, plan, live_model_poses) -> bool:
         """Distinguish robot settling from a genuinely moving obstacle."""
@@ -3518,12 +3987,7 @@ class FormationController:
             self._publish_stop_status_safely('live replan')
             return False
         self._live_replan_attempts += 1
-        self._cancel_pending_assignment_locked(clear_assignments=True)
-        self.assignment_pending = True
-        self.orbit_path_validated = False
-        self.placement_error = None
-        self.formation_state = FormationState.FORMING
-        self._initial_formation_acquired = False
+        self._queue_assignment_after_settle_locked()
         self._request_pending_assignment()
         try:
             rospy.logwarn(
@@ -3675,12 +4139,19 @@ class FormationController:
         return routes_safe
 
     def _record_live_safety_failure(self, detail: Dict):
-        """Keep one structured explanation for a fail-closed geometry gate."""
+        """Keep a short audit trail for fail-closed geometry gates."""
         self._last_live_safety_failure = dict(detail)
+        recorded = dict(detail)
+        recorded['observed_monotonic_s'] = round(time.monotonic(), 3)
+        history = list(getattr(
+            self, '_live_safety_failure_history', ()
+        ))
+        history.append(recorded)
+        self._live_safety_failure_history = history[-3:]
         try:
             rospy.logerr(
                 "Formation live safety gate rejected: %s",
-                json.dumps(detail, sort_keys=True),
+                json.dumps(recorded, sort_keys=True),
             )
         except Exception:
             pass
@@ -4307,11 +4778,13 @@ class FormationController:
                 self._shutdown_started
                 or
                 not self.is_running
-                or self.is_paused
                 or self.emergency_stop_active
             ):
                 return
             try:
+                if self.is_paused:
+                    self._observe_assignment_settle_locked()
+                    return
                 self._control_step(event)
             except Exception as exc:
                 # A malformed scan or another unexpected live-data value must
@@ -4338,9 +4811,58 @@ class FormationController:
                     "Formation control exception failed closed: %s", exc
                 )
 
+    def _observe_assignment_settle_locked(self, now=None):
+        """Measure a pending quiet window even while motion is paused."""
+        if (
+            not self.assignment_pending
+            or getattr(
+                self, '_assignment_planning_phase', 'idle'
+            ) != 'waiting_for_stability'
+        ):
+            return False
+        if now is None:
+            now = time.monotonic()
+        ready, timed_out, detail = (
+            self._assignment_settle_readiness_locked(now=now)
+        )
+        if timed_out:
+            self._fail_assignment_settle_timeout_locked(detail)
+            return True
+        if ready:
+            self._request_pending_assignment()
+        return False
+
     def _control_step(self, event):
         """Main 20 Hz timer callback."""
         if self._shutdown_started or not self.is_running:
+            return
+
+        # A previous generation may still be using the single planner worker
+        # when a shape or fleet change opens a new stability gate. The control
+        # timer remains available in that interval, so it measures stability
+        # independently and preserves a valid pre-deadline result until that
+        # worker can consume the new generation.
+        if self._observe_assignment_settle_locked():
+            return
+        if (
+            self.assignment_pending
+            and getattr(
+                self, '_assignment_planning_phase', 'idle'
+            ) == 'waiting_for_stability'
+        ):
+            # This gate owns the initial-odometry grace for a newly added
+            # robot. Do not let the task's older start timestamp make the
+            # general stale-data check below fail that robot immediately.
+            with self.lock:
+                self.waiting_for_odometry = [
+                    robot_id for robot_id in self.robot_ids
+                    if not self.odom_confirmed_for_task.get(
+                        robot_id, False
+                    )
+                ]
+            self.stale_odometry = []
+            self.formation_state = FormationState.FORMING
+            self._publish_status([], 0.0)
             return
 
         waiting, stale = self._odometry_readiness(self.robot_ids)
@@ -5366,6 +5888,7 @@ class FormationController:
             self.route_batches
             or self._live_replan_attempts
             or self._last_route_stall_detail is not None
+            or getattr(self, '_last_live_safety_failure', None) is not None
         ):
             status['routing'] = {
                 'batch_index': min(
@@ -5383,6 +5906,48 @@ class FormationController:
                     if self._last_route_stall_detail is None
                     else dict(self._last_route_stall_detail)
                 ),
+                'last_live_safety_failure': (
+                    None
+                    if getattr(
+                        self, '_last_live_safety_failure', None
+                    ) is None
+                    else dict(self._last_live_safety_failure)
+                ),
+                'live_safety_failure_history': [
+                    dict(detail) for detail in getattr(
+                        self, '_live_safety_failure_history', ()
+                    )
+                ],
+            }
+        planning_phase = getattr(
+            self, '_assignment_planning_phase', 'idle'
+        )
+        if self.assignment_pending or planning_phase != 'idle':
+            settle_since = getattr(
+                self, '_assignment_settle_since', None
+            )
+            status['planning'] = {
+                'phase': planning_phase,
+                'stability_reached': (
+                    getattr(
+                        self, '_assignment_settle_ready_at', None
+                    ) is not None
+                ),
+                'stationary_for': round(
+                    0.0 if settle_since is None else max(
+                        0.0, time.monotonic() - settle_since
+                    ),
+                    3,
+                ),
+                'required_stationary_time': round(
+                    float(getattr(
+                        self, 'assignment_settle_time_wall_s', 0.5
+                    )),
+                    3,
+                ),
+                'waiting_for_stability': list(getattr(
+                    self, '_assignment_settle_waiting', ()
+                )),
             }
         if (
             self.movement_mode != MovementMode.STATIC

@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -64,6 +65,7 @@ SCENE_PIXEL_THRESHOLD = 32
 MIN_SCENE_DIFFERENCE_RATIO = 0.00075
 FAST_FIGURE_RECORD_SETTLE_SECONDS = 5.0
 MAX_VIEWER_LEASE_SECONDS = 30 * 60
+VIEWER_VISIBILITY_RETRY_SECONDS = 1.0
 VIEWER_LEASE_COUNTDOWN = re.compile(r"Vence en (0|[1-9]\d*):([0-5]\d)")
 
 LOGIN_EMAIL = 'input[name="email"]'
@@ -555,9 +557,11 @@ class OwnedChrome:
     run_id: str
     chrome_path: Path
     site_url: str
+    target_nonce: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     process: subprocess.Popen[bytes] | None = None
     browser_id: str | None = None
     browser_ws: str | None = None
+    page_id: str | None = None
     page: CdpClient | None = None
     product: str | None = None
     closed: bool = False
@@ -565,6 +569,59 @@ class OwnedChrome:
     @property
     def marker(self) -> Path:
         return self.profile / ".robotswarm-visible-owner.json"
+
+    @property
+    def launch_target(self) -> str:
+        return (
+            "data:text/html,"
+            f"<title>RobotSwarm</title>robotswarm-owned-{self.target_nonce}"
+        )
+
+    def owns_launch_target(self, url: Any) -> bool:
+        value = str(url or "")
+        return (
+            value.startswith("data:text/html,")
+            and f"robotswarm-owned-{self.target_nonce}" in value
+        )
+
+    def is_local_cdp_endpoint(
+        self,
+        websocket_url: Any,
+        endpoint_type: str,
+        endpoint_id: str | None = None,
+    ) -> bool:
+        try:
+            endpoint = urllib.parse.urlsplit(str(websocket_url or ""))
+            expected_path = (
+                f"/devtools/page/{endpoint_id}"
+                if endpoint_type == "page" and endpoint_id
+                else None
+            )
+            browser_prefix = "/devtools/browser/"
+            browser_id = (
+                endpoint.path[len(browser_prefix) :]
+                if endpoint.path.startswith(browser_prefix)
+                else ""
+            )
+            path_matches = (
+                endpoint.path == expected_path
+                if expected_path
+                else endpoint_type == "browser"
+                and bool(browser_id)
+                and "/" not in browser_id
+            )
+            return (
+                endpoint.scheme == "ws"
+                and endpoint.hostname in {"127.0.0.1", "localhost"}
+                and endpoint.port == self.port
+                and endpoint.username is None
+                and endpoint.password is None
+                and not endpoint.query
+                and not endpoint.fragment
+                and path_matches
+            )
+        except ValueError:
+            return False
 
     def launch(self) -> None:
         if not port_is_free(self.port):
@@ -588,7 +645,7 @@ class OwnedChrome:
             "--new-window",
             "--window-size=960,1000",
             f"--window-position={x_position},0",
-            "about:blank",
+            self.launch_target,
         ]
         forbidden = ("--headless", "--disable-gpu")
         if any(any(argument.startswith(item) for item in forbidden) for argument in arguments):
@@ -608,26 +665,59 @@ class OwnedChrome:
     def _connect(self) -> None:
         deadline = time.monotonic() + 35
         version: dict[str, Any] | None = None
+        page_target: dict[str, Any] | None = None
         while time.monotonic() < deadline:
-            if self.process and self.process.poll() is not None:
-                raise DriverError(f"Chrome {self.label} exited before CDP became ready")
             try:
-                version = local_json(f"http://127.0.0.1:{self.port}/json/version")
-                if version.get("webSocketDebuggerUrl"):
+                candidate_version = local_json(
+                    f"http://127.0.0.1:{self.port}/json/version"
+                )
+                browser_ws = str(
+                    candidate_version.get("webSocketDebuggerUrl") or ""
+                )
+                targets = local_json(f"http://127.0.0.1:{self.port}/json/list")
+                candidate_page = next(
+                    (
+                        item
+                        for item in targets
+                        if item.get("type") == "page"
+                        and self.owns_launch_target(item.get("url"))
+                        and item.get("id")
+                        and self.is_local_cdp_endpoint(
+                            item.get("webSocketDebuggerUrl"),
+                            "page",
+                            str(item["id"]),
+                        )
+                    ),
+                    None,
+                )
+                if (
+                    self.is_local_cdp_endpoint(browser_ws, "browser")
+                    and candidate_page is not None
+                ):
+                    version = candidate_version
+                    page_target = candidate_page
                     break
             except (OSError, urllib.error.URLError, json.JSONDecodeError):
                 pass
+            # Windows may hand the launch to a new browser process and let the
+            # WSL interop process exit first. The unique launch target binds the
+            # CDP endpoint to this invocation even after that handoff.
             time.sleep(0.25)
-        if not version or not version.get("webSocketDebuggerUrl"):
-            raise DriverError(f"Chrome {self.label} did not expose CDP on {self.port}")
+        if (
+            not version
+            or not version.get("webSocketDebuggerUrl")
+            or page_target is None
+        ):
+            raise DriverError(
+                f"Chrome {self.label} did not expose its owned CDP target on {self.port}"
+            )
 
         self.browser_ws = str(version["webSocketDebuggerUrl"])
         self.browser_id = self.browser_ws.rstrip("/").rsplit("/", 1)[-1]
         self.product = str(version.get("Browser", "Chrome"))
-        targets = local_json(f"http://127.0.0.1:{self.port}/json/list")
-        page_target = next((item for item in targets if item.get("type") == "page"), None)
-        if not page_target:
-            raise DriverError(f"Chrome {self.label} has no page target")
+        self.page_id = str(page_target.get("id") or "")
+        if not self.page_id:
+            raise DriverError(f"Chrome {self.label} has no owned page target")
         self.page = CdpClient(str(page_target["webSocketDebuggerUrl"]), self.port)
         self.page.call("Page.enable")
         self.page.call("Runtime.enable")
@@ -655,11 +745,18 @@ class OwnedChrome:
             return outcome
 
         endpoint_matches = False
-        if self.browser_id:
+        if self.browser_id and self.page_id:
             try:
                 current = local_json(f"http://127.0.0.1:{self.port}/json/version")
                 current_id = str(current.get("webSocketDebuggerUrl", "")).rstrip("/").rsplit("/", 1)[-1]
-                endpoint_matches = current_id == self.browser_id
+                targets = local_json(f"http://127.0.0.1:{self.port}/json/list")
+                target_still_owned = any(
+                    item.get("type") == "page" and item.get("id") == self.page_id
+                    for item in targets
+                )
+                endpoint_matches = (
+                    current_id == self.browser_id and target_still_owned
+                )
             except Exception:
                 endpoint_matches = False
 
@@ -1235,14 +1332,75 @@ class RobotSwarmUi:
     def request_viewer(self) -> None:
         self.click_button(OPEN_VIEWER_BUTTON)
 
-    def wait_viewer_frame(self, timeout: float) -> None:
-        condition = """
+    def _viewer_frame_state(self) -> dict[str, Any]:
+        state = self.cdp.evaluate("""
             (() => {
-                const videos = [...document.querySelectorAll('video')].filter(item => item.offsetParent !== null);
-                return videos.some(video => video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0);
+                const videos = [...document.querySelectorAll('video')]
+                    .filter(item => item.offsetParent !== null);
+                return {
+                    visibilityState: document.visibilityState,
+                    focused: document.hasFocus(),
+                    decoded: videos.some(video =>
+                        video.readyState >= 2
+                        && video.videoWidth > 0
+                        && video.videoHeight > 0
+                    ),
+                };
             })()
-        """
-        self.wait_js(condition, timeout, "a decoded private viewer frame")
+        """)
+        if not isinstance(state, dict):
+            raise DriverError("Could not inspect the private viewer frame state")
+        return state
+
+    def _restore_viewer_visibility(self) -> None:
+        """Restore the real owned window and activate its page without emulation."""
+        try:
+            window = self.cdp.call(
+                "Browser.getWindowForTarget",
+                timeout=3.0,
+            )
+            window_id = window.get("windowId")
+            bounds = window.get("bounds") or {}
+            if isinstance(window_id, int) and bounds.get("windowState") == "minimized":
+                self.cdp.call(
+                    "Browser.setWindowBounds",
+                    {
+                        "windowId": window_id,
+                        "bounds": {"windowState": "normal"},
+                    },
+                    timeout=3.0,
+                )
+        except DriverError:
+            # Page activation still recovers a background tab when the Browser
+            # window domain is unavailable on a particular Chrome build.
+            pass
+        self.cdp.call("Page.bringToFront")
+        self.cdp.evaluate("window.focus(); true")
+
+    def wait_viewer_frame(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        next_visibility_recovery = 0.0
+        while time.monotonic() < deadline:
+            self.raise_if_interrupted()
+            state = self._viewer_frame_state()
+            if (
+                state.get("visibilityState") == "visible"
+                and state.get("decoded") is True
+            ):
+                return
+
+            now = time.monotonic()
+            if (
+                state.get("visibilityState") != "visible"
+                and now >= next_visibility_recovery
+            ):
+                self._restore_viewer_visibility()
+                next_visibility_recovery = now + VIEWER_VISIBILITY_RETRY_SECONDS
+
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.35, remaining))
+        raise DriverError("Timed out waiting for a decoded private viewer frame")
 
     def open_viewer(self, timeout: float) -> None:
         self.request_viewer()
@@ -2176,13 +2334,27 @@ class RobotSwarmUi:
         safety = self.cdp.evaluate(
             f"""
                 (() => {{
-                    const text = document.documentElement.innerText || '';
-                    if (text.includes({json.dumps(password)})) return false;
                     const privateNodes = [];
                     const hide = element => {{
                         if (!element || privateNodes.some(entry => entry.element === element)) return;
                         privateNodes.push({{element, visibility: element.style.visibility}});
                         element.style.visibility = 'hidden';
+                    }};
+                    const passwordValue = {json.dumps(password)};
+                    const containsBoundedPassword = value => {{
+                        let offset = 0;
+                        while (offset <= value.length - passwordValue.length) {{
+                            const index = value.indexOf(passwordValue, offset);
+                            if (index < 0) return false;
+                            const before = index === 0 ? '' : value[index - 1];
+                            const end = index + passwordValue.length;
+                            const after = end >= value.length ? '' : value[end];
+                            const startsAtBoundary = !before || !/[A-Za-z0-9]/.test(before);
+                            const endsAtBoundary = !after || !/[A-Za-z0-9]/.test(after);
+                            if (startsAtBoundary && endsAtBoundary) return true;
+                            offset = index + 1;
+                        }}
+                        return false;
                     }};
                     document.querySelectorAll(
                         'input[type="password"], input[type="email"], input[type="search"], '
@@ -2201,9 +2373,32 @@ class RobotSwarmUi:
                         const hasSessionMarker = /(?:sesi[oó]n)[ ]+[0-9a-f]{{8}}(?:$|[^0-9a-f])/i.test(value);
                         const hasPrivateIp = /(?:^|[^0-9])(?:10(?:[.][0-9]{{1,3}}){{3}}|192[.]168(?:[.][0-9]{{1,3}}){{2}}|172[.](?:1[6-9]|2[0-9]|3[01])(?:[.][0-9]{{1,3}}){{2}})(?=$|[^0-9])/.test(value);
                         const hasWorkerName = /(?:worker|trabajador)[ ]*[:#-][ ]*[A-Za-z0-9._-]+/i.test(value);
-                        if (value.includes({json.dumps(email)}) || hasEmail || hasUuid || hasSessionMarker || hasPrivateIp || hasWorkerName) {{
+                        const hasShortPassword = passwordValue.length < 8
+                            && containsBoundedPassword(value);
+                        if (value.includes({json.dumps(email)}) || hasEmail || hasUuid || hasSessionMarker || hasPrivateIp || hasWorkerName || hasShortPassword) {{
                             hide(walker.currentNode.parentElement);
                         }}
+                    }}
+                    const passwordIsVisible = [...document.body.querySelectorAll('*')]
+                        .filter(element => {{
+                            const style = getComputedStyle(element);
+                            return element.offsetParent !== null
+                                && style.visibility !== 'hidden'
+                                && style.display !== 'none';
+                        }})
+                        .flatMap(element => [...element.childNodes])
+                        .filter(node => node.nodeType === Node.TEXT_NODE)
+                        .some(node => {{
+                            const value = (node.nodeValue || '').trim();
+                            return passwordValue.length >= 8
+                                ? value.includes(passwordValue)
+                                : containsBoundedPassword(value);
+                        }});
+                    if (passwordIsVisible) {{
+                        privateNodes.forEach(entry => {{
+                            entry.element.style.visibility = entry.visibility;
+                        }});
+                        return false;
                     }}
                     const previousTitle = document.title;
                     if ({json.dumps(title_marker)} !== null) document.title = {json.dumps(title_marker)};
