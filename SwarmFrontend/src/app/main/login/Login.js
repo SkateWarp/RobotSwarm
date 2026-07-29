@@ -1,9 +1,10 @@
 import { motion } from "framer-motion";
+import Alert from "@mui/material/Alert";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Typography from "@mui/material/Typography";
 import clsx from "clsx";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { makeStyles } from "@mui/styles";
 import { darken } from "@mui/material/styles";
 import { LOGO } from "../../constants/constants";
@@ -21,6 +22,8 @@ const useStyles = makeStyles((theme) => ({
 
 function Login() {
     const classes = useStyles();
+    const location = useLocation();
+    const accountCreated = location.state?.accountCreated === true;
 
     return (
         <div
@@ -39,11 +42,23 @@ function Login() {
                             >
                                 BIENVENIDO
                             </Typography>
+                            {accountCreated ? (
+                                <Alert className="w-full mb-16" severity="success">
+                                    Cuenta creada. Ya puedes iniciar sesión.
+                                </Alert>
+                            ) : null}
                             <JWTLoginTab />
                             <div className="flex flex-col items-center justify-center pt-32 pb-24">
                                 <span className="font-normal">¿Olvidaste tu contraseña?</span>
-                                <Link className="font-normal" to="/forgot-password">
+                                <Link
+                                    className="inline-flex items-center min-h-24 font-normal"
+                                    to="/forgot-password"
+                                >
                                     Restablecer contraseña
+                                </Link>
+                                <span className="font-normal mt-16">¿No tienes una cuenta?</span>
+                                <Link className="inline-flex items-center min-h-24 font-normal" to="/register">
+                                    Crear cuenta
                                 </Link>
                             </div>
                             <div className="w-1/3 mt-32">

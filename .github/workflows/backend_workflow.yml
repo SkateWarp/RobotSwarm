@@ -30,6 +30,7 @@ jobs:
       AppSettings__Secret: ${{ secrets.APPSETTINGS_SECRET }}
       AppSettings__Issuer: https://robot.zerav.la
       Cors__Origins__0: https://rs.zerav.la
+      Accounts__PublicRegistrationEnabled: ${{ vars.PUBLIC_REGISTRATION_ENABLED || 'false' }}
       ReverseProxy__KnownProxies__0: ${{ vars.BACKEND_PROXY_IP }}
       LegacyControl__Enabled: "false"
       Tasks__RequireCollaborativeTransportEvidence: ${{ vars.REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE || 'false' }}
@@ -86,6 +87,10 @@ jobs:
           test -n "$DB_NAME"
           test -n "$AppSettings__Secret"
           test -n "$BACKEND_PUBLISH_IP"
+          case "$Accounts__PublicRegistrationEnabled" in
+            true|false) ;;
+            *) echo "PUBLIC_REGISTRATION_ENABLED must be true or false." >&2; exit 1 ;;
+          esac
           case "$Viewer__WorkerPublishingEnabled" in
             true|false) ;;
             *) echo "VIEWER_WORKER_PUBLISHING_ENABLED must be true or false." >&2; exit 1 ;;

@@ -75,6 +75,22 @@ public sealed class AccountValidationTests
     }
 
     [Fact]
+    public void CompleteRequestRejectsNamesThatAreTooLong()
+    {
+        var valid = AccountRequestValidator.TryNormalize(
+            new AccountRequest(
+                new string('A', AccountRequestValidator.MaximumNameLength + 1),
+                "Lovelace",
+                "ada@example.test",
+                "Valid1!a"),
+            out _,
+            out var errors);
+
+        Assert.False(valid);
+        Assert.Contains(nameof(AccountRequest.FirstName), errors.Keys);
+    }
+
+    [Fact]
     public void PatchLeavesNullPasswordAloneButRejectsAnEmptyPassword()
     {
         Assert.True(AccountRequestValidator.TryNormalize(

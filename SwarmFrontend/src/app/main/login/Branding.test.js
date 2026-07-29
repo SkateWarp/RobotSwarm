@@ -8,6 +8,7 @@ import { act } from "react-dom/test-utils";
 import { MemoryRouter } from "react-router-dom";
 import Logo from "../../fuse-layouts/shared-components/Logo";
 import Login from "./Login";
+import LoginConfig from "./LoginConfig";
 import Register from "./Register";
 
 jest.mock("./tabs/JWTLoginTab", () => () => <div />);
@@ -52,7 +53,7 @@ describe("RobotSwarm branding", () => {
 
     it.each([
         ["login", Login, "BIENVENIDO"],
-        ["register", Register, "Crear cuenta"],
+        ["register", Register, "CREAR CUENTA"],
     ])("keeps one page heading and the PNG on %s", (_name, Component, title) => {
         render(<Component />);
 
@@ -69,6 +70,14 @@ describe("RobotSwarm branding", () => {
         expect(document.querySelector('a[href="/forgot-password"]').textContent).toContain(
             "Restablecer contraseña"
         );
+        expect(document.querySelector('a[href="/register"]').textContent).toContain("Crear cuenta");
+    });
+
+    it("serves the registration page instead of redirecting it", () => {
+        const registerRoute = LoginConfig.routes.find((route) => route.path === "/register");
+
+        expect(registerRoute).toBeDefined();
+        expect(registerRoute.element.type).toBe(Register);
     });
 
     it("keeps the splash logo legible and exposes the same asset through the manifest", () => {

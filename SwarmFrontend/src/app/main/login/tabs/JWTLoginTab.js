@@ -140,7 +140,6 @@ function JWTLoginTab() {
                                             aria-label={
                                                 showPassword ? "Ocultar contraseña" : "Mostrar contraseña"
                                             }
-                                            edge="end"
                                             size="large"
                                         >
                                             <Icon className="text-20" color="action">

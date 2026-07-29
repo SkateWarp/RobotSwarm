@@ -58,6 +58,8 @@ jobs:
               "git ls-remote --exit-code origin refs/heads/main",
               "Tasks__RequireCollaborativeTransportEvidence:",
               "REQUIRE_COLLABORATIVE_TRANSPORT_EVIDENCE || 'false'",
+              "Accounts__PublicRegistrationEnabled:",
+              "PUBLIC_REGISTRATION_ENABLED || 'false'",
           )
           missing = [value for value in required if value not in backend]
           if missing:
@@ -519,8 +521,10 @@ jobs:
             src/app/main/apps/accounts/AccountsTable.js \
             src/app/main/apps/accounts/AccountsTable.test.js \
             src/app/main/login/Login.js \
+            src/app/main/login/LoginConfig.js \
             src/app/main/login/Register.js \
             src/app/main/login/Branding.test.js \
+            src/app/main/login/LoginForms.test.js \
             src/app/main/login/tabs/JWTLoginTab.js \
             src/app/main/login/tabs/JWTRegisterTab.js \
             src/app/shared-components/GeneralHeader.js \

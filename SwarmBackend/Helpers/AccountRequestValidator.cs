@@ -8,6 +8,7 @@ public static class AccountRequestValidator
 {
     public const int MinimumPasswordLength = 8;
     public const int MaximumPasswordLength = 16;
+    public const int MaximumNameLength = 100;
     public const int MaximumEmailLength = 254;
     public const string CanonicalEmailSql =
         "lower(btrim(\"Email\", ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13)))";
@@ -99,6 +100,11 @@ public static class AccountRequestValidator
         if (normalized.Length == 0)
         {
             errors[field] = ["El campo es obligatorio."];
+        }
+        else if (normalized.Length > MaximumNameLength)
+        {
+            errors[field] =
+                [$"El campo no puede superar {MaximumNameLength} caracteres."];
         }
 
         return normalized;

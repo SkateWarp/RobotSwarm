@@ -1,6 +1,6 @@
 import { authRoles } from "app/auth";
-import { Navigate } from "react-router-dom";
 import Login from "./Login";
+import Register from "./Register";
 
 const LoginConfig = {
     settings: {
@@ -32,7 +32,7 @@ const LoginConfig = {
         },
         {
             path: "/register",
-            element: <Navigate to="/login" replace />,
+            element: <Register />,
         },
     ],
 };
