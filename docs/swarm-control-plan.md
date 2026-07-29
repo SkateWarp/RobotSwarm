@@ -8,23 +8,26 @@ históricos, no el estado vigente. La PR #106 integró ese conjunto como
 `1448a31bbbbfd77588bada109947098cc95d9dda`; CI, Cloudflare, backend y el
 despliegue GPU exacto aprobaron.
 
-El estado vigente al 29 de julio parte de `907c89c` en `main`, frontend y
-backend, mientras el worker GPU conserva `c3866d5`. El candidato local añade
-la recuperación ordenada de la VM, propiedad de conexión por encarnación del
-worker, reactivación explícita de cuentas y robots, cierre generacional del
-visor y la barrera atómica de odometría/estabilidad para formación. También
-endurece el enlace de seguridad: el heartbeat transporta un deadline
-monotónico absoluto, ROS rechaza publicaciones tardías, la ausencia del primer
-pulso enclava la parada a los 15 s y ninguna tarea puede publicarse sin dos
-comprobaciones de frescura. La cota conservadora desde el último contacto
-confirmado es 24,25 s frente al presupuesto declarado de 30 s.
+El estado vigente al 29 de julio tiene `8c643a3` alineado en `main`, frontend,
+backend y worker GPU. La PR #118 desplegó la recuperación ordenada de la VM,
+propiedad de conexión por encarnación del worker, reactivación explícita de
+cuentas y robots, cierre generacional del visor y la barrera atómica de
+odometría/estabilidad para formación. También endureció el enlace de seguridad:
+el heartbeat transporta un deadline monotónico absoluto, ROS rechaza
+publicaciones tardías, la ausencia del primer pulso enclava la parada a los
+15 s y ninguna tarea puede publicarse sin dos comprobaciones de frescura. La
+cota conservadora desde el último contacto confirmado es 24,25 s frente al
+presupuesto declarado de 30 s. `907c89c` permanece como base de reversión
+anterior a esta intervención.
 
-Antes de usar Actions aprobaron backend 275/275 más 8/8 sobre PostgreSQL 17,
-worker 146/146, frontend 182/182, ROS 667/667, los siete arneses contractuales
-268/268 y la recuperación 17/17. Estas cifras son locales. El cierre permanece
-abierto hasta que un único candidato pase PR y `main`, los tres planos queden
-en el mismo SHA y la matriz visible postdeploy confirme RTF, FPS, aislamiento,
-interacción, movimiento y limpieza.
+Antes de la PR #118 aprobaron localmente backend 275/275 más 8/8 sobre
+PostgreSQL 17, worker 146/146, frontend 182/182, ROS 667/667, los siete arneses
+contractuales 268/268 y recuperación 17/17. PR, `main`, Cloudflare, backend y
+un solo despliegue GPU aprobaron después. La aceptación visible comprobó
+aislamiento, interacción, movimiento y rendimiento. El único defecto nuevo,
+I-159, fue una carrera de lectura del reloj en transporte N=2; su delta local
+aprobó lifecycle 251/251 y ROS 669/669. El cierre queda limitado a una PR y
+despliegue de ese delta, su repetición N=2/N=3/N=10 y el gate cargado N=4.
 
 Sobre `1448a31` aprobaron API multiusuario N=3/N=7, dos visores privados en
 Chrome visible, interacción, pantalla completa, responsive a 360/768/1366/1920
@@ -986,33 +989,31 @@ productiva completa aprobaron.
 El gate cargado final aprobó masa 0,75 kg, fricción 0,25, GRF 0,4999 m, RTF
 2,9960, Gazebo 58,419 FPS, posrender 62,508 FPS y HLS ≈30 FPS. El recorrido
 User e Historial y los cuatro anchos responsive también aprobaron. Plantillas,
-Robots, Grupos y Usuarios permanecen restringidos al rol Admin; no se creó ni
-elevó una cuenta para aparentar ese recorrido.
+Robots, Grupos y Usuarios permanecen restringidos al rol Admin; el recorrido
+administrativo autorizado comprobó las cuatro secciones y retiró su único
+grupo temporal.
 
-1. Congelar el árbol local, escanear secretos y confirmar nuevamente la base
-   de rollback `907c89c`.
-2. Publicar un solo commit candidato y una sola PR. La concurrencia del workflow
-   cancela corridas obsoletas y cada job tiene un límite de 30 min; no se
-   solicitarán reruns sin corregir primero una causa reproducida localmente.
-3. Antes del merge, comprobar que no existen sesiones activas. El despliegue
-   automático del backend no adquiere el drain del worker, por lo que la
-   ventana se realiza sin tareas de usuario.
-4. Después del merge, esperar el CI de `main` y el workflow de backend del
-   mismo SHA. Verificar `backend_prod`, PostgreSQL, MediaMTX y `/health`;
-   confirmar además que Cloudflare publicó ese commit.
-5. Instalar por SSH la unidad y el script de recuperación —no forman parte del
-   workflow—, ejecutar `daemon-reload`, `enable` y `restart`, y comprobar el
-   estado `active (exited)`.
-6. Reconfirmar cero sesiones y lanzar una sola vez el workflow GPU manual. El
-   lock de producción serializa backend y GPU, pero no decide su orden: el
-   dispatch solo se hace después de comprobar el backend.
-7. Ejecutar Chrome visible y Gazebo no headless con NVIDIA: formaciones y
-   cantidades distintas, seguimiento, transporte N=1 y multi-robot, dos
-   usuarios privados, interacción, fullscreen, RTF ≥2,90, Gazebo ≥45 FPS,
-   HLS ≥27 FPS y cero colisiones inesperadas.
-8. Eliminar sesiones, cuenta y credenciales temporales. La evidencia postdeploy
-   se conservará primero fuera del repositorio para no provocar otro ciclo
-   completo de CI y despliegue únicamente por documentación.
+La PR #118 integró después el candidato completo como `8c643a3`. CI de PR y
+`main`, backend, Cloudflare, recuperación del host y un solo despliegue GPU
+aprobaron. La aceptación productiva comprobó dos usuarios, interacción,
+fullscreen, React N=4, seis formaciones, tres seguimientos y transporte
+N=1/N=3/N=4/N=10. N=2 llegó con ambos robots a la reunión, pero abrió I-159 al
+comparar un timestamp nuevo con un reloj monotónico leído antes del lock. La
+corrección conserva el timeout y el rechazo de fechas futuras reales; aprobaron
+251/251 lifecycle y 669/669 ROS.
+
+1. Publicar I-159 en un solo commit y una sola PR; no solicitar reruns sin una
+   causa reproducida localmente.
+2. Confirmar cero sesiones, esperar CI de PR y `main`, y comprobar backend,
+   Cloudflare y `/health` sobre el SHA exacto.
+3. Despachar una sola vez el workflow GPU después del backend y verificar el
+   release inmutable activo.
+4. Repetir Gazebo visible y no headless con N=2, los controles N=3/N=10 y la
+   carga N=4; exigir RTF ≥2,90, Gazebo ≥45 FPS, HLS ≥27 FPS, contribución de
+   toda la flota y cero colisiones inesperadas.
+5. Eliminar sesiones, cuenta y credenciales temporales. La evidencia postdeploy
+   se conserva primero fuera del repositorio para evitar otro ciclo completo de
+   CI y despliegue dedicado únicamente a documentación.
 
 ## Deferred work
 

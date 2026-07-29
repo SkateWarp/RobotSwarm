@@ -5289,6 +5289,48 @@ class BehaviorLifecycleTests(unittest.TestCase):
         self.assertIn("stale: tb3_0", failures[0][0])
         controller._transport_targets.assert_not_called()
 
+    def test_transport_model_clock_is_sampled_after_locking_snapshot(self):
+        controller = self._transport_search_controller(1)
+        controller.model_states_received_at = 9.0
+        controller.model_states_timeout_wall_s = 0.75
+
+        class RefreshingModelLock:
+            entered = False
+
+            def __enter__(self):
+                self.entered = True
+                controller.model_states_received_at = 10.001
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        model_lock = RefreshingModelLock()
+        controller.model_lock = model_lock
+
+        def wall_clock():
+            return 10.002 if model_lock.entered else 10.0
+
+        with mock.patch.object(
+            ROS["transport"].time, "monotonic", side_effect=wall_clock,
+        ):
+            error = controller._transport_model_state_error()
+
+        self.assertTrue(model_lock.entered)
+        self.assertIsNone(error)
+
+    def test_transport_explicit_clock_still_rejects_future_snapshot(self):
+        controller = self._transport_search_controller(1)
+        controller.model_states_received_at = 10.001
+
+        with mock.patch.object(
+            ROS["transport"].time,
+            "monotonic",
+            side_effect=AssertionError("explicit clocks must be preserved"),
+        ):
+            error = controller._transport_model_state_error(now=10.0)
+
+        self.assertIn("model states became stale", error)
+
     def test_transport_push_fails_closed_when_model_states_become_stale(self):
         controller = self._transport_search_controller(1)
         controller.phase = ROS["transport"].TransportPhase.PUSH

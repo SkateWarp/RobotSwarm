@@ -3187,8 +3187,16 @@ class CollaborativeTransport:
 
     def _transport_model_state_error(self, now=None):
         """Explain why Gazebo geometry is not fresh enough to command."""
-        if now is None:
-            now = time.monotonic()
+        # Keep the sample and its clock reading in the same critical section.
+        # Otherwise a callback can publish a newer timestamp while this method
+        # waits for model_lock, making fresh data appear to come from the future.
+        with self.model_lock:
+            received_at = getattr(self, 'model_states_received_at', None)
+            invalid_reason = getattr(
+                self, 'model_states_invalid_reason', None
+            )
+            if now is None:
+                now = time.monotonic()
         try:
             now = float(now)
         except (TypeError, ValueError, OverflowError):
@@ -3196,11 +3204,6 @@ class CollaborativeTransport:
         if not math.isfinite(now):
             return "Transport requires a valid wall clock"
 
-        with self.model_lock:
-            received_at = getattr(self, 'model_states_received_at', None)
-            invalid_reason = getattr(
-                self, 'model_states_invalid_reason', None
-            )
         if invalid_reason:
             return invalid_reason
         try:
